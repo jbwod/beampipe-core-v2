@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_execution_record import crud_batch_execution_records
@@ -321,6 +321,54 @@ class ExecutionLedgerService:
             scheduler_job_id,
         )
         return updated_execution
+
+    @staticmethod
+    async def list_executions_for_source(
+        db: AsyncSession,
+        project_module: str,
+        source_identifier: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        src_match = text(
+            "EXISTS (SELECT 1 FROM jsonb_array_elements(batch_execution_record.sources) AS elem "
+            "WHERE elem->>'source_identifier' = :src_sid)"
+        ).bindparams(src_sid=source_identifier)
+
+        base_filter = and_(
+            BatchExecutionRecord.project_module == project_module,
+            src_match,
+        )
+
+        count_stmt = select(func.count()).select_from(BatchExecutionRecord).where(base_filter)
+        count_result = await db.execute(count_stmt)
+        total = int(count_result.scalar_one())
+
+        list_stmt = (
+            select(
+                BatchExecutionRecord.uuid,
+                BatchExecutionRecord.status,
+                BatchExecutionRecord.created_at,
+                BatchExecutionRecord.completed_at,
+            )
+            .where(base_filter)
+            .order_by(BatchExecutionRecord.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        rows_result = await db.execute(list_stmt)
+        rows = rows_result.mappings().all()
+        items = [
+            {
+                "uuid": r["uuid"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "completed_at": r["completed_at"],
+            }
+            for r in rows
+        ]
+        return items, total
 
 
 execution_ledger_service = ExecutionLedgerService()

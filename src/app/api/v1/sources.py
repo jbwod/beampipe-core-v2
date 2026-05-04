@@ -13,12 +13,14 @@ from ...api.dependencies import get_current_user
 from ...core.archive.service import archive_metadata_service
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
+from ...core.ledger.service import execution_ledger_service
 from ...core.projects import list_project_modules
 from ...core.registry.service import invalid_project_module_message, source_registry_service
 from ...crud.crud_source_registry import crud_source_registry
 from ...schemas.registry import (
     DiscoverTriggerRequest,
     DiscoverTriggerResponse,
+    SourceLinkedExecutionItem,
     SourceMetadataResponse,
     SourceRegistryBulkCreate,
     SourceRegistryBulkCreateResponse,
@@ -192,6 +194,31 @@ async def trigger_discovery(
         "marked_count": len(identifiers),
         "source_identifiers": identifiers,
     }
+
+
+@router.get("/{source_id}/executions", response_model=PaginatedListResponse[SourceLinkedExecutionItem])
+async def list_source_executions(
+    request: Request,
+    source_id: UUID,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: Annotated[int, Query(ge=1, le=50, description="Page size (max 50)")] = 10,
+) -> dict[str, Any]:
+    source = await source_registry_service.get_source(db=db, source_id=source_id)
+    offset = compute_offset(page, items_per_page)
+    items_raw, total = await execution_ledger_service.list_executions_for_source(
+        db,
+        source["project_module"],
+        source["source_identifier"],
+        offset=offset,
+        limit=items_per_page,
+    )
+    data = [SourceLinkedExecutionItem.model_validate(x) for x in items_raw]
+    return paginated_response(
+        crud_data={"data": data, "total_count": total},
+        page=page,
+        items_per_page=items_per_page,
+    )
 
 
 @router.get("/{source_id}", response_model=SourceRegistryRead)

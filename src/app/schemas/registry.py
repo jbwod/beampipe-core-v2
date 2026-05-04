@@ -1,9 +1,11 @@
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import TimestampSchema, UUIDSchema
+from ..models.ledger import ExecutionStatus
 
 
 class SourceRegistryBase(BaseModel):
@@ -110,6 +112,17 @@ class SourceMetadataResponse(BaseModel):
     source: SourceRegistryRead
     metadata: list[dict]
     metadata_count: int
+
+
+class SourceLinkedExecutionItem(BaseModel):
+    """One batch execution that included this registry source."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    uuid: Annotated[UUID, Field(description="Batch execution record id")]
+    status: ExecutionStatus
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 class DiscoverTriggerRequest(BaseModel):
