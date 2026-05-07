@@ -2,7 +2,7 @@ import os
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import SecretStr, computed_field
+from pydantic import SecretStr, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -161,7 +161,7 @@ class CORSSettings(BaseSettings):
 class ExecutionLedgerSettings(BaseSettings):
     MAX_RETRIES: int = 3
     WORKFLOW_AUTOMATION_SCHEDULER_NAME: str = "workflow_auto"
-    WORKFLOW_EXECUTION_AUTOMATION_ENABLED: bool = False
+    WORKFLOW_EXECUTION_AUTOMATION_ENABLED: bool = True
 
 
 class RestateWorkflowSettings(BaseSettings):
@@ -196,11 +196,20 @@ class RestateWorkflowSettings(BaseSettings):
 
 
 class SlurmSshSettings(BaseSettings):
+    SLURM_SSH_USE_AGENT: bool = False
+    SLURM_SSH_AUTH_SOCK: str | None = None
     SLURM_SSH_PRIVATE_KEY_PATH: str | None = None
     SLURM_SSH_PRIVATE_KEY_PASSPHRASE: SecretStr | None = None
     SLURM_SSH_KNOWN_HOSTS: str | None = None
     SLURM_SSH_CONNECT_TIMEOUT_SECONDS: float = 30.0
     SLURM_SSH_COMMAND_TIMEOUT_SECONDS: float = 60.0
+
+    @field_validator("SLURM_SSH_KNOWN_HOSTS", mode="after")
+    @classmethod
+    def expand_slurm_known_hosts_path(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return v
+        return os.path.expanduser(str(v).strip())
 
 
 class DiscoverySettings(BaseSettings):
@@ -239,6 +248,7 @@ class ArchiveSettings(BaseSettings):
 class CasdaSettings(BaseSettings):
     CASDA_USERNAME: str | None = None
     CASDA_PASSWORD: SecretStr | None = None
+    CASDA_STAGE_BY_SBID: bool = True
 
 
 class Settings(

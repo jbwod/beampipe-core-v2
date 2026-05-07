@@ -1,8 +1,8 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import TimestampSchema, UUIDSchema
 from ..models.ledger import ExecutionPhase, ExecutionStatus
@@ -66,6 +66,9 @@ class BatchExecutionRecordRead(TimestampSchema, BatchExecutionRecordBase, UUIDSc
     status: ExecutionStatus
     execution_phase: ExecutionPhase | None = None
     workflow_manifest: dict | None = None
+    beampipe_run_record: dict[str, Any] | None = Field(
+        default=None,
+    )
     scheduler_name: str | None = None
     scheduler_job_id: str | None = None
     dim_session_status_url: str | None = Field(
@@ -81,6 +84,17 @@ class BatchExecutionRecordRead(TimestampSchema, BatchExecutionRecordBase, UUIDSc
     created_by_id: int | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_beampipe_run_record(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            wm = data.get("workflow_manifest")
+            if isinstance(wm, dict):
+                rr = wm.get("beampipe_run_record")
+                if isinstance(rr, dict):
+                    return {**data, "beampipe_run_record": dict(rr)}
+        return data
 
 
 class BatchExecutionRecordListItem(TimestampSchema, BatchExecutionRecordBase, UUIDSchema):

@@ -15,11 +15,14 @@ endif
 
 .PHONY: help beampipe-start beampipe-stop slurm-known-hosts-sync \
 	podman-bridge podman-bridge-bg podman-bridge-ensure podman-bridge-stop podman-bridge-status \
-	compose-up compose-build compose-down compose-logs
+	beampipe-new-admin restate-start restate-stop compose-up compose-build compose-down compose-logs
 
 help:
 	@echo "  beampipe-start       Start known_hosts sync, SSH bridge, and compose"
 	@echo "  beampipe-stop        Stop compose and SSH bridge"
+	@echo "  beampipe-new-admin   Run init job to create first superuser"
+	@echo "  restate-start        Start only Restate services"
+	@echo "  restate-stop         Stop only Restate services"
 	@echo "  podman-bridge        Run SSH bridge in foreground"
 	@echo "  podman-bridge-bg     Run SSH bridge in background"
 	@echo "  podman-bridge-stop   Stop SSH bridge"
@@ -35,6 +38,15 @@ beampipe-start: slurm-known-hosts-sync podman-bridge-ensure
 beampipe-stop:
 	$(COMPOSE) down
 	@$(MAKE) podman-bridge-stop
+
+beampipe-new-admin:
+	$(COMPOSE) --profile init run --rm create_superuser
+
+restate-start:
+	$(COMPOSE) up -d restate-1 restate-2 restate-3
+
+restate-stop:
+	$(COMPOSE) stop restate-1 restate-2 restate-3
 
 podman-bridge:
 	@test -n "$$SSH_AUTH_SOCK" || (echo "SSH_AUTH_SOCK is not set." >&2 && exit 1)

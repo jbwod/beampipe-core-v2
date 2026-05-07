@@ -17,6 +17,7 @@ from ...shaping.policy import (
     shaping_enqueue_pace,
     shaping_queue_max_depth,
 )
+from ...ledger.source_readiness import source_identifiers_from_specs
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +330,16 @@ async def process_workflow_module_for_execution_schedule(
                     archive_name=policy["archive_name"],
                     deployment_profile_id=dep_uuid,
                     created_by_id=None,
+                )
+                # Once the source is admitted into an execution, clear its pending flag
+                # so the next scheduler tick doesn't re-schedule it while this execution
+                # is still in-flight (e.g. AWAITING_SCHEDULER / Restate completion).
+                admitted_source_ids = source_identifiers_from_specs(valid)
+                await source_registry_service.clear_workflow_pending_for_sources(
+                    db=db,
+                    project_module=module_name,
+                    source_identifiers=admitted_source_ids,
+                    commit=False,
                 )
                 execution_uuid = str(execution["uuid"])
                 await execution_ledger_service.update_execution_status(
