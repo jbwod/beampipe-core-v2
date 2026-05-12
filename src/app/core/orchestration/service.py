@@ -24,7 +24,12 @@ from ..exceptions.workflow_exceptions import (
     wf_staging_requires_casda,
     wf_unexpected,
 )
-from ..ledger.run_record import extract_beampipe_run_record, has_beampipe_run_record
+from ..ledger.run_record import (
+    extract_beampipe_run_record,
+    has_beampipe_run_record,
+    merge_execution_request_into_run_record,
+    preserve_run_record_into_manifest,
+)
 from ..ledger.service import execution_ledger_service
 from ..ledger.source_readiness import (
     filter_archive_rows_by_sbids,
@@ -32,6 +37,7 @@ from ..ledger.source_readiness import (
     parsed_source_readiness_error,
     source_identifiers_from_specs,
 )
+from ..log_context import current_arq_correlation
 from ..projects import load_project_module
 from ..projects.service import get_graph_path, resolve_graph_content
 from ..registry.service import source_registry_service
@@ -119,6 +125,8 @@ async def read_execution_ledger_snapshot(
             return cast(Any, dt).isoformat()
         return str(dt)
 
+    raw_sources = execution.get("sources") or []
+    sources_specs = list(raw_sources) if isinstance(raw_sources, list) else []
     out: dict[str, Any] = {
         "execution_id": str(execution_id),
         "project_module": execution.get("project_module"),
@@ -137,6 +145,8 @@ async def read_execution_ledger_snapshot(
         "updated_at": _iso(execution.get("updated_at")),
         "started_at": _iso(execution.get("started_at")),
         "completed_at": _iso(execution.get("completed_at")),
+        "sources": sources_specs,
+        "source_identifiers": source_identifiers_from_specs(sources_specs),
     }
     out.update(await enrich_execution_dim_rest_urls(db, execution))
     rr = extract_beampipe_run_record(wm if isinstance(wm, dict) else None)
@@ -164,10 +174,20 @@ async def begin_restate_execution_for_execution(
         raise wf_execution_not_found(execution_id)
 
     execution_phase = _coerce_execution_phase(execution)
+    raw_sources = execution.get("sources") or []
+    requested_specs = list(raw_sources) if isinstance(raw_sources, list) else []
+    existing_manifest = execution.get("workflow_manifest")
+    merged_manifest = merge_execution_request_into_run_record(
+        existing_manifest if isinstance(existing_manifest, dict) else None,
+        sources=requested_specs,
+    )
 
     if execution_phase == ExecutionPhase.SUBMIT:
         await execution_ledger_service.update_execution_status(
-            db=db, execution_id=execution_id, status=ExecutionStatus.RUNNING
+            db=db,
+            execution_id=execution_id,
+            status=ExecutionStatus.RUNNING,
+            workflow_manifest=merged_manifest,
         )
     else:
         await execution_ledger_service.update_execution_status(
@@ -175,6 +195,7 @@ async def begin_restate_execution_for_execution(
             execution_id=execution_id,
             status=ExecutionStatus.RUNNING,
             execution_phase=ExecutionPhase.STAGE_AND_MANIFEST,
+            workflow_manifest=merged_manifest,
         )
 
     return await read_execution_ledger_snapshot(db=db, execution_id=execution_id)
@@ -484,6 +505,10 @@ async def build_manifest_for_execution(
     manifest["execution_id"] = str(execution_id)
     manifest["session_id"] = sid
     manifest["created_at"] = cast(datetime, execution["created_at"]).astimezone(UTC).isoformat()
+    manifest = preserve_run_record_into_manifest(
+        manifest,
+        existing_manifest=existing_manifest if isinstance(existing_manifest, dict) else None,
+    )
 
     await execution_ledger_service.update_execution_status(
         db=db,
@@ -562,7 +587,6 @@ async def translate_dim_session_for_execution(
             execution_id=execution_id,
             status=ExecutionStatus.FAILED,
             error=graph_fetch_error,
-            execution_phase=ExecutionPhase.SUBMIT,
         )
         return {"status": "terminal_failed", "session_id": session_id}
 
@@ -674,15 +698,71 @@ async def submit_slurm_session_payload_for_execution(
 
 async def kickoff_slurm_completion_workflow_for_execution(
     execution_id: UUID,
+    *,
+    arq_job_id: str | None = None,
+    arq_job_try: int | None = None,
 ) -> dict[str, Any]:
     if not settings.RESTATE_INGRESS_BASE_URL:
         return {"status": "skipped", "reason": "restate_ingress_not_configured"}
+    if arq_job_id is None and arq_job_try is None:
+        arq_job_id, arq_job_try = current_arq_correlation()
+    payload: dict[str, Any] = {}
+    if arq_job_id is not None:
+        payload["arq_job_id"] = arq_job_id
+    if arq_job_try is not None:
+        payload["arq_job_try"] = arq_job_try
     return await invoke_restate_workflow(
         workflow_name=settings.RESTATE_SLURM_COMPLETION_WORKFLOW_NAME,
         workflow_id=str(execution_id),
         handler_name=settings.RESTATE_SLURM_COMPLETION_WORKFLOW_HANDLER,
-        payload={},
+        payload=payload,
+        arq_job_id=arq_job_id,
+        job_try=arq_job_try,
     )
+
+
+async def cancel_scheduler_session_for_execution(
+    db: AsyncSession,
+    execution_id: UUID,
+) -> dict[str, Any]:
+    from ...crud.crud_execution_record import crud_batch_execution_records
+    from ...schemas.ledger import BatchExecutionRecordRead
+
+    execution = await crud_batch_execution_records.get(
+        db=db, uuid=execution_id, schema_to_select=BatchExecutionRecordRead
+    )
+    if not execution:
+        raise wf_execution_not_found(execution_id)
+
+    if not execution.get("scheduler_job_id"):
+        return {"cancelled": False, "reason": "no_scheduler_job_id"}
+
+    try:
+        profile = await _resolve_deployment_profile(db, execution)
+    except Exception as e:
+        logger.warning(
+            "event=cancel_profile_unresolved execution_id=%s error=%s",
+            execution_id,
+            e,
+        )
+        return {"cancelled": False, "reason": "profile_unresolved", "error": str(e)}
+
+    backend = profile.get("deployment_backend")
+    if backend == "slurm_remote":
+        return await slurm.cancel_session(
+            db=db,
+            execution_id=execution_id,
+            execution=execution,
+            profile=profile,
+        )
+    if backend == "rest_remote":
+        return await rest.cancel_session(
+            db=db,
+            execution_id=execution_id,
+            execution=execution,
+            profile=profile,
+        )
+    return {"cancelled": False, "reason": f"unsupported_backend={backend}"}
 
 
 async def submit_dim_session_for_execution(
@@ -779,7 +859,6 @@ async def poll_dim_session_for_execution(
         execution_id=execution_id,
         status=ExecutionStatus.FAILED,
         error=f"durable polling not implemented for backend={deployment_backend}",
-        execution_phase=ExecutionPhase.SUBMIT,
     )
     return {"terminal": True, "status": "failed", "error": f"backend={deployment_backend}"}
 

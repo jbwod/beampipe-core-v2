@@ -339,7 +339,6 @@ async def poll_session(
             status=ExecutionStatus.CANCELLED,
             scheduler_name="daliuge",
             scheduler_job_id=str(session_id),
-            execution_phase=ExecutionPhase.SUBMIT,
             workflow_manifest=merged,
         )
         logger.info(
@@ -392,7 +391,6 @@ async def poll_session(
         error=error_msg,
         scheduler_name="daliuge",
         scheduler_job_id=str(session_id),
-        execution_phase=ExecutionPhase.SUBMIT,
         workflow_manifest=merged,
     )
     logger.info(

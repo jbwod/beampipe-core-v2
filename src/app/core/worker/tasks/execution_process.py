@@ -6,6 +6,7 @@ from uuid import UUID
 from ....crud.crud_daliuge_deployment_profile import crud_daliuge_deployment_profile
 from ...config import settings
 from ...ledger.service import execution_ledger_service
+from ...ledger.source_readiness import source_identifiers_from_specs
 from ...positive_policy import positive_float_optional, positive_int_optional
 from ...projects import get_workflow_execution_automation_policy
 from ...registry.service import source_registry_service
@@ -17,7 +18,6 @@ from ...shaping.policy import (
     shaping_enqueue_pace,
     shaping_queue_max_depth,
 )
-from ...ledger.source_readiness import source_identifiers_from_specs
 
 logger = logging.getLogger(__name__)
 
@@ -250,12 +250,6 @@ async def process_workflow_module_for_execution_schedule(
         )
         return 0
     max_executions_for_module = min(max_executions_for_module, admitted_executions)
-
-    max_sources_for_module = min(
-        max_sources_for_module,
-        max_executions_for_module * max(1, int(policy["max_sources_per_execution"])),
-    )
-
     claim_token, pending_sources = await source_registry_service.claim_pending_sources_for_workflow_run(
         db=db,
         project_module=module_name,
@@ -379,7 +373,8 @@ async def process_workflow_module_for_execution_schedule(
     logger.info(
         "event=workflow_execution_gate_funnel project_module=%s requested_runs_tick=%s "
         "runs_after_project_concurrency=%s runs_after_global_concurrency=%s runs_after_rate=%s "
-        "enqueued_runs=%s requested_sources_tick=%s admitted_sources=%s",
+        "enqueued_runs=%s requested_sources_tick=%s admitted_sources=%s "
+        "claimed_sources=%s",
         module_name,
         requested_runs_tick,
         runs_after_project_concurrency,
@@ -388,5 +383,6 @@ async def process_workflow_module_for_execution_schedule(
         created_for_module,
         requested_sources_tick,
         sources_scheduled,
+        len(pending_sources),
     )
     return sources_scheduled

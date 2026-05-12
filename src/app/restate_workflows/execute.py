@@ -19,7 +19,7 @@ from ..core.exceptions.workflow_exceptions import (
 from ..core.ledger.service import execution_ledger_service
 from ..core.log_context import bind_execution_log_context
 from ..core.orchestration import service as orchestration_service
-from ..core.positive_policy import positive_int
+from ..core.positive_policy import positive_float, positive_int
 from ..core.projects import resolve_workflow_execute_step_overrides
 from ..core.restate_invoke import invoke_restate_workflow
 from ..models.ledger import ExecutionStatus
@@ -254,7 +254,7 @@ async def _execute_execution_workflow_body(
         run_policy_overrides = _extract_overrides(snapshot_start)
         out = await _run_step(
             ctx,
-            "execute_execution_no_submit_step",
+            "execution.execute_no_submit",
             _run_opts_external_io(run_policy_overrides),
             _execute_execution_no_submit_step,
             execution_id=execution_id,
@@ -340,7 +340,11 @@ async def _execute_execution_workflow_body(
             "rest_remote_poll_max_rounds",
             settings.RESTATE_REST_REMOTE_POLL_MAX_ROUNDS,
         )
-        poll_interval = settings.RESTATE_REST_REMOTE_POLL_INTERVAL_SECONDS
+        poll_interval = positive_float(
+            run_policy_overrides,
+            "rest_remote_poll_interval_seconds",
+            settings.RESTATE_REST_REMOTE_POLL_INTERVAL_SECONDS,
+        )
         poll_step_prefix = "execution.poll_rest_remote"
         poll_callable = _execution_poll_dim
         poll_timeout_code = WorkflowErrorCode.EXECUTION_DIM_STATE

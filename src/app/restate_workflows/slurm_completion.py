@@ -30,9 +30,11 @@ from ..core.exceptions.workflow_exceptions import WorkflowErrorCode, WorkflowFai
 from ..crud.crud_execution_record import crud_batch_execution_records
 from ..core.ledger.run_record import merge_restate_slurm_completion_timeout_into_manifest
 from ..core.ledger.service import execution_ledger_service
+from ..core.ledger.source_readiness import source_identifiers_from_specs
 from ..core.log_context import bind_execution_log_context
 from ..core.orchestration import service as orchestration_service
-from ..core.positive_policy import positive_int
+from ..core.registry.service import source_registry_service
+from ..core.positive_policy import positive_float, positive_int
 from ..core.projects import resolve_workflow_execute_step_overrides
 from ..models.ledger import ExecutionStatus
 from ..schemas.ledger import BatchExecutionRecordRead
@@ -94,12 +96,22 @@ async def _completion_mark_failed_if_non_terminal(
         )
         wm = row.get("workflow_manifest") if isinstance(row, dict) else None
         merged_manifest = merge_restate_slurm_completion_timeout_into_manifest(wm, error=error)
+
+        project_module = snapshot.get("project_module") if isinstance(snapshot, dict) else None
+        sources = row.get("sources") if isinstance(row, dict) else None
+        if isinstance(project_module, str) and project_module:
+            await source_registry_service.clear_workflow_pending_for_sources(
+                db=db,
+                project_module=project_module,
+                source_identifiers=source_identifiers_from_specs(sources),
+                commit=False,
+            )
+
         await execution_ledger_service.update_execution_status(
             db=db,
             execution_id=UUID(execution_id),
             status=ExecutionStatus.FAILED,
             error=error,
-            execution_phase=None,
             workflow_manifest=merged_manifest,
         )
 
@@ -135,7 +147,11 @@ async def _slurm_completion_workflow_body(
         "slurm_remote_poll_max_rounds",
         settings.RESTATE_SLURM_REMOTE_POLL_MAX_ROUNDS,
     )
-    poll_interval = settings.RESTATE_SLURM_REMOTE_POLL_INTERVAL_SECONDS
+    poll_interval = positive_float(
+        run_policy_overrides,
+        "slurm_remote_poll_interval_seconds",
+        settings.RESTATE_SLURM_REMOTE_POLL_INTERVAL_SECONDS,
+    )
 
     poll_round = 0
     while poll_round < max_polls:
@@ -196,13 +212,19 @@ async def slurm_completion_workflow(
         try:
             return await _slurm_completion_workflow_body(ctx, execution_id)
         except TerminalError as e:
+            cause = e.__cause__
+            err_for_ledger = (
+                cause.format_for_ledger()
+                if isinstance(cause, WorkflowFailure)
+                else str(e)
+            )
             await _run_step(
                 ctx,
                 "slurm_completion.mark_failed",
                 _run_opts_database(),
                 _completion_mark_failed_if_non_terminal,
                 execution_id=execution_id,
-                error=str(e),
+                error=err_for_ledger,
             )
             logger.exception(
                 "event=slurm_completion_terminal execution_id=%s", execution_id

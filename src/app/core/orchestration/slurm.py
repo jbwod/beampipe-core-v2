@@ -44,6 +44,7 @@ _JOBSUB_CREATED_RE = re.compile(
 )
 
 __all__ = [
+    "cancel_session",
     "poll_session",
     "slurm_session_debug_paths",
     "submit_session_payload",
@@ -483,6 +484,48 @@ async def submit_session_payload(
     )
 
 
+async def cancel_session(
+    db: AsyncSession,
+    execution_id: UUID,
+    *,
+    execution: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    raw_id = str(execution.get("scheduler_job_id") or "")
+    if not raw_id:
+        return {"cancelled": False, "reason": "no_scheduler_job_id"}
+    parsed = parse_scheduler_job_id(raw_id)
+    slurm_job_id = parsed.slurm_job_id
+    if not slurm_job_id:
+        return {"cancelled": False, "reason": "no_slurm_job_id"}
+
+    deployment_config = dict(profile.get("deployment_config") or {})
+    login_node = str(deployment_config.get("login_node") or "").strip()
+    username = _resolve_remote_user(deployment_config)
+    if not login_node or not username:
+        return {"cancelled": False, "reason": "incomplete_profile"}
+
+    try:
+        async with SlurmDeployClient(
+            **_slurm_ssh_kwargs(login_node, str(username), deployment_config=deployment_config)
+        ) as client:
+            await client.cancel_job(slurm_job_id)
+        logger.info(
+            "event=slurm_scancel_dispatched execution_id=%s slurm_job_id=%s",
+            execution_id,
+            slurm_job_id,
+        )
+        return {"cancelled": True, "slurm_job_id": slurm_job_id}
+    except Exception as e:
+        logger.warning(
+            "event=slurm_scancel_failed execution_id=%s slurm_job_id=%s error=%s",
+            execution_id,
+            slurm_job_id,
+            e,
+        )
+        return {"cancelled": False, "reason": "scancel_error", "error": str(e)}
+
+
 async def poll_session(
     db: AsyncSession,
     execution_id: UUID,
@@ -522,6 +565,24 @@ async def poll_session(
             execution_id,
             slurm_job_id,
         )
+
+        merged_unknown = merge_slurm_poll_into_manifest(
+            execution.get("workflow_manifest"),
+            composite_scheduler_job_id=raw_id,
+            slurm_job_id=slurm_job_id,
+            state=state,
+            source=source,
+            exit_code=result.get("exit_code"),
+            raw_line=result.get("raw") if isinstance(result.get("raw"), str) else None,
+            record_terminal=False,
+            terminal_ledger_status=None,
+            remote_session_dir=parsed.session_dir,
+        )
+        await execution_ledger_service.update_execution_status(
+            db=db,
+            execution_id=execution_id,
+            workflow_manifest=merged_unknown,
+        )
         return {
             "terminal": False,
             "slurm_state": state,
@@ -548,9 +609,24 @@ async def poll_session(
             terminal_ledger_status=None,
             remote_session_dir=parsed.session_dir,
         )
+        next_status: ExecutionStatus | None = None
+        current_status_raw = execution.get("status")
+        current_status_value = (
+            current_status_raw.value
+            if isinstance(current_status_raw, ExecutionStatus)
+            else str(current_status_raw or "")
+        )
+        if state == "RUNNING" and current_status_value == ExecutionStatus.AWAITING_SCHEDULER.value:
+            next_status = ExecutionStatus.RUNNING
+            logger.info(
+                "event=slurm_job_running execution_id=%s slurm_job_id=%s",
+                execution_id,
+                slurm_job_id,
+            )
         await execution_ledger_service.update_execution_status(
             db=db,
             execution_id=execution_id,
+            status=next_status,
             workflow_manifest=merged,
         )
         return {
@@ -616,18 +692,34 @@ async def poll_session(
             "slurm_exit_code": exit_code,
         }
 
+    if state == "CANCELLED":
+        terminal_status = ExecutionStatus.CANCELLED
+        terminal_ledger = "cancelled"
+        reason = "scheduler_cancelled"
+    elif state == "TIMEOUT":
+        terminal_status = ExecutionStatus.FAILED
+        terminal_ledger = "failed"
+        reason = "timeout"
+    else:
+        terminal_status = ExecutionStatus.FAILED
+        terminal_ledger = "failed"
+        reason = state.lower() if state else "unknown"
+
     error_msg = (
-        f"SLURM job {slurm_job_id} finished in state={state}"
+        f"SLURM job {slurm_job_id} finished in state={state} reason={reason}"
         + (f" exit_code={exit_code}" if exit_code is not None else "")
     )
     if parsed.session_dir:
         # Help operators jump straight to the failing job's stderr.
         error_msg += f" stderr_glob={parsed.session_dir.rstrip('/')}/logs/err-*.log"
     logger.error(
-        "event=slurm_job_failed execution_id=%s slurm_job_id=%s state=%s exit_code=%s",
+        "event=slurm_job_terminal execution_id=%s slurm_job_id=%s state=%s "
+        "ledger_status=%s reason=%s exit_code=%s",
         execution_id,
         slurm_job_id,
         state,
+        terminal_ledger,
+        reason,
         exit_code,
     )
     diag: dict[str, Any] | None = None
@@ -642,34 +734,38 @@ async def poll_session(
         exit_code=exit_code,
         raw_line=result.get("raw") if isinstance(result.get("raw"), str) else None,
         record_terminal=True,
-        terminal_ledger_status="failed",
+        terminal_ledger_status=terminal_ledger,
         remote_session_dir=parsed.session_dir,
         diagnostics=diag,
+        reason=reason,
     )
+    error_for_ledger = error_msg if terminal_status == ExecutionStatus.FAILED else None
     await execution_ledger_service.update_execution_status(
         db=db,
         execution_id=execution_id,
-        status=ExecutionStatus.FAILED,
-        error=error_msg,
+        status=terminal_status,
+        error=error_for_ledger,
         scheduler_name="slurm",
         scheduler_job_id=raw_id,
-        execution_phase=None,
         workflow_manifest=merged,
     )
     logger.info(
         "event=ledger_slurm_terminal_persisted execution_id=%s slurm_job_id=%s "
-        "state=%s source=%s exit_code=%s ledger_status=failed",
+        "state=%s source=%s exit_code=%s ledger_status=%s reason=%s",
         execution_id,
         slurm_job_id,
         state,
         source,
         exit_code,
+        terminal_ledger,
+        reason,
     )
     return {
         "terminal": True,
-        "status": "failed",
+        "status": terminal_ledger,
         "slurm_state": state,
         "slurm_job_id": slurm_job_id,
         "slurm_exit_code": exit_code,
-        "error": error_msg,
+        "reason": reason,
+        "error": error_for_ledger,
     }

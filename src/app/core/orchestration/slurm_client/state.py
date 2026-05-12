@@ -90,7 +90,7 @@ _PENDING_LIKE: frozenset[str] = frozenset(
     }
 )
 
-_NORM_RANK: dict[str, int] = {
+STATE_RANK: dict[str, int] = {
     "UNKNOWN": 0,
     "PENDING": 1,
     "RUNNING": 2,
@@ -99,6 +99,10 @@ _NORM_RANK: dict[str, int] = {
     "TIMEOUT": 5,
     "FAILED": 6,
 }
+
+
+def state_rank(normalized_state: str) -> int:
+    return STATE_RANK.get(normalized_state, 0)
 
 
 def _normalize_one_token(u: str) -> str:
@@ -132,7 +136,7 @@ def normalize_state(state: str) -> str:
         parts = [p.strip() for p in u.split("+") if p.strip()]
         if len(parts) > 1:
             norms = [_normalize_one_token(p) for p in parts]
-            return max(norms, key=lambda n: _NORM_RANK.get(n, 0))
+            return max(norms, key=lambda n: STATE_RANK.get(n, 0))
 
     return _normalize_one_token(u)
 
@@ -156,6 +160,8 @@ __all__ = [
     "SLURM_TERMINAL_FAILED_STATES",
     "SLURM_TERMINAL_OK_STATES",
     "SLURM_TRANSIENT_STATES",
+    "STATE_RANK",
     "normalize_state",
     "parse_sacct_exit_code",
+    "state_rank",
 ]

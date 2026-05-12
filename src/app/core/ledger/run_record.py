@@ -63,6 +63,7 @@ def merge_slurm_poll_into_manifest(
     terminal_ledger_status: str | None,
     remote_session_dir: str | None = None,
     diagnostics: dict[str, Any] | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     base: dict[str, Any] = dict(existing_manifest) if isinstance(existing_manifest, dict) else {}
     rr: dict[str, Any] = dict(base.get(BEAMPIPE_RUN_RECORD_KEY) or {})
@@ -98,6 +99,8 @@ def merge_slurm_poll_into_manifest(
                 "composite_scheduler_job_id": comp,
                 "slurm_job_id_ref": str(slurm_job_id),
             }
+            if reason:
+                term["reason"] = str(reason)
             if diagnostics:
                 term["diagnostics"] = {k: v for k, v in diagnostics.items() if v is not None}
             slurm["terminal"] = term

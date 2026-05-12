@@ -10,7 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...models.ledger import ExecutionPhase, ExecutionStatus
+from ...models.ledger import ExecutionStatus
 from ..ledger.service import execution_ledger_service
 from ..ledger.source_readiness import source_identifiers_from_specs
 from ..registry.service import source_registry_service
@@ -74,7 +74,6 @@ async def fail_execution_after_translate_error(
         execution_id=execution_id,
         status=ExecutionStatus.FAILED,
         error=error_message,
-        execution_phase=ExecutionPhase.SUBMIT,
     )
     return {"status": "terminal_failed", "session_id": session_id}
 

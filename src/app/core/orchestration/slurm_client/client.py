@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self
 
-from .state import normalize_state, parse_sacct_exit_code
+from .state import normalize_state, parse_sacct_exit_code, state_rank
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +137,16 @@ class SlurmDeployClient:
             }
         # sacct (-P pipe-separated, -n no header) once the job has left the controller.
         # https://curc.readthedocs.io/en/latest/running-jobs/slurm-commands.html#formatting-sacct-output
+        # Job arrays / steps surface multiple rows (parent + .batch + .extern + step.N);
+        # we fold them into the highest-rank normalized state
         stdout, _stderr, _ = await self.run_command(
             f"sacct -j {shell_quote(slurm_job_id)} --format={_SACCT_FORMAT} -P -n",
             check=False,
         )
+        chosen_state: str | None = None
+        chosen_rank = -1
+        chosen_row = ""
+        chosen_exit_code: int | None = None
         for raw in (stdout or "").splitlines():
             row = raw.strip()
             if not row:
@@ -149,10 +155,17 @@ class SlurmDeployClient:
             normalized = normalize_state(
                 state_str.split()[0].strip().upper() if state_str else ""
             )
+            rank = state_rank(normalized)
+            if rank > chosen_rank:
+                chosen_state = normalized
+                chosen_rank = rank
+                chosen_row = row
+                chosen_exit_code = parse_sacct_exit_code(exit_code_str)
+        if chosen_state is not None:
             return {
-                "state": normalized,
-                "exit_code": parse_sacct_exit_code(exit_code_str),
-                "raw": row,
+                "state": chosen_state,
+                "exit_code": chosen_exit_code,
+                "raw": chosen_row,
                 "source": "sacct",
             }
         return {"state": "UNKNOWN", "exit_code": None, "raw": "", "source": "none"}

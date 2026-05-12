@@ -104,6 +104,13 @@ def _resolve_workflow_step_overrides_from_policy(
         f"{family}_initial_retry_seconds": "initial_retry_seconds",
         f"{family}_max_retry_interval_seconds": "max_retry_interval_seconds",
     }
+    if family == "execution":
+        float_map[f"{family}_rest_remote_poll_interval_seconds"] = (
+            "rest_remote_poll_interval_seconds"
+        )
+        float_map[f"{family}_slurm_remote_poll_interval_seconds"] = (
+            "slurm_remote_poll_interval_seconds"
+        )
     for in_key, out_key in float_map.items():
         float_val = positive_float_optional(policy, in_key)
         if float_val is not None:
