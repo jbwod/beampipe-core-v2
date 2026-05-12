@@ -24,6 +24,28 @@ logger = logging.getLogger(__name__)
 
 _EXECUTION_PHASE_UNSET: object = object()
 
+_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.NOT_SUBMITTED,
+    }
+)
+
+_LOCKED_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.CANCELLED,
+    }
+)
+_RETRY_COUNT_INCREMENT_TRANSITIONS: frozenset[tuple[ExecutionStatus, ExecutionStatus]] = frozenset(
+    {
+        (ExecutionStatus.FAILED, ExecutionStatus.RETRYING),
+        (ExecutionStatus.RETRYING, ExecutionStatus.RUNNING),
+    }
+)
+
 
 def _validate_parsed_source_for_execution(
     sid: str,

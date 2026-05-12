@@ -276,3 +276,68 @@ def extract_beampipe_run_record(workflow_manifest: dict[str, Any] | None) -> dic
 
 def has_beampipe_run_record(workflow_manifest: dict[str, Any] | None) -> bool:
     return extract_beampipe_run_record(workflow_manifest) is not None
+
+
+def preserve_run_record_into_manifest(
+    new_manifest: dict[str, Any] | None,
+    *,
+    existing_manifest: dict[str, Any] | None,
+) -> dict[str, Any]:
+    new_dict: dict[str, Any] = dict(new_manifest) if isinstance(new_manifest, dict) else {}
+    existing_rr = extract_beampipe_run_record(existing_manifest)
+    if not existing_rr:
+        return new_dict
+    new_rr_raw = new_dict.get(BEAMPIPE_RUN_RECORD_KEY)
+    new_rr: dict[str, Any] = dict(new_rr_raw) if isinstance(new_rr_raw, dict) else {}
+    merged = {**existing_rr, **new_rr}
+    new_dict[BEAMPIPE_RUN_RECORD_KEY] = merged
+    return new_dict
+
+
+def merge_execution_request_into_run_record(
+    existing_manifest: dict[str, Any] | None,
+    *,
+    sources: list[Any] | None,
+) -> dict[str, Any]:
+    base: dict[str, Any] = dict(existing_manifest) if isinstance(existing_manifest, dict) else {}
+    rr: dict[str, Any] = dict(base.get(BEAMPIPE_RUN_RECORD_KEY) or {})
+
+    captured: list[dict[str, Any]] = []
+    for spec in sources or []:
+        if isinstance(spec, dict):
+            sid = spec.get("source_identifier")
+            if not sid:
+                continue
+            entry: dict[str, Any] = {"source_identifier": str(sid)}
+            sbids = spec.get("sbids")
+            if isinstance(sbids, list) and sbids:
+                entry["sbids"] = [str(s) for s in sbids]
+            captured.append(entry)
+        else:
+            sid = getattr(spec, "source_identifier", None)
+            if not sid:
+                continue
+            entry = {"source_identifier": str(sid)}
+            sbids = getattr(spec, "sbids", None)
+            if isinstance(sbids, list) and sbids:
+                entry["sbids"] = [str(s) for s in sbids]
+            captured.append(entry)
+
+    requested: dict[str, Any] = {
+        "count": len(captured),
+        "source_identifiers": [e["source_identifier"] for e in captured],
+        "sources": captured,
+        "captured_at": _now_iso_z(),
+    }
+    existing = rr.get("requested_sources")
+    if isinstance(existing, dict):
+        same = (
+            existing.get("source_identifiers") == requested["source_identifiers"]
+            and existing.get("count") == requested["count"]
+        )
+        if same:
+            return base
+    rr["requested_sources"] = requested
+    out = dict(base)
+    out[BEAMPIPE_RUN_RECORD_KEY] = rr
+    return out

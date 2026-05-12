@@ -25,7 +25,7 @@ def main() -> None:
 
     latest_by_source = OrderedDict()
     for row in res:
-        src = str(row["filename"]).split("_", 1)[0]
+        src = str(row["filename"]).split("_", 1)[0]  # HIPASS source id prefix
         if src not in latest_by_source:
             latest_by_source[src] = row
 
