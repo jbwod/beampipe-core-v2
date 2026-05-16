@@ -52,16 +52,15 @@ async def invoke_restate_workflow(
     resp.raise_for_status()
     # Restate returns JSON - otherwise if it doesn't, fall back to something we can work with
     try:
-        body = resp.json()
-        if isinstance(body, dict):
-            body.setdefault("ok", True)
-            body.setdefault("workflow_name", workflow_name)
-            body.setdefault("workflow_id", workflow_id)
-        return body
+        parsed = resp.json()
+        if isinstance(parsed, dict):
+            parsed.setdefault("ok", True)
+            parsed.setdefault("workflow_name", workflow_name)
+            parsed.setdefault("workflow_id", workflow_id)
+        return parsed
     except ValueError:
         return {
             "ok": True,
             "workflow_name": workflow_name,
             "workflow_id": workflow_id,
         }
-

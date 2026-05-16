@@ -12,6 +12,7 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
 from ...core.ledger.service import execution_ledger_service
 from ...core.orchestration.service import (
+    cancel_scheduler_session_for_execution,
     enrich_execution_dim_rest_urls,
     prepare_execution as orchestration_prepare_execution,
     read_execution_ledger_snapshot,
@@ -145,6 +146,22 @@ async def get_execution_ledger_snapshot(
     return await read_execution_ledger_snapshot(db=db, execution_id=execution_id)
 
 
+_SCANCEL_ELIGIBLE_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {ExecutionStatus.AWAITING_SCHEDULER, ExecutionStatus.RUNNING}
+)
+
+
+def _coerce_execution_status(raw: Any) -> ExecutionStatus | None:
+    if raw is None:
+        return None
+    if isinstance(raw, ExecutionStatus):
+        return raw
+    try:
+        return ExecutionStatus(str(raw))
+    except ValueError:
+        return None
+
+
 @router.patch("/{execution_id}", response_model=BatchExecutionRecordRead)
 async def update_execution(
     request: Request,
@@ -153,6 +170,16 @@ async def update_execution(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    if execution_update.status == ExecutionStatus.CANCELLED:
+        existing = await crud_batch_execution_records.get(
+            db=db, uuid=execution_id, schema_to_select=BatchExecutionRecordRead
+        )
+        if existing is None:
+            raise NotFoundException(f"Execution {execution_id} not found")
+        current_status_enum = _coerce_execution_status(existing.get("status"))
+        if current_status_enum in _SCANCEL_ELIGIBLE_STATUSES:
+            await cancel_scheduler_session_for_execution(db=db, execution_id=execution_id)
+
     return await execution_ledger_service.update_execution_status(
         db=db,
         execution_id=execution_id,
@@ -173,11 +200,27 @@ async def get_execution_status(
     execution = await crud_batch_execution_records.get(
         db=db,
         uuid=execution_id,
-        schema_to_select=BatchExecutionStatusResponse,  # type: ignore[arg-type]
+        schema_to_select=BatchExecutionRecordRead,
     )
     if execution is None:
         raise NotFoundException(f"Execution {execution_id} not found")
-    return execution
+    return BatchExecutionStatusResponse.model_validate(execution).model_dump()
+
+
+@router.get("/{execution_id}/summary", response_model=BatchExecutionSummary)
+async def get_execution_summary(
+    request: Request,
+    execution_id: UUID,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, Any]:
+    execution = await crud_batch_execution_records.get(
+        db=db,
+        uuid=execution_id,
+        schema_to_select=BatchExecutionRecordRead,
+    )
+    if execution is None:
+        raise NotFoundException(f"Execution {execution_id} not found")
+    return BatchExecutionSummary.model_validate(execution).model_dump()
 
 
 @router.post("/{execution_id}/execute", status_code=202)

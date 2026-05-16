@@ -409,7 +409,50 @@ async def poll_session(
     }
 
 
+async def cancel_session(
+    db: AsyncSession,
+    execution_id: UUID,
+    *,
+    execution: dict[str, Any],
+    profile: dict[str, Any],
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    session_id = execution.get("scheduler_job_id")
+    if not session_id:
+        return {"cancelled": False, "reason": "no_scheduler_job_id"}
+    deploy_host = profile.get("deploy_host")
+    deploy_port = profile.get("deploy_port")
+    if deploy_host is None or deploy_port is None:
+        return {"cancelled": False, "reason": "incomplete_profile"}
+
+    dim_base = dim_rest_http_base(str(deploy_host), int(deploy_port))
+    sid = quote(str(session_id))
+    try:
+        async with httpx.AsyncClient(
+            base_url=dim_base.rstrip("/"),
+            verify=profile["verify_ssl"],
+            timeout=timeout_seconds,
+        ) as client:
+            r = await client.post(f"/api/sessions/{sid}/cancel")
+            r.raise_for_status()
+        logger.info(
+            "event=dim_session_cancel_dispatched execution_id=%s session_id=%s",
+            execution_id,
+            session_id,
+        )
+        return {"cancelled": True, "session_id": str(session_id)}
+    except Exception as e:
+        logger.warning(
+            "event=dim_session_cancel_failed execution_id=%s session_id=%s error=%s",
+            execution_id,
+            session_id,
+            e,
+        )
+        return {"cancelled": False, "reason": "dim_cancel_error", "error": str(e)}
+
+
 __all__ = [
+    "cancel_session",
     "deploy_session_payload",
     "dim_operator_urls_from_base",
     "poll_session",
