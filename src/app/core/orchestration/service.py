@@ -70,7 +70,7 @@ async def _record_execute_execution_failure(
         if isinstance(exc, WorkflowFailure)
         else wf_unexpected(exc).format_for_ledger()
     )
-    logger.exception("event=execute_execution_error execution_id=%s error=%s", execution_id, exc)
+    logger.exception("event=execute_execution_error execution_id=%s", execution_id)
     await execution_ledger_service.update_execution_status(
         db=db,
         execution_id=execution_id,
@@ -567,11 +567,9 @@ async def translate_dim_session_for_execution(
           # Graph fetch failures (e.g. 404 from GitHub) should not be retried by ARQ.
           # immediately keep re-creating failing runs in a tight loop.
         graph_fetch_error = str(e)
-        logger.warning(
-            "event=execute_execution_graph_fetch_error project_module=%s error=%s",
+        logger.exception(
+            "event=execute_execution_graph_fetch_error project_module=%s",
             project_module,
-            graph_fetch_error,
-            exc_info=True,
         )
 
     if graph_fetch_error:

@@ -93,7 +93,7 @@ async def stage_sources_for_manifest(
                 vis_table = metadata_records_to_staging_table(sub_records)
                 if len(vis_table) == 0:
                     continue
-                logger.info(
+                logger.debug(
                     "event=casda_stage_visibility_by_sbid project_module=%s sbid=%s rows=%s",
                     project_module,
                     sb,
@@ -149,12 +149,10 @@ async def stage_sources_for_manifest(
                 all_staged[scan_id] = url
             for scan_id, url in checksum_urls.items():
                 all_checksums[scan_id] = url
-    except Exception as e:
-        logger.error(
-            "event=stage_sources_error project_module=%s error=%s",
+    except Exception:
+        logger.exception(
+            "event=stage_sources_error project_module=%s",
             project_module,
-            e,
-            exc_info=True,
         )
         raise
 
@@ -181,4 +179,13 @@ async def stage_sources_for_manifest(
         all_eval.pop(sb, None)
         all_eval_checksums.pop(sb, None)
 
+    logger.info(
+        "event=stage_sources_completed project_module=%s by_sbid=%s "
+        "staged_visibilities=%s staged_evals=%s failed_sbids=%s",
+        project_module,
+        split_visibility,
+        len(all_staged),
+        len(all_eval),
+        len(staging_failed_sbids),
+    )
     return all_staged, all_eval, all_checksums, all_eval_checksums, staging_failed_sbids

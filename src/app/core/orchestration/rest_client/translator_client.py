@@ -96,10 +96,10 @@ class DaliugeTranslatorClient:
         resp = self._client.get("/gen_pg", params=params)
         if resp.status_code >= 500:
             logger.error(
-                "gen_pg failed: status=%s url=%s body=%s",
+                "event=daliuge_tm_gen_pg_error status=%s pgt_id=%s body_len=%s",
                 resp.status_code,
-                resp.url,
-                resp.text[:500] if resp.text else "(empty)",
+                pgt_id,
+                len(resp.text or ""),
             )
         resp.raise_for_status()
         data = resp.json()
@@ -139,10 +139,10 @@ class DaliugeTranslatorClient:
         resp = self._client.post("/unroll_and_partition", data=data)
         if resp.status_code >= 500:
             logger.error(
-                "unroll_and_partition failed: status=%s url=%s body=%s",
+                "event=daliuge_tm_unroll_and_partition_error status=%s lg_name=%s body_len=%s",
                 resp.status_code,
-                resp.url,
-                resp.text[:500] if resp.text else "(empty)",
+                lg_name,
+                len(resp.text or ""),
             )
         resp.raise_for_status()
         try:

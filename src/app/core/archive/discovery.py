@@ -230,13 +230,11 @@ async def discover_schedule(  # noqa: C901
     if max_queue_depth is not None:
         try:
             queue_depth = await redis.zcard(settings.WORKER_QUEUE_NAME)
-        except Exception as exc:
-            logger.warning(
-                "event=discover_schedule_queue_depth_unavailable project_module=%s queue=%s error=%s",
+        except Exception:
+            logger.exception(
+                "event=discover_schedule_queue_depth_unavailable project_module=%s queue=%s",
                 target_module,
                 settings.WORKER_QUEUE_NAME,
-                exc,
-                exc_info=True,
             )
         else:
             logger.debug(
@@ -372,13 +370,11 @@ async def discover_schedule(  # noqa: C901
         if max_queue_depth is not None:
             try:
                 queue_depth = await redis.zcard(settings.WORKER_QUEUE_NAME)
-            except Exception as exc:
-                logger.warning(
-                    "event=discover_schedule_queue_depth_unavailable project_module=%s queue=%s error=%s",
+            except Exception:
+                logger.exception(
+                    "event=discover_schedule_queue_depth_unavailable project_module=%s queue=%s",
                     target_module,
                     settings.WORKER_QUEUE_NAME,
-                    exc,
-                    exc_info=True,
                 )
             else:
                 logger.debug(
@@ -458,14 +454,12 @@ async def discover_schedule(  # noqa: C901
             )
             if claimed_rows:
                 await db.commit()
-        except Exception as exc:
+        except Exception:
             await db.rollback()
-            logger.error(
-                "event=discover_schedule_claim_error project_module=%s batch_limit=%s error=%s",
+            logger.exception(
+                "event=discover_schedule_claim_error project_module=%s batch_limit=%s",
                 target_module,
                 batch_limit,
-                exc,
-                exc_info=True,
             )
             enqueue_failures += 1
             failed_batches.append(
@@ -508,14 +502,12 @@ async def discover_schedule(  # noqa: C901
                         len(batch),
                         attempt + 1,
                     )
-                except Exception as exc:
-                    logger.error(
-                        "event=discover_schedule_enqueue_error project_module=%s batch_size=%s attempt=%s error=%s",
+                except Exception:
+                    logger.exception(
+                        "event=discover_schedule_enqueue_error project_module=%s batch_size=%s attempt=%s",
                         module_name,
                         len(batch),
                         attempt + 1,
-                        exc,
-                        exc_info=True,
                     )
                 if attempt == 0:
                     await asyncio.sleep(1)
@@ -555,16 +547,13 @@ async def discover_schedule(  # noqa: C901
                                 commit=False,
                             )
                             await db.commit()
-                        except Exception as exc:
+                        except Exception:
                             await db.rollback()
-                            logger.warning(
+                            logger.exception(
                                 "event=discover_schedule_release_claim_error "
-                                "project_module=%s batch_size=%s claim_token=%s error=%s",
+                                "project_module=%s batch_size=%s",
                                 release_module,
                                 len(release_batch),
-                                claim_token,
-                                exc,
-                                exc_info=True,
                             )
                     if queue_depth is None:
                         try:
@@ -609,16 +598,13 @@ async def discover_schedule(  # noqa: C901
                         commit=False,
                     )
                     await db.commit()
-                except Exception as exc:
+                except Exception:
                     await db.rollback()
-                    logger.warning(
+                    logger.exception(
                         "event=discover_schedule_release_claim_error "
-                        "project_module=%s batch_size=%s claim_token=%s error=%s",
+                        "project_module=%s batch_size=%s",
                         release_module,
                         len(release_batch),
-                        claim_token,
-                        exc,
-                        exc_info=True,
                     )
             return {
                 "ok": True,

@@ -176,12 +176,11 @@ async def translate(
                 body = (e.response.text or "").strip()[:1200]
                 if body:
                     err_detail = f"{err_detail} response_body={body}"
-            logger.warning(
+            logger.exception(
                 "event=translate_slurm_tm_error execution_id=%s project_module=%s error=%s",
                 execution_id,
                 project_module,
                 err_detail,
-                exc_info=True,
             )
             return await fail_execution_after_translate_error(
                 db=db,

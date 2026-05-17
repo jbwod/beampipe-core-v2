@@ -19,7 +19,7 @@ router = APIRouter(tags=["health"])
 STATUS_HEALTHY = "healthy"
 STATUS_UNHEALTHY = "unhealthy"
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @router.get("/health", response_model=HealthCheck)
@@ -38,9 +38,9 @@ async def health():
 @router.get("/ready", response_model=ReadyCheck)
 async def ready(redis: Annotated[Redis, Depends(async_get_redis)], db: Annotated[AsyncSession, Depends(async_get_db)]):
     database_status = await check_database_health(db=db)
-    LOGGER.debug(f"Database health check status: {database_status}")
+    logger.debug("event=health_ready_db_check ok=%s", database_status)
     redis_status = await check_redis_health(redis=redis)
-    LOGGER.debug(f"Redis health check status: {redis_status}")
+    logger.debug("event=health_ready_redis_check ok=%s", redis_status)
 
     overall_status = STATUS_HEALTHY if database_status and redis_status else STATUS_UNHEALTHY
     http_status = status.HTTP_200_OK if overall_status == STATUS_HEALTHY else status.HTTP_503_SERVICE_UNAVAILABLE

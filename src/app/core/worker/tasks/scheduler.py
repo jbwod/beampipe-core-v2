@@ -21,7 +21,7 @@ async def sample_background_task(ctx: dict[str, Any], name: str) -> str:
 async def workflow_execution_schedule_task(
     ctx: dict[str, Any], project_module: str | None = None
 ) -> dict[str, Any]:
-    logger.debug(
+    logger.info(
         "event=workflow_execution_schedule_task_started project_module=%s",
         project_module or "all",
     )
@@ -60,9 +60,8 @@ async def workflow_execution_schedule_task(
             return result
     except Exception as exc:
         logger.exception(
-            "event=workflow_execution_schedule_task_error project_module=%s error=%s",
+            "event=workflow_execution_schedule_task_error project_module=%s",
             project_module,
-            exc,
         )
         return {
             "ok": False,
@@ -75,7 +74,7 @@ async def workflow_execution_schedule_task(
 async def discover_schedule_task(
     ctx: dict[str, Any], project_module: str | None = None
 ) -> dict[str, Any]:
-    logger.debug(
+    logger.info(
         "event=discover_schedule_task_started project_module=%s",
         project_module or "all",
     )
@@ -186,9 +185,8 @@ async def discover_schedule_task(
             return result
     except Exception as exc:
         logger.exception(
-            "event=discover_schedule_task_error project_module=%s error=%s",
+            "event=discover_schedule_task_error project_module=%s",
             project_module,
-            exc,
         )
         return {
             "ok": False,

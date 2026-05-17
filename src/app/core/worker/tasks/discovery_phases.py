@@ -1,7 +1,6 @@
 """Discovery Phases"""
 
 import asyncio
-import json
 import logging
 import time
 from datetime import UTC, datetime
@@ -75,11 +74,11 @@ async def run_discovery_tap_phase(
     module_adapters = resolve_module_adapters(module)
     n = len(source_identifiers)
     logger.info(
-        "event=discover_batch_started project_module=%s total_sources=%s concurrency=%s claim_token=%s",
+        "event=discover_batch_started project_module=%s total_sources=%s concurrency=%s claimed=%s",
         project_module,
         n,
         batch_concurrency,
-        claim_token,
+        bool(claim_token),
     )
     if n > 500:
         logger.info(
@@ -186,11 +185,10 @@ async def _apply_tap_results_to_stats(
         grouped = group_metadata_by_sbid(metadata_list)
         logger.debug(
             "event=discover_batch_source_grouped project_module=%s source_identifier=%s "
-            "sbids=%s sbid_list=%s datasets=%s",
+            "sbids=%s datasets=%s",
             project_module,
             source_identifier,
             len(grouped),
-            list(grouped.keys()),
             len(metadata_list),
         )
 
@@ -299,24 +297,20 @@ async def _finalize_discovery_batch(
             claim_token=claim_token,
             commit=False,
         )
-    except Exception as exc:
-        logger.warning(
-            "event=discover_batch_release_claim_error project_module=%s count=%s claim_token=%s error=%s",
+    except Exception:
+        logger.exception(
+            "event=discover_batch_release_claim_error project_module=%s count=%s",
             project_module,
             len(source_identifiers),
-            claim_token,
-            exc,
-            exc_info=True,
         )
         await db.rollback()
         raise
     if claim_token and released_count != len(source_identifiers):
         logger.warning(
-            "event=discover_batch_release_claim_partial project_module=%s expected=%s released=%s claim_token=%s",
+            "event=discover_batch_release_claim_partial project_module=%s expected=%s released=%s",
             project_module,
             len(source_identifiers),
             released_count,
-            claim_token,
         )
     await db.commit()
     claim_released = claim_token is None or released_count == len(source_identifiers)
@@ -362,11 +356,6 @@ async def _finalize_discovery_batch(
         project_module=project_module,
         source_identifiers=source_identifiers,
         stats=stats,
-    )
-    logger.debug(
-        "event=discover_batch_result project_module=%s result_json=%s",
-        project_module,
-        json.dumps(result, sort_keys=True, separators=(",", ":")),
     )
     return result, claim_released
 

@@ -1,6 +1,5 @@
 """Manifest builder: fetch metadata, apply staged URLs, produce project manifest format."""
 
-import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,8 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..archive.service import archive_metadata_service
 from ..exceptions.workflow_exceptions import WorkflowErrorCode, WorkflowFailure
 from ..projects import load_project_module
-
-logger = logging.getLogger(__name__)
 
 
 def _get_sbids_for_source(spec: Any) -> list[str] | None:

@@ -59,7 +59,7 @@ def record_failed_result(
     else:
         stats.error_count += 1
     stats.failed_source_identifiers.append(source_identifier)
-    logger.error(
+    logger.warning(
         "event=discover_batch_source_outcome "
         "project_module=%s source_identifier=%s outcome=%s error=%s duration_ms=%s",
         project_module,
@@ -160,13 +160,10 @@ async def persist_source_result(
             await db.commit()
         return result
     except Exception as e:
-        logger.error(
-            "event=discover_batch_upsert_error "
-            "project_module=%s source_identifier=%s error=%s",
+        logger.exception(
+            "event=discover_batch_upsert_error project_module=%s source_identifier=%s",
             project_module,
             source_identifier,
-            e,
-            exc_info=True,
         )
         await db.rollback()
         record_failed_result(

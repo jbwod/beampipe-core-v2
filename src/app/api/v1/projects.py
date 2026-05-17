@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, status
 
 from ...core.projects.service import project_module_service
+from ...core.registry.service import invalid_project_module_message
 from ...schemas.projects import (
     ProjectModuleContractListResponse,
     ProjectModuleContractStatus,
@@ -37,6 +38,6 @@ async def get_project_module_contract(
     if not project_module_service.project_exists(project_module):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Unknown project_module '{project_module}'.",
+            detail=invalid_project_module_message(project_module),
         )
     return project_module_service.get_contract_status(project_module)

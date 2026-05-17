@@ -4,7 +4,6 @@ Both REST/SLURM translate with identical inputs and its
 their downstream handover differs for DIM vs PGT-body upload for SLURM.
 """
 
-import logging
 from typing import Any
 from uuid import UUID
 
@@ -19,8 +18,6 @@ from .rest_client.translator_client import (
     partitioned_pgt_for_dlg_deploy,
     pgt_handle_from_partitioned_payload,
 )
-
-logger = logging.getLogger(__name__)
 
 
 async def translate_lg_to_pgt_artifact(

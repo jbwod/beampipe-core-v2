@@ -137,7 +137,15 @@ async def process_workflow_module_for_execution_schedule(
             reason_counts[reason] = int(reason_counts.get(reason, 0)) + 1
 
     policy = workflow_execution_policy_for_module(module_name)
-    logger.debug("event=workflow_execution_policy project_module=%s policy=%s", module_name, policy)
+    logger.debug(
+        "event=workflow_execution_policy project_module=%s enabled=%s "
+        "max_sources_per_execution=%s tick_execution_run_limit=%s tick_execution_source_limit=%s",
+        module_name,
+        policy.get("enabled"),
+        policy.get("max_sources_per_execution"),
+        policy.get("tick_execution_run_limit"),
+        policy.get("tick_execution_source_limit"),
+    )
     if not policy["enabled"]:
         _bump("disabled")
         skipped_modules.append(module_name)
@@ -269,7 +277,7 @@ async def process_workflow_module_for_execution_schedule(
         dep_uuid, dep_resolve_failed = await _resolve_deployment_profile_uuid_for_policy(db, policy)
         if dep_resolve_failed:
             _bump("deployment_profile_not_found")
-            logger.error(
+            logger.warning(
                 "event=workflow_execution_schedule_missing_deployment_profile "
                 "project_module=%s deployment_profile_name=%s",
                 module_name,
