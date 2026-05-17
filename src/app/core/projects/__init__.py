@@ -25,25 +25,14 @@ from .service import (
     resolve_workflow_execute_step_overrides,
 )
 
-
-def debug_print_modules(target: str | None = None) -> None:
-    modules = list_project_modules()
-    print(f"beampipe.projects modules: {modules}")
-    if target:
-        module = load_project_module(target)
-        name = getattr(module, "PROJECT_NAME", None)
-        print(f"Loaded module '{target}', PROJECT_NAME={name}")
-
-
 __all__ = [
-    "debug_print_modules",
     "get_graph_github_url",
     "get_graph_path",
     "get_workflow_discovery_automation_policy",
     "get_workflow_execution_automation_policy",
     "list_project_modules",
     "load_project_module",
+    "resolve_graph_content",
     "resolve_workflow_discovery_step_overrides",
     "resolve_workflow_execute_step_overrides",
-    "resolve_graph_content",
 ]

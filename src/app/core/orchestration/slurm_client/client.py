@@ -1,11 +1,11 @@
 """Async SSH wrapper for the Slurm Backend
 """
-import asyncssh
-
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self
+
+import asyncssh
 
 from .state import normalize_state, parse_sacct_exit_code, state_rank
 
@@ -69,7 +69,7 @@ class SlurmDeployClient:
                 if self.known_hosts.strip().lower() == self._KNOWN_HOSTS_DISABLED
                 else self.known_hosts
             )
-        logger.info(
+        logger.debug(
             "event=slurm_ssh_connect host=%s port=%s username=%s",
             self.host,
             self.port,
