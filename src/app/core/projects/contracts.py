@@ -1,10 +1,29 @@
 from types import ModuleType
 from typing import Any, Protocol, TypedDict, cast
 
+REQUIRED_HOOK_NAMES: tuple[str, ...] = (
+    "discover",
+    "prepare_metadata",
+    "manifest",
+)
 
-class DiscoverBundle(TypedDict, total=False):
-    query_results: Any
-    enrichments: dict[str, Any]
+OPTIONAL_HOOK_NAMES: tuple[str, ...] = (
+    "graph_overrides_from_sources",
+    "apply_graph_translate_overrides",
+    "ping",
+)
+
+KNOWN_HOOK_NAMES: tuple[str, ...] = REQUIRED_HOOK_NAMES + OPTIONAL_HOOK_NAMES
+
+OPTIONAL_CONSTANT_NAMES: tuple[str, ...] = (
+    "PROJECT_NAME",
+    "REQUIRED_ADAPTERS",
+    "DISCOVERY_ENRICHMENT_KEYS",
+    "GRAPH_PATH",
+    "GRAPH_GITHUB_URL",
+    "WORKFLOW_EXECUTION_AUTOMATION",
+    "WORKFLOW_DISCOVERY_AUTOMATION",
+)
 
 # MANIFEST_SCHEMA
 # GRAPH_PATH
@@ -12,30 +31,22 @@ class DiscoverBundle(TypedDict, total=False):
 # WORKFLOW_EXECUTION_AUTOMATION [Optional]: project-specific execution scheduling and retry policy.
 # WORKFLOW_DISCOVERY_AUTOMATION [Optional]: project-specific discovery scheduling policy.
 
-class ProjectDiscoveryModule(Protocol):
-    REQUIRED_ADAPTERS: list[str]
-    def discover(self, source_identifier: str, adapters: dict[str, Any] | None = None) -> DiscoverBundle: ...
-    def prepare_metadata(
-        self,
-        source_identifier: str,
-        query_results: DiscoverBundle,
-        data_url_by_scan_id: dict[str, str] | None = None,
-        checksum_url_by_scan_id: dict[str, str] | None = None,
-        adapters: dict[str, Any] | None = None,
-    ) -> Any: ...
+class DiscoverBundle(TypedDict, total=False):
+    query_results: Any
+    enrichments: dict[str, Any]
+
 
 def validate_project_module_interface(module: ModuleType, module_name: str) -> None:
-    discover_fn = getattr(module, "discover", None)
-    prepare_fn = getattr(module, "prepare_metadata", None)
+    for hook_name in REQUIRED_HOOK_NAMES:
+        if not callable(getattr(module, hook_name, None)):
+            raise ValueError(
+                f"module '{module_name}' must implement {hook_name}(...) — "
+                "see app.core.projects.contracts for the expected signature"
+            )
 
-    if not callable(discover_fn):
-        raise ValueError(
-            f"module '{module_name}' must implement discover(source_identifier, adapters=...)"
-        )
-    if not callable(prepare_fn):
-        raise ValueError(
-            f"module '{module_name}' must implement prepare_metadata(source_identifier, query_results, ...)"
-        )
+
+def known_exports(module: ModuleType) -> list[str]:
+    return [name for name in KNOWN_HOOK_NAMES if hasattr(module, name)]
 
 
 def extract_discover_bundle(discover_output: Any, module_name: str) -> DiscoverBundle:
@@ -57,7 +68,6 @@ def extract_discover_bundle(discover_output: Any, module_name: str) -> DiscoverB
             f"Project module '{module_name}' discover() key 'enrichments' must be a dict when provided"
         )
     return cast(DiscoverBundle, discover_output)
-
 
 # """
 # {
@@ -92,3 +102,16 @@ def get_discover_enrichment(
             f"module '{module_label}' discover() enrichment '{key}' must be {expected_label}"
         )
     return value
+
+
+__all__ = [
+    "KNOWN_HOOK_NAMES",
+    "OPTIONAL_CONSTANT_NAMES",
+    "OPTIONAL_HOOK_NAMES",
+    "REQUIRED_HOOK_NAMES",
+    "DiscoverBundle",
+    "extract_discover_bundle",
+    "get_discover_enrichment",
+    "known_exports",
+    "validate_project_module_interface",
+]

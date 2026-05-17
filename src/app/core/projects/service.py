@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from ..positive_policy import positive_float_optional, positive_int_optional
+from .contracts import known_exports
 from .plugins import list_project_modules, load_project_module
 
 logger = logging.getLogger(__name__)
@@ -180,17 +181,7 @@ class ProjectModuleService:
                 "valid": True,
                 "required_adapters": required_adapters if isinstance(required_adapters, list) else [],
                 "error": None,
-                "exports": [
-                    symbol
-                    for symbol in [
-                        "discover",
-                        "prepare_metadata",
-                        "stage",
-                        "build_manifest_sources",
-                        "REQUIRED_ADAPTERS",
-                    ]
-                    if hasattr(module, symbol)
-                ],
+                "exports": known_exports(module),
                 "enrichment_keys": enrichment_keys,
                 "graph_path": graph_path,
                 "graph_github_url": graph_github_url,
