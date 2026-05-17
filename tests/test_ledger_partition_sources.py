@@ -193,19 +193,68 @@ def test_valid_transitions():
     svc = ExecutionLedgerService
     assert svc._validate_status_transition(ExecutionStatus.PENDING, ExecutionStatus.RUNNING)
     assert svc._validate_status_transition(ExecutionStatus.RUNNING, ExecutionStatus.COMPLETED)
+    assert svc._validate_status_transition(ExecutionStatus.RUNNING, ExecutionStatus.NOT_SUBMITTED)
+    assert svc._validate_status_transition(ExecutionStatus.NOT_SUBMITTED, ExecutionStatus.RUNNING)
     assert svc._validate_status_transition(ExecutionStatus.RUNNING, ExecutionStatus.FAILED)
     assert svc._validate_status_transition(ExecutionStatus.FAILED, ExecutionStatus.RETRYING)
     assert svc._validate_status_transition(ExecutionStatus.RETRYING, ExecutionStatus.RUNNING)
 
 
+def test_awaiting_scheduler_transitions_valid():
+    """AWAITING_SCHEDULER sits between RUNNING and terminal states."""
+    svc = ExecutionLedgerService
+    assert svc._validate_status_transition(
+        ExecutionStatus.RUNNING, ExecutionStatus.AWAITING_SCHEDULER
+    )
+    assert svc._validate_status_transition(
+        ExecutionStatus.AWAITING_SCHEDULER, ExecutionStatus.COMPLETED
+    )
+    assert svc._validate_status_transition(
+        ExecutionStatus.AWAITING_SCHEDULER, ExecutionStatus.FAILED
+    )
+    assert svc._validate_status_transition(
+        ExecutionStatus.AWAITING_SCHEDULER, ExecutionStatus.CANCELLED
+    )
+    # Replay of a submit step may re-enter RUNNING before flipping forward again.
+    assert svc._validate_status_transition(
+        ExecutionStatus.AWAITING_SCHEDULER, ExecutionStatus.RUNNING
+    )
+
+
+def test_awaiting_scheduler_transitions_invalid():
+    svc = ExecutionLedgerService
+    # Terminal states never regress.
+    assert not svc._validate_status_transition(
+        ExecutionStatus.COMPLETED, ExecutionStatus.AWAITING_SCHEDULER
+    )
+    assert not svc._validate_status_transition(
+        ExecutionStatus.CANCELLED, ExecutionStatus.AWAITING_SCHEDULER
+    )
+    # PENDING must go through RUNNING first.
+    assert not svc._validate_status_transition(
+        ExecutionStatus.PENDING, ExecutionStatus.AWAITING_SCHEDULER
+    )
+    # Cannot re-enter the awaiting state from a terminal-ish state.
+    assert not svc._validate_status_transition(
+        ExecutionStatus.NOT_SUBMITTED, ExecutionStatus.AWAITING_SCHEDULER
+    )
+
+
 def test_invalid_transitions():
     svc = ExecutionLedgerService
     assert not svc._validate_status_transition(ExecutionStatus.COMPLETED, ExecutionStatus.RUNNING)
+    assert not svc._validate_status_transition(ExecutionStatus.NOT_SUBMITTED, ExecutionStatus.COMPLETED)
     assert not svc._validate_status_transition(ExecutionStatus.CANCELLED, ExecutionStatus.RUNNING)
     assert not svc._validate_status_transition(ExecutionStatus.PENDING, ExecutionStatus.COMPLETED)
 
 
 def test_cancel_allowed_from_multiple_states():
     svc = ExecutionLedgerService
-    for state in (ExecutionStatus.PENDING, ExecutionStatus.RUNNING, ExecutionStatus.FAILED, ExecutionStatus.RETRYING):
+    for state in (
+        ExecutionStatus.PENDING,
+        ExecutionStatus.RUNNING,
+        ExecutionStatus.NOT_SUBMITTED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.RETRYING,
+    ):
         assert svc._validate_status_transition(state, ExecutionStatus.CANCELLED), f"cancel from {state}"

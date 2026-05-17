@@ -3,21 +3,46 @@ from types import ModuleType
 
 import pytest
 
-from app.core.utils import validate_prepared_metadata_records
-from src.app.core.projects import list_project_modules, load_project_module
-from src.app.core.projects.contracts import (
+from app.core.projects import list_project_modules, load_project_module
+from app.core.projects.contracts import (
+    KNOWN_HOOK_NAMES,
+    REQUIRED_HOOK_NAMES,
     extract_discover_bundle,
     get_discover_enrichment,
+    known_exports,
     validate_project_module_interface,
 )
+from app.core.utils import validate_prepared_metadata_records
+
+
+def _make_valid_module(name: str = "m") -> ModuleType:
+    module = ModuleType(name)
+    module.discover = lambda sid, adapters=None: {"query_results": []}
+    module.prepare_metadata = lambda sid, qr, **kw: ([], {})
+    module.manifest = lambda metadata_by_source, **kw: []
+    module.REQUIRED_ADAPTERS = ["casda"]
+    return module
 
 
 def test_validate_project_module_interface_accepts_valid_module():
-    module = ModuleType("m")
-    module.discover = lambda sid, adapters=None: {"query_results": []}
-    module.prepare_metadata = lambda sid, qr, **kw: ([], {})
-    module.REQUIRED_ADAPTERS = ["casda"]
-    validate_project_module_interface(module, "m")
+    validate_project_module_interface(_make_valid_module(), "m")
+
+
+@pytest.mark.parametrize("missing", REQUIRED_HOOK_NAMES)
+def test_validate_project_module_interface_rejects_missing_required(missing: str):
+    module = _make_valid_module()
+    delattr(module, missing)
+    with pytest.raises(ValueError, match=missing):
+        validate_project_module_interface(module, "m")
+
+
+def test_known_exports_returns_only_defined_hooks():
+    module = _make_valid_module()
+    exports = known_exports(module)
+    for required in REQUIRED_HOOK_NAMES:
+        assert required in exports
+    for name in exports:
+        assert name in KNOWN_HOOK_NAMES
 
 
 def test_extract_discover_bundle():

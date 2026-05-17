@@ -57,21 +57,27 @@ def test_profile_to_dict_slurm_remote_backend():
     deployment = {
         "kind": "slurm_remote",
         "login_node": "setonix.pawsey.org.au",
-        "dlg_root": "/scratch/pawsey0411/me/dlg",
         "account": "pawsey0411",
+        "home_dir": "/scratch/pawsey0411",
+        "dlg_root": "/scratch/pawsey0411/me/dlg",
+        "log_dir": "/scratch/pawsey0411/me/dlg/log",
+        "remote_user": "me",
+        "venv": "source /software/projects/pawsey0411/venv/bin/activate",
+        "exec_prefix": "srun -l",
+        "facility": "setonix",
         "job_duration_minutes": 30,
         "num_nodes": 2,
         "num_islands": 1,
-        "sbatch_mem": "32G",
         "verbose_level": 5,
         "max_threads": 0,
         "all_nics": True,
-        "slurm_template_name": "setonix",
+        "verify_ssl": True,
     }
     profile = {"translation": {"algo": "metis"}, "deployment": deployment}
     result = _profile_to_dict(profile)
     assert result["deployment_backend"] == "slurm_remote"
     assert result["deployment_config"] == deployment
+    assert result["verify_ssl"] is True
 
 
 def test_slurm_remote_schema_create_validates_new_fields():
@@ -84,21 +90,30 @@ def test_slurm_remote_schema_create_validates_new_fields():
         "deployment": {
             "kind": "slurm_remote",
             "login_node": "setonix.pawsey.org.au",
-            "dlg_root": "/scratch/pawsey0411/me/dlg",
             "account": "pawsey0411",
-            "job_duration_minutes": 30,
+            "home_dir": "/scratch/pawsey0411",
+            "dlg_root": "/scratch/pawsey0411/me/dlg",
+            "log_dir": "/scratch/pawsey0411/me/dlg/log",
+            "venv": "source /software/projects/pawsey0411/venv/bin/activate",
+            "verify_ssl": True,
         },
     }
     parsed = DaliugeDeploymentProfileCreate.model_validate(body)
     dep = parsed.deployment
     assert dep.kind == "slurm_remote"
+    assert dep.facility == "setonix"
     assert dep.num_nodes == 1
     assert dep.num_islands == 1
-    assert dep.sbatch_mem == "16G"
     assert dep.verbose_level == 1
     assert dep.max_threads == 0
     assert dep.all_nics is False
-    assert dep.slurm_template_name == "setonix"
+    assert dep.zerorun is False
+    assert dep.sleepncopy is False
+    assert dep.check_with_session is False
+    assert dep.slurm_template is None
+    assert dep.ssh_port == 22
+    assert dep.job_duration_minutes == 30
+    assert dep.verify_ssl is True
 
 
 # ---- _resolve_deployment_profile ----
