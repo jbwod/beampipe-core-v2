@@ -143,6 +143,28 @@ def lifespan_factory(
 
 
 # -------------- application --------------
+def _getting_started_markdown(settings: Any) -> str:
+    is_local = (
+        isinstance(settings, EnvironmentSettings)
+        and settings.ENVIRONMENT == EnvironmentOption.LOCAL
+    )
+    lines = [
+        "## Getting started",
+        "",
+        "1. **Authenticate** — `POST /api/v1/login` with the admin email and password "
+        "you set during setup. Copy the returned `access_token` and click "
+        "**Authorize** at the top of this page (Bearer token).",
+        "2. **Browse sources** — `GET /api/v1/sources` lists everything in the registry.",
+        "3. **Run discovery** — `POST /api/v1/sources/discover` to enqueue a discovery run.",
+        "",
+        "Health: `GET /api/v1/health` (liveness) · `GET /api/v1/ready` (deps).",
+    ]
+    if is_local:
+        lines.append("")
+        lines.append("Local-only UI: [`/sources`](/sources) for a minimal browser view.")
+    return "\n".join(lines)
+
+
 def create_application(
     router: APIRouter,
     settings: (
@@ -202,9 +224,15 @@ def create_application(
     """
     # --- before creating application ---
     if isinstance(settings, AppSettings):
+        base_description = settings.APP_DESCRIPTION or ""
+        getting_started = _getting_started_markdown(settings)
+        description = (
+            f"{base_description}\n\n{getting_started}".strip()
+            if getting_started else base_description
+        )
         to_update = {
             "title": settings.APP_NAME,
-            "description": settings.APP_DESCRIPTION,
+            "description": description,
             "contact": {"name": settings.CONTACT_NAME, "email": settings.CONTACT_EMAIL},
             "license_info": {"name": settings.LICENSE_NAME},
         }

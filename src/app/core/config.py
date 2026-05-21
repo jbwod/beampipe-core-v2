@@ -159,7 +159,6 @@ class CORSSettings(BaseSettings):
 
 
 class ExecutionLedgerSettings(BaseSettings):
-    MAX_RETRIES: int = 3
     WORKFLOW_AUTOMATION_SCHEDULER_NAME: str = "workflow_auto"
     WORKFLOW_EXECUTION_AUTOMATION_ENABLED: bool = True
 
@@ -275,8 +274,11 @@ class Settings(
     CasdaSettings,
     SlurmSshSettings,
 ):
+    _config_dir = os.path.dirname(os.path.realpath(__file__))
+    _legacy_env = os.path.join(_config_dir, "..", "..", ".env")          # src/.env
+    _wizard_env = os.path.join(_config_dir, "..", "..", "..", ".env")    # repo root .env
     model_config = SettingsConfigDict(
-        env_file=os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", ".env"),
+        env_file=(_legacy_env, _wizard_env),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
