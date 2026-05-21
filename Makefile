@@ -1,10 +1,13 @@
 COMPOSE ?= $(shell command -v docker >/dev/null 2>&1 && echo docker compose || echo podman compose)
-
-BRIDGE_SCRIPT := $(CURDIR)/scripts/podman-ssh-agent-bridge.sh
-BRIDGE_LOGDIR := $(CURDIR)/.logs
-BRIDGE_PIDFILE := $(CURDIR)/.podman-bridge.pid
+COMPOSE_FILE ?= docker-compose.yml
+ENV_FILE ?= .env
 
 BEAMPIPE_BUILD ?=
+
+SLURM_SSH_PRIVATE_KEY_FILE ?= ./deploy/ssh/id_slurm
+
+API_URL ?= http://127.0.0.1:8000
+RESTATE_ADMIN_URL ?= http://127.0.0.1:9070
 
 .DEFAULT_GOAL := help
 
@@ -13,102 +16,96 @@ ifeq ($(BEAMPIPE_BUILD),1)
 COMPOSE_UP_FLAGS += --build
 endif
 
-.PHONY: help beampipe-start beampipe-stop slurm-known-hosts-sync \
-	podman-bridge podman-bridge-bg podman-bridge-ensure podman-bridge-stop podman-bridge-status \
-	beampipe-new-admin restate-start restate-stop compose-up compose-build compose-down compose-logs
+.PHONY: help dev logs ps urls preflight \
+	compose-up compose-build compose-down \
+	beampipe-start beampipe-stop beampipe-new-admin \
+	migrate restate-start restate-stop \
+	slurm-known-hosts-sync slurm-key-check
 
 help:
-	@echo "  beampipe-start       Start known_hosts sync, SSH bridge, and compose"
-	@echo "  beampipe-stop        Stop compose and SSH bridge"
-	@echo "  beampipe-new-admin   Run init job to create first superuser"
-	@echo "  restate-start        Start only Restate services"
-	@echo "  restate-stop         Stop only Restate services"
-	@echo "  podman-bridge        Run SSH bridge in foreground"
-	@echo "  podman-bridge-bg     Run SSH bridge in background"
-	@echo "  podman-bridge-stop   Stop SSH bridge"
-	@echo "  podman-bridge-status Check SSH bridge"
-	@echo "  compose-up           Start compose"
-	@echo "  compose-build        Build compose"
+	@echo "Beampipe Core
+	@echo ""
+	@echo "Local development:"
+	@echo "  dev                  compose up + create first superuser + print URLs"
+	@echo "  logs                 Tail logs from all services"
+	@echo "  ps                   Show running services and ports"
+	@echo "  urls                 Print useful URLs (API docs, sources UI, Restate admin)"
+	@echo ""
+	@echo "Production:"
+	@echo "  beampipe-start       "
+	@echo "  beampipe-stop        "
+	@echo "  beampipe-new-admin   Run init job to create the first superuser"
+	@echo ""
+	@echo "Compose:"
+	@echo "  compose-up           Start compose (no init jobs)"
+	@echo "  compose-build        Build compose images (also: BEAMPIPE_BUILD=1)"
 	@echo "  compose-down         Stop compose"
-	@echo "  compose-logs         Tail SSH bridge log"
+	@echo "  migrate              Run Alembic migration"
+	@echo ""
+	@echo "Restate / Slurm:"
+	@echo "  restate-start        Start Restate node(s); auto-detects single vs cluster"
+	@echo "  restate-stop         Stop Restate node(s)"
+	@echo "  slurm-known-hosts-sync  Copy ~/.ssh/known_hosts -> ./deploy/ssh/known_hosts (644)"
+	@echo "  slurm-key-check      Verify $(SLURM_SSH_PRIVATE_KEY_FILE) exists"
+	@echo ""
+	@echo "VAR: BEAMPIPE_BUILD=1 forces a rebuild on compose-up / dev / beampipe-start."
 
-beampipe-start: slurm-known-hosts-sync podman-bridge-ensure
+# ---------------------------------------------------------------------------
+# Local development
+# ---------------------------------------------------------------------------
+
+dev: preflight compose-up migrate beampipe-new-admin urls
+
+preflight:
+	@if [ ! -f "$(ENV_FILE)" ]; then \
+		echo "Missing $(ENV_FILE) - run: python setup.py local" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(COMPOSE_FILE)" ]; then \
+		echo "Missing $(COMPOSE_FILE) - run: python setup.py local" >&2; \
+		exit 1; \
+	fi
+
+logs:
+	$(COMPOSE) logs -f --tail=100
+
+ps:
+	$(COMPOSE) ps
+
+urls:
+	@echo ""
+	@echo "Beampipe Core is up:"
+	@echo "  API docs:      $(API_URL)/docs"
+	@echo "  Sources UI:    $(API_URL)/sources       (only when ENVIRONMENT=local)"
+	@echo "  Readiness:     $(API_URL)/api/v1/ready"
+	@echo "  Restate admin: $(RESTATE_ADMIN_URL)"
+	@echo ""
+	@echo "Log in with the admin and password you set during 'python setup.py'."
+
+# ---------------------------------------------------------------------------
+# Production
+# ---------------------------------------------------------------------------
+
+beampipe-start: preflight
+	@if grep -q "slurm_ssh_key" "$(COMPOSE_FILE)" 2>/dev/null; then \
+		$(MAKE) slurm-known-hosts-sync slurm-key-check; \
+	else \
+		echo "Slurm SSH not wired in $(COMPOSE_FILE); skipping known_hosts sync and key check."; \
+	fi
 	$(COMPOSE) up $(COMPOSE_UP_FLAGS)
 
 beampipe-stop:
 	$(COMPOSE) down
-	@$(MAKE) podman-bridge-stop
 
 beampipe-new-admin:
 	$(COMPOSE) --profile init run --rm create_superuser
 
-restate-start:
-	$(COMPOSE) up -d restate-1 restate-2 restate-3
-
-restate-stop:
-	$(COMPOSE) stop restate-1 restate-2 restate-3
-
-podman-bridge:
-	@test -n "$$SSH_AUTH_SOCK" || (echo "SSH_AUTH_SOCK is not set." >&2 && exit 1)
-	@$(BRIDGE_SCRIPT)
-
-podman-bridge-bg:
-	@test -n "$$SSH_AUTH_SOCK" || (echo "SSH_AUTH_SOCK is not set." >&2 && exit 1)
-	@mkdir -p "$(BRIDGE_LOGDIR)"
-	@if [ -f "$(BRIDGE_PIDFILE)" ] && kill -0 "$$(cat "$(BRIDGE_PIDFILE)")" 2>/dev/null; then \
-		echo "Bridge already running (PID $$(cat "$(BRIDGE_PIDFILE")))." >&2; \
-		exit 1; \
-	fi
-	@nohup "$(BRIDGE_SCRIPT)" >"$(BRIDGE_LOGDIR)/podman-bridge.log" 2>&1 & echo $$! >"$(BRIDGE_PIDFILE)"
-	@echo "Bridge PID $$(cat "$(BRIDGE_PIDFILE)")"
-
-podman-bridge-ensure:
-	@test -n "$$SSH_AUTH_SOCK" || (echo "SSH_AUTH_SOCK is not set." >&2 && exit 1)
-	@set -e; \
-	mkdir -p "$(BRIDGE_LOGDIR)"; \
-	if [ -f "$(BRIDGE_PIDFILE)" ]; then \
-		pid=$$(cat "$(BRIDGE_PIDFILE)"); \
-		if kill -0 $$pid 2>/dev/null; then \
-			echo "Bridge already running (PID $$pid)."; \
-			exit 0; \
-		fi; \
-		rm -f "$(BRIDGE_PIDFILE)"; \
-	fi; \
-	nohup "$(BRIDGE_SCRIPT)" >"$(BRIDGE_LOGDIR)/podman-bridge.log" 2>&1 & echo $$! >"$(BRIDGE_PIDFILE)"; \
-	echo "Started bridge PID $$(cat "$(BRIDGE_PIDFILE)")"; \
-	sleep 2; \
-	podman machine ssh 'SSH_AUTH_SOCK=/tmp/beampipe-agent-relay.sock ssh-add -l' >/dev/null \
-		|| (echo "VM agent check failed; see $(BRIDGE_LOGDIR)/podman-bridge.log" >&2; exit 1)
-
-podman-bridge-stop:
-	@if [ ! -f "$(BRIDGE_PIDFILE)" ]; then \
-		echo "Bridge not running."; \
-		exit 0; \
-	fi
-	@pid=$$(cat "$(BRIDGE_PIDFILE)"); \
-	if kill -0 $$pid 2>/dev/null; then \
-		kill $$pid && echo "Stopped bridge PID $$pid"; \
-	else \
-		echo "Bridge PID $$pid not running"; \
-	fi; \
-	rm -f "$(BRIDGE_PIDFILE)"
-
-podman-bridge-status:
-	@if [ -f "$(BRIDGE_PIDFILE)" ]; then \
-		pid=$$(cat "$(BRIDGE_PIDFILE)"); \
-		if kill -0 $$pid 2>/dev/null; then \
-			echo "Bridge running (PID $$pid)"; \
-		else \
-			echo "Stale bridge PID file ($$pid)"; \
-		fi; \
-	else \
-		echo "Bridge not running"; \
-	fi
-	@podman machine ssh 'SSH_AUTH_SOCK=/tmp/beampipe-agent-relay.sock ssh-add -l' 2>/dev/null \
-		|| echo "VM agent check failed"
+# ---------------------------------------------------------------------------
+# Compose
+# ---------------------------------------------------------------------------
 
 compose-up:
-	$(COMPOSE) up -d
+	$(COMPOSE) up $(COMPOSE_UP_FLAGS)
 
 compose-build:
 	$(COMPOSE) build
@@ -116,6 +113,39 @@ compose-build:
 compose-down:
 	$(COMPOSE) down
 
-compose-logs:
-	@test -f "$(BRIDGE_LOGDIR)/podman-bridge.log" || (echo "No bridge log found." >&2 && exit 1)
-	tail -f "$(BRIDGE_LOGDIR)/podman-bridge.log"
+migrate:
+	$(COMPOSE) --profile init run --rm migrate
+
+# ---------------------------------------------------------------------------
+# Restate / Slurm
+# ---------------------------------------------------------------------------
+
+# Detect them dynamically from the compose file rather than hardcoding.
+restate-start:
+	@svcs=$$( $(COMPOSE) config --services 2>/dev/null | grep -E '^restate(-[0-9]+)?$$' | tr '\n' ' '); \
+	if [ -z "$$svcs" ]; then echo "no restate services found in $(COMPOSE_FILE)" >&2; exit 1; fi; \
+	echo "Starting: $$svcs"; \
+	$(COMPOSE) up -d $$svcs
+
+restate-stop:
+	@svcs=$$( $(COMPOSE) config --services 2>/dev/null | grep -E '^restate(-[0-9]+)?$$' | tr '\n' ' '); \
+	if [ -z "$$svcs" ]; then echo "no restate services found in $(COMPOSE_FILE)" >&2; exit 1; fi; \
+	echo "Stopping: $$svcs"; \
+	$(COMPOSE) stop $$svcs
+
+slurm-known-hosts-sync:
+	@$(CURDIR)/scripts/sync-slurm-known-hosts.sh
+
+slurm-key-check:
+	@key="$(SLURM_SSH_PRIVATE_KEY_FILE)"; \
+	if [ ! -f "$$key" ]; then \
+		echo "Slurm SSH key missing: $$key" >&2; \
+		echo "Generate with:  ssh-keygen -t ed25519 -f $$key -N \"\"" >&2; \
+		echo "Then add $$key.pub to ~/.ssh/authorized_keys on the head end." >&2; \
+		exit 1; \
+	fi; \
+	mode=$$(stat -f '%Lp' "$$key" 2>/dev/null || stat -c '%a' "$$key" 2>/dev/null); \
+	case "$$mode" in \
+		400|600) echo "Slurm bot key OK ($$key, mode $$mode)";; \
+		*) echo "Slurm bot key has unsafe perms ($$key, mode $$mode); run: chmod 600 $$key" >&2; exit 1;; \
+	esac

@@ -8,6 +8,7 @@ default-replication = 1
 [bifrost]
 default-provider = "replicated"
 
+# Required when restate >= 2 (HA cluster) — https://docs.restate.dev/server/snapshots
 [worker.snapshots]
 destination = ""
 aws-region = ""
