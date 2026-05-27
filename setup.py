@@ -9,21 +9,50 @@ import shutil
 import sys
 from pathlib import Path
 
-DEPLOYMENTS = {
+REPO_ROOT = Path(__file__).resolve().parent
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+ENV_TEMPLATE = SCRIPTS_DIR / "setup" / ".env.template"
+LOGO_PATH = REPO_ROOT / "logo.txt"
+
+CUSTOM_PRESETS: list[tuple[str, dict[str, int]]] = [
+    ("minimal",         {"web": 1, "workers": 1, "restate": 1, "beamcore": 1}),
+    ("production-like", {"web": 2, "workers": 3, "restate": 3, "beamcore": 2}),
+]
+
+DEPLOYMENTS: dict[str, dict] = {
     "local": {
-        "name": "Local development with Uvicorn",
-        "description": "Auto-reload enabled, development-friendly",
-        "path": "scripts/local_with_uvicorn",
-    },
-    "staging": {
-        "name": "Staging with Gunicorn managing Uvicorn workers",
-        "description": "Production-like setup for testing",
-        "path": "scripts/gunicorn_managing_uvicorn_workers",
+        "label": "Local development",
+        "description": "Single instance of every service, no nginx, no Restate cluster.",
+        "source": SCRIPTS_DIR / "local_dev",
+        "files": [
+            ("Dockerfile", "Dockerfile"),
+            ("docker-compose.yml", "docker-compose.yml"),
+        ],
+        "scalable": False,
     },
     "production": {
-        "name": "Production with NGINX",
-        "description": "Full production setup with reverse proxy",
-        "path": "scripts/production_with_nginx",
+        "label": "Production (HA)",
+        "description": "nginx LB, 2 web, 3 worker, 3 restate (cluster), 2 beamcore_rs. ",
+        "source": SCRIPTS_DIR / "production",
+        "files": [
+            ("Dockerfile", "Dockerfile"),
+            ("docker-compose.yml", "docker-compose.yml"),
+            ("default.conf", "default.conf"),
+            ("restate-config/restate.toml", "restate-config/restate.toml"),
+        ],
+        "scalable": False,
+    },
+    "custom": {
+        "label": "Custom",
+        "description": "Pick replica counts for web / worker / restate / beamcore_rs.",
+        "source": SCRIPTS_DIR / "custom_base",
+        "files": [
+            ("Dockerfile", "Dockerfile"),
+            ("docker-compose.yml", "docker-compose.yml"),
+            ("default.conf", "default.conf"),
+            ("restate-config/restate.toml", "restate-config/restate.toml"),
+        ],
+        "scalable": True,
     },
 }
 
