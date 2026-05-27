@@ -113,6 +113,8 @@ class BatchExecutionRecordListItem(TimestampSchema, BatchExecutionRecordBase, UU
 
 
 class BatchExecutionStatusResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     uuid: UUID
     status: ExecutionStatus
     execution_phase: ExecutionPhase | None = None
@@ -122,6 +124,130 @@ class BatchExecutionStatusResponse(BaseModel):
     retry_count: int = 0
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    slurm_state: str | None = Field(
+        default=None,
+        description="Last observed SLURM state.",
+    )
+    dim_state: str | None = Field(
+        default=None,
+        description="Last observed DIM session state.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_observed_states(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        wm = data.get("workflow_manifest")
+        if not isinstance(wm, dict):
+            return data
+        rr = wm.get("beampipe_run_record")
+        if not isinstance(rr, dict):
+            return data
+        out = dict(data)
+        slurm = rr.get("slurm")
+        if isinstance(slurm, dict):
+            obs = slurm.get("last_observation")
+            if isinstance(obs, dict) and obs.get("state"):
+                out.setdefault("slurm_state", str(obs.get("state")))
+        dim = rr.get("dim")
+        if isinstance(dim, dict):
+            obs = dim.get("last_observation")
+            if isinstance(obs, dict) and obs.get("session_state"):
+                out.setdefault("dim_state", str(obs.get("session_state")))
+        return out
+
+
+class BatchExecutionSummary(BaseModel):
+
+    model_config = ConfigDict(from_attributes=True)
+
+    uuid: UUID
+    project_module: str
+    archive_name: str
+    status: ExecutionStatus
+    execution_phase: ExecutionPhase | None = None
+    scheduler_name: str | None = None
+    scheduler_job_id: str | None = None
+    requested_source_count: int = 0
+    requested_source_identifiers: list[str] = Field(default_factory=list)
+    slurm_state: str | None = None
+    dim_state: str | None = None
+    last_observation_at: datetime | None = None
+    last_error: str | None = None
+    retry_count: int = 0
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime | None = None
+    duration_seconds: float | None = Field(
+        default=None,
+        description="completed_at - started_at when both are present (rounded ms precision).",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_summary_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        wm = out.get("workflow_manifest")
+        rr: dict | None = None
+        if isinstance(wm, dict):
+            maybe_rr = wm.get("beampipe_run_record")
+            if isinstance(maybe_rr, dict):
+                rr = maybe_rr
+        if rr is None:
+            maybe_rr = out.get("beampipe_run_record")
+            if isinstance(maybe_rr, dict):
+                rr = maybe_rr
+        if isinstance(rr, dict):
+            requested = rr.get("requested_sources")
+            if isinstance(requested, dict):
+                ids = requested.get("source_identifiers")
+                if isinstance(ids, list):
+                    out.setdefault("requested_source_identifiers", [str(s) for s in ids])
+                count = requested.get("count")
+                if isinstance(count, int):
+                    out.setdefault("requested_source_count", count)
+            slurm = rr.get("slurm")
+            if isinstance(slurm, dict):
+                obs = slurm.get("last_observation")
+                if isinstance(obs, dict):
+                    if obs.get("state"):
+                        out.setdefault("slurm_state", str(obs.get("state")))
+                    if obs.get("observed_at"):
+                        out.setdefault("last_observation_at", obs.get("observed_at"))
+            dim = rr.get("dim")
+            if isinstance(dim, dict):
+                obs = dim.get("last_observation")
+                if isinstance(obs, dict):
+                    if obs.get("session_state"):
+                        out.setdefault("dim_state", str(obs.get("session_state")))
+                    if obs.get("observed_at"):
+                        out.setdefault("last_observation_at", obs.get("observed_at"))
+      
+        if not out.get("requested_source_identifiers"):
+            sources = out.get("sources") or []
+            if isinstance(sources, list):
+                ids = [
+                    str(s.get("source_identifier"))
+                    for s in sources
+                    if isinstance(s, dict) and s.get("source_identifier")
+                ]
+                if ids:
+                    out["requested_source_identifiers"] = ids
+                    out.setdefault("requested_source_count", len(ids))
+        started = out.get("started_at")
+        completed = out.get("completed_at")
+        if isinstance(started, datetime) and isinstance(completed, datetime):
+            try:
+                out.setdefault(
+                    "duration_seconds",
+                    round((completed - started).total_seconds(), 3),
+                )
+            except (TypeError, ValueError):
+                pass
+        return out
 
 
 class BatchExecutionRecordUpdate(BaseModel):
