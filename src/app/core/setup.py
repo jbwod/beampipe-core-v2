@@ -130,6 +130,8 @@ def lifespan_factory(
             yield
 
         finally:
+            await engine.dispose()
+
             if isinstance(settings, RedisCacheSettings):
                 await close_redis_cache_pool()
 
