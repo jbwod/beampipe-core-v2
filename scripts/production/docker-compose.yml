@@ -1,0 +1,369 @@
+# Production Compose
+
+x-app-common: &app-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  restart: unless-stopped
+
+x-worker-env: &worker-env
+  WORKFLOW_ENGINE_EXECUTION: restate
+  WORKFLOW_ENGINE_DISCOVERY: restate
+  RESTATE_INGRESS_BASE_URL: http://nginx:8080
+  RESTATE_INVOKE_TIMEOUT_SECONDS: "30.0"
+
+x-restate-aws: &restate-aws
+  AWS_ACCESS_KEY_ID: ${RESTATE_AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${RESTATE_AWS_SECRET_ACCESS_KEY}
+
+x-slurm-ssh-app-volumes: &slurm-ssh-app-volumes
+  - type: bind
+    source: ${SLURM_SSH_KNOWN_HOSTS_SOURCE:-./deploy/ssh/known_hosts}
+    target: /run/slurm-ssh/known_hosts
+    read_only: true
+
+x-slurm-ssh-secrets: &slurm-ssh-secrets
+  - slurm_ssh_key
+
+services:
+  nginx:
+    image: nginx:latest
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - ./default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - web-1
+      - web-2
+    restart: unless-stopped
+
+  web-1:
+    <<: *app-common
+    command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  web-2:
+    <<: *app-common
+    command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  scheduler:
+    <<: *app-common
+    command: arq app.core.worker.settings.SchedulerSettings
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker-1:
+    <<: *app-common
+    command: sh -c "sleep 15 && exec arq app.core.worker.settings.WorkerSettings"
+    volumes: *slurm-ssh-app-volumes
+    secrets: *slurm-ssh-secrets
+    environment:
+      <<: *worker-env
+      SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+      SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      restate-1:
+        condition: service_healthy
+      restate-2:
+        condition: service_healthy
+      restate-3:
+        condition: service_healthy
+      beamcore_rs-1:
+        condition: service_healthy
+      beamcore_rs-2:
+        condition: service_healthy
+
+  worker-2:
+    <<: *app-common
+    command: sh -c "sleep 15 && exec arq app.core.worker.settings.WorkerSettings"
+    volumes: *slurm-ssh-app-volumes
+    secrets: *slurm-ssh-secrets
+    environment:
+      <<: *worker-env
+      SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+      SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      restate-1:
+        condition: service_healthy
+      restate-2:
+        condition: service_healthy
+      restate-3:
+        condition: service_healthy
+      beamcore_rs-1:
+        condition: service_healthy
+      beamcore_rs-2:
+        condition: service_healthy
+
+  worker-3:
+    <<: *app-common
+    command: sh -c "sleep 15 && exec arq app.core.worker.settings.WorkerSettings"
+    volumes: *slurm-ssh-app-volumes
+    secrets: *slurm-ssh-secrets
+    environment:
+      <<: *worker-env
+      SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+      SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      restate-1:
+        condition: service_healthy
+      restate-2:
+        condition: service_healthy
+      restate-3:
+        condition: service_healthy
+      beamcore_rs-1:
+        condition: service_healthy
+      beamcore_rs-2:
+        condition: service_healthy
+
+  restate-1:
+    image: docker.restate.dev/restatedev/restate:latest
+    volumes:
+      - ./restate-config:/etc/restate:ro
+      - restate-1-data:/restate-data
+    environment:
+      <<: *restate-aws
+      RESTATE_CONFIG: /etc/restate/restate.toml
+      RESTATE_NODE_NAME: restate-1
+      RESTATE_ADVERTISED_ADDRESS: "http://restate-1:5122"
+      RESTATE_METADATA_CLIENT__ADDRESSES: '["http://restate-1:5122","http://restate-2:5122","http://restate-3:5122"]'
+      RESTATE_AUTO_PROVISION: "true"
+    expose:
+      - "8080"
+      - "9070"
+      - "5122"
+    ports:
+      - "9070:9070"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9070/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  restate-2:
+    image: docker.restate.dev/restatedev/restate:latest
+    volumes:
+      - ./restate-config:/etc/restate:ro
+      - restate-2-data:/restate-data
+    environment:
+      <<: *restate-aws
+      RESTATE_CONFIG: /etc/restate/restate.toml
+      RESTATE_NODE_NAME: restate-2
+      RESTATE_ADVERTISED_ADDRESS: "http://restate-2:5122"
+      RESTATE_METADATA_CLIENT__ADDRESSES: '["http://restate-1:5122","http://restate-2:5122","http://restate-3:5122"]'
+      RESTATE_AUTO_PROVISION: "false"
+    expose:
+      - "8080"
+      - "9070"
+      - "5122"
+    depends_on:
+      restate-1:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9070/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  restate-3:
+    image: docker.restate.dev/restatedev/restate:latest
+    volumes:
+      - ./restate-config:/etc/restate:ro
+      - restate-3-data:/restate-data
+    environment:
+      <<: *restate-aws
+      RESTATE_CONFIG: /etc/restate/restate.toml
+      RESTATE_NODE_NAME: restate-3
+      RESTATE_ADVERTISED_ADDRESS: "http://restate-3:5122"
+      RESTATE_METADATA_CLIENT__ADDRESSES: '["http://restate-1:5122","http://restate-2:5122","http://restate-3:5122"]'
+      RESTATE_AUTO_PROVISION: "false"
+    expose:
+      - "8080"
+      - "9070"
+      - "5122"
+    depends_on:
+      restate-1:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9070/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  beamcore_rs-1:
+    <<: *app-common
+    command: gunicorn app.restate_app:app -w 2 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:9080 --timeout 300
+    expose:
+      - "9080"
+    volumes: *slurm-ssh-app-volumes
+    secrets: *slurm-ssh-secrets
+    environment:
+      WORKFLOW_ENGINE_EXECUTION: arq
+      WORKFLOW_ENGINE_DISCOVERY: arq
+      RESTATE_INGRESS_BASE_URL: http://nginx:8080
+      RESTATE_INVOKE_TIMEOUT_SECONDS: "30.0"
+      SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+      SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  beamcore_rs-2:
+    <<: *app-common
+    command: gunicorn app.restate_app:app -w 2 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:9080 --timeout 300
+    expose:
+      - "9080"
+    volumes: *slurm-ssh-app-volumes
+    secrets: *slurm-ssh-secrets
+    environment:
+      WORKFLOW_ENGINE_EXECUTION: arq
+      WORKFLOW_ENGINE_DISCOVERY: arq
+      RESTATE_INGRESS_BASE_URL: http://nginx:8080
+      RESTATE_INVOKE_TIMEOUT_SECONDS: "30.0"
+      SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+      SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  restate_register:
+    image: docker.restate.dev/restatedev/restate-cli:latest
+    environment:
+      RESTATE_ADMIN_URL: http://restate-1:9070
+    depends_on:
+      restate-1:
+        condition: service_healthy
+      restate-2:
+        condition: service_healthy
+      restate-3:
+        condition: service_healthy
+      beamcore_rs-1:
+        condition: service_healthy
+      beamcore_rs-2:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 2
+        restate deployments register http://beamcore_rs-1:9080 --use-http1.1 --force --yes
+        restate deployments register http://beamcore_rs-2:9080 --use-http1.1 --force --yes
+    restart: "no"
+
+  db:
+    image: postgres:13
+    env_file:
+      - .env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    expose:
+      - "6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate:
+    <<: *app-common
+    command: sh -c "cd /code/src && python -m alembic upgrade head"
+    volumes:
+      - ./src:/code/src
+    working_dir: /code/src
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    profiles: ["init"]
+
+  create_superuser:
+    <<: *app-common
+    command: python -m src.scripts.create_first_superuser
+    volumes:
+      - ./src:/code/src
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    profiles: ["init"]
+
+volumes:
+  postgres-data:
+  redis-data:
+  restate-1-data:
+  restate-2-data:
+  restate-3-data:
+
+secrets:
+  # Dedicated Slurm bot SSH private key, mounted into worker / beamcore_rs at
+  # Generate one-time:
+  #   ssh-keygen -t ed25519 -f ./deploy/ssh/id_slurm -N ""
+  # Add ./deploy/ssh/id_slurm.pub to ~/.ssh/authorized_keys on the Slurm head node.
+  slurm_ssh_key:
+    file: ${SLURM_SSH_PRIVATE_KEY_FILE:-./deploy/ssh/id_slurm}
