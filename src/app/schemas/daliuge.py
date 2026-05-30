@@ -205,12 +205,28 @@ class DaliugeDeploymentProfileDbCreate(BaseModel):
 class DaliugeDeploymentProfileCreate(BaseModel):
     """API create: nested ``translation`` + ``deployment`` only."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "name": "setonix-rest-default",
+                    "description": "Default REST remote profile for Setonix",
+                    "project_module": "wallaby_hires",
+                    "is_default": True,
+                    "translation": {"algo": "metis", "num_par": 1, "num_islands": 0},
+                    "deployment": {"kind": "rest_remote", "verify_ssl": False},
+                }
+            ]
+        },
+    )
 
-    name: Annotated[str, Field(min_length=1, max_length=50)]
-    description: str | None = Field(default=None, max_length=255)
-    project_module: str | None = Field(default=None, max_length=50)
-    is_default: bool = Field(default=False)
+    name: Annotated[str, Field(min_length=1, max_length=50, description="Unique profile name")]
+    description: str | None = Field(default=None, max_length=255, description="Human-readable description")
+    project_module: str | None = Field(
+        default=None, max_length=50, description="Owning project module; null for global profiles"
+    )
+    is_default: bool = Field(default=False, description="Use as default profile for the project or globally")
 
     translation: DaliugeTranslationConfig
     deployment: DeploymentConfigUnion
@@ -286,12 +302,12 @@ class DaliugeDeploymentProfileRead(TimestampSchema, UUIDSchema):
 
     model_config = ConfigDict(from_attributes=True)
 
-    name: str
-    description: str | None = None
-    project_module: str | None = None
-    is_default: bool = False
-    translation: DaliugeTranslationConfig
-    deployment: DeploymentConfigUnion
+    name: str = Field(description="Profile name")
+    description: str | None = Field(default=None, description="Human-readable description")
+    project_module: str | None = Field(default=None, description="Owning project module when scoped")
+    is_default: bool = Field(default=False, description="Default profile flag")
+    translation: DaliugeTranslationConfig = Field(description="DALiuGE translator configuration")
+    deployment: DeploymentConfigUnion = Field(description="REST or Slurm remote deployment configuration")
 
     @classmethod
     def from_stored_dict(cls, row: dict[str, Any]) -> "DaliugeDeploymentProfileRead":

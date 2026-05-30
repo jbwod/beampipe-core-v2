@@ -36,7 +36,19 @@ class BatchExecutionRecordBase(BaseModel):
 
 
 class BatchExecutionRecordCreate(BatchExecutionRecordBase):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "project_module": "wallaby_hires",
+                    "sources": [{"source_identifier": "HIPASSJ1313-15"}],
+                    "archive_name": "casda",
+                    "deployment_profile_name": "setonix-slurm-ini",
+                }
+            ]
+        },
+    )
 
     deployment_profile_name: str | None = Field(
         default=None,
@@ -280,25 +292,97 @@ class BatchExecutionRecordDelete(BaseModel):
 
 # Prepare execution (validate + preview, no DB write)
 class ExecuteRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"do_stage": True, "do_submit": True}]},
+    )
 
     do_stage: bool = Field(default=True, description="Stage data from the archive before execution")
     do_submit: bool = Field(default=True, description="Submit the graph to DALiuGE after staging")
 
 
 class PrepareExecutionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "project_module": "wallaby_hires",
+                    "sources": [{"source_identifier": "HIPASSJ1313-15"}],
+                }
+            ]
+        },
+    )
 
-    project_module: Annotated[str, Field(min_length=1, max_length=50)]
-    sources: Annotated[list[ExecutionSourceSpec], Field(min_length=1)]
+    project_module: Annotated[
+        str, Field(min_length=1, max_length=50, examples=["wallaby_hires"], description="Project module identifier")
+    ]
+    sources: Annotated[
+        list[ExecutionSourceSpec],
+        Field(min_length=1, description="Sources with optional per-source SBID filters"),
+    ]
 
 
 class PrepareExecutionResponse(BaseModel):
     """Preview of what would be included in an execution."""
 
-    project_module: str
-    sources: list[ExecutionSourceSpec]
-    sources_preview: list[dict]  # per-source: source_identifier, sbid_count, dataset_count
-    total_datasets: int
-    valid: bool
-    errors: list[str] = Field(default_factory=list)
+    project_module: str = Field(description="Project module identifier")
+    sources: list[ExecutionSourceSpec] = Field(description="Requested source specs")
+    sources_preview: list[dict[str, Any]] = Field(
+        description="Per-source preview: source_identifier, sbid_count, dataset_count",
+    )
+    total_datasets: int = Field(description="Total archive datasets across all sources")
+    valid: bool = Field(description="True when the execution would pass validation")
+    errors: list[str] = Field(default_factory=list, description="Validation errors when valid is false")
+
+
+class ExecutionLedgerSnapshot(BaseModel):
+    """Compact execution view for operators and Restate workflow correlation."""
+
+    model_config = ConfigDict(extra="allow")
+
+    execution_id: str = Field(description="Batch execution UUID")
+    project_module: str | None = Field(default=None, description="Project module identifier")
+    status: str | None = Field(default=None, description="Execution status")
+    execution_phase: str | None = Field(default=None, description="Current execution phase")
+    scheduler_job_id: str | None = Field(default=None, description="Scheduler session or job id")
+    scheduler_name: str | None = Field(default=None, description="Scheduler backend name")
+    has_manifest: bool = Field(description="Whether a workflow manifest is persisted")
+    has_beampipe_run_record: bool = Field(description="Whether beampipe run record data exists in the manifest")
+    last_error: str | None = Field(default=None, description="Most recent error message")
+    retry_count: int = Field(default=0, description="Number of retries attempted")
+    deployment_profile_id: str | None = Field(default=None, description="Linked deployment profile UUID")
+    created_at: str | None = Field(default=None, description="ISO-8601 creation timestamp")
+    updated_at: str | None = Field(default=None, description="ISO-8601 last update timestamp")
+    started_at: str | None = Field(default=None, description="ISO-8601 start timestamp")
+    completed_at: str | None = Field(default=None, description="ISO-8601 completion timestamp")
+    sources: list[Any] = Field(default_factory=list, description="Source specs included in the execution")
+    source_identifiers: list[str] = Field(default_factory=list, description="Flattened source identifier list")
+    beampipe_run_record: dict[str, Any] | None = Field(
+        default=None,
+        description="Embedded beampipe run record from workflow manifest when present",
+    )
+    dim_session_status_url: str | None = Field(default=None, description="DIM session status URL when available")
+    dim_graph_status_url: str | None = Field(default=None, description="DIM graph status URL when available")
+
+
+class ExecuteAcceptedResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "accepted",
+                    "execution_id": "019302ab-1234-7890-abcd-ef1234567890",
+                    "job_id": "abc123",
+                    "do_stage": True,
+                    "do_submit": True,
+                }
+            ]
+        }
+    )
+
+    status: str = Field(default="accepted", description="Always `accepted` when enqueue succeeds")
+    execution_id: str = Field(description="Batch execution UUID")
+    job_id: str = Field(description="ARQ worker job id")
+    do_stage: bool = Field(description="Whether archive staging was requested")
+    do_submit: bool = Field(description="Whether DALiuGE submit was requested")

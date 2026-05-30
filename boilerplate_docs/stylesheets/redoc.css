@@ -1,0 +1,35 @@
+body:has(#redoc-frame) .md-sidebar--primary,
+body:has(#redoc-frame) .md-sidebar--secondary {
+  display: none;
+}
+
+body:has(#redoc-frame) .md-content {
+  margin-left: 0;
+  max-width: none;
+}
+
+body:has(#redoc-frame) .md-content__inner {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+body:has(#redoc-frame) .md-main__inner {
+  margin-top: 0;
+}
+
+body:has(#redoc-frame) article.md-content__inner > h1,
+body:has(#redoc-frame) .md-content__button,
+body:has(#redoc-frame) .md-footer {
+  display: none;
+}
+
+.md-typeset .redoc-frame {
+  display: block;
+  width: 100%;
+  min-height: calc(100vh - var(--md-header-height, 3.6rem));
+  border: 0;
+  margin: 0;
+  padding: 0;
+  background: #0d1117;
+}

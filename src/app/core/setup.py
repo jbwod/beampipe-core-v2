@@ -10,10 +10,10 @@ from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.openapi.utils import get_openapi
 from sqlalchemy import text
 
 from ..api.dependencies import get_current_superuser
+from .openapi import OPENAPI_TAGS, build_openapi_schema
 from ..core.utils.rate_limit import rate_limiter
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..models import *  # noqa: F403
@@ -153,11 +153,15 @@ def _getting_started_markdown(settings: Any) -> str:
     lines = [
         "## Getting started",
         "",
-        "1. **Authenticate** — `POST /api/v1/login` with the admin email and password "
-        "you set during setup. Copy the returned `access_token` and click "
-        "**Authorize** at the top of this page (Bearer token).",
-        "2. **Browse sources** — `GET /api/v1/sources` lists everything in the registry.",
-        "3. **Run discovery** — `POST /api/v1/sources/discover` to enqueue a discovery run.",
+        "1. **Authenticate**: `POST /api/v1/login` with the admin **username or email** "
+        "and password from setup. Copy `access_token` and click **Authorize** (Bearer token).",
+        "2. **List projects**: `GET /api/v1/projects` shows registered project modules.",
+        "3. **Register sources**: `POST /api/v1/sources` (returns 201 or 200 if already registered).",
+        "4. **Run discovery**: `POST /api/v1/sources/discover` marks sources for async archive polling.",
+        "5. **Create execution**: `POST /api/v1/executions/prepare` (preview) then `POST /api/v1/executions`.",
+        "6. **Execute**: `POST /api/v1/executions/{id}/execute` enqueues staging/submit on the worker queue.",
+        "7. **Poll**: `GET /api/v1/executions/{id}/status` or `.../ledger-snapshot` for operator view.",
+        "",
         "",
         "Health: `GET /api/v1/health` (liveness) · `GET /api/v1/ready` (deps).",
     ]
@@ -247,7 +251,7 @@ def create_application(
     if lifespan is None:
         lifespan = lifespan_factory(settings, create_tables_on_start=create_tables_on_start)
 
-    application = FastAPI(lifespan=lifespan, **kwargs)
+    application = FastAPI(lifespan=lifespan, openapi_tags=OPENAPI_TAGS, **kwargs)
     application.include_router(router)
 
     if isinstance(settings, EnvironmentSettings) and settings.ENVIRONMENT == EnvironmentOption.LOCAL:
@@ -268,24 +272,33 @@ def create_application(
         )
 
     if isinstance(settings, EnvironmentSettings):
-        if settings.ENVIRONMENT != EnvironmentOption.PRODUCTION:
-            docs_router = APIRouter()
-            if settings.ENVIRONMENT != EnvironmentOption.LOCAL:
-                docs_router = APIRouter(dependencies=[Depends(get_current_superuser)])
+        docs_dependencies: list[Any] = []
+        if settings.ENVIRONMENT == EnvironmentOption.STAGING:
+            docs_dependencies = [Depends(get_current_superuser)]
 
-            @docs_router.get("/docs", include_in_schema=False)
-            async def get_swagger_documentation() -> fastapi.responses.HTMLResponse:
-                return get_swagger_ui_html(openapi_url="/openapi.json", title="docs")
+        docs_router = APIRouter(dependencies=docs_dependencies)
 
-            @docs_router.get("/redoc", include_in_schema=False)
-            async def get_redoc_documentation() -> fastapi.responses.HTMLResponse:
-                return get_redoc_html(openapi_url="/openapi.json", title="docs")
+        @docs_router.get("/docs", include_in_schema=False)
+        async def get_swagger_documentation() -> fastapi.responses.HTMLResponse:
+            return get_swagger_ui_html(
+                openapi_url="/openapi.json",
+                title="Beampipe API",
+                swagger_ui_parameters={
+                    "persistAuthorization": True,
+                    "docExpansion": "list",
+                    "filter": True,
+                    "tryItOutEnabled": True,
+                },
+            )
 
-            @docs_router.get("/openapi.json", include_in_schema=False)
-            async def openapi() -> dict[str, Any]:
-                out: dict = get_openapi(title=application.title, version=application.version, routes=application.routes)
-                return out
+        @docs_router.get("/redoc", include_in_schema=False)
+        async def get_redoc_documentation() -> fastapi.responses.HTMLResponse:
+            return get_redoc_html(openapi_url="/openapi.json", title="Beampipe API")
 
-            application.include_router(docs_router)
+        @docs_router.get("/openapi.json", include_in_schema=False)
+        async def openapi() -> dict[str, Any]:
+            return build_openapi_schema(application)
+
+        application.include_router(docs_router)
 
     return application
