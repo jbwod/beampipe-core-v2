@@ -1,4 +1,4 @@
-xw(function () {
+(function () {
   "use strict";
 
   var canvas = null;

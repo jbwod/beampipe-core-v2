@@ -13,7 +13,6 @@ theme:
   favicon: https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e
   features:
     - navigation.instant
-    - navigation.instant.prefetch
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.top

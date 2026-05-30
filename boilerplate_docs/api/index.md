@@ -5,4 +5,4 @@ hide:
   - footer
 ---
 
-<div class="redoc-wrap"><div id="redoc-container"></div></div>
+<iframe id="redoc-frame" class="redoc-frame" title="API reference"></iframe>
