@@ -1,6 +1,5 @@
 import uuid as uuid_pkg
 from datetime import UTC, datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from uuid6 import uuid7

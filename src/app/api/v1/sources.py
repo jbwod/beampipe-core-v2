@@ -17,8 +17,6 @@ from ...core.ledger.service import execution_ledger_service
 from ...core.openapi import (
     RESPONSES_BAD_REQUEST,
     RESPONSES_NOT_FOUND,
-    RESPONSES_SERVER_ERROR,
-    RESPONSES_SERVICE_UNAVAILABLE,
     authenticated_responses,
     merge_responses,
 )
@@ -36,6 +34,7 @@ from ...schemas.registry import (
     SourceRegistryRead,
     SourceRegistryUpdate,
 )
+
 
 class SourceSortField(StrEnum):
     created_at = "created_at"

@@ -3,7 +3,6 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
-
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 

@@ -237,7 +237,7 @@ class BatchExecutionSummary(BaseModel):
                         out.setdefault("dim_state", str(obs.get("session_state")))
                     if obs.get("observed_at"):
                         out.setdefault("last_observation_at", obs.get("observed_at"))
-      
+
         if not out.get("requested_source_identifiers"):
             sources = out.get("sources") or []
             if isinstance(sources, list):

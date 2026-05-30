@@ -1,5 +1,5 @@
 from types import ModuleType
-from typing import Any, Protocol, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 REQUIRED_HOOK_NAMES: tuple[str, ...] = (
     "discover",

@@ -13,7 +13,6 @@ from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from sqlalchemy import text
 
 from ..api.dependencies import get_current_superuser
-from .openapi import OPENAPI_TAGS, build_openapi_schema
 from ..core.utils.rate_limit import rate_limiter
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..models import *  # noqa: F403
@@ -31,6 +30,7 @@ from .config import (
 )
 from .db.database import Base
 from .db.database import async_engine as engine
+from .openapi import OPENAPI_TAGS, build_openapi_schema
 from .utils import cache, queue
 
 # -------------- database --------------

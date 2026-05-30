@@ -21,8 +21,10 @@ from ...core.openapi import (
 from ...core.orchestration.service import (
     cancel_scheduler_session_for_execution,
     enrich_execution_dim_rest_urls,
-    prepare_execution as orchestration_prepare_execution,
     read_execution_ledger_snapshot,
+)
+from ...core.orchestration.service import (
+    prepare_execution as orchestration_prepare_execution,
 )
 from ...core.utils import queue
 from ...crud.crud_daliuge_deployment_profile import crud_daliuge_deployment_profile
