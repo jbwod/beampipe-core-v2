@@ -26,14 +26,10 @@ Local dev runs a single instance of each service. Production adds nginx, replica
 
 <div class="bp-topology-grid">
 <picture class="bp-topology-cell bp-topology-cell--local">
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ba78a75d-a84d-416e-93a8-39043c9524c1">
-  <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/4a31dee1-5daf-4348-a03f-559c9f463dd3">
-  <img src="https://github.com/user-attachments/assets/4a31dee1-5daf-4348-a03f-559c9f463dd3" alt="Local development topology">
+  <img src="https://github.com/user-attachments/assets/ba78a75d-a84d-416e-93a8-39043c9524c1" alt="Local development topology">
 </picture>
 <picture class="bp-topology-cell bp-topology-cell--production">
-  <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/5631237e-02e8-4be0-ae39-9e0343714187">
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/8ff3c5b4-e3b2-408c-aab7-782ba6fa2d16">
-  <img src="https://github.com/user-attachments/assets/5631237e-02e8-4be0-ae39-9e0343714187" alt="Production deployment topology">
+  <img src="https://github.com/user-attachments/assets/8ff3c5b4-e3b2-408c-aab7-782ba6fa2d16" alt="Production deployment topology">
 </picture>
 </div>
 
