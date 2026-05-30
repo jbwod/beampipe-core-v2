@@ -20,7 +20,7 @@ endif
 	compose-up compose-build compose-down \
 	beampipe-start beampipe-stop beampipe-new-admin \
 	migrate restate-start restate-stop \
-	slurm-known-hosts-sync slurm-key-check
+	slurm-known-hosts-sync slurm-key-check openapi docs-copy docs-build docs-serve
 
 help:
 	@echo "Beampipe Core
@@ -47,6 +47,10 @@ help:
 	@echo "  restate-stop         Stop Restate node(s)"
 	@echo "  slurm-known-hosts-sync  Copy ~/.ssh/known_hosts -> ./deploy/ssh/known_hosts (644)"
 	@echo "  slurm-key-check      Verify $(SLURM_SSH_PRIVATE_KEY_FILE) exists"
+	@echo "  openapi              Regenerate openapi.json"
+	@echo "  docs-copy            Copy openapi.json into boilerplate_docs/ for ReDoc"
+	@echo "  docs-build           docs-copy + mkdocs build --strict"
+	@echo "  docs-serve           docs-copy + mkdocs serve"
 	@echo ""
 	@echo "VAR: BEAMPIPE_BUILD=1 forces a rebuild on compose-up / dev / beampipe-start."
 
@@ -88,9 +92,9 @@ urls:
 
 beampipe-start: preflight
 	@if grep -q "slurm_ssh_key" "$(COMPOSE_FILE)" 2>/dev/null; then \
-		$(MAKE) slurm-known-hosts-sync slurm-key-check; \
+		$(MAKE) slurm-known-hosts-sync; \
 	else \
-		echo "Slurm SSH not wired in $(COMPOSE_FILE); skipping known_hosts sync and key check."; \
+		echo "Slurm SSH not wired in $(COMPOSE_FILE); skipping known_hosts sync."; \
 	fi
 	$(COMPOSE) up $(COMPOSE_UP_FLAGS)
 
@@ -149,3 +153,16 @@ slurm-key-check:
 		400|600) echo "Slurm bot key OK ($$key, mode $$mode)";; \
 		*) echo "Slurm bot key has unsafe perms ($$key, mode $$mode); run: chmod 600 $$key" >&2; exit 1;; \
 	esac
+
+openapi:
+	uv run python scripts/export_openapi.py
+
+docs-copy:
+	cp openapi.json boilerplate_docs/openapi.json
+
+docs-build: docs-copy
+	uv run mkdocs build --strict
+
+docs-serve: docs-copy
+	uv run mkdocs serve
+
