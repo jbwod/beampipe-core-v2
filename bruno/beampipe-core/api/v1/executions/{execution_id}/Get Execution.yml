@@ -10,7 +10,7 @@ http:
   url: "{{baseUrl}}/api/v1/executions/:execution_id"
   params:
     - name: execution_id
-      value: ""
+      value: 019e5fc3-a836-7cb4-b4cd-b698371cc442
       type: path
   auth: inherit
 

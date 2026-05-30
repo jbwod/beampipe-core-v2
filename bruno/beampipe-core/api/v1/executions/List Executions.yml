@@ -7,7 +7,7 @@ info:
 
 http:
   method: GET
-  url: "{{baseUrl}}/api/v1/executions"
+  url: "{{baseUrl}}/api/v1/executions?page=1&items_per_page=10"
   params:
     - name: page
       value: "1"

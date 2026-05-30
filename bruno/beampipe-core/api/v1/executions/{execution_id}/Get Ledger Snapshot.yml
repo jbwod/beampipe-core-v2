@@ -10,7 +10,7 @@ http:
   url: "{{baseUrl}}/api/v1/executions/:execution_id/ledger-snapshot"
   params:
     - name: execution_id
-      value: ""
+      value: 019e633a-195c-7e1f-89ff-c5f3c525488c
       type: path
   auth: inherit
 
