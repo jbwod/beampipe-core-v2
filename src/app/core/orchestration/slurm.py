@@ -262,7 +262,7 @@ def _render_generated_ini(
     dlg_root: str,
 ) -> str:
     cfg = ConfigParser(interpolation=None)
-    cfg.optionxform = str
+    cfg.optionxform = str  # type: ignore[method-assign, assignment]
 
     all_nics = bool(deployment_config.get("all_nics"))
     check_with_session = bool(deployment_config.get("check_with_session"))

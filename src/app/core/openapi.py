@@ -4,6 +4,8 @@ from fastapi import FastAPI, status
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 
+OpenAPIResponses = dict[int | str, dict[str, Any]]
+
 _HTTP_422: int = (
     status.HTTP_422_UNPROCESSABLE_CONTENT
     if hasattr(status, "HTTP_422_UNPROCESSABLE_CONTENT")
@@ -60,7 +62,7 @@ class ErrorDetail(BaseModel):
     detail: str = Field(description="Human-readable error message", examples=["Resource not found"])
 
 
-def _response(status_code: int, description: str, model: type[BaseModel] = ErrorDetail) -> dict[int, dict[str, Any]]:
+def _response(status_code: int, description: str, model: type[BaseModel] = ErrorDetail) -> OpenAPIResponses:
     return {
         status_code: {
             "model": model,
@@ -83,21 +85,21 @@ RESPONSES_SERVICE_UNAVAILABLE = _response(
     "Required dependency unavailable (e.g. Redis queue)",
 )
 
-RESPONSES_AUTHENTICATED: dict[int, dict[str, Any]] = {
+RESPONSES_AUTHENTICATED: OpenAPIResponses = {
     **RESPONSES_UNAUTHORIZED,
     **RESPONSES_FORBIDDEN,
     **RESPONSES_UNPROCESSABLE,
 }
 
 
-def merge_responses(*maps: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    merged: dict[int, dict[str, Any]] = {}
+def merge_responses(*maps: OpenAPIResponses) -> OpenAPIResponses:
+    merged: OpenAPIResponses = {}
     for response_map in maps:
         merged.update(response_map)
     return merged
 
 
-def authenticated_responses(*extra: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+def authenticated_responses(*extra: OpenAPIResponses) -> OpenAPIResponses:
     return merge_responses(RESPONSES_AUTHENTICATED, *extra)
 
 

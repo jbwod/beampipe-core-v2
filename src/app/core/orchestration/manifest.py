@@ -54,7 +54,7 @@ def _node_name_matches(node: dict[str, Any], match: dict[str, Any]) -> bool:
     if not isinstance(name, str):
         return False
     if "equals" in match:
-        return name == match["equals"]
+        return bool(name == match["equals"])
     return False
 
 

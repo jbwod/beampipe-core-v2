@@ -274,7 +274,7 @@ async def poll_session(
 
         graph_info: dict[str, Any] = {}
         if session_state == "finished":
-            graph_info = await _fetch_dim_graph_status(client, session_id)
+            graph_info = await _fetch_dim_graph_status(client, str(session_id))
 
     source_identifiers = source_identifiers_from_specs(execution.get("sources"))
     await source_registry_service.clear_workflow_pending_for_sources(

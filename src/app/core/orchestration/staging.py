@@ -31,7 +31,7 @@ def _effective_stage_by_sbid(stage_by_sbid: bool | None) -> bool:
 
 
 def _sort_sbids(sbids: set[str]) -> list[str]:
-    def key(s: str) -> tuple[int, str]:
+    def key(s: str) -> tuple[int, int | str]:
         if s.isdigit():
             return (0, int(s))
         return (1, s)

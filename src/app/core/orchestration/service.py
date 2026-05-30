@@ -122,7 +122,7 @@ async def read_execution_ledger_snapshot(
         if dt is None:
             return None
         if hasattr(dt, "isoformat"):
-            return cast(Any, dt).isoformat()
+            return str(cast(Any, dt).isoformat())
         return str(dt)
 
     raw_sources = execution.get("sources") or []

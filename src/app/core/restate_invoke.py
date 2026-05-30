@@ -57,7 +57,13 @@ async def invoke_restate_workflow(
             parsed.setdefault("ok", True)
             parsed.setdefault("workflow_name", workflow_name)
             parsed.setdefault("workflow_id", workflow_id)
-        return parsed
+            return parsed
+        return {
+            "ok": True,
+            "workflow_name": workflow_name,
+            "workflow_id": workflow_id,
+            "result": parsed,
+        }
     except ValueError:
         return {
             "ok": True,
