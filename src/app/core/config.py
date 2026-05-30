@@ -2,7 +2,7 @@ import os
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import SecretStr, computed_field
+from pydantic import SecretStr, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -159,9 +159,8 @@ class CORSSettings(BaseSettings):
 
 
 class ExecutionLedgerSettings(BaseSettings):
-    MAX_RETRIES: int = 3
     WORKFLOW_AUTOMATION_SCHEDULER_NAME: str = "workflow_auto"
-    WORKFLOW_EXECUTION_AUTOMATION_ENABLED: bool = False
+    WORKFLOW_EXECUTION_AUTOMATION_ENABLED: bool = True
 
 
 class RestateWorkflowSettings(BaseSettings):
@@ -174,6 +173,8 @@ class RestateWorkflowSettings(BaseSettings):
     RESTATE_DISCOVERY_WORKFLOW_NAME: str = "DiscoveryBatchWorkflow"
     RESTATE_EXECUTION_WORKFLOW_HANDLER: str = "execute_execution_workflow"
     RESTATE_DISCOVERY_WORKFLOW_HANDLER: str = "discovery_batch_workflow"
+    RESTATE_SLURM_COMPLETION_WORKFLOW_NAME: str = "SlurmCompletionWorkflow"
+    RESTATE_SLURM_COMPLETION_WORKFLOW_HANDLER: str = "slurm_completion_workflow"
 
     RESTATE_INVOKE_TIMEOUT_SECONDS: float = 30.0
     # ctx.run_typed policies (https://docs.restate.dev/develop/python/durable-steps).
@@ -186,8 +187,28 @@ class RestateWorkflowSettings(BaseSettings):
     RESTATE_STEP_INITIAL_RETRY_SECONDS: float = 2.0
     RESTATE_STEP_MAX_RETRY_INTERVAL_SECONDS: float = 120.0
 
-    RESTATE_DIM_POLL_INTERVAL_SECONDS: float = 15.0
-    RESTATE_DIM_POLL_MAX_ROUNDS: int = 240
+    RESTATE_REST_REMOTE_POLL_INTERVAL_SECONDS: float = 15.0
+    RESTATE_REST_REMOTE_POLL_MAX_ROUNDS: int = 240
+
+    RESTATE_SLURM_REMOTE_POLL_INTERVAL_SECONDS: float = 30.0
+    RESTATE_SLURM_REMOTE_POLL_MAX_ROUNDS: int = 480
+
+
+class SlurmSshSettings(BaseSettings):
+    SLURM_SSH_USE_AGENT: bool = False
+    SLURM_SSH_AUTH_SOCK: str | None = None
+    SLURM_SSH_PRIVATE_KEY_PATH: str | None = None
+    SLURM_SSH_PRIVATE_KEY_PASSPHRASE: SecretStr | None = None
+    SLURM_SSH_KNOWN_HOSTS: str | None = None
+    SLURM_SSH_CONNECT_TIMEOUT_SECONDS: float = 30.0
+    SLURM_SSH_COMMAND_TIMEOUT_SECONDS: float = 60.0
+
+    @field_validator("SLURM_SSH_KNOWN_HOSTS", mode="after")
+    @classmethod
+    def expand_slurm_known_hosts_path(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return v
+        return os.path.expanduser(str(v).strip())
 
 
 class DiscoverySettings(BaseSettings):
@@ -226,6 +247,7 @@ class ArchiveSettings(BaseSettings):
 class CasdaSettings(BaseSettings):
     CASDA_USERNAME: str | None = None
     CASDA_PASSWORD: SecretStr | None = None
+    CASDA_STAGE_BY_SBID: bool = True
 
 
 class Settings(
@@ -250,9 +272,13 @@ class Settings(
     ShapingSettings,
     ArchiveSettings,
     CasdaSettings,
+    SlurmSshSettings,
 ):
+    _config_dir = os.path.dirname(os.path.realpath(__file__))
+    _legacy_env = os.path.join(_config_dir, "..", "..", ".env")          # src/.env
+    _wizard_env = os.path.join(_config_dir, "..", "..", "..", ".env")    # repo root .env
     model_config = SettingsConfigDict(
-        env_file=os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", ".env"),
+        env_file=(_legacy_env, _wizard_env),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",

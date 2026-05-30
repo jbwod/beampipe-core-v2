@@ -13,12 +13,20 @@ from ...api.dependencies import get_current_user
 from ...core.archive.service import archive_metadata_service
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
+from ...core.ledger.service import execution_ledger_service
+from ...core.openapi import (
+    RESPONSES_BAD_REQUEST,
+    RESPONSES_NOT_FOUND,
+    authenticated_responses,
+    merge_responses,
+)
 from ...core.projects import list_project_modules
 from ...core.registry.service import invalid_project_module_message, source_registry_service
 from ...crud.crud_source_registry import crud_source_registry
 from ...schemas.registry import (
     DiscoverTriggerRequest,
     DiscoverTriggerResponse,
+    SourceLinkedExecutionItem,
     SourceMetadataResponse,
     SourceRegistryBulkCreate,
     SourceRegistryBulkCreateResponse,
@@ -50,17 +58,32 @@ def _ensure_valid_project_module(project_module: str) -> None:
             detail=invalid_project_module_message(project_module, available_modules),
         )
 
-@router.get("", response_model=PaginatedListResponse[SourceRegistryRead])
+
+@router.get(
+    "",
+    response_model=PaginatedListResponse[SourceRegistryRead],
+    summary="List sources",
+    responses=merge_responses(
+        {
+            status.HTTP_200_OK: {
+                "description": "Paginated source registry entries",
+            },
+        },
+    ),
+)
 async def list_sources(
     request: Request,
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    project_module: str | None = None,
-    enabled: bool | None = None,
-    page: int = 1,
-    items_per_page: int = 10,
-    sort_by: SourceSortField = SourceSortField.created_at,
+    project_module: Annotated[
+        str | None, Query(description="Filter by project module identifier")
+    ] = None,
+    enabled: Annotated[bool | None, Query(description="Filter by enabled flag")] = None,
+    page: Annotated[int, Query(ge=1, description="Page number (1-based)")] = 1,
+    items_per_page: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 10,
+    sort_by: Annotated[SourceSortField, Query(description="Column to sort by")] = SourceSortField.created_at,
     order: Annotated[Literal["asc", "desc"], Query(description="Sort direction")] = "desc",
 ) -> dict[str, Any]:
+    """List registered sources with optional filters and pagination."""
     filters: dict[str, Any] = {}
     if project_module:
         filters["project_module"] = project_module
@@ -83,16 +106,33 @@ async def list_sources(
     )
     return response
 
-@router.post("", response_model=SourceRegistryRead, status_code=201)
+
+@router.post(
+    "",
+    response_model=SourceRegistryRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register source",
+    responses=merge_responses(
+        {
+            status.HTTP_200_OK: {
+                "model": SourceRegistryRead,
+                "description": "Source already registered (idempotent)",
+            },
+            status.HTTP_201_CREATED: {
+                "model": SourceRegistryRead,
+                "description": "New source created",
+            },
+        },
+        authenticated_responses(RESPONSES_BAD_REQUEST),
+    ),
+)
 async def register_source(
     request: Request,
     source_data: SourceRegistryCreate,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> Response:
-    """Register a new source in the registry.
-
-    """
+    """Register a source in the registry. Returns 200 when the source already exists."""
     _ensure_valid_project_module(source_data.project_module)
 
     existing = await source_registry_service.check_existing_source(
@@ -122,13 +162,20 @@ async def register_source(
     return _json_response(source, status_code=201)
 
 
-@router.post("/bulk", response_model=SourceRegistryBulkCreateResponse, status_code=200)
+@router.post(
+    "/bulk",
+    response_model=SourceRegistryBulkCreateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Bulk register sources",
+    responses=authenticated_responses(RESPONSES_BAD_REQUEST),
+)
 async def bulk_register_sources(
     request: Request,
     bulk_data: SourceRegistryBulkCreate,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Register many sources in one request. Existing sources are returned in `existing` without error."""
     created: list[dict[str, Any]] = []
     existing: list[dict[str, Any]] = []
 
@@ -164,13 +211,20 @@ async def bulk_register_sources(
     }
 
 
-@router.post("/discover", response_model=DiscoverTriggerResponse, status_code=200)
+@router.post(
+    "/discover",
+    response_model=DiscoverTriggerResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Trigger discovery",
+    responses=authenticated_responses(RESPONSES_BAD_REQUEST),
+)
 async def trigger_discovery(
     request: Request,
     body: DiscoverTriggerRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Mark sources for rediscovery. Discovery runs asynchronously via the background scheduler."""
     _ensure_valid_project_module(body.project_module)
     if body.source_identifier is not None:
         source_identifiers: list[str] | None = [body.source_identifier]
@@ -194,21 +248,64 @@ async def trigger_discovery(
     }
 
 
-@router.get("/{source_id}", response_model=SourceRegistryRead)
+@router.get(
+    "/{source_id}/executions",
+    response_model=PaginatedListResponse[SourceLinkedExecutionItem],
+    summary="List source executions",
+    responses=merge_responses(RESPONSES_NOT_FOUND),
+)
+async def list_source_executions(
+    request: Request,
+    source_id: UUID,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: Annotated[int, Query(ge=1, description="Page number (1-based)")] = 1,
+    items_per_page: Annotated[int, Query(ge=1, le=50, description="Page size (max 50)")] = 10,
+) -> dict[str, Any]:
+    """List batch executions that included this registry source."""
+    source = await source_registry_service.get_source(db=db, source_id=source_id)
+    offset = compute_offset(page, items_per_page)
+    items_raw, total = await execution_ledger_service.list_executions_for_source(
+        db,
+        source["project_module"],
+        source["source_identifier"],
+        offset=offset,
+        limit=items_per_page,
+    )
+    data = [SourceLinkedExecutionItem.model_validate(x) for x in items_raw]
+    return paginated_response(
+        crud_data={"data": data, "total_count": total},
+        page=page,
+        items_per_page=items_per_page,
+    )
+
+
+@router.get(
+    "/{source_id}",
+    response_model=SourceRegistryRead,
+    summary="Get source",
+    responses=merge_responses(RESPONSES_NOT_FOUND),
+)
 async def get_source(
     request: Request,
     source_id: UUID,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Return a single source registry entry by UUID."""
     return await source_registry_service.get_source(db=db, source_id=source_id)
 
 
-@router.get("/{source_id}/metadata", response_model=SourceMetadataResponse)
+@router.get(
+    "/{source_id}/metadata",
+    response_model=SourceMetadataResponse,
+    summary="Get source metadata",
+    responses=merge_responses(RESPONSES_NOT_FOUND),
+)
 async def get_source_metadata(
     request: Request,
     source_id: UUID,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Return archive metadata rows linked to this source."""
     source = await source_registry_service.get_source(db=db, source_id=source_id)
 
     metadata_list = await archive_metadata_service.list_metadata_for_source(
@@ -223,7 +320,13 @@ async def get_source_metadata(
         "metadata_count": len(metadata_list),
     }
 
-@router.patch("/{source_id}", response_model=SourceRegistryRead)
+
+@router.patch(
+    "/{source_id}",
+    response_model=SourceRegistryRead,
+    summary="Update source",
+    responses=authenticated_responses(RESPONSES_NOT_FOUND),
+)
 async def update_source(
     request: Request,
     source_id: UUID,
@@ -231,6 +334,7 @@ async def update_source(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Update enabled flag and/or stale-after hours for a source."""
     return await source_registry_service.update_source(
         db=db,
         source_id=source_id,
@@ -240,13 +344,19 @@ async def update_source(
     )
 
 
-@router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{source_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete source",
+    responses=authenticated_responses(RESPONSES_NOT_FOUND),
+)
 async def delete_source(
     request: Request,
     source_id: UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> Response:
+    """Permanently remove a source from the registry."""
     source = await crud_source_registry.get(
         db=db,
         uuid=source_id,

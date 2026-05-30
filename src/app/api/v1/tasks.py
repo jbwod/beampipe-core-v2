@@ -7,7 +7,7 @@ from ...api.dependencies import rate_limiter_dependency
 from ...core.utils import queue
 from ...schemas.job import Job
 
-router = APIRouter(prefix="/tasks", tags=["tasks"])
+router = APIRouter(prefix="/tasks", tags=["tasks"], include_in_schema=False)
 
 
 @router.post("/task", response_model=Job, status_code=201, dependencies=[Depends(rate_limiter_dependency)])

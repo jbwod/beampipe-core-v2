@@ -4,7 +4,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProjectModuleListResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"projects": ["wallaby_hires"]}]},
+    )
     projects: list[str] = Field(description="Registered project module names")
 
 
@@ -36,5 +39,5 @@ class ProjectModuleContractStatus(BaseModel):
 
 class ProjectModuleContractListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    count: int
-    modules: list[ProjectModuleContractStatus]
+    count: int = Field(description="Number of modules in the response")
+    modules: list[ProjectModuleContractStatus] = Field(description="Contract status per module")

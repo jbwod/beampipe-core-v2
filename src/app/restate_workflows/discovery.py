@@ -1,5 +1,4 @@
 """Discovery Restate workflow: tap then persist in Postgres."""
-import logging
 import time
 from typing import Any, cast
 
@@ -17,8 +16,6 @@ from ..core.worker.tasks.discovery_phases import (
 )
 from .options import _run_opts_database, _run_opts_external_io
 from .runtime import _ingress_terminal, _run_step
-
-logger = logging.getLogger(__name__)
 
 DiscoveryBatchWorkflow = restate.Workflow("DiscoveryBatchWorkflow")
 

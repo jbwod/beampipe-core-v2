@@ -1,5 +1,4 @@
 """Archive metadata service."""
-import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -14,8 +13,6 @@ from ...models.archive import ArchiveMetadata
 from ...schemas.archive import ArchiveMetadataCreateInternal, ArchiveMetadataRead
 from ..config import settings
 from ..exceptions.http_exceptions import NotFoundException
-
-logger = logging.getLogger(__name__)
 
 
 def _validate_metadata_json(metadata_json: dict | None) -> None:

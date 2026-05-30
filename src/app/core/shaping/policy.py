@@ -131,12 +131,10 @@ async def arq_queue_depth_allows_enqueue(
 
     try:
         depth = int(await redis.zcard(queue_name))
-    except Exception as exc:
-        logger.warning(
-            "event=shaping_queue_depth_unavailable queue=%s error=%s",
+    except Exception:
+        logger.exception(
+            "event=shaping_queue_depth_unavailable queue=%s",
             queue_name,
-            exc,
-            exc_info=True,
         )
         return True, None
 

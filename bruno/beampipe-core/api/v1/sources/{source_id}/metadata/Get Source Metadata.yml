@@ -10,7 +10,7 @@ http:
   url: "{{baseUrl}}/api/v1/sources/:source_id/metadata"
   params:
     - name: source_id
-      value: ""
+      value: 019e04d1-8d2a-781a-ac9a-5a6a5357eb1d
       type: path
   auth: inherit
 

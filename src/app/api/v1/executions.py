@@ -2,7 +2,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,8 +11,19 @@ from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
 from ...core.ledger.service import execution_ledger_service
+from ...core.openapi import (
+    RESPONSES_NOT_FOUND,
+    RESPONSES_SERVER_ERROR,
+    RESPONSES_SERVICE_UNAVAILABLE,
+    authenticated_responses,
+    merge_responses,
+)
 from ...core.orchestration.service import (
+    cancel_scheduler_session_for_execution,
     enrich_execution_dim_rest_urls,
+    read_execution_ledger_snapshot,
+)
+from ...core.orchestration.service import (
     prepare_execution as orchestration_prepare_execution,
 )
 from ...core.utils import queue
@@ -25,7 +36,10 @@ from ...schemas.ledger import (
     BatchExecutionRecordRead,
     BatchExecutionRecordUpdate,
     BatchExecutionStatusResponse,
+    BatchExecutionSummary,
+    ExecuteAcceptedResponse,
     ExecuteRequest,
+    ExecutionLedgerSnapshot,
     PrepareExecutionRequest,
     PrepareExecutionResponse,
 )
@@ -41,13 +55,19 @@ class ExecutionSortField(StrEnum):
 router = APIRouter(prefix="/executions", tags=["executions"])
 
 
-@router.post("/prepare", response_model=PrepareExecutionResponse)
+@router.post(
+    "/prepare",
+    response_model=PrepareExecutionResponse,
+    summary="Prepare execution",
+    responses=authenticated_responses(),
+)
 async def prepare_execution(
     request: Request,
     body: PrepareExecutionRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Validate sources and preview datasets without creating an execution record."""
     return await orchestration_prepare_execution(
         db=db,
         project_module=body.project_module,
@@ -55,22 +75,38 @@ async def prepare_execution(
     )
 
 
-@router.get("", response_model=PaginatedListResponse[BatchExecutionRecordListItem])
+@router.get(
+    "",
+    response_model=PaginatedListResponse[BatchExecutionRecordListItem],
+    summary="List executions",
+    responses=merge_responses(
+        {
+            status.HTTP_200_OK: {
+                "description": "Paginated batch execution records",
+            },
+        },
+    ),
+)
 async def list_executions(
     request: Request,
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
-    project_module: str | None = None,
-    status: ExecutionStatus | None = None,
-    sort_by: ExecutionSortField = ExecutionSortField.created_at,
+    page: Annotated[int, Query(ge=1, description="Page number (1-based)")] = 1,
+    items_per_page: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 10,
+    project_module: Annotated[
+        str | None, Query(description="Filter by project module identifier")
+    ] = None,
+    execution_status: Annotated[
+        ExecutionStatus | None, Query(description="Filter by execution status", alias="status")
+    ] = None,
+    sort_by: Annotated[ExecutionSortField, Query(description="Column to sort by")] = ExecutionSortField.created_at,
     order: Annotated[Literal["asc", "desc"], Query(description="Sort direction")] = "desc",
 ) -> dict[str, Any]:
+    """List batch execution records with optional filters and pagination."""
     filters: dict[str, Any] = {}
     if project_module:
         filters["project_module"] = project_module
-    if status:
-        filters["status"] = status
+    if execution_status:
+        filters["status"] = execution_status
 
     executions_data = await crud_batch_execution_records.get_multi(
         db=db,
@@ -89,13 +125,20 @@ async def list_executions(
     )
 
 
-@router.post("", response_model=BatchExecutionRecordRead, status_code=201)
+@router.post(
+    "",
+    response_model=BatchExecutionRecordRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create execution",
+    responses=authenticated_responses(RESPONSES_NOT_FOUND),
+)
 async def create_execution(
     request: Request,
     execution_data: BatchExecutionRecordCreate,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Create a batch execution record in the ledger."""
     deployment_profile_id: UUID | None = None
     if execution_data.deployment_profile_name:
         profile = await crud_daliuge_deployment_profile.get(
@@ -118,12 +161,18 @@ async def create_execution(
     )
 
 
-@router.get("/{execution_id}", response_model=BatchExecutionRecordRead)
+@router.get(
+    "/{execution_id}",
+    response_model=BatchExecutionRecordRead,
+    summary="Get execution",
+    responses=merge_responses(RESPONSES_NOT_FOUND),
+)
 async def get_execution(
     request: Request,
     execution_id: UUID,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Return a batch execution record by UUID."""
     execution = await crud_batch_execution_records.get(
         db=db, uuid=execution_id, schema_to_select=BatchExecutionRecordRead
     )
@@ -134,7 +183,48 @@ async def get_execution(
     return row
 
 
-@router.patch("/{execution_id}", response_model=BatchExecutionRecordRead)
+@router.get(
+    "/{execution_id}/ledger-snapshot",
+    response_model=ExecutionLedgerSnapshot,
+    summary="Get ledger snapshot",
+    responses=merge_responses(RESPONSES_NOT_FOUND),
+)
+async def get_execution_ledger_snapshot(
+    request: Request,
+    execution_id: UUID,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, Any]:
+    """Return a compact execution view for operators and workflow correlation."""
+    execution = await crud_batch_execution_records.get(
+        db=db, uuid=execution_id, schema_to_select=BatchExecutionRecordRead
+    )
+    if execution is None:
+        raise NotFoundException(f"Execution {execution_id} not found")
+    return await read_execution_ledger_snapshot(db=db, execution_id=execution_id)
+
+
+_SCANCEL_ELIGIBLE_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {ExecutionStatus.AWAITING_SCHEDULER, ExecutionStatus.RUNNING}
+)
+
+
+def _coerce_execution_status(raw: Any) -> ExecutionStatus | None:
+    if raw is None:
+        return None
+    if isinstance(raw, ExecutionStatus):
+        return raw
+    try:
+        return ExecutionStatus(str(raw))
+    except ValueError:
+        return None
+
+
+@router.patch(
+    "/{execution_id}",
+    response_model=BatchExecutionRecordRead,
+    summary="Update execution",
+    responses=authenticated_responses(RESPONSES_NOT_FOUND),
+)
 async def update_execution(
     request: Request,
     execution_id: UUID,
@@ -142,6 +232,17 @@ async def update_execution(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Update execution status, manifest, or scheduler fields."""
+    if execution_update.status == ExecutionStatus.CANCELLED:
+        existing = await crud_batch_execution_records.get(
+            db=db, uuid=execution_id, schema_to_select=BatchExecutionRecordRead
+        )
+        if existing is None:
+            raise NotFoundException(f"Execution {execution_id} not found")
+        current_status_enum = _coerce_execution_status(existing.get("status"))
+        if current_status_enum in _SCANCEL_ELIGIBLE_STATUSES:
+            await cancel_scheduler_session_for_execution(db=db, execution_id=execution_id)
+
     return await execution_ledger_service.update_execution_status(
         db=db,
         execution_id=execution_id,
@@ -153,23 +254,63 @@ async def update_execution(
     )
 
 
-@router.get("/{execution_id}/status", response_model=BatchExecutionStatusResponse)
+@router.get(
+    "/{execution_id}/status",
+    response_model=BatchExecutionStatusResponse,
+    summary="Get execution status",
+    responses=merge_responses(RESPONSES_NOT_FOUND),
+)
 async def get_execution_status(
     request: Request,
     execution_id: UUID,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
+    """Return status-focused fields for an execution."""
     execution = await crud_batch_execution_records.get(
         db=db,
         uuid=execution_id,
-        schema_to_select=BatchExecutionStatusResponse,  # type: ignore[arg-type]
+        schema_to_select=BatchExecutionRecordRead,
     )
     if execution is None:
         raise NotFoundException(f"Execution {execution_id} not found")
-    return execution
+    return BatchExecutionStatusResponse.model_validate(execution).model_dump()
 
 
-@router.post("/{execution_id}/execute", status_code=202)
+@router.get(
+    "/{execution_id}/summary",
+    response_model=BatchExecutionSummary,
+    summary="Get execution summary",
+    responses=merge_responses(RESPONSES_NOT_FOUND),
+)
+async def get_execution_summary(
+    request: Request,
+    execution_id: UUID,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, Any]:
+    """Return a summarized view of execution progress and timing."""
+    execution = await crud_batch_execution_records.get(
+        db=db,
+        uuid=execution_id,
+        schema_to_select=BatchExecutionRecordRead,
+    )
+    if execution is None:
+        raise NotFoundException(f"Execution {execution_id} not found")
+    return BatchExecutionSummary.model_validate(execution).model_dump()
+
+
+@router.post(
+    "/{execution_id}/execute",
+    response_model=ExecuteAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Execute execution",
+    responses=authenticated_responses(
+        merge_responses(
+            RESPONSES_NOT_FOUND,
+            RESPONSES_SERVICE_UNAVAILABLE,
+            RESPONSES_SERVER_ERROR,
+        ),
+    ),
+)
 async def execute_execution(
     request: Request,
     execution_id: UUID,
@@ -177,6 +318,7 @@ async def execute_execution(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     body: ExecuteRequest | None = None,
 ) -> dict[str, Any]:
+    """Enqueue staging and/or DALiuGE submit for an existing execution record."""
     do_stage = body.do_stage if body else True
     do_submit = body.do_submit if body else True
 

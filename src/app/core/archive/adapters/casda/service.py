@@ -51,8 +51,8 @@ def query(query: str, tap_url: str | None = None) -> Table:
         results = job.get_results()
         logger.debug("event=casda_tap_query_result result_count=%s", len(results))
         return results
-    except Exception as e:
-        logger.error("event=casda_tap_query_error error=%s", e)
+    except Exception:
+        logger.exception("event=casda_tap_query_error")
         raise
 
 
@@ -109,8 +109,8 @@ def stage_data(
             len(checksum_url_by_scan_id),
         )
         return data_url_by_scan_id, checksum_url_by_scan_id
-    except Exception as e:
-        logger.error("event=casda_staging_error error=%s", e)
+    except Exception:
+        logger.exception("event=casda_staging_error")
         raise
 
 
@@ -122,7 +122,6 @@ def stage_data_pawsey(
 
 
 def metadata_records_to_staging_table(records: list[dict]) -> Table:
-    """Need to turn this back to an Astropy Table."""
     rows = [
         {
             "access_url": ds["access_url"],

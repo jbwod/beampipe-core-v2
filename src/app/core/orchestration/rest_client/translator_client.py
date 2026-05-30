@@ -9,6 +9,30 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def pgt_handle_from_partitioned_payload(pgt_json: Any, fallback_lg_name: str) -> str:
+    if isinstance(pgt_json, list) and len(pgt_json) > 0 and isinstance(pgt_json[0], str):
+        return pgt_json[0]
+    base = fallback_lg_name.rsplit("/", 1)[-1]
+    return base
+
+
+def partitioned_pgt_for_dlg_deploy(pgt_json: Any, lg_name: str) -> list[Any]:
+    if (
+        isinstance(pgt_json, list)
+        and len(pgt_json) == 2
+        and isinstance(pgt_json[0], str)
+        and isinstance(pgt_json[1], list)
+    ):
+        return pgt_json
+    base = lg_name.rsplit("/", 1)[-1]
+    # depnds on what we actually save with I suppose
+    if base.endswith(".graph"):
+        pgt_filename = base[: -len(".graph")] + "_pgt.graph"
+    else:
+        pgt_filename = f"{base}.pgt.graph"
+    return [pgt_filename, pgt_json]
+
+
 @dataclass
 class DaliugeTranslatorClient:
     """Very small helper for DALiuGE translator REST calls."""
@@ -72,10 +96,10 @@ class DaliugeTranslatorClient:
         resp = self._client.get("/gen_pg", params=params)
         if resp.status_code >= 500:
             logger.error(
-                "gen_pg failed: status=%s url=%s body=%s",
+                "event=daliuge_tm_gen_pg_error status=%s pgt_id=%s body_len=%s",
                 resp.status_code,
-                resp.url,
-                resp.text[:500] if resp.text else "(empty)",
+                pgt_id,
+                len(resp.text or ""),
             )
         resp.raise_for_status()
         data = resp.json()
@@ -87,4 +111,42 @@ class DaliugeTranslatorClient:
                 raise ValueError(f"gen_pg list items must be objects, got {type(item).__name__}")
             out.append(item)
         return out
+
+    def unroll_and_partition_lg(
+        self,
+        lg_name: str,
+        lg_json: dict[str, Any],
+        *,
+        algo: str = "metis",
+        num_par: int = 1,
+        num_islands: int = 0,
+    ) -> Any:
+        """Call /unroll_and_partition and return the TM JSON
+        Wrap with `partitioned_pgt_for_dlg_deploy`
+        """
+        np = int(num_par) if num_par is not None else 1
+        if np < 1:
+            np = 1
+        ni = int(num_islands) if num_islands is not None else 1
+        if ni < 1:
+            ni = 1
+        data = {
+            "lg_content": json.dumps(lg_json),
+            "num_partitions": str(np),
+            "num_islands": str(ni),
+            "algorithm": algo,
+        }
+        resp = self._client.post("/unroll_and_partition", data=data)
+        if resp.status_code >= 500:
+            logger.error(
+                "event=daliuge_tm_unroll_and_partition_error status=%s lg_name=%s body_len=%s",
+                resp.status_code,
+                lg_name,
+                len(resp.text or ""),
+            )
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise ValueError(f"unroll_and_partition invalid JSON for lg={lg_name!r}: {e}") from e
 

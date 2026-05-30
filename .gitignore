@@ -112,6 +112,7 @@ venv.bak/
 
 # mkdocs documentation
 /site
+boilerplate_docs/openapi.json
 
 # mypy
 .mypy_cache/
@@ -154,11 +155,15 @@ src/.env
 
 src/app/core/archive/adapters/test.py
 
-dlg/*
 
 wallaby-hires-beampipe/*
+
+deploy/ssh/known_hosts
+deploy/ssh/id_slurm
+deploy/ssh/id_slurm.pub
 scripts/calibration_files/*
 src/app/core/orchestration/dlg-engine_deploy
+src/app/core/orchestration/dlg-engine_deploy-test
 src/app/core/orchestration/dev/*.py
-
+dlg/*
 docs/*

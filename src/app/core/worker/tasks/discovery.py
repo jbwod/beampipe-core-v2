@@ -90,13 +90,10 @@ async def discover_batch(
                             claim_token=claim_token,
                             commit=True,
                         )
-                except Exception as exc:
-                    logger.warning(
+                except Exception:
+                    logger.exception(
                         "event=discover_batch_release_claim_fallback_error "
-                        "project_module=%s count=%s claim_token=%s error=%s",
+                        "project_module=%s count=%s",
                         project_module,
                         len(source_identifiers),
-                        claim_token,
-                        exc,
-                        exc_info=True,
                     )

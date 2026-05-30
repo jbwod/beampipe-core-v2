@@ -1,127 +1,66 @@
-site_name: FastAPI Boilerplate
-site_description: A production-ready FastAPI boilerplate with async support, JWT authentication, Redis caching, and more.
-site_author: Benav Labs
-site_url: https://github.com/benavlabs/fastapi-boilerplate
+docs_dir: boilerplate_docs
+
+site_name: ~ 𝚋𝚎𝚊𝚖𝚙𝚒𝚙𝚎-𝚌𝚘𝚛𝚎
+site_description: Event-driven control plane for scheduler-aware radio astronomy workflows.
+site_author: Jack Blackwood
+site_url: https://beampipe-core.readthedocs.io/
 
 theme:
   name: material
-  font:
-    text: Ubuntu
-  logo: assets/FastAPI-boilerplate.png
-  favicon: assets/FastAPI-boilerplate.png
+  custom_dir: boilerplate_docs/overrides
+  font: false
+  logo: https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e
+  favicon: https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e
   features:
     - navigation.instant
-    - navigation.instant.prefetch
     - navigation.tabs
-    - navigation.indexes
-    - search.suggest
-    - content.code.copy
-    - content.code.annotate
+    - navigation.tabs.sticky
     - navigation.top
     - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.follow
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+    - scheme: slate
+      primary: black
+      accent: blue
 
 plugins:
   - search
-  - mkdocstrings:
-      handlers:
-        python:
-          rendering:
-            show_source: true
 
 nav:
   - Home: index.md
-  - Getting Started:
-      - Overview: getting-started/index.md
+  - Getting started:
       - Installation: getting-started/installation.md
       - Configuration: getting-started/configuration.md
-      - First Run: getting-started/first-run.md
-  - User Guide:
-      - Overview: user-guide/index.md
-      - Project Structure: user-guide/project-structure.md
-      - Configuration:
-          - Overview: user-guide/configuration/index.md
-          - Environment Variables: user-guide/configuration/environment-variables.md
-          - Settings Classes: user-guide/configuration/settings-classes.md
-          - Docker Setup: user-guide/configuration/docker-setup.md
-          - Environment-Specific: user-guide/configuration/environment-specific.md
-      - Database:
-          - Overview: user-guide/database/index.md
-          - Models: user-guide/database/models.md
-          - Schemas: user-guide/database/schemas.md
-          - CRUD Operations: user-guide/database/crud.md
-          - Migrations: user-guide/database/migrations.md
-      - API:
-          - Overview: user-guide/api/index.md
-          - Endpoints: user-guide/api/endpoints.md
-          - Pagination: user-guide/api/pagination.md
-          - Exceptions: user-guide/api/exceptions.md
-          - Versioning: user-guide/api/versioning.md
-      - Authentication:
-          - Overview: user-guide/authentication/index.md
-          - JWT Tokens: user-guide/authentication/jwt-tokens.md
-          - User Management: user-guide/authentication/user-management.md
-          - Permissions: user-guide/authentication/permissions.md
-      - Admin Panel:
-          - user-guide/admin-panel/index.md
-          - Configuration: user-guide/admin-panel/configuration.md
-          - Adding Models: user-guide/admin-panel/adding-models.md
-          - User Management: user-guide/admin-panel/user-management.md
-      - Caching:
-          - Overview: user-guide/caching/index.md
-          - Redis Cache: user-guide/caching/redis-cache.md
-          - Client Cache: user-guide/caching/client-cache.md
-          - Cache Strategies: user-guide/caching/cache-strategies.md
-      - Background Tasks: user-guide/background-tasks/index.md
-      - Rate Limiting: user-guide/rate-limiting/index.md
-      - Development: user-guide/development.md
-      - Production: user-guide/production.md
-      - Testing: user-guide/testing.md
-  - Community: community.md
-  # - Examples:
-  #   - Overview: examples/index.md
-  #   - Basic CRUD: examples/basic-crud.md
-  #   - Authentication Flow: examples/authentication-flow.md
-  #   - Background Job Workflow: examples/background-job-workflow.md
-  #   - Caching Patterns: examples/caching-patterns.md
-  #   - Production Setup: examples/production-setup.md
-  # - Reference:
-  #   - Overview: reference/index.md
-  #   - API Reference: reference/api-reference.md
-  #   - Configuration Reference: reference/configuration-reference.md
-  #   - Database Schema: reference/database-schema.md
-  #   - Middleware Reference: reference/middleware-reference.md
-  #   - Dependencies Reference: reference/dependencies-reference.md
-  # - Contributing:
-  #   - Overview: contributing/index.md
-  #   - Development Setup: contributing/development-setup.md
-  #   - Coding Standards: contributing/coding-standards.md
-  #   - Pull Request Process: contributing/pull-request-process.md
-  #   - Testing Guidelines: contributing/testing-guidelines.md
-  # - Migration Guides:
-  #   - Overview: migration-guides/index.md
-  #   - Version Migrations: migration-guides/from-v1-to-v2.md
-  #   - From Other Frameworks: migration-guides/from-other-frameworks.md
-  # - FAQ: faq.md
+  - API: api/index.md
+  - Project modules:
+      - Overview: project-modules/index.md
+      - How it works: project-modules/lifecycle.md
+      - Authoring a module: project-modules/authoring.md
+  - Deployment profiles: deployment-profiles/index.md
+  - Tools:
+      - Bruno collection: tools/bruno.md
+      - OpenAPI export: tools/openapi.md
+  - Contributing: contributing.md
+
+exclude_docs: |
+  user-guide/**
+  community.md
+  operations/**
+  getting-started/index.md
+  getting-started/first-run.md
+  deployment-profiles/rest-remote.md
+  deployment-profiles/slurm-remote.md
+  deployment-profiles/daliuge.md
+  project-modules/contract.md
+  project-modules/wallaby-hires.md
 
 markdown_extensions:
   - admonition
-  - codehilite
   - toc:
       permalink: true
   - pymdownx.details
@@ -130,30 +69,31 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.tasklist:
       custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - attr_list
   - md_in_html
 
 extra:
+  generator: false
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/benavlabs/fastapi-boilerplate
-    - icon: fontawesome/brands/python
-      link: https://pypi.org/project/fastapi/
-  version:
-    provider: mike
-  analytics:
-    provider: google
-    property: !ENV [GOOGLE_ANALYTICS_KEY, ""]
+      link: https://github.com/jbwod/beampipe-core
 
 extra_css:
   - stylesheets/extra.css
+  - stylesheets/redoc.css
 
-repo_name: benavlabs/fastapi-boilerplate
-repo_url: https://github.com/benavlabs/fastapi-boilerplate
-edit_uri: edit/main/docs/
+extra_javascript:
+  - javascripts/bp-stars.js
+  - javascripts/redoc-init.js
+
+repo_name: jbwod/beampipe-core
+repo_url: https://github.com/jbwod/beampipe-core
+edit_uri: edit/main/boilerplate_docs/

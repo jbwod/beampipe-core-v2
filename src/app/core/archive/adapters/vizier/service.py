@@ -46,5 +46,5 @@ def query(query: str, tap_url: str | None = None) -> Table:
         logger.debug("event=vizier_tap_query_result row_count=%s", len(results))
         return results
     except Exception as e:
-        logger.error("event=vizier_tap_query_error error=%s query_snippet=%s", e, query[:150])
+        logger.exception("event=vizier_tap_query_error query_snippet=%s", query[:150])
         raise RuntimeError(f"Vizier TAP query failed: {e}") from e

@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from ..positive_policy import positive_float_optional, positive_int_optional
+from .contracts import known_exports
 from .plugins import list_project_modules, load_project_module
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,11 @@ def resolve_graph_content(project_module: str) -> str:
     if path:
         p = Path(path)
         if p.exists():
-            logger.info("Resolved graph from local path: %s", path)
+            logger.info(
+                "event=project_graph_resolved project_module=%s source=local path=%s",
+                project_module,
+                path,
+            )
             return p.read_text()
         raise FileNotFoundError(f"Graph path not found: {path}")
 
@@ -46,16 +51,33 @@ def resolve_graph_content(project_module: str) -> str:
     last_error: Exception | None = None
     for attempt in range(1, _GRAPH_FETCH_RETRIES + 1):
         try:
-            logger.info("Fetching graph from GitHub (attempt %d/%d): %s", attempt, _GRAPH_FETCH_RETRIES, url)
+            logger.info(
+                "event=project_graph_fetch_attempt project_module=%s url=%s attempt=%d/%d",
+                project_module,
+                url,
+                attempt,
+                _GRAPH_FETCH_RETRIES,
+            )
             resp = httpx.get(url, timeout=_GRAPH_FETCH_TIMEOUT)
             resp.raise_for_status()
             content = resp.text
             json.loads(content)
-            logger.info("Resolved graph from GitHub: %s", url)
+            logger.info(
+                "event=project_graph_resolved project_module=%s source=github url=%s",
+                project_module,
+                url,
+            )
             return content
         except (httpx.HTTPError, json.JSONDecodeError) as e:
             last_error = e
-            logger.warning("Graph fetch attempt %d/%d failed: %s", attempt, _GRAPH_FETCH_RETRIES, e)
+            logger.warning(
+                "event=project_graph_fetch_error project_module=%s url=%s attempt=%d/%d error=%s",
+                project_module,
+                url,
+                attempt,
+                _GRAPH_FETCH_RETRIES,
+                e,
+            )
             if attempt == _GRAPH_FETCH_RETRIES:
                 raise
     raise last_error or RuntimeError("Graph fetch failed")
@@ -90,8 +112,10 @@ def _resolve_workflow_step_overrides_from_policy(
         f"{family}_max_duration_minutes_db": "db_max_duration_minutes",
     }
     if family == "execution":
-        int_map[f"{family}_max_polls"] = "poll_max_attempts"
-        int_map[f"{family}_poll_max_duration_minutes"] = "poll_max_duration_minutes"
+        int_map[f"{family}_poll_step_max_attempts"] = "poll_max_attempts"
+        int_map[f"{family}_poll_step_max_duration_minutes"] = "poll_max_duration_minutes"
+        int_map[f"{family}_rest_remote_poll_max_rounds"] = "rest_remote_poll_max_rounds"
+        int_map[f"{family}_slurm_remote_poll_max_rounds"] = "slurm_remote_poll_max_rounds"
 
     for in_key, out_key in int_map.items():
         v = positive_int_optional(policy, in_key)
@@ -102,6 +126,13 @@ def _resolve_workflow_step_overrides_from_policy(
         f"{family}_initial_retry_seconds": "initial_retry_seconds",
         f"{family}_max_retry_interval_seconds": "max_retry_interval_seconds",
     }
+    if family == "execution":
+        float_map[f"{family}_rest_remote_poll_interval_seconds"] = (
+            "rest_remote_poll_interval_seconds"
+        )
+        float_map[f"{family}_slurm_remote_poll_interval_seconds"] = (
+            "slurm_remote_poll_interval_seconds"
+        )
     for in_key, out_key in float_map.items():
         float_val = positive_float_optional(policy, in_key)
         if float_val is not None:
@@ -150,17 +181,7 @@ class ProjectModuleService:
                 "valid": True,
                 "required_adapters": required_adapters if isinstance(required_adapters, list) else [],
                 "error": None,
-                "exports": [
-                    symbol
-                    for symbol in [
-                        "discover",
-                        "prepare_metadata",
-                        "stage",
-                        "build_manifest_sources",
-                        "REQUIRED_ADAPTERS",
-                    ]
-                    if hasattr(module, symbol)
-                ],
+                "exports": known_exports(module),
                 "enrichment_keys": enrichment_keys,
                 "graph_path": graph_path,
                 "graph_github_url": graph_github_url,
@@ -168,6 +189,10 @@ class ProjectModuleService:
                 "workflow_discovery_automation": workflow_discovery_automation,
             }
         except Exception as exc:
+            logger.exception(
+                "event=project_contract_load_failed project_module=%s",
+                project_module,
+            )
             return {
                 "project_module": project_module,
                 "valid": False,

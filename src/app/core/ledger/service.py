@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_execution_record import crud_batch_execution_records
@@ -23,6 +23,28 @@ from .source_readiness import parse_execution_source_spec, parsed_source_readine
 logger = logging.getLogger(__name__)
 
 _EXECUTION_PHASE_UNSET: object = object()
+
+_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.NOT_SUBMITTED,
+    }
+)
+
+_LOCKED_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.CANCELLED,
+    }
+)
+_RETRY_COUNT_INCREMENT_TRANSITIONS: frozenset[tuple[ExecutionStatus, ExecutionStatus]] = frozenset(
+    {
+        (ExecutionStatus.FAILED, ExecutionStatus.RETRYING),
+        (ExecutionStatus.RETRYING, ExecutionStatus.RUNNING),
+    }
+)
 
 
 def _validate_parsed_source_for_execution(
@@ -203,8 +225,17 @@ class ExecutionLedgerService:
         allowed_transitions = {
             ExecutionStatus.PENDING: [ExecutionStatus.RUNNING, ExecutionStatus.CANCELLED],
             ExecutionStatus.RUNNING: [
+                ExecutionStatus.AWAITING_SCHEDULER,
                 ExecutionStatus.COMPLETED,
                 ExecutionStatus.NOT_SUBMITTED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            ],
+            # Job is queued/running on an external scheduler (e.g. SLURM) a
+            # completion workflow polls until terminal.
+            ExecutionStatus.AWAITING_SCHEDULER: [
+                ExecutionStatus.RUNNING,
+                ExecutionStatus.COMPLETED,
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             ],
@@ -228,6 +259,7 @@ class ExecutionLedgerService:
         workflow_manifest: dict | None = None,
         error: str | None = None,
         execution_phase: ExecutionPhase | None | object = _EXECUTION_PHASE_UNSET,
+        clear_error: bool = False,
     ) -> dict[str, Any]:
         """Update execution status and related fields.
 
@@ -257,29 +289,63 @@ class ExecutionLedgerService:
         current_status_value = execution.get("status")
         started_at_value = execution.get("started_at")
         completed_at_value = execution.get("completed_at")
+        current_status: ExecutionStatus | None = (
+            ExecutionStatus(str(current_status_value)) if current_status_value is not None else None
+        )
+        effective_status = status
+        if (
+            status is not None
+            and current_status is not None
+            and current_status in _LOCKED_TERMINAL_STATUSES
+            and status != current_status
+        ):
+            logger.warning(
+                "event=ledger_execution_terminal_status_locked execution_id=%s "
+                "current_status=%s requested_status=%s",
+                execution_id,
+                current_status.value,
+                status.value,
+            )
+            effective_status = None
 
-        if status and status != current_status_value and current_status_value is not None:
-            current_status = ExecutionStatus(str(current_status_value))
-            if not ExecutionLedgerService._validate_status_transition(current_status, status):
-                raise BadRequestException(
-                    f"Invalid status transition from {current_status.value} to {status.value}"
-                )
+        if (
+            effective_status
+            and effective_status != current_status_value
+            and current_status is not None
+            and not ExecutionLedgerService._validate_status_transition(current_status, effective_status)
+        ):
+            raise BadRequestException(
+                f"Invalid status transition from {current_status.value} to {effective_status.value}"
+            )
 
         update_data: dict[str, Any] = {}
         now = datetime.now(UTC)
 
-        if status:
-            update_data["status"] = status
-            if status == ExecutionStatus.RUNNING and not started_at_value:
+        if effective_status:
+            update_data["status"] = effective_status
+            if effective_status == ExecutionStatus.RUNNING and not started_at_value:
                 update_data["started_at"] = now
-            elif status in [
-                ExecutionStatus.COMPLETED,
-                ExecutionStatus.NOT_SUBMITTED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            ]:
+            elif effective_status in _TERMINAL_STATUSES:
                 if not completed_at_value:
                     update_data["completed_at"] = now
+
+            # Increment retry_count on recovery transition
+            if (
+                current_status is not None
+                and (current_status, effective_status) in _RETRY_COUNT_INCREMENT_TRANSITIONS
+            ):
+                current_retry_count = execution.get("retry_count")
+                try:
+                    current_retry_int = int(current_retry_count) if current_retry_count is not None else 0
+                except (TypeError, ValueError):
+                    current_retry_int = 0
+                update_data["retry_count"] = current_retry_int + 1
+            recovering = (
+                current_status in {ExecutionStatus.FAILED, ExecutionStatus.RETRYING}
+                and effective_status in {ExecutionStatus.RUNNING, ExecutionStatus.RETRYING}
+            )
+            if recovering and error is None:
+                update_data["last_error"] = None
 
         if scheduler_job_id is not None:
             update_data["scheduler_job_id"] = scheduler_job_id
@@ -289,8 +355,13 @@ class ExecutionLedgerService:
             update_data["workflow_manifest"] = workflow_manifest
         if error is not None:
             update_data["last_error"] = error
+        elif clear_error:
+            update_data["last_error"] = None
+
         if execution_phase is not _EXECUTION_PHASE_UNSET:
             update_data["execution_phase"] = execution_phase
+        elif effective_status in _TERMINAL_STATUSES:
+            update_data["execution_phase"] = None
 
         update_data["updated_at"] = now
 
@@ -308,10 +379,58 @@ class ExecutionLedgerService:
         logger.info(
             "event=ledger_execution_updated execution_id=%s status=%s scheduler_job_id=%s",
             execution_id,
-            status,
+            effective_status,
             scheduler_job_id,
         )
         return updated_execution
+
+    @staticmethod
+    async def list_executions_for_source(
+        db: AsyncSession,
+        project_module: str,
+        source_identifier: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        src_match = text(
+            "EXISTS (SELECT 1 FROM jsonb_array_elements(batch_execution_record.sources) AS elem "
+            "WHERE elem->>'source_identifier' = :src_sid)"
+        ).bindparams(src_sid=source_identifier)
+
+        base_filter = and_(
+            BatchExecutionRecord.project_module == project_module,
+            src_match,
+        )
+
+        count_stmt = select(func.count()).select_from(BatchExecutionRecord).where(base_filter)
+        count_result = await db.execute(count_stmt)
+        total = int(count_result.scalar_one())
+
+        list_stmt = (
+            select(
+                BatchExecutionRecord.uuid,
+                BatchExecutionRecord.status,
+                BatchExecutionRecord.created_at,
+                BatchExecutionRecord.completed_at,
+            )
+            .where(base_filter)
+            .order_by(BatchExecutionRecord.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        rows_result = await db.execute(list_stmt)
+        rows = rows_result.mappings().all()
+        items = [
+            {
+                "uuid": r["uuid"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "completed_at": r["completed_at"],
+            }
+            for r in rows
+        ]
+        return items, total
 
 
 execution_ledger_service = ExecutionLedgerService()

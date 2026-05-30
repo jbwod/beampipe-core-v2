@@ -1,9 +1,11 @@
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import TimestampSchema, UUIDSchema
+from ..models.ledger import ExecutionStatus
 
 
 class SourceRegistryBase(BaseModel):
@@ -22,9 +24,20 @@ class SourceRegistryBase(BaseModel):
 
 
 class SourceRegistryCreate(SourceRegistryBase):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "project_module": "wallaby_hires",
+                    "source_identifier": "HIPASSJ1318-21",
+                    "enabled": True,
+                }
+            ]
+        },
+    )
 
-    enabled: bool = Field(default=False, description="monitoring is enabled for this source?")
+    enabled: bool = Field(default=False, description="Whether discovery monitoring is enabled for this source")
 
 
 class SourceRegistryCreateInternal(SourceRegistryCreate):
@@ -87,7 +100,22 @@ class SourceRegistryDelete(BaseModel):
 class SourceRegistryBulkCreate(BaseModel):
     """Schema for bulk source registration."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "items": [
+                        {
+                            "project_module": "wallaby_hires",
+                            "source_identifier": "HIPASSJ1318-21",
+                            "enabled": True,
+                        }
+                    ]
+                }
+            ]
+        },
+    )
     items: Annotated[
         list[SourceRegistryCreate],
         Field(min_length=1, description="List of sources to register"),
@@ -107,16 +135,35 @@ class SourceRegistryBulkCreateResponse(BaseModel):
 class SourceMetadataResponse(BaseModel):
     """Response for GET /sources/{id}/metadata."""
 
-    source: SourceRegistryRead
-    metadata: list[dict]
-    metadata_count: int
+    source: SourceRegistryRead = Field(description="Source registry entry")
+    metadata: list[dict] = Field(description="Archive metadata rows for this source")
+    metadata_count: int = Field(description="Number of metadata rows returned")
+
+
+class SourceLinkedExecutionItem(BaseModel):
+    """One batch execution that included this registry source."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    uuid: Annotated[UUID, Field(description="Batch execution record id")]
+    status: ExecutionStatus
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 class DiscoverTriggerRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {"project_module": "wallaby_hires"},
+                {"project_module": "wallaby_hires", "source_identifier": "HIPASSJ1318-21"},
+            ]
+        },
+    )
 
     project_module: Annotated[
-        str, Field(min_length=1, max_length=50, examples=["wallaby"], description="Project module identifier")
+        str, Field(min_length=1, max_length=50, examples=["wallaby_hires"], description="Project module identifier")
     ]
     source_identifier: str | None = Field(
         default=None,

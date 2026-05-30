@@ -12,7 +12,6 @@ REST: POST {dim_base}/api/sessions/{sessionId}/deploy
 Poll: GET {dim_base}/api/sessions/{sessionId}/status  = JSON session status (e.g. 4 = FINISHED, 3 = ERROR)
       GET {dim_base}/api/sessions/{sessionId}/graph/status  = JSON dict { drop_uid: status, ... }
 """
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -80,7 +79,7 @@ class DaliugeDeployClient:
         poll_interval: float = 3.0,
         timeout: float = 10.0,
     ) -> int:
-        """Poll session status until FINISHED or ERROR."""
+        """Poll session status until FINISHED, FAILED, or CANCELLED."""
         sid = quote(session_id)
         while True:
             try:
@@ -90,8 +89,8 @@ class DaliugeDeployClient:
                 )
                 r.raise_for_status()
                 status = r.json()
-            except Exception as e:
-                logger.warning("event=dim_poll_status_error session_id=%s error=%s", session_id, e)
+            except Exception:
+                logger.debug("event=dim_poll_status_error session_id=%s", session_id, exc_info=True)
                 time.sleep(5)
                 continue
 
@@ -106,9 +105,14 @@ class DaliugeDeployClient:
                     )
                     r.raise_for_status()
                     graph = r.json()
-                    logger.debug("event=dim_graph_status session_id=%s graph=%s", session_id, json.dumps(graph))
                     if isinstance(graph, dict):
                         error_drops = dim_graph_status_error_uids(graph)
+                        logger.debug(
+                            "event=dim_graph_status session_id=%s drops=%s error_drops=%s",
+                            session_id,
+                            len(graph),
+                            len(error_drops),
+                        )
                         if error_drops:
                             logger.error(
                                 "event=dim_session_drop_errors session_id=%s error_count=%s",
@@ -116,15 +120,17 @@ class DaliugeDeployClient:
                                 len(error_drops),
                             )
                             return 1
-                except Exception as e:
-                    logger.warning("event=dim_graph_status_error session_id=%s error=%s", session_id, e)
+                except Exception:
+                    logger.warning(
+                        "event=dim_graph_status_error session_id=%s", session_id, exc_info=True
+                    )
                 return 0
 
-            if state == "error":
+            if state in ("failed", "cancelled"):
                 logger.error(
-                    "event=dim_session_error session_id=%s status=%s",
+                    "event=dim_session_error session_id=%s state=%s",
                     session_id,
-                    json.dumps(status),
+                    state,
                 )
                 return 1
 

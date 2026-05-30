@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import UnauthorizedException
+from ...core.openapi import RESPONSES_UNAUTHORIZED, merge_responses
 from ...core.schemas import Token
 from ...core.security import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -21,7 +22,20 @@ from ...core.security import (
 router = APIRouter(tags=["login"])
 
 
-@router.post("/login", response_model=Token)
+@router.post(
+    "/login",
+    response_model=Token,
+    summary="Login for access token",
+    responses=merge_responses(
+        {
+            200: {
+                "model": Token,
+                "description": "Bearer access token; use with Authorize in Swagger UI",
+            },
+        },
+        RESPONSES_UNAUTHORIZED,
+    ),
+)
 async def login_for_access_token(
     response: Response,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
@@ -44,7 +58,11 @@ async def login_for_access_token(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.post("/refresh")
+@router.post(
+    "/refresh",
+    summary="Refresh access token",
+    responses=RESPONSES_UNAUTHORIZED,
+)
 async def refresh_access_token(request: Request, db: AsyncSession = Depends(async_get_db)) -> dict[str, str]:
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:

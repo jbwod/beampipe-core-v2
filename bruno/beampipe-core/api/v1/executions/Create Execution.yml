@@ -15,17 +15,11 @@ http:
         "project_module": "wallaby_hires",
         "sources": [
           {
-            "source_identifier": "HIPASSJ0349-18",
-            "sbids": ["69412"]
-          },
-          {
-            "source_identifier": "HIPASSJ0359-42",
-            "sbids": ["50098","50193"]
+            "source_identifier": "HIPASSJ1313-15"
           }
         ],
         "archive_name": "casda",
-        "deployment_profile_name": "test-staging-e2e-rest-dim",
-        "created_by_id": "0"
+        "deployment_profile_name": "setonix-slurm-ini"
       }
   auth:
     type: bearer
@@ -47,16 +41,14 @@ examples:
         type: json
         data: |-
           {
-            "project_module": "",
+            "project_module": "wallaby_hires",
             "sources": [
               {
-                "source_identifier": "",
-                "sbids": ""
+                "source_identifier": "HIPASSJ1313-15"
               }
             ],
-            "archive_name": "",
-            "deployment_profile_id": "",
-            "created_by_id": ""
+            "archive_name": "casda",
+            "deployment_profile_name": "setonix-slurm-ini"
           }
     response:
       status: 201
@@ -69,65 +61,13 @@ examples:
         data: |-
           {
             "uuid": "",
-            "project_module": "",
+            "project_module": "wallaby_hires",
             "sources": [
               {
-                "source_identifier": "",
-                "sbids": ""
+                "source_identifier": "HIPASSJ1313-15"
               }
             ],
-            "archive_name": "",
-            "created_at": "",
-            "updated_at": "",
-            "deployment_profile_id": "",
-            "status": "pending",
-            "execution_phase": "",
-            "workflow_manifest": "",
-            "scheduler_name": "",
-            "scheduler_job_id": "",
-            "retry_count": 0,
-            "last_error": "",
-            "created_by_id": "",
-            "started_at": "",
-            "completed_at": ""
-          }
-  - name: 422 Response
-    description: Validation Error
-    request:
-      url: "{{baseUrl}}/api/v1/executions"
-      method: POST
-      body:
-        type: json
-        data: |-
-          {
-            "project_module": "",
-            "sources": [
-              {
-                "source_identifier": "",
-                "sbids": ""
-              }
-            ],
-            "archive_name": "",
-            "deployment_profile_id": "",
-            "created_by_id": ""
-          }
-    response:
-      status: 422
-      statusText: Unprocessable Entity
-      headers:
-        - name: Content-Type
-          value: application/json
-      body:
-        type: json
-        data: |-
-          {
-            "detail": [
-              {
-                "loc": [],
-                "msg": "",
-                "type": "",
-                "input": "",
-                "ctx": {}
-              }
-            ]
+            "archive_name": "casda",
+            "deployment_profile_name": "setonix-slurm-ini",
+            "status": "pending"
           }

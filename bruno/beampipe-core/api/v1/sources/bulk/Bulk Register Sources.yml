@@ -25,7 +25,7 @@ http:
           },
           {
             "project_module": "wallaby_hires",
-            "source_identifier": "HIPASSJ1026-20",
+            "source_identifier": "HIPASSJ1318-21",
             "enabled": true
           },
           {
@@ -61,6 +61,21 @@ http:
           {
             "project_module": "wallaby_hires",
             "source_identifier": "HIPASSJ0909-33",
+            "enabled": true
+          },
+          {
+            "project_module": "wallaby_hires",
+            "source_identifier": "HIPASSJ1201-24",
+            "enabled": true
+          },
+          {
+            "project_module": "wallaby_hires",
+            "source_identifier": "HIPASSJ2302-32",
+            "enabled": true
+          },
+          {
+            "project_module": "wallaby_hires",
+            "source_identifier": "HIPASSJ1105-48",
             "enabled": true
           }
         ]

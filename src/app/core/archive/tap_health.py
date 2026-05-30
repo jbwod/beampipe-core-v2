@@ -39,12 +39,8 @@ async def is_tap_reachable(url: str, timeout_seconds: float = 10.0) -> bool:
             e,
         )
         return False
-    except Exception as e:
-        logger.warning(
-            "event=tap_health_error url=%s error=%s",
-            url,
-            e,
-        )
+    except Exception:
+        logger.exception("event=tap_health_error url=%s", url)
         return False
 
 

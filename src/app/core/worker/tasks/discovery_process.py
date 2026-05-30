@@ -24,8 +24,13 @@ async def process_source(
 ) -> dict[str, Any]:
     """Run discover (with retry) then prepare for one source; return outcome dict."""
     source_started_at = time.perf_counter()
-    discover_fn = getattr(module, "discover")
-    prepare_fn = getattr(module, "prepare_metadata")
+    discover_fn = getattr(module, "discover", None)
+    prepare_fn = getattr(module, "prepare_metadata", None)
+    if not callable(discover_fn) or not callable(prepare_fn):
+        raise ValueError(
+            f"Project module '{project_module}' missing required callable hooks "
+            "(discover, prepare_metadata). See app.core.projects.contracts."
+        )
 
     # Discover with retry (TimeoutError/ConnectionError only); then normalize bundle
     logger.debug(

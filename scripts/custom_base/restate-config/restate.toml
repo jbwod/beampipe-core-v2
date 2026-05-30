@@ -1,0 +1,16 @@
+#   1 node  -> default-replication = 1   (single-node, no HA)
+#   2 nodes -> default-replication = 2   (no failure tolerance)
+#   3+ node -> default-replication = 2   (tolerates 1 failure)
+cluster-name = "beampipe"
+
+default-replication = 1
+
+[bifrost]
+default-provider = "replicated"
+
+# Required when restate >= 2 (HA cluster) — https://docs.restate.dev/server/snapshots
+[worker.snapshots]
+destination = ""
+aws-region = ""
+snapshot-interval-num-records = 100000
+snapshot-interval = "60m"

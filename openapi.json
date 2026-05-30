@@ -1,0 +1,5795 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Beampipe",
+    "description": "Beampipe Core\n\n## Getting started\n\n1. **Authenticate**: `POST /api/v1/login` with the admin **username or email** and password from setup. Copy `access_token` and click **Authorize** (Bearer token).\n2. **List projects**: `GET /api/v1/projects` shows registered project modules.\n3. **Register sources**: `POST /api/v1/sources` (returns 201 or 200 if already registered).\n4. **Run discovery**: `POST /api/v1/sources/discover` marks sources for async archive polling.\n5. **Create execution**: `POST /api/v1/executions/prepare` (preview) then `POST /api/v1/executions`.\n6. **Execute**: `POST /api/v1/executions/{id}/execute` enqueues staging/submit on the worker queue.\n7. **Poll**: `GET /api/v1/executions/{id}/status` or `.../ledger-snapshot` for operator view.\n\n### Common errors\n\n- **401**: missing or expired token. Log in again.\n- **400**: unknown `project_module` (check `GET /api/v1/projects`).\n- **404**: source, execution, or deployment profile not found.\n- **503**: Redis worker queue unavailable.\n\nHealth: `GET /api/v1/health` (liveness) \u00b7 `GET /api/v1/ready` (deps).\n\nLocal-only UI: [`/sources`](/sources) for a minimal browser view.",
+    "version": "0.1.0",
+    "contact": {
+      "name": "admin",
+      "email": "admin@example.com"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness probe",
+        "description": "Return process liveness. Does not check external dependencies.",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Application process is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/ready": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readiness probe",
+        "description": "Check PostgreSQL and Redis connectivity. Returns HTTP 503 when any dependency is down.",
+        "operationId": "ready_api_v1_ready_get",
+        "responses": {
+          "200": {
+            "description": "All dependencies healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyCheck"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "One or more dependencies unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health/tap": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Archive TAP probe",
+        "description": "Probe configured archive TAP endpoints used by discovery.",
+        "operationId": "tap_health_api_v1_health_tap_get",
+        "responses": {
+          "200": {
+            "description": "TAP endpoint probe results (may include unreachable endpoints)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TapHealthCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/login": {
+      "post": {
+        "tags": [
+          "login"
+        ],
+        "summary": "Login for access token",
+        "description": "Exchange username (or email) and password for a JWT access token.\n\nThe `username` form field accepts either the account username or email address.\nA refresh token is also set as an httpOnly cookie for `POST /api/v1/refresh`.",
+        "operationId": "login_for_access_token_api_v1_login_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_login_for_access_token_api_v1_login_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Bearer access token; use with Authorize in Swagger UI",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Token"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/refresh": {
+      "post": {
+        "tags": [
+          "login"
+        ],
+        "summary": "Refresh access token",
+        "description": "Issue a new access token using the httpOnly `refresh_token` cookie from login.",
+        "operationId": "refresh_access_token_api_v1_refresh_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Refresh Access Token Api V1 Refresh Post"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logout": {
+      "post": {
+        "tags": [
+          "login"
+        ],
+        "summary": "Logout",
+        "operationId": "logout_api_v1_logout_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "refresh_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Refresh Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Logout Api V1 Logout Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/user": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Write User",
+        "operationId": "write_user_api_v1_user_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Read Users",
+        "operationId": "read_users_api_v1_users_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "items_per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "title": "Items Per Page"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedListResponse_UserRead_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/user/me/": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Read Users Me",
+        "operationId": "read_users_me_api_v1_user_me__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/user/{username}": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Read User",
+        "operationId": "read_user_api_v1_user__username__get",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Patch User",
+        "operationId": "patch_user_api_v1_user__username__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Patch User Api V1 User  Username  Patch"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Erase User",
+        "operationId": "erase_user_api_v1_user__username__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Erase User Api V1 User  Username  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/db_user/{username}": {
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Erase Db User",
+        "operationId": "erase_db_user_api_v1_db_user__username__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Erase Db User Api V1 Db User  Username  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/executions/prepare": {
+      "post": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Prepare execution",
+        "description": "Validate sources and preview datasets without creating an execution record.",
+        "operationId": "prepare_execution_api_v1_executions_prepare_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrepareExecutionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrepareExecutionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/executions": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "List executions",
+        "description": "List batch execution records with optional filters and pagination.",
+        "operationId": "list_executions_api_v1_executions_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number (1-based)",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number (1-based)"
+          },
+          {
+            "name": "items_per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 10,
+              "title": "Items Per Page"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "project_module",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by project module identifier",
+              "title": "Project Module"
+            },
+            "description": "Filter by project module identifier"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ExecutionStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by execution status",
+              "title": "Status"
+            },
+            "description": "Filter by execution status"
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ExecutionSortField",
+              "description": "Column to sort by",
+              "default": "created_at"
+            },
+            "description": "Column to sort by"
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string",
+              "description": "Sort direction",
+              "default": "desc",
+              "title": "Order"
+            },
+            "description": "Sort direction"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated batch execution records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedListResponse_BatchExecutionRecordListItem_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Create execution",
+        "description": "Create a batch execution record in the ledger.",
+        "operationId": "create_execution_api_v1_executions_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchExecutionRecordCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchExecutionRecordRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/executions/{execution_id}": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Get execution",
+        "description": "Return a batch execution record by UUID.",
+        "operationId": "get_execution_api_v1_executions__execution_id__get",
+        "parameters": [
+          {
+            "name": "execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Execution Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchExecutionRecordRead"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Update execution",
+        "description": "Update execution status, manifest, or scheduler fields.",
+        "operationId": "update_execution_api_v1_executions__execution_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Execution Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchExecutionRecordUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchExecutionRecordRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/executions/{execution_id}/ledger-snapshot": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Get ledger snapshot",
+        "description": "Return a compact execution view for operators and workflow correlation.",
+        "operationId": "get_execution_ledger_snapshot_api_v1_executions__execution_id__ledger_snapshot_get",
+        "parameters": [
+          {
+            "name": "execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Execution Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionLedgerSnapshot"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/executions/{execution_id}/status": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Get execution status",
+        "description": "Return status-focused fields for an execution.",
+        "operationId": "get_execution_status_api_v1_executions__execution_id__status_get",
+        "parameters": [
+          {
+            "name": "execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Execution Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchExecutionStatusResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/executions/{execution_id}/summary": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Get execution summary",
+        "description": "Return a summarized view of execution progress and timing.",
+        "operationId": "get_execution_summary_api_v1_executions__execution_id__summary_get",
+        "parameters": [
+          {
+            "name": "execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Execution Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchExecutionSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/executions/{execution_id}/execute": {
+      "post": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Execute execution",
+        "description": "Enqueue staging and/or DALiuGE submit for an existing execution record.",
+        "operationId": "execute_execution_api_v1_executions__execution_id__execute_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "execution_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Execution Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ExecuteRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecuteAcceptedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency unavailable (e.g. Redis queue)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployment-profiles": {
+      "get": {
+        "tags": [
+          "deployment-profiles"
+        ],
+        "summary": "List deployment profiles",
+        "description": "List DALiuGE deployment profiles. Filter by project_module or global_only.",
+        "operationId": "list_deployment_profiles_api_v1_deployment_profiles_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number (1-based)",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number (1-based)"
+          },
+          {
+            "name": "items_per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 10,
+              "title": "Items Per Page"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "project_module",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by project module; omit for all",
+              "title": "Project Module"
+            },
+            "description": "Filter by project module; omit for all"
+          },
+          {
+            "name": "global_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "When true, return only global (non-project) profiles",
+              "default": false,
+              "title": "Global Only"
+            },
+            "description": "When true, return only global (non-project) profiles"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedListResponse_DaliugeDeploymentProfileRead_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "deployment-profiles"
+        ],
+        "summary": "Create deployment profile",
+        "description": "Create a DALiuGE deployment profile with translation and deployment configuration.",
+        "operationId": "create_deployment_profile_api_v1_deployment_profiles_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DaliugeDeploymentProfileCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DaliugeDeploymentProfileRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployment-profiles/{profile_id}": {
+      "get": {
+        "tags": [
+          "deployment-profiles"
+        ],
+        "summary": "Get deployment profile",
+        "description": "Return a deployment profile by UUID.",
+        "operationId": "get_deployment_profile_api_v1_deployment_profiles__profile_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DaliugeDeploymentProfileRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "deployment-profiles"
+        ],
+        "summary": "Update deployment profile",
+        "description": "Partially update a deployment profile. Nested translation/deployment fields are merged.",
+        "operationId": "update_deployment_profile_api_v1_deployment_profiles__profile_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DaliugeDeploymentProfileUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DaliugeDeploymentProfileRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "deployment-profiles"
+        ],
+        "summary": "Delete deployment profile",
+        "description": "Permanently delete a deployment profile.",
+        "operationId": "delete_deployment_profile_api_v1_deployment_profiles__profile_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sources": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "List sources",
+        "description": "List registered sources with optional filters and pagination.",
+        "operationId": "list_sources_api_v1_sources_get",
+        "parameters": [
+          {
+            "name": "project_module",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by project module identifier",
+              "title": "Project Module"
+            },
+            "description": "Filter by project module identifier"
+          },
+          {
+            "name": "enabled",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by enabled flag",
+              "title": "Enabled"
+            },
+            "description": "Filter by enabled flag"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number (1-based)",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number (1-based)"
+          },
+          {
+            "name": "items_per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 10,
+              "title": "Items Per Page"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SourceSortField",
+              "description": "Column to sort by",
+              "default": "created_at"
+            },
+            "description": "Column to sort by"
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string",
+              "description": "Sort direction",
+              "default": "desc",
+              "title": "Order"
+            },
+            "description": "Sort direction"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated source registry entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedListResponse_SourceRegistryRead_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Register source",
+        "description": "Register a source in the registry. Returns 200 when the source already exists.",
+        "operationId": "register_source_api_v1_sources_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceRegistryCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New source created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryRead"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Source already registered (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (e.g. unknown project module)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sources/bulk": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Bulk register sources",
+        "description": "Register many sources in one request. Existing sources are returned in `existing` without error.",
+        "operationId": "bulk_register_sources_api_v1_sources_bulk_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceRegistryBulkCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryBulkCreateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (e.g. unknown project module)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sources/discover": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Trigger discovery",
+        "description": "Mark sources for rediscovery. Discovery runs asynchronously via the background scheduler.",
+        "operationId": "trigger_discovery_api_v1_sources_discover_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoverTriggerResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (e.g. unknown project module)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sources/{source_id}/executions": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "List source executions",
+        "description": "List batch executions that included this registry source.",
+        "operationId": "list_source_executions_api_v1_sources__source_id__executions_get",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number (1-based)",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number (1-based)"
+          },
+          {
+            "name": "items_per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 1,
+              "description": "Page size (max 50)",
+              "default": 10,
+              "title": "Items Per Page"
+            },
+            "description": "Page size (max 50)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedListResponse_SourceLinkedExecutionItem_"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sources/{source_id}": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Get source",
+        "description": "Return a single source registry entry by UUID.",
+        "operationId": "get_source_api_v1_sources__source_id__get",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryRead"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Update source",
+        "description": "Update enabled flag and/or stale-after hours for a source.",
+        "operationId": "update_source_api_v1_sources__source_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceRegistryUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Delete source",
+        "description": "Permanently remove a source from the registry.",
+        "operationId": "delete_source_api_v1_sources__source_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sources/{source_id}/metadata": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Get source metadata",
+        "description": "Return archive metadata rows linked to this source.",
+        "operationId": "get_source_metadata_api_v1_sources__source_id__metadata_get",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceMetadataResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "List project modules",
+        "description": "List registered project module names (from beampipe.projects entry points).",
+        "operationId": "list_projects_api_v1_projects_get",
+        "responses": {
+          "200": {
+            "description": "Registered project module names",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectModuleListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/contracts": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "List project contracts",
+        "description": "Return discovery contract validation status for every registered project module.",
+        "operationId": "list_project_contracts_api_v1_projects_contracts_get",
+        "responses": {
+          "200": {
+            "description": "Discovery contract validation status for all modules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectModuleContractListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/contracts/{project_module}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Get project contract",
+        "description": "Return discovery contract validation status for a single project module.",
+        "operationId": "get_project_module_contract_api_v1_projects_contracts__project_module__get",
+        "parameters": [
+          {
+            "name": "project_module",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Module"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contract validation status for one module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectModuleContractStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sources": {
+      "get": {
+        "summary": "View Sources",
+        "description": "Very simple HTML page for source registry in development - to be removed.",
+        "operationId": "view_sources_sources_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BatchExecutionRecordCreate": {
+        "properties": {
+          "project_module": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Module",
+            "description": "Project module identifier",
+            "examples": [
+              "wallaby_hires"
+            ]
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionSourceSpec"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Sources",
+            "description": "Sources with optional per-source SBID filters"
+          },
+          "archive_name": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Archive Name",
+            "description": "Archive name",
+            "examples": [
+              "casda"
+            ]
+          },
+          "deployment_profile_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Profile Name",
+            "description": "DALiuGE deployment profile name to resolve at create time"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_module",
+          "sources",
+          "archive_name"
+        ],
+        "title": "BatchExecutionRecordCreate",
+        "examples": [
+          {
+            "archive_name": "casda",
+            "deployment_profile_name": "setonix-slurm-ini",
+            "project_module": "wallaby_hires",
+            "sources": [
+              {
+                "source_identifier": "HIPASSJ1313-15"
+              }
+            ]
+          }
+        ]
+      },
+      "BatchExecutionRecordListItem": {
+        "properties": {
+          "uuid": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Uuid"
+          },
+          "project_module": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Module",
+            "description": "Project module identifier",
+            "examples": [
+              "wallaby_hires"
+            ]
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionSourceSpec"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Sources",
+            "description": "Sources with optional per-source SBID filters"
+          },
+          "archive_name": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Archive Name",
+            "description": "Archive name",
+            "examples": [
+              "casda"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "deployment_profile_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Profile Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExecutionStatus"
+          },
+          "execution_phase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduler_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Name"
+          },
+          "scheduler_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Job Id"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count",
+            "default": 0
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "created_by_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_module",
+          "sources",
+          "archive_name",
+          "status"
+        ],
+        "title": "BatchExecutionRecordListItem"
+      },
+      "BatchExecutionRecordRead": {
+        "properties": {
+          "uuid": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Uuid"
+          },
+          "project_module": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Module",
+            "description": "Project module identifier",
+            "examples": [
+              "wallaby_hires"
+            ]
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionSourceSpec"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Sources",
+            "description": "Sources with optional per-source SBID filters"
+          },
+          "archive_name": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Archive Name",
+            "description": "Archive name",
+            "examples": [
+              "casda"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "deployment_profile_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Profile Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExecutionStatus"
+          },
+          "execution_phase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workflow_manifest": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Manifest"
+          },
+          "beampipe_run_record": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beampipe Run Record"
+          },
+          "scheduler_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Name"
+          },
+          "scheduler_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Job Id"
+          },
+          "dim_session_status_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim Session Status Url",
+            "description": "DIM GET /api/sessions/{id}/status"
+          },
+          "dim_graph_status_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim Graph Status Url",
+            "description": "DIM GET /api/sessions/{id}/graph/status"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count",
+            "default": 0
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "created_by_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_module",
+          "sources",
+          "archive_name",
+          "status"
+        ],
+        "title": "BatchExecutionRecordRead"
+      },
+      "BatchExecutionRecordUpdate": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New execution status"
+          },
+          "workflow_manifest": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Manifest",
+            "description": "Workflow manifest JSON"
+          },
+          "scheduler_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Name",
+            "description": "Name of scheduler"
+          },
+          "scheduler_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Job Id",
+            "description": "Scheduler job ID"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error",
+            "description": "Error message if execution failed"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BatchExecutionRecordUpdate",
+        "description": "Schema for updating execution records via API.\n\nNote: status, started_at, and completed_at are managed automatically\nby the service layer based on status transitions."
+      },
+      "BatchExecutionStatusResponse": {
+        "properties": {
+          "uuid": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExecutionStatus"
+          },
+          "execution_phase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduler_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Name"
+          },
+          "scheduler_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Job Id"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count",
+            "default": 0
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "slurm_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slurm State",
+            "description": "Last observed SLURM state."
+          },
+          "dim_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim State",
+            "description": "Last observed DIM session state."
+          }
+        },
+        "type": "object",
+        "required": [
+          "uuid",
+          "status"
+        ],
+        "title": "BatchExecutionStatusResponse"
+      },
+      "BatchExecutionSummary": {
+        "properties": {
+          "uuid": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Uuid"
+          },
+          "project_module": {
+            "type": "string",
+            "title": "Project Module"
+          },
+          "archive_name": {
+            "type": "string",
+            "title": "Archive Name"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExecutionStatus"
+          },
+          "execution_phase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduler_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Name"
+          },
+          "scheduler_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Job Id"
+          },
+          "requested_source_count": {
+            "type": "integer",
+            "title": "Requested Source Count",
+            "default": 0
+          },
+          "requested_source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requested Source Identifiers"
+          },
+          "slurm_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slurm State"
+          },
+          "dim_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim State"
+          },
+          "last_observation_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Observation At"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count",
+            "default": 0
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds",
+            "description": "completed_at - started_at when both are present (rounded ms precision)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "uuid",
+          "project_module",
+          "archive_name",
+          "status"
+        ],
+        "title": "BatchExecutionSummary"
+      },
+      "Body_login_for_access_token_api_v1_login_post": {
+        "properties": {
+          "grant_type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^password$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grant Type"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "title": "Password"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope",
+            "default": ""
+          },
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Id"
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "password",
+            "title": "Client Secret"
+          }
+        },
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "Body_login_for_access_token_api_v1_login_post"
+      },
+      "DaliugeDeploymentProfileCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Name",
+            "description": "Unique profile name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "Human-readable description"
+          },
+          "project_module": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Module",
+            "description": "Owning project module; null for global profiles"
+          },
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default",
+            "description": "Use as default profile for the project or globally",
+            "default": false
+          },
+          "translation": {
+            "$ref": "#/components/schemas/DaliugeTranslationConfig"
+          },
+          "deployment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RestRemoteDeploymentConfig"
+              },
+              {
+                "$ref": "#/components/schemas/SlurmRemoteDeploymentConfig"
+              }
+            ],
+            "title": "Deployment",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "rest_remote": "#/components/schemas/RestRemoteDeploymentConfig",
+                "slurm_remote": "#/components/schemas/SlurmRemoteDeploymentConfig"
+              }
+            }
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "translation",
+          "deployment"
+        ],
+        "title": "DaliugeDeploymentProfileCreate",
+        "description": "API create: nested ``translation`` + ``deployment`` only.",
+        "examples": [
+          {
+            "deployment": {
+              "kind": "rest_remote",
+              "verify_ssl": false
+            },
+            "description": "Default REST remote profile for Setonix",
+            "is_default": true,
+            "name": "setonix-rest-default",
+            "project_module": "wallaby_hires",
+            "translation": {
+              "algo": "metis",
+              "num_islands": 0,
+              "num_par": 1
+            }
+          }
+        ]
+      },
+      "DaliugeDeploymentProfileRead": {
+        "properties": {
+          "uuid": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Profile name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "Human-readable description"
+          },
+          "project_module": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Module",
+            "description": "Owning project module when scoped"
+          },
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default",
+            "description": "Default profile flag",
+            "default": false
+          },
+          "translation": {
+            "$ref": "#/components/schemas/DaliugeTranslationConfig",
+            "description": "DALiuGE translator configuration"
+          },
+          "deployment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RestRemoteDeploymentConfig"
+              },
+              {
+                "$ref": "#/components/schemas/SlurmRemoteDeploymentConfig"
+              }
+            ],
+            "title": "Deployment",
+            "description": "REST or Slurm remote deployment configuration",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "rest_remote": "#/components/schemas/RestRemoteDeploymentConfig",
+                "slurm_remote": "#/components/schemas/SlurmRemoteDeploymentConfig"
+              }
+            }
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "translation",
+          "deployment"
+        ],
+        "title": "DaliugeDeploymentProfileRead",
+        "description": "API read."
+      },
+      "DaliugeDeploymentProfileUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "project_module": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Module"
+          },
+          "is_default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Default"
+          },
+          "translation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DaliugeTranslationPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deployment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment",
+            "description": "Deployment config"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DaliugeDeploymentProfileUpdate"
+      },
+      "DaliugeTranslationConfig": {
+        "properties": {
+          "algo": {
+            "type": "string",
+            "enum": [
+              "metis",
+              "mysarkar"
+            ],
+            "title": "Algo",
+            "description": "Partition algorithm",
+            "default": "metis"
+          },
+          "num_par": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Num Par",
+            "description": "Partitions / nodes",
+            "default": 1
+          },
+          "num_islands": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Num Islands",
+            "description": "Data islands; dlg -s",
+            "default": 0
+          },
+          "tm_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tm Url",
+            "description": "Translator base URL"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DaliugeTranslationConfig",
+        "description": "DALiuGE translator (partition + TM URL)."
+      },
+      "DaliugeTranslationPatch": {
+        "properties": {
+          "algo": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "metis",
+                  "mysarkar"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Algo"
+          },
+          "num_par": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Par"
+          },
+          "num_islands": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Islands"
+          },
+          "tm_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tm Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DaliugeTranslationPatch",
+        "description": "Partial translation."
+      },
+      "DiscoverTriggerRequest": {
+        "properties": {
+          "project_module": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Module",
+            "description": "Project module identifier",
+            "examples": [
+              "wallaby_hires"
+            ]
+          },
+          "source_identifier": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Identifier",
+            "description": "Single source to mark."
+          },
+          "source_identifiers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Identifiers",
+            "description": "List of sources to mark. Omit to all enabled sources for the project."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_module"
+        ],
+        "title": "DiscoverTriggerRequest",
+        "examples": [
+          {
+            "project_module": "wallaby_hires"
+          },
+          {
+            "project_module": "wallaby_hires",
+            "source_identifier": "HIPASSJ1318-21"
+          }
+        ]
+      },
+      "DiscoverTriggerResponse": {
+        "properties": {
+          "project_module": {
+            "type": "string",
+            "title": "Project Module",
+            "description": "Project module that was used"
+          },
+          "marked_count": {
+            "type": "integer",
+            "title": "Marked Count",
+            "description": "Number of sources marked for recheck"
+          },
+          "source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Source Identifiers",
+            "description": "Source identifiers that were updated"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Human-readable status note",
+            "default": "Sources marked for rediscovery. Discovery runs asynchronously via the background scheduler."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_module",
+          "marked_count",
+          "source_identifiers"
+        ],
+        "title": "DiscoverTriggerResponse"
+      },
+      "ErrorDetail": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Human-readable error message",
+            "examples": [
+              "Resource not found"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorDetail",
+        "description": "Standard FastAPI / HTTPException error body."
+      },
+      "ExecuteAcceptedResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Always `accepted` when enqueue succeeds",
+            "default": "accepted"
+          },
+          "execution_id": {
+            "type": "string",
+            "title": "Execution Id",
+            "description": "Batch execution UUID"
+          },
+          "job_id": {
+            "type": "string",
+            "title": "Job Id",
+            "description": "ARQ worker job id"
+          },
+          "do_stage": {
+            "type": "boolean",
+            "title": "Do Stage",
+            "description": "Whether archive staging was requested"
+          },
+          "do_submit": {
+            "type": "boolean",
+            "title": "Do Submit",
+            "description": "Whether DALiuGE submit was requested"
+          }
+        },
+        "type": "object",
+        "required": [
+          "execution_id",
+          "job_id",
+          "do_stage",
+          "do_submit"
+        ],
+        "title": "ExecuteAcceptedResponse",
+        "description": "Response when an execution job is accepted onto the worker queue.",
+        "examples": [
+          {
+            "do_stage": true,
+            "do_submit": true,
+            "execution_id": "019302ab-1234-7890-abcd-ef1234567890",
+            "job_id": "abc123",
+            "status": "accepted"
+          }
+        ]
+      },
+      "ExecuteRequest": {
+        "properties": {
+          "do_stage": {
+            "type": "boolean",
+            "title": "Do Stage",
+            "description": "Stage data from the archive before execution",
+            "default": true
+          },
+          "do_submit": {
+            "type": "boolean",
+            "title": "Do Submit",
+            "description": "Submit the graph to DALiuGE after staging",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ExecuteRequest",
+        "examples": [
+          {
+            "do_stage": true,
+            "do_submit": true
+          }
+        ]
+      },
+      "ExecutionLedgerSnapshot": {
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "title": "Execution Id",
+            "description": "Batch execution UUID"
+          },
+          "project_module": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Module",
+            "description": "Project module identifier"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "description": "Execution status"
+          },
+          "execution_phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Phase",
+            "description": "Current execution phase"
+          },
+          "scheduler_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Job Id",
+            "description": "Scheduler session or job id"
+          },
+          "scheduler_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduler Name",
+            "description": "Scheduler backend name"
+          },
+          "has_manifest": {
+            "type": "boolean",
+            "title": "Has Manifest",
+            "description": "Whether a workflow manifest is persisted"
+          },
+          "has_beampipe_run_record": {
+            "type": "boolean",
+            "title": "Has Beampipe Run Record",
+            "description": "Whether beampipe run record data exists in the manifest"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error",
+            "description": "Most recent error message"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count",
+            "description": "Number of retries attempted",
+            "default": 0
+          },
+          "deployment_profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Profile Id",
+            "description": "Linked deployment profile UUID"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At",
+            "description": "ISO-8601 creation timestamp"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At",
+            "description": "ISO-8601 last update timestamp"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At",
+            "description": "ISO-8601 start timestamp"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At",
+            "description": "ISO-8601 completion timestamp"
+          },
+          "sources": {
+            "items": {},
+            "type": "array",
+            "title": "Sources",
+            "description": "Source specs included in the execution"
+          },
+          "source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Source Identifiers",
+            "description": "Flattened source identifier list"
+          },
+          "beampipe_run_record": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beampipe Run Record",
+            "description": "Embedded beampipe run record from workflow manifest when present"
+          },
+          "dim_session_status_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim Session Status Url",
+            "description": "DIM session status URL when available"
+          },
+          "dim_graph_status_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim Graph Status Url",
+            "description": "DIM graph status URL when available"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "execution_id",
+          "has_manifest",
+          "has_beampipe_run_record"
+        ],
+        "title": "ExecutionLedgerSnapshot",
+        "description": "Compact execution view for operators and Restate workflow correlation."
+      },
+      "ExecutionPhase": {
+        "type": "string",
+        "enum": [
+          "stage_and_manifest",
+          "submit"
+        ],
+        "title": "ExecutionPhase",
+        "description": "STAGE_AND_MANIFEST: staging (if enabled) and manifest build not yet persisted.\nSUBMIT: workflow_manifest is on the row; remainder is graph resolve + TM/DIM (or slurm)."
+      },
+      "ExecutionSortField": {
+        "type": "string",
+        "enum": [
+          "created_at",
+          "updated_at",
+          "started_at",
+          "completed_at",
+          "status"
+        ],
+        "title": "ExecutionSortField"
+      },
+      "ExecutionSourceSpec": {
+        "properties": {
+          "source_identifier": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Source Identifier",
+            "examples": [
+              "HIPASSJ1318-21"
+            ]
+          },
+          "sbids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sbids",
+            "description": "Optional: restrict to these SBIDs for this source. Omit to include all.",
+            "examples": [
+              [
+                "12345",
+                "12346"
+              ]
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_identifier"
+        ],
+        "title": "ExecutionSourceSpec",
+        "description": "Per-source spec with optional SBID filter.",
+        "examples": [
+          {
+            "source_identifier": "HIPASSJ1318-21"
+          }
+        ]
+      },
+      "ExecutionStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "running",
+          "not_submitted",
+          "awaiting_scheduler",
+          "completed",
+          "failed",
+          "retrying",
+          "cancelled"
+        ],
+        "title": "ExecutionStatus"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthCheck": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Overall health: `healthy` or `unhealthy`",
+            "examples": [
+              "healthy"
+            ]
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment",
+            "description": "Deployment environment name",
+            "examples": [
+              "local"
+            ]
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version",
+            "description": "Application version string"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp",
+            "description": "ISO-8601 timestamp of the probe"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "environment",
+          "timestamp"
+        ],
+        "title": "HealthCheck",
+        "description": "Liveness probe: process is running.",
+        "examples": [
+          {
+            "environment": "local",
+            "status": "healthy",
+            "timestamp": "2026-05-29T12:00:00+00:00",
+            "version": "0.1.0"
+          }
+        ]
+      },
+      "PaginatedListResponse_BatchExecutionRecordListItem_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/BatchExecutionRecordListItem"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "total_count": {
+            "type": "integer",
+            "title": "Total Count"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "items_per_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Items Per Page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "total_count",
+          "has_more"
+        ],
+        "title": "PaginatedListResponse[BatchExecutionRecordListItem]"
+      },
+      "PaginatedListResponse_DaliugeDeploymentProfileRead_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/DaliugeDeploymentProfileRead"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "total_count": {
+            "type": "integer",
+            "title": "Total Count"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "items_per_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Items Per Page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "total_count",
+          "has_more"
+        ],
+        "title": "PaginatedListResponse[DaliugeDeploymentProfileRead]"
+      },
+      "PaginatedListResponse_SourceLinkedExecutionItem_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/SourceLinkedExecutionItem"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "total_count": {
+            "type": "integer",
+            "title": "Total Count"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "items_per_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Items Per Page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "total_count",
+          "has_more"
+        ],
+        "title": "PaginatedListResponse[SourceLinkedExecutionItem]"
+      },
+      "PaginatedListResponse_SourceRegistryRead_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRegistryRead"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "total_count": {
+            "type": "integer",
+            "title": "Total Count"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "items_per_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Items Per Page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "total_count",
+          "has_more"
+        ],
+        "title": "PaginatedListResponse[SourceRegistryRead]"
+      },
+      "PaginatedListResponse_UserRead_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/UserRead"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "total_count": {
+            "type": "integer",
+            "title": "Total Count"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "items_per_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Items Per Page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "total_count",
+          "has_more"
+        ],
+        "title": "PaginatedListResponse[UserRead]"
+      },
+      "PrepareExecutionRequest": {
+        "properties": {
+          "project_module": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Module",
+            "description": "Project module identifier",
+            "examples": [
+              "wallaby_hires"
+            ]
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionSourceSpec"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Sources",
+            "description": "Sources with optional per-source SBID filters"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_module",
+          "sources"
+        ],
+        "title": "PrepareExecutionRequest",
+        "examples": [
+          {
+            "project_module": "wallaby_hires",
+            "sources": [
+              {
+                "source_identifier": "HIPASSJ1313-15"
+              }
+            ]
+          }
+        ]
+      },
+      "PrepareExecutionResponse": {
+        "properties": {
+          "project_module": {
+            "type": "string",
+            "title": "Project Module",
+            "description": "Project module identifier"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionSourceSpec"
+            },
+            "type": "array",
+            "title": "Sources",
+            "description": "Requested source specs"
+          },
+          "sources_preview": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Sources Preview",
+            "description": "Per-source preview: source_identifier, sbid_count, dataset_count"
+          },
+          "total_datasets": {
+            "type": "integer",
+            "title": "Total Datasets",
+            "description": "Total archive datasets across all sources"
+          },
+          "valid": {
+            "type": "boolean",
+            "title": "Valid",
+            "description": "True when the execution would pass validation"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors",
+            "description": "Validation errors when valid is false"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_module",
+          "sources",
+          "sources_preview",
+          "total_datasets",
+          "valid"
+        ],
+        "title": "PrepareExecutionResponse",
+        "description": "Preview of what would be included in an execution."
+      },
+      "ProjectModuleContractListResponse": {
+        "properties": {
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "description": "Number of modules in the response"
+          },
+          "modules": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectModuleContractStatus"
+            },
+            "type": "array",
+            "title": "Modules",
+            "description": "Contract status per module"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "count",
+          "modules"
+        ],
+        "title": "ProjectModuleContractListResponse"
+      },
+      "ProjectModuleContractStatus": {
+        "properties": {
+          "project_module": {
+            "type": "string",
+            "title": "Project Module",
+            "description": "Project module identifier"
+          },
+          "valid": {
+            "type": "boolean",
+            "title": "Valid",
+            "description": "Whether discovery contract validation passed"
+          },
+          "required_adapters": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Required Adapters"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "Validation/import error when invalid"
+          },
+          "exports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Exports",
+            "description": "Known module exports relevant to discovery integration"
+          },
+          "enrichment_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Enrichment Keys",
+            "description": "Discover bundle enrichment keys this module uses (e.g. ra_dec_vsys, sbid_to_eval_file)"
+          },
+          "graph_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graph Path",
+            "description": "Local path to .graph file if set"
+          },
+          "graph_github_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graph Github Url",
+            "description": "GitHub raw URL to graph if set"
+          },
+          "workflow_execution_automation": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Execution Automation",
+            "description": "Module WORKFLOW_EXECUTION_AUTOMATION dict when present (workflow auto-scheduling policy)"
+          },
+          "workflow_discovery_automation": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Discovery Automation",
+            "description": "Module WORKFLOW_DISCOVERY_AUTOMATION dict when present (discovery auto-scheduling policy)"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_module",
+          "valid"
+        ],
+        "title": "ProjectModuleContractStatus"
+      },
+      "ProjectModuleListResponse": {
+        "properties": {
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Projects",
+            "description": "Registered project module names"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "projects"
+        ],
+        "title": "ProjectModuleListResponse",
+        "examples": [
+          {
+            "projects": [
+              "wallaby_hires"
+            ]
+          }
+        ]
+      },
+      "ReadyCheck": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Overall readiness: `healthy` or `unhealthy`",
+            "examples": [
+              "healthy"
+            ]
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment",
+            "description": "Deployment environment name",
+            "examples": [
+              "local"
+            ]
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version",
+            "description": "Application version string"
+          },
+          "app": {
+            "type": "string",
+            "title": "App",
+            "description": "Application process status",
+            "examples": [
+              "healthy"
+            ]
+          },
+          "database": {
+            "type": "string",
+            "title": "Database",
+            "description": "PostgreSQL connectivity status",
+            "examples": [
+              "healthy"
+            ]
+          },
+          "redis": {
+            "type": "string",
+            "title": "Redis",
+            "description": "Redis connectivity status",
+            "examples": [
+              "healthy"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp",
+            "description": "ISO-8601 timestamp of the probe"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "environment",
+          "app",
+          "database",
+          "redis",
+          "timestamp"
+        ],
+        "title": "ReadyCheck",
+        "description": "Readiness probe: required dependencies (database, Redis) are reachable.",
+        "examples": [
+          {
+            "app": "healthy",
+            "database": "healthy",
+            "environment": "local",
+            "redis": "healthy",
+            "status": "healthy",
+            "timestamp": "2026-05-29T12:00:00+00:00",
+            "version": "0.1.0"
+          }
+        ]
+      },
+      "RestRemoteDeploymentConfig": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "rest_remote",
+            "title": "Kind",
+            "default": "rest_remote"
+          },
+          "dim_host_for_tm": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim Host For Tm",
+            "description": "DIM host as seen by translator (gen_pg)"
+          },
+          "dim_port_for_tm": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 65535.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dim Port For Tm"
+          },
+          "deploy_host": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploy Host"
+          },
+          "deploy_port": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 65535.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploy Port"
+          },
+          "verify_ssl": {
+            "type": "boolean",
+            "title": "Verify Ssl",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RestRemoteDeploymentConfig",
+        "description": "DALiuGE REST remote deployment"
+      },
+      "SlurmRemoteDeploymentConfig": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "slurm_remote",
+            "title": "Kind",
+            "default": "slurm_remote"
+          },
+          "login_node": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Login Node"
+          },
+          "ssh_port": {
+            "type": "integer",
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Ssh Port",
+            "description": "SSH port on the login node.",
+            "default": 22
+          },
+          "remote_user": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote User",
+            "description": "Remote user for SLURM_REMOTE_USER / USER"
+          },
+          "account": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Account"
+          },
+          "home_dir": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Home Dir"
+          },
+          "log_dir": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Log Dir"
+          },
+          "exec_prefix": {
+            "type": "string",
+            "title": "Exec Prefix",
+            "description": "FACILITY EXEC_PREFIX used in generated jobsub command prefix.",
+            "default": "srun -l"
+          },
+          "dlg_root": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Dlg Root"
+          },
+          "venv": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Venv",
+            "description": "Shell snippet to source before invoking(e.g. 'source /software/projects/<acc>/venv/bin/activate')."
+          },
+          "modules": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modules",
+            "description": "Optional multi-line 'module load' snippet sourced before venv."
+          },
+          "facility": {
+            "type": "string",
+            "enum": [
+              "galaxy_mwa",
+              "galaxy_askap",
+              "magnus",
+              "galaxy",
+              "setonix",
+              "shao",
+              "hyades",
+              "ood",
+              "ood_cloud"
+            ],
+            "title": "Facility",
+            "description": "``-f`` facility known to dlg.deploy.configs (setonix, hyades, ...).",
+            "default": "setonix"
+          },
+          "job_duration_minutes": {
+            "type": "integer",
+            "maximum": 10080.0,
+            "minimum": 1.0,
+            "title": "Job Duration Minutes",
+            "description": "``-t`` minutes passed to create_dlg_job.",
+            "default": 30
+          },
+          "num_nodes": {
+            "type": "integer",
+            "maximum": 1024.0,
+            "minimum": 1.0,
+            "title": "Num Nodes",
+            "description": "``-n`` number of compute nodes.",
+            "default": 1
+          },
+          "num_islands": {
+            "type": "integer",
+            "maximum": 64.0,
+            "minimum": 0.0,
+            "title": "Num Islands",
+            "description": "``-s`` number of data islands.",
+            "default": 1
+          },
+          "verbose_level": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Verbose Level",
+            "description": "``-v`` verbosity level.",
+            "default": 1
+          },
+          "max_threads": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Threads",
+            "description": "``-T`` drop thread pool size.",
+            "default": 0
+          },
+          "all_nics": {
+            "type": "boolean",
+            "title": "All Nics",
+            "description": "``--all_nics`` flag.",
+            "default": false
+          },
+          "zerorun": {
+            "type": "boolean",
+            "title": "Zerorun",
+            "description": "``--zerorun`` flag.",
+            "default": false
+          },
+          "sleepncopy": {
+            "type": "boolean",
+            "title": "Sleepncopy",
+            "description": "``--sleepncopy`` flag.",
+            "default": false
+          },
+          "check_with_session": {
+            "type": "boolean",
+            "title": "Check With Session",
+            "description": "``--check_with_session`` flag.",
+            "default": false
+          },
+          "verify_ssl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verify Ssl",
+            "description": "TLS verification used by TM translation HTTP calls."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "login_node",
+          "account",
+          "home_dir",
+          "log_dir",
+          "dlg_root"
+        ],
+        "title": "SlurmRemoteDeploymentConfig",
+        "description": "DALiuGE remote SLURM deployment (generated INI + SSH submit).\n\nAt submit time Beampipe stages a generated DALiuGE ``--config_file`` INI on\nthe login node and calls ``python3 -m dlg.deploy.create_dlg_job`` over SSH.\nProfile fields therefore capture both transport/auth details and the\nINI-style facility/engine controls used by DALiuGE."
+      },
+      "SourceLinkedExecutionItem": {
+        "properties": {
+          "uuid": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Uuid",
+            "description": "Batch execution record id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExecutionStatus"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "uuid",
+          "status",
+          "created_at"
+        ],
+        "title": "SourceLinkedExecutionItem",
+        "description": "One batch execution that included this registry source."
+      },
+      "SourceMetadataResponse": {
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/SourceRegistryRead",
+            "description": "Source registry entry"
+          },
+          "metadata": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Metadata",
+            "description": "Archive metadata rows for this source"
+          },
+          "metadata_count": {
+            "type": "integer",
+            "title": "Metadata Count",
+            "description": "Number of metadata rows returned"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "metadata",
+          "metadata_count"
+        ],
+        "title": "SourceMetadataResponse",
+        "description": "Response for GET /sources/{id}/metadata."
+      },
+      "SourceRegistryBulkCreate": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRegistryCreate"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Items",
+            "description": "List of sources to register"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "SourceRegistryBulkCreate",
+        "description": "Schema for bulk source registration.",
+        "examples": [
+          {
+            "items": [
+              {
+                "enabled": true,
+                "project_module": "wallaby_hires",
+                "source_identifier": "HIPASSJ1318-21"
+              }
+            ]
+          }
+        ]
+      },
+      "SourceRegistryBulkCreateResponse": {
+        "properties": {
+          "created": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRegistryRead"
+            },
+            "type": "array",
+            "title": "Created"
+          },
+          "existing": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRegistryRead"
+            },
+            "type": "array",
+            "title": "Existing"
+          },
+          "total_created": {
+            "type": "integer",
+            "title": "Total Created"
+          },
+          "total_existing": {
+            "type": "integer",
+            "title": "Total Existing"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "created",
+          "existing",
+          "total_created",
+          "total_existing"
+        ],
+        "title": "SourceRegistryBulkCreateResponse",
+        "description": "Response for bulk source registration."
+      },
+      "SourceRegistryCreate": {
+        "properties": {
+          "project_module": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Module",
+            "description": "Project module identifier",
+            "examples": [
+              "wallaby"
+            ]
+          },
+          "source_identifier": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Source Identifier",
+            "description": "Source identifier",
+            "examples": [
+              "HIPASSJ1318-21"
+            ]
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "description": "Whether discovery monitoring is enabled for this source",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_module",
+          "source_identifier"
+        ],
+        "title": "SourceRegistryCreate",
+        "examples": [
+          {
+            "enabled": true,
+            "project_module": "wallaby_hires",
+            "source_identifier": "HIPASSJ1318-21"
+          }
+        ]
+      },
+      "SourceRegistryRead": {
+        "properties": {
+          "uuid": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Uuid"
+          },
+          "project_module": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Module",
+            "description": "Project module identifier",
+            "examples": [
+              "wallaby"
+            ]
+          },
+          "source_identifier": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Source Identifier",
+            "description": "Source identifier",
+            "examples": [
+              "HIPASSJ1318-21"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "last_checked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Checked At",
+            "description": "Last discovery check timestamp"
+          },
+          "last_attempted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Attempted At",
+            "description": "Last failed discovery attempt timestamp (retry cooldown anchor)."
+          },
+          "stale_after_hours": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale After Hours",
+            "description": "Recheck after this many hours; null = use default (DISCOVERY_STALE_HOURS)"
+          },
+          "discovery_signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discovery Signature",
+            "description": "Hash of last discovery state; used to skip writes when unchanged."
+          },
+          "discovery_claim_expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discovery Claim Expires At",
+            "description": "When the current discovery lease expires; null means no active lease."
+          },
+          "workflow_run_pending": {
+            "type": "boolean",
+            "title": "Workflow Run Pending",
+            "description": "True when source has newly discovered metadata awaiting orchestration.",
+            "default": false
+          },
+          "workflow_run_pending_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Run Pending At",
+            "description": "Timestamp when source was marked pending for workflow execution."
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_module",
+          "source_identifier",
+          "enabled"
+        ],
+        "title": "SourceRegistryRead"
+      },
+      "SourceRegistryUpdate": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled",
+            "description": "monitoring is enabled for this source?"
+          },
+          "stale_after_hours": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale After Hours",
+            "description": "Recheck after this many hours; null = use default. Omit to leave unchanged."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SourceRegistryUpdate",
+        "description": "Schema for updating source registry entries via API."
+      },
+      "SourceSortField": {
+        "type": "string",
+        "enum": [
+          "created_at",
+          "updated_at",
+          "source_identifier",
+          "last_checked_at"
+        ],
+        "title": "SourceSortField"
+      },
+      "TapHealthCheck": {
+        "properties": {
+          "all_ok": {
+            "type": "boolean",
+            "title": "All Ok",
+            "description": "True when every configured TAP endpoint responded successfully"
+          },
+          "endpoints": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Endpoints",
+            "description": "Per-endpoint probe result keyed by adapter name",
+            "examples": [
+              {
+                "casda": true
+              }
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp",
+            "description": "ISO-8601 timestamp of the probe"
+          }
+        },
+        "type": "object",
+        "required": [
+          "all_ok",
+          "endpoints",
+          "timestamp"
+        ],
+        "title": "TapHealthCheck",
+        "description": "Archive TAP endpoint reachability (used by discovery).",
+        "examples": [
+          {
+            "all_ok": true,
+            "endpoints": {
+              "casda": true,
+              "vizier": true
+            },
+            "timestamp": "2026-05-29T12:00:00+00:00"
+          }
+        ]
+      },
+      "Token": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "title": "Access Token",
+            "description": "JWT bearer token"
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type",
+            "description": "Token type (always `bearer`)",
+            "default": "bearer"
+          }
+        },
+        "type": "object",
+        "required": [
+          "access_token"
+        ],
+        "title": "Token"
+      },
+      "UserCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 30,
+            "minLength": 2,
+            "title": "Name",
+            "examples": [
+              "User Userson"
+            ]
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+$",
+            "title": "Username",
+            "examples": [
+              "userson"
+            ]
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email",
+            "examples": [
+              "user.userson@example.com"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "pattern": "^.{8,}|[0-9]+|[A-Z]+|[a-z]+|[^a-zA-Z0-9]+$",
+            "title": "Password",
+            "examples": [
+              "Str1ngst!"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "username",
+          "email",
+          "password"
+        ],
+        "title": "UserCreate"
+      },
+      "UserRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 30,
+            "minLength": 2,
+            "title": "Name",
+            "examples": [
+              "User Userson"
+            ]
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+$",
+            "title": "Username",
+            "examples": [
+              "userson"
+            ]
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email",
+            "examples": [
+              "user.userson@example.com"
+            ]
+          },
+          "profile_image_url": {
+            "type": "string",
+            "title": "Profile Image Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "username",
+          "email",
+          "profile_image_url"
+        ],
+        "title": "UserRead"
+      },
+      "UserUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 30,
+                "minLength": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name",
+            "examples": [
+              "User Userberg"
+            ]
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 20,
+                "minLength": 2,
+                "pattern": "^[a-z0-9]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username",
+            "examples": [
+              "userberg"
+            ]
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "email"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email",
+            "examples": [
+              "user.userberg@example.com"
+            ]
+          },
+          "profile_image_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(https?|ftp)://[^\\s/$.?#].[^\\s]*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Image Url",
+            "examples": [
+              "https://www.profileimageurl.com"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "UserUpdate"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "type": "oauth2",
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "/api/v1/login"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "login",
+      "description": "OAuth2 password flow and token refresh."
+    },
+    {
+      "name": "projects",
+      "description": "Registered project modules and discovery contract validation status."
+    },
+    {
+      "name": "sources",
+      "description": "Source registry: register astronomical sources, trigger discovery, and read archive metadata."
+    },
+    {
+      "name": "executions",
+      "description": "Batch execution ledger: create runs, enqueue staging/submit jobs, and inspect status."
+    },
+    {
+      "name": "deployment-profiles",
+      "description": "DALiuGE deployment profiles (translation + REST/Slurm remote deployment configuration)."
+    },
+    {
+      "name": "health",
+      "description": "Liveness, readiness, and archive TAP connectivity probes."
+    },
+    {
+      "name": "users",
+      "description": "User management (admin)."
+    }
+  ],
+  "servers": [
+    {
+      "url": "/",
+      "description": "Current host (API routes are under /api/v1)"
+    }
+  ],
+  "x-tagGroups": [
+    {
+      "name": "Authentication",
+      "tags": [
+        "login"
+      ]
+    },
+    {
+      "name": "Core workflow",
+      "tags": [
+        "projects",
+        "sources",
+        "executions",
+        "deployment-profiles"
+      ]
+    },
+    {
+      "name": "Operations",
+      "tags": [
+        "health"
+      ]
+    },
+    {
+      "name": "Admin",
+      "tags": [
+        "users"
+      ]
+    }
+  ]
+}

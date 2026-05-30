@@ -6,6 +6,7 @@ from uuid import UUID
 from ....crud.crud_daliuge_deployment_profile import crud_daliuge_deployment_profile
 from ...config import settings
 from ...ledger.service import execution_ledger_service
+from ...ledger.source_readiness import source_identifiers_from_specs
 from ...positive_policy import positive_float_optional, positive_int_optional
 from ...projects import get_workflow_execution_automation_policy
 from ...registry.service import source_registry_service
@@ -69,8 +70,10 @@ def workflow_execution_policy_for_module(project_module: str) -> dict[str, Any]:
         "execution_max_duration_minutes_external",
         "execution_max_attempts_db",
         "execution_max_duration_minutes_db",
-        "execution_max_polls",
-        "execution_poll_max_duration_minutes",
+        "execution_poll_step_max_attempts",
+        "execution_poll_step_max_duration_minutes",
+        "execution_rest_remote_poll_max_rounds",
+        "execution_slurm_remote_poll_max_rounds",
         "discovery_max_attempts_external",
         "discovery_max_duration_minutes_external",
         "discovery_max_attempts_db",
@@ -134,7 +137,15 @@ async def process_workflow_module_for_execution_schedule(
             reason_counts[reason] = int(reason_counts.get(reason, 0)) + 1
 
     policy = workflow_execution_policy_for_module(module_name)
-    logger.debug("event=workflow_execution_policy project_module=%s policy=%s", module_name, policy)
+    logger.debug(
+        "event=workflow_execution_policy project_module=%s enabled=%s "
+        "max_sources_per_execution=%s tick_execution_run_limit=%s tick_execution_source_limit=%s",
+        module_name,
+        policy.get("enabled"),
+        policy.get("max_sources_per_execution"),
+        policy.get("tick_execution_run_limit"),
+        policy.get("tick_execution_source_limit"),
+    )
     if not policy["enabled"]:
         _bump("disabled")
         skipped_modules.append(module_name)
@@ -247,12 +258,6 @@ async def process_workflow_module_for_execution_schedule(
         )
         return 0
     max_executions_for_module = min(max_executions_for_module, admitted_executions)
-
-    max_sources_for_module = min(
-        max_sources_for_module,
-        max_executions_for_module * max(1, int(policy["max_sources_per_execution"])),
-    )
-
     claim_token, pending_sources = await source_registry_service.claim_pending_sources_for_workflow_run(
         db=db,
         project_module=module_name,
@@ -272,7 +277,7 @@ async def process_workflow_module_for_execution_schedule(
         dep_uuid, dep_resolve_failed = await _resolve_deployment_profile_uuid_for_policy(db, policy)
         if dep_resolve_failed:
             _bump("deployment_profile_not_found")
-            logger.error(
+            logger.warning(
                 "event=workflow_execution_schedule_missing_deployment_profile "
                 "project_module=%s deployment_profile_name=%s",
                 module_name,
@@ -328,6 +333,16 @@ async def process_workflow_module_for_execution_schedule(
                     deployment_profile_id=dep_uuid,
                     created_by_id=None,
                 )
+                # Once the source is admitted into an execution, clear its pending flag
+                # so the next scheduler tick doesn't re-schedule it while this execution
+                # is still in-flight (e.g. AWAITING_SCHEDULER / Restate completion).
+                admitted_source_ids = source_identifiers_from_specs(valid)
+                await source_registry_service.clear_workflow_pending_for_sources(
+                    db=db,
+                    project_module=module_name,
+                    source_identifiers=admitted_source_ids,
+                    commit=False,
+                )
                 execution_uuid = str(execution["uuid"])
                 await execution_ledger_service.update_execution_status(
                     db=db,
@@ -366,7 +381,8 @@ async def process_workflow_module_for_execution_schedule(
     logger.info(
         "event=workflow_execution_gate_funnel project_module=%s requested_runs_tick=%s "
         "runs_after_project_concurrency=%s runs_after_global_concurrency=%s runs_after_rate=%s "
-        "enqueued_runs=%s requested_sources_tick=%s admitted_sources=%s",
+        "enqueued_runs=%s requested_sources_tick=%s admitted_sources=%s "
+        "claimed_sources=%s",
         module_name,
         requested_runs_tick,
         runs_after_project_concurrency,
@@ -375,5 +391,6 @@ async def process_workflow_module_for_execution_schedule(
         created_for_module,
         requested_sources_tick,
         sources_scheduled,
+        len(pending_sources),
     )
     return sources_scheduled

@@ -35,6 +35,10 @@ class ExecutionLogContextFilter(logging.Filter):
         return True
 
 
+def current_arq_correlation() -> tuple[str | None, int | None]:
+    return _arq_job_id_var.get(), _job_try_var.get()
+
+
 def parse_arq_job_context(ctx: Any) -> tuple[str | None, int | None]:
     if isinstance(ctx, dict):
         job_id = ctx.get("job_id")

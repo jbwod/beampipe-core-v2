@@ -1,0 +1,30 @@
+info:
+  name: Prepare Execution
+  type: http
+  seq: 1
+  tags:
+    - executions
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/executions/prepare"
+  body:
+    type: json
+    data: |-
+      {
+        "project_module": "wallaby_hires",
+        "sources": [
+          {
+            "source_identifier": "HIPASSJ1313-15"
+          }
+        ]
+      }
+  auth:
+    type: bearer
+    token: "{{access_token}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

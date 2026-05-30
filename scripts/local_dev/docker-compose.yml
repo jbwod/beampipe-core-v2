@@ -1,0 +1,171 @@
+# Local Development
+
+x-app-common: &app-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  restart: unless-stopped
+  volumes:
+    - ./src/app:/code/app
+
+x-worker-env: &worker-env
+  WORKFLOW_ENGINE_EXECUTION: restate
+  WORKFLOW_ENGINE_DISCOVERY: restate
+  RESTATE_INGRESS_BASE_URL: http://restate:8080
+  RESTATE_INVOKE_TIMEOUT_SECONDS: "30.0"
+
+services:
+  web:
+    <<: *app-common
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  scheduler:
+    <<: *app-common
+    command: arq app.core.worker.settings.SchedulerSettings
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    <<: *app-common
+    command: sh -c "sleep 5 && exec arq app.core.worker.settings.WorkerSettings"
+    environment:
+      <<: *worker-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      restate:
+        condition: service_healthy
+      beamcore_rs:
+        condition: service_healthy
+
+  restate:
+    image: docker.restate.dev/restatedev/restate:latest
+    command: --node-name=restate-1
+    volumes:
+      - restate-data:/restate-data
+    ports:
+      - "8081:8080"
+      - "9070:9070"
+      - "5122:5122"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9070/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  beamcore_rs:
+    <<: *app-common
+    command: uvicorn app.restate_app:app --host 0.0.0.0 --port 9080
+    ports:
+      - "9080:9080"
+    environment:
+      WORKFLOW_ENGINE_EXECUTION: arq
+      WORKFLOW_ENGINE_DISCOVERY: arq
+      RESTATE_INGRESS_BASE_URL: http://restate:8080
+      RESTATE_INVOKE_TIMEOUT_SECONDS: "30.0"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  restate_register:
+    image: docker.restate.dev/restatedev/restate-cli:latest
+    environment:
+      RESTATE_ADMIN_URL: http://restate:9070
+    depends_on:
+      restate:
+        condition: service_healthy
+      beamcore_rs:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 2
+        restate deployments register http://beamcore_rs:9080 --use-http1.1 --force --yes
+    restart: "no"
+
+  db:
+    image: postgres:13
+    env_file:
+      - .env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    expose:
+      - "6379"
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate:
+    <<: *app-common
+    command: sh -c "cd /code/src && python -m alembic upgrade head"
+    volumes:
+      - ./src:/code/src
+    working_dir: /code/src
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    profiles: ["init"]
+
+  create_superuser:
+    <<: *app-common
+    command: python -m src.scripts.create_first_superuser
+    volumes:
+      - ./src:/code/src
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    profiles: ["init"]
+
+volumes:
+  postgres-data:
+  redis-data:
+  restate-data:

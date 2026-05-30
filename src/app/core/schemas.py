@@ -1,31 +1,79 @@
 import uuid as uuid_pkg
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from uuid6 import uuid7
 
 
 class HealthCheck(BaseModel):
-    status: str
-    environment: str
-    version: str
-    timestamp: str
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "healthy",
+                    "environment": "local",
+                    "version": "0.1.0",
+                    "timestamp": "2026-05-29T12:00:00+00:00",
+                }
+            ]
+        }
+    )
+
+    status: str = Field(description="Overall health: `healthy` or `unhealthy`", examples=["healthy"])
+    environment: str = Field(description="Deployment environment name", examples=["local"])
+    version: str | None = Field(default=None, description="Application version string")
+    timestamp: str = Field(description="ISO-8601 timestamp of the probe")
 
 
 class ReadyCheck(BaseModel):
-    status: str
-    environment: str
-    version: str
-    app: str
-    database: str
-    redis: str
-    timestamp: str
+    """Readiness probe: required dependencies (database, Redis) are reachable."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "healthy",
+                    "environment": "local",
+                    "version": "0.1.0",
+                    "app": "healthy",
+                    "database": "healthy",
+                    "redis": "healthy",
+                    "timestamp": "2026-05-29T12:00:00+00:00",
+                }
+            ]
+        }
+    )
+
+    status: str = Field(description="Overall readiness: `healthy` or `unhealthy`", examples=["healthy"])
+    environment: str = Field(description="Deployment environment name", examples=["local"])
+    version: str | None = Field(default=None, description="Application version string")
+    app: str = Field(description="Application process status", examples=["healthy"])
+    database: str = Field(description="PostgreSQL connectivity status", examples=["healthy"])
+    redis: str = Field(description="Redis connectivity status", examples=["healthy"])
+    timestamp: str = Field(description="ISO-8601 timestamp of the probe")
 
 
 class TapHealthCheck(BaseModel):
-    all_ok: bool
-    endpoints: dict[str, bool]
-    timestamp: str
+    """Archive TAP endpoint reachability (used by discovery)."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "all_ok": True,
+                    "endpoints": {"casda": True, "vizier": True},
+                    "timestamp": "2026-05-29T12:00:00+00:00",
+                }
+            ]
+        }
+    )
+
+    all_ok: bool = Field(description="True when every configured TAP endpoint responded successfully")
+    endpoints: dict[str, bool] = Field(
+        description="Per-endpoint probe result keyed by adapter name",
+        examples=[{"casda": True}],
+    )
+    timestamp: str = Field(description="ISO-8601 timestamp of the probe")
 
 
 # -------------- mixins --------------
@@ -45,8 +93,8 @@ class PersistentDeletion(BaseModel):
 
 # -------------- token --------------
 class Token(BaseModel):
-    access_token: str
-    token_type: str
+    access_token: str = Field(description="JWT bearer token")
+    token_type: str = Field(default="bearer", description="Token type (always `bearer`)")
 
 
 class TokenData(BaseModel):
