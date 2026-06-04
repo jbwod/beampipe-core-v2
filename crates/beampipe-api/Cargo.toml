@@ -1,0 +1,38 @@
+[package]
+name = "beampipe-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+beampipe-adapters = { path = "../beampipe-adapters" }
+beampipe-alerts = { path = "../beampipe-alerts" }
+beampipe-auth = { path = "../beampipe-auth" }
+beampipe-config = { path = "../beampipe-config" }
+beampipe-db = { path = "../beampipe-db" }
+beampipe-domain = { path = "../beampipe-domain" }
+beampipe-jobs = { path = "../beampipe-jobs" }
+beampipe-metrics = { path = "../beampipe-metrics" }
+beampipe-orchestration = { path = "../beampipe-orchestration" }
+beampipe-profiles = { path = "../beampipe-profiles" }
+beampipe-project = { path = "../beampipe-project" }
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+redis.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+utoipa.workspace = true

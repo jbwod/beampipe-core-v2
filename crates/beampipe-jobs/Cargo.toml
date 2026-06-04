@@ -1,0 +1,29 @@
+[package]
+name = "beampipe-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+beampipe-adapters = { path = "../beampipe-adapters" }
+beampipe-alerts = { path = "../beampipe-alerts" }
+beampipe-config = { path = "../beampipe-config" }
+beampipe-db = { path = "../beampipe-db" }
+beampipe-domain = { path = "../beampipe-domain" }
+beampipe-orchestration = { path = "../beampipe-orchestration" }
+beampipe-profiles = { path = "../beampipe-profiles" }
+beampipe-metrics = { path = "../beampipe-metrics" }
+beampipe-project = { path = "../beampipe-project" }
+async-trait.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

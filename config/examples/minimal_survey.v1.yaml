@@ -1,0 +1,63 @@
+apiVersion: beampipe.dev/v1
+kind: ProjectConfig
+metadata:
+  id: minimal_survey
+  description: Generic single-archive survey
+
+definitions:
+  transforms:
+    has_rows:
+      kind: is_present
+    trim:
+      kind: trim
+    lowercase:
+      kind: lowercase
+
+source_identity:
+  canonical: source_identifier
+  template_vars:
+    source_identifier:
+      from: canonical
+    source_name:
+      transform: lowercase
+
+adapters:
+  required:
+    - casda
+  tap:
+    timeout_seconds: 60
+    retries: 1
+
+discovery:
+  queries:
+    - name: visibility
+      adapter: casda
+      template: |
+        SELECT o.* FROM ivoa.obscore o
+        WHERE o.filename LIKE '{source_identifier}%'
+  prepare_metadata:
+    field_map:
+      source_identifier:
+        from: source_identifier
+      dataset_id:
+        from: filename
+      visibility_filename:
+        from: filename
+    discovery_flags:
+      visibility_complete:
+        from: enrichments.visibility
+        transform: has_rows
+
+manifest:
+  group_by:
+    - source_identifier
+  source_template:
+    source_identifier: "{source_identifier}"
+
+automation:
+  discovery:
+    enabled: true
+    batch_size: 10
+    tick_discovery_batch_limit: 10
+    concurrent_discovery_batch_limit: 4
+    stale_after_hours: 24

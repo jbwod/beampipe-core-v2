@@ -1,0 +1,100 @@
+docs_dir: boilerplate_docs
+
+site_name: ~ beampipe-core
+site_description: Event-driven control plane for scheduler-aware radio astronomy workflows (Rust v2).
+site_author: Jack Blackwood
+site_url: https://beampipe-core-v2.readthedocs.io/
+
+theme:
+  name: material
+  custom_dir: boilerplate_docs/overrides
+  font: false
+  logo: https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e
+  favicon: https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e
+  features:
+    - navigation.instant
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.follow
+  palette:
+    - scheme: slate
+      primary: black
+      accent: blue
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - First run: getting-started/first-run.md
+      - Configuration: getting-started/configuration.md
+  - Operations:
+      - Operator guide: operations/operator-guide.md
+      - Workers and scheduling: operations/workers-scheduling.md
+      - Observability: operations/observability.md
+      - Production runbook: operations/production-runbook.md
+  - Architecture:
+      - Control plane: architecture/control-plane.md
+      - Discovery and execution: architecture/lifecycle.md
+      - Deployment profiles: architecture/deployment-profiles.md
+  - Project configs:
+      - YAML model: project-configs/index.md
+      - Transforms: project-configs/transforms.md
+      - WASM hooks: project-configs/wasm-hooks.md
+      - DALiuGE Graphs: project-configs/graph-patches.md
+  - API:
+      - Workflow guide: api/index.md
+      - Redoc reference: api/reference.md
+  - Tools:
+      - Bruno collection: tools/bruno.md
+      - OpenAPI export: tools/openapi.md
+  - Contributing: contributing.md
+
+exclude_docs: ""
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/jbwod/beampipe-core-v2
+
+extra_css:
+  - stylesheets/extra.css
+  - stylesheets/redoc.css
+
+extra_javascript:
+  - javascripts/terminal-ui.js
+  - javascripts/redoc-init.js
+
+repo_name: jbwod/beampipe-core-v2
+repo_url: https://github.com/jbwod/beampipe-core-v2
+edit_uri: edit/main/boilerplate_docs/

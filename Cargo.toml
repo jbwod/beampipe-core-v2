@@ -1,0 +1,59 @@
+[workspace]
+members = [
+    "crates/beampipe-adapters",
+    "crates/beampipe-alerts",
+    "crates/beampipe-api",
+    "crates/beampipe-auth",
+    "crates/beampipe-cli",
+    "crates/beampipe-config",
+    "crates/beampipe-db",
+    "crates/beampipe-domain",
+    "crates/beampipe-jobs",
+    "crates/beampipe-metrics",
+    "crates/beampipe-orchestration",
+    "crates/beampipe-profiles",
+    "crates/beampipe-project",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Jack Blackwood <23326698@student.uwa.edu.au>"]
+
+[workspace.dependencies]
+anyhow = "1"
+argon2 = "0.5"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["macros"] }
+bcrypt = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
+thiserror = "1"
+time = { version = "0.3", features = ["serde", "formatting"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }
+uuid = { version = "1", features = ["serde", "v7", "v4"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+russh = "0.61"
+ssh-key = "0.7.0-rc.10"
+axum-test = "15"
+
+[profile.dev]
+debug = true
+

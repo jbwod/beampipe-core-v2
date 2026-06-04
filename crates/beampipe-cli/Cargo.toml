@@ -1,0 +1,32 @@
+[package]
+name = "beampipe-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "beampipe"
+path = "src/main.rs"
+
+[dependencies]
+beampipe-api = { path = "../beampipe-api" }
+beampipe-auth = { path = "../beampipe-auth" }
+beampipe-config = { path = "../beampipe-config" }
+beampipe-db = { path = "../beampipe-db" }
+beampipe-jobs = { path = "../beampipe-jobs" }
+beampipe-metrics = { path = "../beampipe-metrics" }
+beampipe-project = { path = "../beampipe-project" }
+beampipe-profiles = { path = "../beampipe-profiles" }
+beampipe-orchestration = { path = "../beampipe-orchestration" }
+beampipe-adapters = { path = "../beampipe-adapters" }
+beampipe-domain = { path = "../beampipe-domain" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
+tokio.workspace = true
+tracing.workspace = true
+utoipa.workspace = true

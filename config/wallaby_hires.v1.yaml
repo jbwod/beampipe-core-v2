@@ -1,0 +1,133 @@
+apiVersion: beampipe.dev/v1
+kind: ProjectConfig
+metadata:
+  id: wallaby_hires
+  description: WALLABY HiRes CASDA pipeline reference config
+
+definitions:
+  transforms:
+    hipass_source_name:
+      kind: strip_prefix
+      prefix: HIPASS
+    askap_sbid:
+      kind: extract_digits
+    scan_id_from_did:
+      kind: split_last
+      separators: ["/", ":", "#"]
+    has_rows:
+      kind: is_present
+    normalized_sbid:
+      kind: chain
+      steps: [askap_sbid, trim]
+    trim:
+      kind: trim
+
+source_identity:
+  canonical: source_identifier
+  template_vars:
+    source_identifier:
+      from: canonical
+    source_name:
+      transform: hipass_source_name
+
+adapters:
+  required:
+    - casda
+    - vizier
+  tap:
+    timeout_seconds: 90
+    retries: 2
+
+graph:
+  url: https://raw.githubusercontent.com/jbwod/wallaby-hires-beampipe/refs/heads/main/dlg-graphs/wallaby-hires_deploy-setonix-beampipe.graph
+
+discovery:
+  queries:
+    - name: visibility
+      adapter: casda
+      template: |
+        SELECT o.* FROM ivoa.obscore o
+        INNER JOIN (
+          SELECT MAX(t_max) AS mx FROM ivoa.obscore
+          WHERE filename LIKE '{source_identifier}%'
+          AND obs_collection IN ('ASKAP Pilot Survey for WALLABY', 'WALLABY')
+        ) AS latest ON o.t_max = latest.mx
+        WHERE o.filename LIKE '{source_identifier}%'
+        AND o.obs_collection IN ('ASKAP Pilot Survey for WALLABY', 'WALLABY')
+    - name: ra_dec_vsys
+      adapter: vizier
+      template: |
+        SELECT HIPASS, RAJ2000, DEJ2000, RV50max, RV50min, RVmom
+        FROM "VIII/73/hicat" WHERE HIPASS = '{source_name}'
+  enrichments:
+    - name: sbid_to_eval_file
+      adapter: casda
+      template: |
+        SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'
+  prepare_metadata:
+    field_map:
+      source_identifier:
+        from: source_identifier
+      dataset_id:
+        from: filename
+      visibility_filename:
+        from: filename
+      sbid:
+        from: obs_id
+        transform: normalized_sbid
+      scan_id:
+        from: obs_publisher_did
+        transform: scan_id_from_did
+    discovery_flags:
+      ra_dec_vsys_complete:
+        from: enrichments.ra_dec_vsys
+        transform: has_rows
+    signature:
+      exclude_fields:
+        - access_url
+        - evaluation_file_access_url
+        - filesize
+        - t_max
+        - t_min
+      include_discovery_flags: true
+
+manifest:
+  group_by:
+    - source_identifier
+    - sbid
+  source_template:
+    source_identifier: "{source_identifier}"
+    ra_string: "{flags.ra_string}"
+    dec_string: "{flags.dec_string}"
+    vsys: "{flags.vsys}"
+
+graph_patches:
+  - match:
+      kind: node_name
+      equals: Scatter/GenericScatterApp/Beam
+    set:
+      num_of_copies: "$count(sbids[].datasets[])"
+
+automation:
+  execution:
+    enabled: true
+    archive_name: casda
+    # Wallaby Slurm graph expects one source per run.
+    max_sources_per_execution: 1
+    tick_execution_source_limit: 1000
+    tick_execution_run_limit: 50
+    min_sources_to_trigger: 1
+    max_wait_minutes: 1440
+    claim_ttl_minutes: 180
+    concurrent_execution_run_limit: 10
+    deployment_profile_name: slurm-remote
+    execution_slurm_remote_poll_max_rounds: 40
+    execution_slurm_remote_poll_interval_seconds: 60
+  discovery:
+    enabled: true
+    tick_discovery_source_limit: 1000
+    batch_size: 10
+    tick_discovery_batch_limit: 100
+    concurrent_discovery_batch_limit: 24
+    stale_after_hours: 24
+
