@@ -1,0 +1,36 @@
+{
+  "name": "slurm-remote",
+  "description": "WALLABY HiRes on Setonix via slurm_remote",
+  "project_module": "wallaby_hires",
+  "is_default": true,
+  "translation": {
+    "algo": "metis",
+    "num_par": 1,
+    "num_islands": 1,
+    "tm_url": "http://dlg-tm.desk"
+  },
+  "deployment": {
+    "kind": "slurm_remote",
+    "login_node": "setonix.pawsey.org.au",
+    "ssh_port": 22,
+    "remote_user": "jblackwood",
+    "facility": "setonix",
+    "account": "pawsey0411",
+    "home_dir": "/scratch/pawsey0411",
+    "dlg_root": "/scratch/pawsey0411/jblackwood/dlg",
+    "log_dir": "/scratch/pawsey0411/jblackwood/dlg/log",
+    "modules": "module load singularity/4.1.0-askap && module load py-numpy/1.26.4 && module use /group/askap/modulefiles",
+    "venv": "source /software/projects/pawsey0411/jblackwood/venv/bin/activate",
+    "exec_prefix": "srun -l",
+    "job_duration_minutes": 50,
+    "num_nodes": 1,
+    "num_islands": 1,
+    "max_threads": 0,
+    "verbose_level": 1,
+    "all_nics": false,
+    "zerorun": false,
+    "sleepncopy": false,
+    "check_with_session": false,
+    "verify_ssl": false
+  }
+}

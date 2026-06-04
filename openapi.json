@@ -1,0 +1,4530 @@
+{
+  "components": {
+    "schemas": {
+      "AdapterConfig": {
+        "properties": {
+          "casda_tap_url": {
+            "nullable": true,
+            "type": "string"
+          },
+          "required": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tap": {
+            "$ref": "#/components/schemas/TapConfig"
+          },
+          "vizier_tap_url": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AlertDeliveryRow": {
+        "properties": {
+          "channel_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "payload": {},
+          "rule_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "status",
+          "payload",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "AlertRuleCreate": {
+        "properties": {
+          "channel_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cooldown_minutes": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_module": {
+            "nullable": true,
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "trigger_config": {},
+          "trigger_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "trigger_kind",
+          "trigger_config",
+          "channel_ids"
+        ],
+        "type": "object"
+      },
+      "AlertRuleRow": {
+        "properties": {
+          "channel_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cooldown_minutes": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "last_fired_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_module": {
+            "nullable": true,
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "trigger_config": {},
+          "trigger_kind": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "name",
+          "enabled",
+          "severity",
+          "trigger_kind",
+          "trigger_config",
+          "channel_ids",
+          "cooldown_minutes",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "AlertRuleUpdate": {
+        "properties": {
+          "channel_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "cooldown_minutes": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "enabled": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "trigger_config": {
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "AutomationConfig": {
+        "properties": {
+          "discovery": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DiscoveryAutomationConfig"
+              }
+            ],
+            "nullable": true
+          },
+          "execution": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionAutomationConfig"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "DaliugeAlgo": {
+        "enum": [
+          "metis",
+          "mysarkar"
+        ],
+        "type": "string"
+      },
+      "DaliugeTranslationConfig": {
+        "properties": {
+          "algo": {
+            "$ref": "#/components/schemas/DaliugeAlgo"
+          },
+          "num_islands": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "num_par": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "tm_url": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "DefinitionsConfig": {
+        "properties": {
+          "transforms": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TransformSpec"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "DeploymentConfig": {
+        "discriminator": {
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RestRemoteDeploymentConfig"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "rest_remote"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SlurmRemoteDeploymentConfig"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "slurm_remote"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        ]
+      },
+      "DeploymentProfile": {
+        "properties": {
+          "deployment": {
+            "$ref": "#/components/schemas/DeploymentConfig"
+          },
+          "description": {
+            "nullable": true,
+            "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_module": {
+            "nullable": true,
+            "type": "string"
+          },
+          "translation": {
+            "$ref": "#/components/schemas/DaliugeTranslationConfig"
+          }
+        },
+        "required": [
+          "name",
+          "translation",
+          "deployment"
+        ],
+        "type": "object"
+      },
+      "DiscoverTriggerRequest": {
+        "properties": {
+          "project_module": {
+            "type": "string"
+          },
+          "source_identifier": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_module"
+        ],
+        "type": "object"
+      },
+      "DiscoverTriggerResponse": {
+        "properties": {
+          "marked_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_module",
+          "marked_count",
+          "source_identifiers",
+          "message"
+        ],
+        "type": "object"
+      },
+      "DiscoveryAutomationConfig": {
+        "properties": {
+          "batch_size": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "claim_ttl_minutes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "concurrent_discovery_batch_limit": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "queue_max_depth": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "stale_after_hours": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "tick_discovery_batch_limit": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "tick_discovery_source_limit": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "DiscoveryConfig": {
+        "properties": {
+          "enrichments": {
+            "items": {
+              "$ref": "#/components/schemas/DiscoveryQuery"
+            },
+            "type": "array"
+          },
+          "prepare_metadata": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrepareMetadataConfig"
+              }
+            ],
+            "nullable": true
+          },
+          "queries": {
+            "items": {
+              "$ref": "#/components/schemas/DiscoveryQuery"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "DiscoveryQuery": {
+        "properties": {
+          "adapter": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "source_id_transform": {
+            "nullable": true,
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "adapter",
+          "template"
+        ],
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "properties": {
+          "detail": {
+            "description": "Human-readable error message",
+            "examples": [
+              "Resource not found"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "type": "object"
+      },
+      "ExecuteRequest": {
+        "properties": {
+          "do_stage": {
+            "type": "boolean"
+          },
+          "do_submit": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ExecutionAutomationConfig": {
+        "properties": {
+          "archive_name": {
+            "type": "string"
+          },
+          "claim_ttl_minutes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "concurrent_execution_run_limit": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "deployment_profile_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "execution_rest_remote_poll_interval_seconds": {
+            "format": "double",
+            "nullable": true,
+            "type": "number"
+          },
+          "execution_rest_remote_poll_max_rounds": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "execution_slurm_remote_poll_interval_seconds": {
+            "format": "double",
+            "nullable": true,
+            "type": "number"
+          },
+          "execution_slurm_remote_poll_max_rounds": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "max_sources_per_execution": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_wait_minutes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "min_sources_to_trigger": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tick_execution_run_limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tick_execution_source_limit": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "ExecutionCreate": {
+        "properties": {
+          "archive_name": {
+            "type": "string"
+          },
+          "deployment_profile_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "deployment_profile_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "sources": {
+            "items": {},
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_module",
+          "sources",
+          "archive_name"
+        ],
+        "type": "object"
+      },
+      "ExecutionPatchRequest": {
+        "properties": {
+          "last_error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_job_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionStatus"
+              }
+            ],
+            "nullable": true
+          },
+          "workflow_manifest": {
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "ExecutionStatus": {
+        "enum": [
+          "pending",
+          "running",
+          "awaiting_scheduler",
+          "not_submitted",
+          "completed",
+          "failed",
+          "retrying",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "ExtensionConfig": {
+        "properties": {
+          "hooks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "wasm_sha256": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GraphConfig": {
+        "properties": {
+          "path": {
+            "nullable": true,
+            "type": "string"
+          },
+          "url": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GraphPatch": {
+        "properties": {
+          "match": {},
+          "set": {}
+        },
+        "required": [
+          "match",
+          "set"
+        ],
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "service"
+        ],
+        "type": "object"
+      },
+      "JobCreate": {
+        "properties": {
+          "execution_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "nullable": true,
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "payload": {}
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "LogoutRequest": {
+        "properties": {
+          "access_token": {
+            "nullable": true,
+            "type": "string"
+          },
+          "refresh_token": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ManifestConfig": {
+        "properties": {
+          "dataset_template": {
+            "nullable": true
+          },
+          "expand_from": {
+            "nullable": true,
+            "type": "string"
+          },
+          "group_by": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          },
+          "source_template": {}
+        },
+        "type": "object"
+      },
+      "NotificationChannelCreate": {
+        "properties": {
+          "config": {},
+          "enabled": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "config"
+        ],
+        "type": "object"
+      },
+      "NotificationChannelRow": {
+        "properties": {
+          "config": {},
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "name",
+          "kind",
+          "config",
+          "enabled",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "NotificationChannelUpdate": {
+        "properties": {
+          "config": {
+            "nullable": true
+          },
+          "enabled": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "name": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PrepareMetadataConfig": {
+        "properties": {
+          "discovery_flags": {},
+          "field_map": {},
+          "signature": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SignatureConfig"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "ProjectConfig": {
+        "properties": {
+          "adapters": {
+            "$ref": "#/components/schemas/AdapterConfig"
+          },
+          "apiVersion": {
+            "type": "string"
+          },
+          "automation": {
+            "$ref": "#/components/schemas/AutomationConfig"
+          },
+          "definitions": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DefinitionsConfig"
+              }
+            ],
+            "nullable": true
+          },
+          "discovery": {
+            "$ref": "#/components/schemas/DiscoveryConfig"
+          },
+          "extension": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExtensionConfig"
+              }
+            ],
+            "nullable": true
+          },
+          "graph": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GraphConfig"
+              }
+            ],
+            "nullable": true
+          },
+          "graph_patches": {
+            "items": {
+              "$ref": "#/components/schemas/GraphPatch"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "manifest": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ManifestConfig"
+              }
+            ],
+            "nullable": true
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/ProjectMetadata"
+          },
+          "source_identity": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SourceIdentityConfig"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "apiVersion",
+          "kind",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "ProjectMetadata": {
+        "properties": {
+          "description": {
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "ProvenanceEventRow": {
+        "properties": {
+          "actor": {
+            "nullable": true,
+            "type": "string"
+          },
+          "correlation_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "execution_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "payload": {},
+          "project_module": {
+            "type": "string"
+          },
+          "source_identifier": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_at",
+          "event_type",
+          "project_module",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "ProvenanceSummary": {
+        "properties": {
+          "config_version": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "discovery_signature": {
+            "nullable": true,
+            "type": "string"
+          },
+          "recent_events": {
+            "items": {
+              "$ref": "#/components/schemas/ProvenanceEventRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "recent_events"
+        ],
+        "type": "object"
+      },
+      "ReadyResponse": {
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "jobs_running": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "queue_depth": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "redis": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tap_casda": {
+            "type": "string"
+          },
+          "tap_vizier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "service",
+          "database",
+          "redis",
+          "tap_casda",
+          "tap_vizier",
+          "queue_depth",
+          "jobs_running"
+        ],
+        "type": "object"
+      },
+      "RefreshRequest": {
+        "properties": {
+          "refresh_token": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RestRemoteDeploymentConfig": {
+        "properties": {
+          "deploy_host": {
+            "nullable": true,
+            "type": "string"
+          },
+          "deploy_port": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "dim_host_for_tm": {
+            "nullable": true,
+            "type": "string"
+          },
+          "dim_port_for_tm": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "verify_ssl": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "SignatureConfig": {
+        "properties": {
+          "exclude_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "include_discovery_flags": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "SlurmRemoteDeploymentConfig": {
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "all_nics": {
+            "type": "boolean"
+          },
+          "check_with_session": {
+            "type": "boolean"
+          },
+          "dlg_root": {
+            "type": "string"
+          },
+          "exec_prefix": {
+            "type": "string"
+          },
+          "facility": {
+            "type": "string"
+          },
+          "home_dir": {
+            "type": "string"
+          },
+          "job_duration_minutes": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "log_dir": {
+            "type": "string"
+          },
+          "login_node": {
+            "type": "string"
+          },
+          "max_threads": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "modules": {
+            "nullable": true,
+            "type": "string"
+          },
+          "num_islands": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "num_nodes": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "remote_user": {
+            "nullable": true,
+            "type": "string"
+          },
+          "sleepncopy": {
+            "type": "boolean"
+          },
+          "slurm_template": {
+            "nullable": true,
+            "type": "string"
+          },
+          "ssh_port": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "venv": {
+            "nullable": true,
+            "type": "string"
+          },
+          "verbose_level": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "verify_ssl": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "zerorun": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "login_node",
+          "account",
+          "home_dir",
+          "log_dir",
+          "dlg_root"
+        ],
+        "type": "object"
+      },
+      "SourceBulkCreate": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SourceCreate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "SourceBulkCreateResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRegistryRow"
+            },
+            "type": "array"
+          },
+          "total": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "SourceCreate": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "source_identifier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_module",
+          "source_identifier"
+        ],
+        "type": "object"
+      },
+      "SourceExecutionStatus": {
+        "properties": {
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "discovery_complete": {
+            "type": "boolean"
+          },
+          "discovery_signature": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_executed_discovery_signature": {
+            "nullable": true,
+            "type": "string"
+          },
+          "pending_age_seconds": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "ready_for_execution": {
+            "type": "boolean"
+          },
+          "signature_matches_last_execution": {
+            "type": "boolean"
+          },
+          "workflow_run_pending": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ready_for_execution",
+          "discovery_complete",
+          "workflow_run_pending",
+          "signature_matches_last_execution",
+          "blockers"
+        ],
+        "type": "object"
+      },
+      "SourceIdentityConfig": {
+        "properties": {
+          "canonical": {
+            "type": "string"
+          },
+          "template_vars": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TemplateVarSpec"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "SourceRegistryRow": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "discovery_claim_expires_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "discovery_claim_token": {
+            "nullable": true,
+            "type": "string"
+          },
+          "discovery_signature": {
+            "nullable": true,
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "last_attempted_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "last_checked_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "last_executed_discovery_signature": {
+            "nullable": true,
+            "type": "string"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "source_identifier": {
+            "type": "string"
+          },
+          "stale_after_hours": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "workflow_claim_expires_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "workflow_claim_token": {
+            "nullable": true,
+            "type": "string"
+          },
+          "workflow_claimed_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "workflow_run_pending": {
+            "type": "boolean"
+          },
+          "workflow_run_pending_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "project_module",
+          "source_identifier",
+          "enabled",
+          "created_at",
+          "workflow_run_pending"
+        ],
+        "type": "object"
+      },
+      "SourceUpdate": {
+        "properties": {
+          "enabled": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "stale_after_hours": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "TapConfig": {
+        "properties": {
+          "fail_open": {
+            "type": "boolean"
+          },
+          "retries": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout_seconds": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "TemplateVarSpec": {
+        "properties": {
+          "from": {
+            "nullable": true,
+            "type": "string"
+          },
+          "transform": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "refresh_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token",
+          "refresh_token",
+          "token_type"
+        ],
+        "type": "object"
+      },
+      "TransformSpec": {
+        "properties": {
+          "default": {
+            "nullable": true,
+            "type": "string"
+          },
+          "from": {
+            "nullable": true,
+            "type": "string"
+          },
+          "group": {
+            "format": "int32",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "pattern": {
+            "nullable": true,
+            "type": "string"
+          },
+          "prefix": {
+            "nullable": true,
+            "type": "string"
+          },
+          "separators": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "steps": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "suffix": {
+            "nullable": true,
+            "type": "string"
+          },
+          "to": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "ValidationReport": {
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "spec_sha256": {
+            "type": "string"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id",
+          "valid",
+          "errors",
+          "spec_sha256"
+        ],
+        "type": "object"
+      },
+      "WasmUploadResponse": {
+        "properties": {
+          "project_config_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "wasm_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wasm_sha256",
+          "project_config_id"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "/api/v2/login"
+          }
+        },
+        "type": "oauth2"
+      }
+    }
+  },
+  "info": {
+    "contact": {
+      "email": "23326698@student.uwa.edu.au",
+      "name": "Jack Blackwood"
+    },
+    "description": "Beampipe Core (Rust v2)\n\n## Getting started\n\n1. **Authenticate**: `POST /api/v2/login` with the admin **username or email** and password from setup. Copy `access_token` and click **Authorize** (Bearer token).\n2. **List projects**: `GET /api/v2/projects` shows registered project modules.\n3. **Register sources**: `POST /api/v2/sources` (returns 201 or 200 if already registered).\n4. **Run discovery**: `POST /api/v2/sources/discover` marks sources for async archive polling.\n5. **Create execution**: `POST /api/v2/executions/prepare` (preview) then `POST /api/v2/executions`.\n6. **Execute**: `POST /api/v2/executions/{id}/execute` enqueues staging/submit on the worker queue.\n7. **Poll**: `GET /api/v2/executions/{id}/status` or `.../ledger-snapshot` for operator view.\n\n### Common errors\n\n- **401**: missing or expired token. Log in again.\n- **400**: unknown `project_module` (check `GET /api/v2/projects`).\n- **404**: source, execution, or deployment profile not found.\n- **503**: Postgres or dependency unavailable.\n\nHealth: `GET /api/v2/health` (liveness) · `GET /api/v2/ready` (deps).\n\nInteractive docs: `GET /api/v2/docs` (Swagger UI).",
+    "license": {
+      "name": "MIT"
+    },
+    "title": "Beampipe",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v2/alert-deliveries": {
+      "get": {
+        "description": "Audit log of alert deliveries.",
+        "operationId": "list_alert_deliveries",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AlertDeliveryRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List alert deliveries",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/v2/alert-rules": {
+      "get": {
+        "description": "Configured alert rules.",
+        "operationId": "list_alert_rules",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AlertRuleRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List alert rules",
+        "tags": [
+          "alerts"
+        ]
+      },
+      "post": {
+        "description": "Create a new alert rule.",
+        "operationId": "create_alert_rule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertRuleCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertRuleRow"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Create alert rule",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/v2/alert-rules/{id}": {
+      "delete": {
+        "description": "Remove an alert rule.",
+        "operationId": "delete_alert_rule",
+        "parameters": [
+          {
+            "description": "Rule UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Delete alert rule",
+        "tags": [
+          "alerts"
+        ]
+      },
+      "patch": {
+        "description": "Patch alert rule trigger or channels.",
+        "operationId": "update_alert_rule",
+        "parameters": [
+          {
+            "description": "Rule UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertRuleUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertRuleRow"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Update alert rule",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/v2/deployment-profiles": {
+      "get": {
+        "description": "DALiuGE deployment profiles for a project module.",
+        "operationId": "list_deployment_profiles",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List deployment profiles",
+        "tags": [
+          "deployment-profiles"
+        ]
+      },
+      "post": {
+        "description": "Create a translation + deployment profile.",
+        "operationId": "create_deployment_profile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeploymentProfile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Create deployment profile",
+        "tags": [
+          "deployment-profiles"
+        ]
+      }
+    },
+    "/api/v2/deployment-profiles/{id}": {
+      "delete": {
+        "description": "Remove a deployment profile.",
+        "operationId": "delete_deployment_profile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Delete deployment profile",
+        "tags": [
+          "deployment-profiles"
+        ]
+      },
+      "get": {
+        "description": "Fetch one deployment profile.",
+        "operationId": "get_deployment_profile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get deployment profile",
+        "tags": [
+          "deployment-profiles"
+        ]
+      },
+      "patch": {
+        "description": "Patch profile translation or deployment settings.",
+        "operationId": "update_deployment_profile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeploymentProfile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Update deployment profile",
+        "tags": [
+          "deployment-profiles"
+        ]
+      }
+    },
+    "/api/v2/executions": {
+      "get": {
+        "description": "Filter executions by project module and status.",
+        "operationId": "list_executions",
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List executions",
+        "tags": [
+          "executions"
+        ]
+      },
+      "post": {
+        "description": "Create a batch execution ledger record.",
+        "operationId": "create_execution",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Create execution",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/prepare": {
+      "post": {
+        "description": "Validate sources and preview datasets without creating a ledger row.",
+        "operationId": "prepare_execution",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Prepare execution",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}": {
+      "get": {
+        "description": "Full execution record including manifest and scheduler fields.",
+        "operationId": "get_execution",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get execution",
+        "tags": [
+          "executions"
+        ]
+      },
+      "patch": {
+        "description": "Patch status or scheduler metadata; cancel when permitted.",
+        "operationId": "patch_execution",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Update execution",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/events": {
+      "get": {
+        "description": "Provenance timeline for one execution.",
+        "operationId": "list_execution_events",
+        "parameters": [
+          {
+            "description": "Execution UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProvenanceEventRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List execution events",
+        "tags": [
+          "provenance"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/execute": {
+      "post": {
+        "description": "Enqueue staging/submit work on the Postgres job queue.",
+        "operationId": "execute_execution",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteRequest"
+              }
+            }
+          },
+          "description": "",
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Execute execution",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/ledger-snapshot": {
+      "get": {
+        "description": "Compact operator snapshot with provenance summary.",
+        "operationId": "execution_ledger_snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get ledger snapshot",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/status": {
+      "get": {
+        "description": "Status-focused execution view.",
+        "operationId": "execution_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get execution status",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/summary": {
+      "get": {
+        "description": "Progress summary for operators.",
+        "operationId": "execution_summary",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get execution summary",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/health": {
+      "get": {
+        "description": "Return process liveness. Does not check external dependencies.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Liveness probe",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v2/health/tap": {
+      "get": {
+        "description": "Probe configured archive TAP endpoints used by discovery.",
+        "operationId": "health_tap",
+        "responses": {},
+        "summary": "Archive TAP probe",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v2/jobs": {
+      "post": {
+        "description": "Enqueue a Postgres-backed background job (operator/debug).",
+        "operationId": "enqueue_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Enqueue job",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/v2/login": {
+      "post": {
+        "description": "OAuth2 password flow; returns JWT bearer access token.",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "description": "Response"
+          }
+        },
+        "summary": "Login for access token",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v2/logout": {
+      "post": {
+        "description": "Revoke the current access token.",
+        "operationId": "logout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutRequest"
+              }
+            }
+          },
+          "description": "",
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v2/metrics": {
+      "get": {
+        "description": "DB-refreshed gauges and process counters (may require auth unless BEAMPIPE_METRICS_PUBLIC=true).",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "summary": "Prometheus metrics",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v2/notification-channels": {
+      "get": {
+        "description": "Alert delivery channels (webhook, email).",
+        "operationId": "list_notification_channels",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/NotificationChannelRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List notification channels",
+        "tags": [
+          "alerts"
+        ]
+      },
+      "post": {
+        "description": "Register a webhook or SMTP channel.",
+        "operationId": "create_notification_channel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationChannelCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationChannelRow"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Create notification channel",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/v2/notification-channels/{id}": {
+      "delete": {
+        "description": "Remove a notification channel.",
+        "operationId": "delete_notification_channel",
+        "parameters": [
+          {
+            "description": "Channel UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Delete notification channel",
+        "tags": [
+          "alerts"
+        ]
+      },
+      "patch": {
+        "description": "Patch channel configuration.",
+        "operationId": "update_notification_channel",
+        "parameters": [
+          {
+            "description": "Channel UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationChannelUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationChannelRow"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Update notification channel",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/v2/notification-channels/{id}/test": {
+      "post": {
+        "description": "Send a test alert delivery.",
+        "operationId": "test_notification_channel",
+        "parameters": [
+          {
+            "description": "Channel UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Test notification channel",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/v2/project-configs": {
+      "post": {
+        "description": "Upload and validate a versioned survey YAML/JSON config.",
+        "operationId": "upload_project_config",
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationReport"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "description": "Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Upload project config",
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/project-configs/{id}": {
+      "get": {
+        "description": "Fetch active or historical project configuration.",
+        "operationId": "get_project_config",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get project config",
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/project-configs/{id}/versions": {
+      "get": {
+        "description": "Version history for a project module.",
+        "operationId": "list_project_config_versions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List config versions",
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/project-configs/{id}/wasm": {
+      "post": {
+        "description": "Attach optional WASM hooks to a config version.",
+        "operationId": "upload_project_config_wasm",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "",
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmUploadResponse"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Upload WASM module",
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/project-configs/{id}/wasm/{sha256}": {
+      "get": {
+        "operationId": "get_project_config_wasm",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/projects": {
+      "get": {
+        "description": "Registered project modules with active configuration.",
+        "operationId": "list_projects",
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List projects",
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/projects/contracts": {
+      "get": {
+        "description": "Discovery contract validation status per module.",
+        "operationId": "list_project_contracts",
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List project contracts",
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/projects/contracts/{id}": {
+      "get": {
+        "description": "Contract validation detail for one project module.",
+        "operationId": "get_project_contract",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get project contract",
+        "tags": [
+          "project-configs"
+        ]
+      }
+    },
+    "/api/v2/projects/{module}/events": {
+      "get": {
+        "description": "Paginated provenance feed for a project module.",
+        "operationId": "list_project_events",
+        "parameters": [
+          {
+            "description": "Project module name",
+            "in": "path",
+            "name": "module",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProvenanceEventRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List project events",
+        "tags": [
+          "provenance"
+        ]
+      }
+    },
+    "/api/v2/ready": {
+      "get": {
+        "description": "Check PostgreSQL and archive TAP connectivity. Returns HTTP 503 when Postgres is down.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "503": {
+            "description": "Response"
+          }
+        },
+        "summary": "Readiness probe",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v2/refresh": {
+      "post": {
+        "description": "Exchange a valid refresh token for a new access token.",
+        "operationId": "refresh",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "description": "",
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Refresh access token",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v2/sources": {
+      "get": {
+        "description": "Paginated source registry for a project module.",
+        "operationId": "list_sources",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List sources",
+        "tags": [
+          "sources"
+        ]
+      },
+      "post": {
+        "description": "Register or upsert a single astronomical source.",
+        "operationId": "create_source",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Register source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v2/sources/bulk": {
+      "post": {
+        "description": "Register many sources in one request.",
+        "operationId": "bulk_create_sources",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceBulkCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Bulk register sources",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v2/sources/discover": {
+      "post": {
+        "description": "Mark sources for async archive discovery jobs.",
+        "operationId": "discover_sources",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Trigger discovery",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v2/sources/{id}": {
+      "delete": {
+        "description": "Remove a source from the registry.",
+        "operationId": "delete_source",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Delete source",
+        "tags": [
+          "sources"
+        ]
+      },
+      "get": {
+        "description": "Fetch one source registry row.",
+        "operationId": "get_source",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get source",
+        "tags": [
+          "sources"
+        ]
+      },
+      "patch": {
+        "description": "Patch enabled flag or registry fields.",
+        "operationId": "update_source",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Update source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v2/sources/{id}/events": {
+      "get": {
+        "description": "Discovery and execution history for a source.",
+        "operationId": "list_source_events",
+        "parameters": [
+          {
+            "description": "Source UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProvenanceEventRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List source events",
+        "tags": [
+          "provenance"
+        ]
+      }
+    },
+    "/api/v2/sources/{id}/executions": {
+      "get": {
+        "description": "Executions that include this source.",
+        "operationId": "list_source_executions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List executions for source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v2/sources/{id}/metadata": {
+      "get": {
+        "description": "Persisted discovery metadata for a source.",
+        "operationId": "get_source_metadata",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Source archive metadata",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v2/sources/{id}/status": {
+      "get": {
+        "description": "Readiness and blockers for execution scheduling.",
+        "operationId": "get_source_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceExecutionStatus"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Source execution status",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v2/user/me": {
+      "get": {
+        "description": "Return the authenticated user profile.",
+        "operationId": "current_user",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Read current user",
+        "tags": [
+          "auth"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Current host (API routes are under /api/v2)",
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Liveness, readiness, and archive TAP connectivity probes.",
+      "name": "health"
+    },
+    {
+      "description": "OAuth2 password flow and token refresh.",
+      "name": "auth"
+    },
+    {
+      "description": "Source registry: register astronomical sources, trigger discovery, and read archive metadata.",
+      "name": "sources"
+    },
+    {
+      "description": "Batch execution ledger: create runs, enqueue staging/submit jobs, and inspect status.",
+      "name": "executions"
+    },
+    {
+      "description": "Registered project modules and versioned survey configuration.",
+      "name": "project-configs"
+    },
+    {
+      "description": "Postgres-backed async jobs.",
+      "name": "jobs"
+    },
+    {
+      "description": "DALiuGE deployment profiles (translation + REST/Slurm remote deployment configuration).",
+      "name": "deployment-profiles"
+    },
+    {
+      "description": "Notification channels and alert rules.",
+      "name": "alerts"
+    },
+    {
+      "description": "Audit event stream.",
+      "name": "provenance"
+    }
+  ],
+  "x-tagGroups": [
+    {
+      "name": "Authentication",
+      "tags": [
+        "auth"
+      ]
+    },
+    {
+      "name": "Core workflow",
+      "tags": [
+        "sources",
+        "executions",
+        "project-configs",
+        "deployment-profiles",
+        "jobs"
+      ]
+    },
+    {
+      "name": "Operations",
+      "tags": [
+        "health",
+        "provenance",
+        "alerts"
+      ]
+    }
+  ]
+}

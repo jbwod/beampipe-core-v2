@@ -1,0 +1,12 @@
+package beampipe:hooks@0.1.0;
+
+interface project-hooks {
+  /// JSON in JSON out; host validates output shape.
+  prepare-metadata: func(input: string) -> result<string, string>;
+  manifest: func(input: string) -> result<string, string>;
+  graph-patches: func(input: string) -> result<string, string>;
+}
+
+world hooks {
+  export project-hooks;
+}
