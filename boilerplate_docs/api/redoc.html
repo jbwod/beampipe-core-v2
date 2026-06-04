@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>API reference</title>
+    <style>
+      :root {
+        --bg: #050505;
+        --panel: #090b0d;
+        --panel-soft: #0d1117;
+        --border: #3f444c;
+        --border-soft: #24292f;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --subtle: #6e7681;
+        --selection: #1f2328;
+        --font: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font);
+      }
+
+      body {
+        zoom: 0.8;
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+          var(--bg);
+        background-size: 100% 1.45rem;
+      }
+
+      @supports not (zoom: 1) {
+        #redoc-container {
+          transform: scale(0.8);
+          transform-origin: top left;
+          width: 125%;
+        }
+      }
+
+      #redoc-container {
+        min-height: 100vh;
+        width: 100%;
+      }
+
+      body::before {
+        content: "[api] redoc: beampipe-core       /api/v2/openapi.json";
+        display: block;
+        height: 1.8rem;
+        padding: 0.35rem 0.7rem 0;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.72rem;
+        box-sizing: border-box;
+      }
+
+      #redoc-container h1,
+      #redoc-container h2,
+      #redoc-container h3,
+      #redoc-container h4,
+      #redoc-container h5,
+      #redoc-container label,
+      #redoc-container button,
+      #redoc-container strong,
+      #redoc-container [role="heading"],
+      #redoc-container [class*="security"],
+      #redoc-container [class*="Security"],
+      #redoc-container [class*="request"],
+      #redoc-container [class*="Request"],
+      #redoc-container [class*="schema"],
+      #redoc-container [class*="Schema"] {
+        color: var(--text) !important;
+      }
+
+      #redoc-container [class*="secondary"],
+      #redoc-container [class*="Secondary"] {
+        color: var(--text) !important;
+      }
+
+      #redoc-container button,
+      #redoc-container [role="button"],
+      #redoc-container [type="button"] {
+        border: 1px solid #747b86 !important;
+        background-color: #141922 !important;
+        color: var(--text) !important;
+        box-shadow: none !important;
+      }
+
+      #redoc-container button:hover,
+      #redoc-container [role="button"]:hover,
+      #redoc-container [type="button"]:hover {
+        background-color: #1f2630 !important;
+        color: #ffffff !important;
+      }
+
+      #redoc-container table,
+      #redoc-container tr,
+      #redoc-container td,
+      #redoc-container th,
+      #redoc-container pre,
+      #redoc-container code,
+      #redoc-container [class*="panel"],
+      #redoc-container [class*="Panel"],
+      #redoc-container [class*="schema"],
+      #redoc-container [class*="Schema"],
+      #redoc-container [class*="property"],
+      #redoc-container [class*="Property"],
+      #redoc-container [class*="operation"],
+      #redoc-container [class*="Operation"] {
+        border-color: #59616d !important;
+      }
+
+      #redoc-container pre,
+      #redoc-container code,
+      #redoc-container [class*="schema"],
+      #redoc-container [class*="Schema"] {
+        background-color: #10141a !important;
+      }
+    </style>
+    <script src="https://cdn.redoc.ly/redoc/v2.1.5/bundles/redoc.standalone.js"></script>
+  </head>
+  <body>
+    <div id="redoc-container"></div>
+    <script>
+      function forceWhiteLabels() {
+        const container = document.getElementById("redoc-container");
+        if (!container) {
+          return;
+        }
+
+        const labels = [
+          "Authorizations:",
+          "OAuth2PasswordBearer",
+          "Request Body schema:",
+          "application/json",
+          "Payload",
+        ];
+        const walker = document.createTreeWalker(
+          container,
+          NodeFilter.SHOW_TEXT
+        );
+
+        while (walker.nextNode()) {
+          const text = walker.currentNode.textContent.trim();
+          if (!labels.some((label) => text.includes(label))) {
+            continue;
+          }
+
+          let element = walker.currentNode.parentElement;
+          for (let depth = 0; element && depth < 3; depth += 1) {
+            element.style.setProperty("color", "var(--text)", "important");
+            if (
+              text.includes("Payload") &&
+              (element.tagName === "BUTTON" ||
+                element.getAttribute("role") === "button")
+            ) {
+              element.style.setProperty("background-color", "#141922", "important");
+              element.style.setProperty("border-color", "#747b86", "important");
+            }
+            element = element.parentElement;
+          }
+        }
+      }
+
+      Redoc.init(
+        "../openapi.json",
+        {
+          scrollYOffset: 0,
+          hideDownloadButton: false,
+          expandResponses: "200,201,202",
+          nativeScrollbars: true,
+          theme: {
+            breakpoints: {
+              small: "50rem",
+              medium: "80rem",
+              large: "120rem",
+            },
+            colors: {
+              primary: { main: "#c9d1d9" },
+              success: { main: "#9ab4a1" },
+              warning: { main: "#b9a66d" },
+              error: { main: "#c18c8c" },
+              text: { primary: "#e6edf3", secondary: "#c9d1d9" },
+              border: { dark: "#747b86", light: "#3f4650" },
+              responses: {
+                success: { color: "#9ab4a1" },
+                error: { color: "#c18c8c" },
+                redirect: { color: "#b9a66d" },
+                info: { color: "#8b949e" },
+              },
+              http: {
+                get: "#9ab4a1",
+                post: "#a8b3cf",
+                put: "#b9a66d",
+                patch: "#a9a0bd",
+                delete: "#c18c8c",
+                options: "#8b949e",
+                head: "#8b949e",
+              },
+            },
+            typography: {
+              fontFamily:
+                'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+              fontSize: "12px",
+              lineHeight: "1.55",
+              headings: {
+                fontFamily:
+                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                fontWeight: "500",
+                lineHeight: "1.35",
+              },
+              code: {
+                color: "#e6edf3",
+                backgroundColor: "#050505",
+                fontFamily:
+                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+              },
+              links: { color: "#e6edf3" },
+            },
+            sidebar: {
+              backgroundColor: "#050505",
+              textColor: "#c9d1d9",
+              activeTextColor: "#e6edf3",
+              width: "18rem",
+            },
+            rightPanel: {
+              backgroundColor: "#080a0d",
+              textColor: "#e6edf3",
+              width: "44%",
+            },
+            schema: {
+              nestedBackground: "#10141a",
+              typeNameColor: "#c9d1d9",
+              typeTitleColor: "#e6edf3",
+              requireLabelColor: "#c18c8c",
+              labelsTextSize: "0.68rem",
+            },
+          },
+        },
+        document.getElementById("redoc-container")
+      );
+
+      let labelPasses = 0;
+      const labelTimer = window.setInterval(function () {
+        forceWhiteLabels();
+        labelPasses += 1;
+        if (labelPasses > 20) {
+          window.clearInterval(labelTimer);
+        }
+      }, 250);
+    </script>
+  </body>
+</html>

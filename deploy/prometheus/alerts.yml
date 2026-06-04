@@ -1,0 +1,83 @@
+groups:
+  - name: beampipe
+    rules:
+      - alert: BeampipeBacklogHigh
+        expr: sum(max by (project_module) (beampipe_workflow_pending_sources)) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High workflow pending backlog"
+          description: "Total pending sources exceeds 100 for 10+ minutes."
+
+      - alert: BeampipeFailureSpike
+        expr: increase(beampipe_execute_terminal_total{status="failed"}[15m]) > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Execute failure spike"
+          description: "More than 5 terminal execute failures in 15 minutes."
+
+      - alert: BeampipeQueueSaturated
+        expr: max(beampipe_jobs_queue_depth) > 4000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Job queue depth high"
+          description: "Postgres job queue depth exceeds 4000."
+
+      - alert: BeampipeQueuedJobStuck
+        expr: max by (kind) (beampipe_jobs_oldest_queued_age_seconds{kind=~"discover_batch|execute"}) > 1800
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Old queued Beampipe job"
+          description: "At least one {{ $labels.kind }} job has been queued for more than 30 minutes."
+
+      - alert: BeampipeExecutionStuckAwaitingScheduler
+        expr: max(beampipe_executions_oldest_active_age_seconds{status="awaiting_scheduler"}) > 21600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Execution awaiting scheduler for too long"
+          description: "An execution has been awaiting the external scheduler for more than 6 hours."
+
+      - alert: BeampipeTargetDown
+        expr: up{job=~"beampipe.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Beampipe metrics target down"
+          description: "Prometheus cannot scrape a beampipe api/scheduler/worker metrics endpoint."
+
+      - alert: BeampipeDependencyDown
+        expr: max by (dependency) (last_over_time(beampipe_dependency_up[5m])) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dependency unreachable"
+          description: "Postgres or TAP dependency gauge reports down (refreshed from metrics server)."
+
+      - alert: BeampipeSlurmPollErrors
+        expr: increase(beampipe_slurm_poll_errors_total[10m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slurm batch poll errors"
+          description: "Repeated slurm_poll_tick SSH or lock failures in the last 10 minutes."
+
+      - alert: BeampipeSlurmPollBacklog
+        expr: (max(beampipe_slurm_poll_batch_size) or vector(0)) > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Large Slurm poll backlog"
+          description: "More than 50 active Slurm executions awaiting batch poll for 15+ minutes."

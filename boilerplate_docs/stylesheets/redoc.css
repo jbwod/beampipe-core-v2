@@ -1,0 +1,35 @@
+.md-typeset .redoc-frame {
+  display: block;
+  width: 100%;
+  min-height: calc(100vh - 7rem);
+  border: 1px solid #777;
+  margin: 1rem 0 2rem;
+  padding: 0;
+  background: #050505;
+}
+
+body:has(#redoc-frame) .md-content {
+  max-width: none;
+}
+
+body:has(#redoc-frame) .md-content__inner {
+  max-width: none;
+}
+
+body:has(#redoc-frame) .md-main__inner {
+  max-width: none;
+}
+
+@media (min-width: 76.25em) {
+  body:has(#redoc-frame) .md-sidebar--primary {
+    width: 15.5rem;
+  }
+
+  body:has(#redoc-frame) .md-sidebar--secondary {
+    display: none;
+  }
+
+  body:has(#redoc-frame) .md-content {
+    margin-right: 0;
+  }
+}
