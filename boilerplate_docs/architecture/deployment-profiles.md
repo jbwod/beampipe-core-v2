@@ -2,7 +2,12 @@
 
 A deployment profile tells beampipe how to translate and deploy a prepared graph. Executions reference a profile by UUID, by `deployment_profile_name`, or by the project default.
 
-## Fit in the execution path
+## Choosing a profile
+
+| Backend | Use when | Operator concern |
+|---------|----------|------------------|
+| REST remote | A DIM is already running and reachable over HTTP | DIM URL, deploy/poll host, TLS policy |
+| Slurm remote | The graph should run on an HPC cluster through SSH and `sbatch` | SSH trust, Slurm account, DALiuGE paths, poll cadence |
 
 <div class="terminal-diagram terminal-diagram--center">
 <pre>manifest + graph
@@ -37,7 +42,7 @@ Translator Manager
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `name` | yes | 1-50 characters; referenced by executions |
+| `name` | yes | 1-50 characters; referenced by executions and project automation |
 | `description` | no | Operator notes |
 | `project_module` | no | `null` means global profile |
 | `is_default` | no | Default profile when an execution omits a name |
@@ -54,6 +59,8 @@ Profile changes apply to future executions. In-flight runs keep the config/profi
 | `num_par` | `1` | `>= 1` | Partition count |
 | `num_islands` | `0` | `>= 0` | Island count |
 | `tm_url` | unset | URL string | Translator Manager base URL |
+
+`tm_url` must be reachable from the worker that performs translation, not just from the operator laptop.
 
 ## REST remote
 
@@ -79,11 +86,11 @@ Use REST remote when a DIM is already running and reachable over HTTP.
 | `deploy_port` | no | `8001` | DIM deploy/polling port |
 | `verify_ssl` | no | `false` | Verify TLS certificates |
 
-Best for local DIM stacks, staging systems, and integration tests.
+Best for local DIM stacks, staging systems, and integration tests where a long-running DIM service already exists.
 
 ## Slurm remote
 
-Use Slurm remote for HPC clusters. The worker translates through TM, uploads generated artifacts over SSH, submits with `sbatch`, and polls with batched `squeue`/`sacct`.
+Use Slurm remote for HPC clusters. The worker translates through TM, uploads artifacts over SSH, submits with `sbatch`, and polls with batched `squeue`/`sacct`.
 
 ```json
 {
@@ -140,9 +147,57 @@ Worker environment for Slurm:
 
 ```bash
 export BEAMPIPE_USE_REAL_BACKENDS=true
-export SLURM_SSH_PRIVATE_KEY_FILE=./deploy/ssh/id_slurm
-export SLURM_SSH_KNOWN_HOSTS_SOURCE=./deploy/ssh/known_hosts
+export SLURM_SSH_PRIVATE_KEY_FILE=/run/secrets/slurm_ssh_key
+export SLURM_SSH_KNOWN_HOSTS_SOURCE=/run/slurm-ssh/known_hosts
 ```
+
+## Slurm SSH keys
+
+Deployment profiles describe the remote Slurm target. SSH private keys, passphrases, and host-key trust stay outside the profile and are supplied to the worker process through environment variables or mounted files. This keeps profiles safe to store in Postgres and return through the API.
+
+Production setup:
+
+```bash
+export BEAMPIPE_ENV=production
+export BEAMPIPE_USE_REAL_BACKENDS=true
+export SLURM_SSH_PRIVATE_KEY_FILE=/run/secrets/slurm_ssh_key
+export SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE=/run/secrets/slurm_ssh_passphrase
+export SLURM_SSH_KNOWN_HOSTS_SOURCE=/run/slurm-ssh/known_hosts
+```
+
+Use plain OpenSSH known-hosts entries for each Slurm login node. Non-default ports must use bracket syntax:
+
+```text
+login.hpc.example ssh-ed25519 AAAAC3...
+[login.hpc.example]:2222 ssh-ed25519 AAAAC3...
+```
+
+Production rejects group/world-readable private keys, symlinked key paths, missing or empty known-hosts files, hashed known-hosts entries, and host keys that do not match the selected `login_node` and `ssh_port`.
+
+Development may use an inline PEM or home-directory fallback, but production should not:
+
+```bash
+export SLURM_SSH_PRIVATE_KEY='-----BEGIN OPENSSH PRIVATE KEY-----...'
+export BEAMPIPE_SLURM_SSH_ALLOW_HOME_FALLBACK=true
+```
+
+In production, inline PEM requires `BEAMPIPE_ALLOW_INLINE_SECRETS=true`; disabling strict host-key verification requires `BEAMPIPE_ALLOW_INSECURE_SSH_HOST_KEYS=true`. Treat both as break-glass only.
+
+## Validation
+
+Run offline checks first:
+
+```bash
+beampipe security check
+```
+
+Then test the live deployment profile:
+
+```bash
+beampipe slurm ping --profile slurm-remote
+```
+
+If the ping fails, check the profile `login_node`, `ssh_port`, and `remote_user`, then the key path, key permissions, passphrase file, and known-hosts entry.
 
 ## API
 
@@ -160,3 +215,5 @@ curl -s -X PATCH "$BASE/api/v2/deployment-profiles/$PROFILE_ID" \
   -H 'Content-Type: application/json' \
   -d '{"is_default":true}' | jq .
 ```
+
+Next: connect profiles to survey automation in [Project config YAML](../project-configs/index.md#automation).

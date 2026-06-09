@@ -1,43 +1,42 @@
 # Installation
 
-beampipe-core v2 runs as one Rust binary: `beampipe`. The same executable is used on a host, inside the Docker image, and in development.
+beampipe-core v2 ships as one Rust CLI binary named `beampipe`. Operators should prefer a released binary on `PATH`; Docker Compose is the typical local or small-deploy stack; `cargo run` is for Rust development only.
 
 ## One binary
 
-The CLI binary is named `beampipe` in `crates/beampipe-cli/Cargo.toml`. Subcommands include:
+The CLI is defined as `beampipe` in `crates/beampipe-cli/Cargo.toml`. The Docker image sets `ENTRYPOINT ["beampipe"]`, so container commands map directly to host commands.
 
 | Command | Purpose |
 |---------|---------|
-| `beampipe serve` | Run the HTTP API, optionally with embedded workers |
+| `beampipe setup` | Print setup guidance and environment checks |
+| `beampipe migrate` | Apply database migrations |
+| `beampipe admin create-user` | Create an operator account |
+| `beampipe serve` | Run the HTTP API, optionally with embedded scheduler/worker ticks |
 | `beampipe serve --worker false` | API-only process |
 | `beampipe worker` | Worker-only process |
-| `beampipe migrate` | Apply SQLx migrations |
-| `beampipe admin create-user` | Create an operator account |
 | `beampipe project validate` | Validate project config YAML/JSON |
 | `beampipe wasm upload` | Upload WASM hook modules |
-| `beampipe slurm ping` | Slurm SSH smoke check |
+| `beampipe slurm ping` | Smoke-test a Slurm SSH deployment profile |
 | `beampipe openapi export` | Export the OpenAPI contract |
-
-The Docker image also uses this binary: the Dockerfile installs `/usr/local/bin/beampipe` and sets `ENTRYPOINT ["beampipe"]`, so container commands are the same shape as host commands.
 
 ## Preferred: binary on PATH
 
-Download or build a release binary, put it on `PATH`, then run:
+Download or build a release binary, put it on `PATH`, then bootstrap the database and API:
 
 ```bash
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
 export BEAMPIPE_JWT_SECRET=change-me
 
+beampipe setup
 beampipe migrate
 beampipe admin create-user \
   --username admin \
   --password change-me \
   --email admin@example.test
-beampipe project validate -f config/wallaby_hires.v1.yaml
 beampipe serve --worker false
 ```
 
-In another shell, run worker capacity:
+Run worker capacity from another shell:
 
 ```bash
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
@@ -45,7 +44,7 @@ export BEAMPIPE_JWT_SECRET=change-me
 BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
 ```
 
-Production-style split:
+For production-style process splits, run exactly one scheduler-enabled process and any number of API/worker-only replicas:
 
 ```bash
 beampipe serve --worker false
@@ -54,6 +53,8 @@ BEAMPIPE_WORKER_SCHEDULER_ENABLED=false BEAMPIPE_WORKER_CONCURRENCY=4 beampipe w
 ```
 
 ## Build from source
+
+Use this path when a release artifact is not available for the target host.
 
 ```bash
 git clone https://github.com/jbwod/beampipe-core-v2.git
@@ -69,16 +70,47 @@ target/release/beampipe migrate
 target/release/beampipe serve --worker false
 ```
 
-To install from the local crate path:
+Or install it into Cargo's binary directory:
 
 ```bash
 cargo install --path crates/beampipe-cli
 beampipe setup
 ```
 
+## Docker Compose
+
+Docker Compose starts PostgreSQL, an API process, a scheduler process, and worker replicas. It does not run migrations or create the first admin user for you.
+
+```bash
+docker compose build api
+docker compose up -d
+docker compose run --rm api migrate
+docker compose run --rm api admin create-user \
+  --username admin \
+  --password change-me \
+  --email admin@example.test
+```
+
+Compose services:
+
+| Service | Runtime |
+|---------|---------|
+| `postgres` | PostgreSQL on `:5432` |
+| `api` | `beampipe serve --worker false` on `:8080` |
+| `scheduler` | `beampipe serve --worker true` for recurring ticks |
+| `worker` | `beampipe worker`, scaled by Compose |
+
+Optional observability:
+
+```bash
+docker compose --profile observability up -d
+```
+
+Prometheus is exposed on `http://127.0.0.1:9099`.
+
 ## Development with cargo run
 
-Use `cargo run` when hacking Rust on the host. It is the same command surface, with Cargo compiling first:
+Use `cargo run` only when hacking Rust on the host. It is the same command surface after Cargo compiles:
 
 ```bash
 docker compose up -d postgres
@@ -93,44 +125,6 @@ cargo run -p beampipe-cli --bin beampipe -- admin create-user \
 cargo run -p beampipe-cli --bin beampipe -- serve
 ```
 
-For faster iteration, keep Postgres in Docker and run API/workers from the host.
-
-## Docker Compose
-
-Docker Compose is the typical local or small-deploy path.
-
-```bash
-docker compose build api
-docker compose up -d
-```
-
-That starts:
-
-| Service | Runtime |
-|---------|---------|
-| `postgres` | PostgreSQL on `:5432` |
-| `api` | `beampipe serve --worker false` on `:8080` |
-| `scheduler` | `beampipe serve --worker true` for ticks and some job work |
-| `worker` | `beampipe worker`, scaled by compose |
-
-Compose does not run migrations or create an admin user for you. Run those once:
-
-```bash
-docker compose run --rm api migrate
-docker compose run --rm api admin create-user \
-  --username admin \
-  --password change-me \
-  --email admin@example.test
-```
-
-Optional observability:
-
-```bash
-docker compose --profile observability up -d
-```
-
-Prometheus is exposed on `http://127.0.0.1:9099`.
-
 ## Health check
 
 ```bash
@@ -138,4 +132,4 @@ curl -s http://127.0.0.1:8080/api/v2/health | jq .
 curl -s http://127.0.0.1:8080/api/v2/ready | jq .
 ```
 
-Read [First run](first-run.md) for the source discovery and execution workflow.
+Next: run [First run](first-run.md) to register a source, discover metadata, and queue a dry execution.

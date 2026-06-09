@@ -1,8 +1,8 @@
 # API workflow guide
 
-The Rust API is mounted at `/api/v2`. Use this page for workflow order; use [Redoc reference](reference.md) for request and response schemas.
+The Rust API is mounted at `/api/v2`. Use this page for workflow order and copyable calls; use [Redoc reference](reference.md) for request and response schemas.
 
-## Auth
+## Setup
 
 ```bash
 BASE=http://127.0.0.1:8080
@@ -12,9 +12,13 @@ TOKEN=$(curl -s -X POST "$BASE/api/v2/login" \
 AUTH="Authorization: Bearer $TOKEN"
 ```
 
+Create the admin user with `beampipe admin create-user` before logging in.
+
 ## Project config
 
 ```bash
+beampipe project validate -f config/wallaby_hires.v1.yaml
+
 curl -s -X POST "$BASE/api/v2/project-configs" \
   -H "$AUTH" \
   -H 'Content-Type: application/x-yaml' \
@@ -24,13 +28,17 @@ curl -s "$BASE/api/v2/project-configs/wallaby_hires" -H "$AUTH" | jq .
 curl -s "$BASE/api/v2/project-configs/wallaby_hires/versions" -H "$AUTH" | jq .
 ```
 
-## Sources
+## Sources and discovery
 
 ```bash
 SOURCE=$(curl -s -X POST "$BASE/api/v2/sources" \
   -H "$AUTH" \
   -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1313-15","enabled":true}')
+  -d '{
+    "project_module": "wallaby_hires",
+    "source_identifier": "HIPASSJ1313-15",
+    "enabled": true
+  }')
 SOURCE_ID=$(echo "$SOURCE" | jq -r .uuid)
 
 curl -s "$BASE/api/v2/sources?project_module=wallaby_hires" -H "$AUTH" | jq .
@@ -39,6 +47,18 @@ curl -s -X POST "$BASE/api/v2/sources/discover" \
   -H 'Content-Type: application/json' \
   -d '{"project_module":"wallaby_hires","source_identifiers":["HIPASSJ1313-15"]}' | jq .
 curl -s "$BASE/api/v2/sources/$SOURCE_ID/status" -H "$AUTH" | jq .
+```
+
+## Deployment profiles
+
+```bash
+curl -s -X POST "$BASE/api/v2/deployment-profiles" \
+  -H "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d @profile.json | jq .
+
+curl -s "$BASE/api/v2/deployment-profiles?project_module=wallaby_hires" \
+  -H "$AUTH" | jq .
 ```
 
 ## Executions
@@ -65,18 +85,6 @@ curl -s "$BASE/api/v2/executions/$EXEC_ID/summary" -H "$AUTH" | jq .
 curl -s "$BASE/api/v2/executions/$EXEC_ID/ledger-snapshot" -H "$AUTH" | jq .
 ```
 
-## Deployment profiles
-
-```bash
-curl -s -X POST "$BASE/api/v2/deployment-profiles" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d @profile.json | jq .
-
-curl -s "$BASE/api/v2/deployment-profiles?project_module=wallaby_hires" \
-  -H "$AUTH" | jq .
-```
-
 ## Observability
 
 ```bash
@@ -92,4 +100,4 @@ curl -s "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 beampipe openapi export > openapi.json
 ```
 
-The committed OpenAPI document is used by Redoc, Bruno, and external clients.
+The committed OpenAPI document drives Redoc, Bruno, and external clients. Regenerate it whenever Rust request or response types change.

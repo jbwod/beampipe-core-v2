@@ -13,6 +13,7 @@ members = [
     "crates/beampipe-orchestration",
     "crates/beampipe-profiles",
     "crates/beampipe-project",
+    "crates/beampipe-security",
 ]
 resolver = "2"
 
@@ -53,7 +54,8 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 russh = "0.61"
 ssh-key = "0.7.0-rc.10"
 axum-test = "15"
+libc = "0.2"
+zeroize = "1"
 
 [profile.dev]
 debug = true
-

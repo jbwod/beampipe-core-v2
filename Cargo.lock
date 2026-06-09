@@ -419,6 +419,7 @@ version = "0.1.0"
 dependencies = [
  "beampipe-db",
  "beampipe-domain",
+ "beampipe-security",
  "chrono",
  "lettre",
  "reqwest",
@@ -448,6 +449,7 @@ dependencies = [
  "beampipe-orchestration",
  "beampipe-profiles",
  "beampipe-project",
+ "beampipe-security",
  "chrono",
  "redis",
  "schemars",
@@ -474,6 +476,7 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
@@ -518,6 +521,7 @@ dependencies = [
  "beampipe-domain",
  "beampipe-profiles",
  "beampipe-project",
+ "beampipe-security",
  "chrono",
  "serde",
  "serde_json",
@@ -573,14 +577,19 @@ dependencies = [
  "beampipe-adapters",
  "beampipe-db",
  "beampipe-domain",
+ "beampipe-orchestration",
+ "beampipe-security",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "redis",
  "sqlx",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -589,20 +598,25 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "beampipe-adapters",
+ "beampipe-config",
  "beampipe-domain",
  "beampipe-profiles",
  "beampipe-project",
+ "beampipe-security",
  "chrono",
+ "libc",
  "quick-xml",
  "reqwest",
  "russh",
  "serde_json",
  "ssh-key",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "uuid",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -629,6 +643,17 @@ dependencies = [
  "thiserror 1.0.69",
  "utoipa",
  "wasmtime",
+]
+
+[[package]]
+name = "beampipe-security"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "utoipa",
+ "zeroize",
 ]
 
 [[package]]
@@ -5476,6 +5501,24 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-opentelemetry"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a971f6058498b5c0f1affa23e7ea202057a7301dbff68e968b2d578bcbd053"
+dependencies = [
+ "js-sys",
+ "once_cell",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "smallvec",
+ "tracing",
+ "tracing-core",
+ "tracing-log",
+ "tracing-subscriber",
+ "web-time",
 ]
 
 [[package]]

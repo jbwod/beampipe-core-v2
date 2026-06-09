@@ -1,6 +1,6 @@
 # Project config YAML
 
-Project configs are the survey configuration surface for beampipe-core. They describe source identity, archive queries, metadata preparation, manifest shape, graph mutation, and scheduler automation.
+Project configs are the survey configuration surface for beampipe-core. They describe source identity, archive queries, metadata preparation, manifest shape, DALiuGE Graphs, scheduler automation, and optional WASM hooks.
 
 ## Anatomy
 
@@ -30,7 +30,7 @@ extension: {}
 | `graph` | Logical graph URL or local path |
 | `discovery` | TAP query templates, enrichments, field mapping, flags, signatures |
 | `manifest` | Manifest grouping and JSON templates |
-| `graph_patches` | Graph mutations before translation |
+| `graph_patches` | YAML key for DALiuGE Graph mutations before translation |
 | `automation` | Discovery and execution scheduler policy |
 | `extension` | Optional WASM hook linkage |
 
@@ -59,9 +59,9 @@ metadata:
 
 `metadata.id` is the `project_module` used in source registration, executions, events, and deployment profile scoping.
 
-## Definitions
+## Definitions and transforms
 
-Definitions hold named transforms. Keep them small, explicit, and reusable.
+Definitions hold named transforms. Give transforms survey-meaningful names so field maps stay readable.
 
 ```yaml
 definitions:
@@ -69,12 +69,21 @@ definitions:
     hipass_source_name:
       kind: strip_prefix
       prefix: HIPASS
+    askap_sbid:
+      kind: extract_digits
+    scan_id_from_did:
+      kind: split_last
+      separators: ["/", ":", "#"]
+    has_rows:
+      kind: is_present
     normalized_sbid:
       kind: chain
       steps: [askap_sbid, trim]
+    trim:
+      kind: trim
 ```
 
-The WALLABY config uses transforms to convert `HIPASSJ1313-15` into query variables, normalize SBIDs, split scan IDs, and convert enrichment results into flags.
+This WALLABY example converts `HIPASSJ1313-15` into VizieR query variables, normalizes ASKAP SBIDs, splits scan IDs from publisher DIDs, and converts enrichment rows into readiness flags. See [Transforms](transforms.md) for the full reference.
 
 ## Source identity
 
@@ -88,7 +97,7 @@ source_identity:
       transform: hipass_source_name
 ```
 
-Discovery SQL templates can then use `{source_identifier}` and `{source_name}`. This keeps source registration stable while still allowing survey-specific archive query formats.
+For a registered source `HIPASSJ1313-15`, `{source_identifier}` remains `HIPASSJ1313-15` and `{source_name}` becomes `J1313-15`. This lets CASDA and VizieR use different query formats without changing source registration.
 
 ## Adapters
 
@@ -145,7 +154,7 @@ discovery:
         SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'
 ```
 
-Field mapping turns TAP rows into persisted archive metadata:
+Field mapping turns TAP rows into persisted archive metadata. `from` reads a field from the current TAP row or enrichment result; `transform` normalizes it before storage.
 
 ```yaml
 prepare_metadata:
@@ -157,6 +166,9 @@ prepare_metadata:
     sbid:
       from: obs_id
       transform: normalized_sbid
+    scan_id:
+      from: obs_publisher_did
+      transform: scan_id_from_did
   discovery_flags:
     ra_dec_vsys_complete:
       from: enrichments.ra_dec_vsys
@@ -170,7 +182,7 @@ prepare_metadata:
     include_discovery_flags: true
 ```
 
-Discovery signatures let beampipe decide whether the source metadata has changed since the last execution.
+Discovery signatures decide whether source metadata changed enough to trigger future execution. Exclude volatile fields when changes should not trigger reruns.
 
 ## Manifest
 
@@ -186,9 +198,11 @@ manifest:
     vsys: "{flags.vsys}"
 ```
 
-`group_by` controls how rows become manifest groups. Templates can read metadata fields and flags.
+`group_by` controls how metadata rows become manifest groups. Templates can read metadata fields, discovery flags, and staging-derived values.
 
 ## DALiuGE Graphs
+
+The YAML key is still `graph_patches`, but the operator-facing concept is DALiuGE Graph preparation.
 
 ```yaml
 graph_patches:
@@ -199,7 +213,7 @@ graph_patches:
       num_of_copies: "$count(sbids[].datasets[])"
 ```
 
-Graph patches are applied after manifest generation and before DALiuGE translation. Keep them deterministic and easy to audit. Graphs that include the `beampipe-ingest` palette can also receive the generated manifest through a `beampipe-ingest` node with a `manifest_path` field.
+Patches are applied after manifest generation and before DALiuGE translation. Graphs that include the `beampipe-ingest` palette can also receive the generated manifest through a `beampipe-ingest` node with a `manifest_path` field.
 
 ## Automation
 
@@ -237,4 +251,4 @@ extension:
     - manifest
 ```
 
-Use WASM hooks only when transforms, templates, and graph patches are not expressive enough.
+Use WASM hooks only when transforms, templates, and DALiuGE Graph patches are not expressive enough. Next: review [Transforms](transforms.md) for concrete normalization examples.

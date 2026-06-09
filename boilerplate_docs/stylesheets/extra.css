@@ -950,6 +950,84 @@ body:has(#redoc-frame) .md-main {
   .md-content__inner {
     max-width: 56rem;
   }
+
+  .md-container {
+    z-index: auto;
+  }
+
+  [data-md-color-scheme="slate"] .md-header {
+    z-index: 20;
+  }
+
+  [data-md-color-scheme="slate"] .md-overlay {
+    z-index: 12;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary {
+    left: 0;
+    z-index: 18;
+    width: min(86vw, 24rem);
+    transform: translateX(-100%) !important;
+    transition: transform 160ms ease;
+  }
+
+  [data-md-toggle="drawer"]:checked ~ .md-container .md-sidebar--primary {
+    transform: translateX(0) !important;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-sidebar__scrollwrap {
+    width: 100%;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav,
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__list,
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__item {
+    width: 100%;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__item--nested > .md-nav {
+    position: static !important;
+    top: auto !important;
+    left: auto !important;
+    width: 100% !important;
+    max-height: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+    transform: none !important;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav .md-nav .md-nav__title,
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__icon {
+    display: none !important;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav .md-nav .md-nav__title::before {
+    content: none !important;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__item--nested > .md-nav__link::after {
+    content: none;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__item--nested .md-nav .md-nav__link {
+    padding-left: 1.35rem;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__link {
+    min-height: 1.8rem;
+    padding-top: 0.28rem;
+    padding-bottom: 0.28rem;
+  }
+
+  [data-md-color-scheme="slate"] .md-sidebar--primary .md-nav__title {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    min-height: 3.1rem;
+    background: #000 !important;
+    border-bottom: 1px solid var(--bp-border);
+  }
 }
 
 @media (max-width: 720px) {

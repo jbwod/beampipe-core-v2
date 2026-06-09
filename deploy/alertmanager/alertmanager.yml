@@ -3,13 +3,21 @@ global:
 
 route:
   receiver: default
-  group_by: ['alertname', 'role']
+  group_by: ["alertname", "severity"]
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
 
 receivers:
   - name: default
+    # Override via BEAMPIPE_ALERTMANAGER_WEBHOOK_URL in compose or K8s secret.
     webhook_configs:
-      - url: 'http://api:8080/api/v2/notification-channels/test-webhook-placeholder'
+      - url: ${BEAMPIPE_ALERTMANAGER_WEBHOOK_URL:-http://127.0.0.1:65535/alerts-disabled}
         send_resolved: true
+
+  - name: slack
+    slack_configs:
+      - api_url: ${BEAMPIPE_SLACK_WEBHOOK_URL}
+        channel: "#beampipe-alerts"
+        title: '{{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'

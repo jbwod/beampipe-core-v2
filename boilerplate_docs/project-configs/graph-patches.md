@@ -1,14 +1,14 @@
 # DALiuGE Graphs
 
-DALiuGE graph support covers the final graph-shaping step before translation and deployment. Graph patches mutate the logical graph after manifest construction and before DALiuGE translation. They are deterministic YAML rules, so operators can review how a project config changes the graph.
+DALiuGE Graph support covers the final graph-shaping step before translation and deployment. The YAML key is `graph_patches`; the operator-facing goal is to make graph changes deterministic, reviewable, and tied to the generated manifest.
 
 ## Flow
 
-<div class="terminal-diagram">
-<pre>logical graph
+<div class="terminal-diagram terminal-diagram--center">
+<pre>project config
      |
      v
-embed manifest JSON
+manifest build
      |
      v
 apply graph_patches
@@ -17,12 +17,12 @@ apply graph_patches
 Translator Manager
      |
      v
-PGT / REST / Slurm deployment</pre>
+REST / Slurm deployment</pre>
 </div>
 
 ## Example
 
-The WALLABY reference config sets scatter copies from the manifest dataset count:
+Set the scatter count from manifest data:
 
 ```yaml
 graph_patches:
@@ -33,51 +33,47 @@ graph_patches:
       num_of_copies: "$count(sbids[].datasets[])"
 ```
 
+The expression runs against the manifest context. In this example, the graph receives one copy per discovered dataset across SBID groups.
+
 ## Matching
 
-Patch matching is intentionally small and explicit. Prefer stable node names over positional assumptions.
+| Match kind | Purpose |
+|------------|---------|
+| `node_name` | Match a graph node by full DALiuGE node name |
+| Additional kinds | Add only when the graph format and validation rules support them |
 
-| Field | Purpose |
-|-------|---------|
-| `match.kind` | Match strategy |
-| `match.equals` | Expected node identifier/value |
-| `set` | Properties to write on the matched node |
+Keep matches precise. A patch that silently matches multiple nodes can make execution hard to audit.
 
 ## Expressions
 
-Values beginning with `$` are evaluated against the manifest context. Use them for counts and manifest-derived scatter settings; keep complex survey logic in config transforms or WASM hooks.
+Values beginning with `$` are evaluated against the manifest context. Use expressions for counts and manifest-derived scatter settings; keep complex survey logic in transforms or WASM hooks.
+
+| Expression | Use |
+|------------|-----|
+| `$count(path)` | Count manifest elements |
+| `$sum(path)` | Sum numeric manifest values |
 
 ## beampipe-ingest palette
 
-Existing DALiuGE graphs can opt into beampipe by importing the `beampipe-ingest` palette in EAGLE and adding the `beampipe-ingest` PyFunc drop to the logical graph. The drop is the handoff point between the beampipe execution manifest and the translated DALiuGE graph.
+Existing DALiuGE graphs can include the `beampipe-ingest` palette. At submit time, beampipe looks for a node named `beampipe-ingest` with a `manifest_path` field, creates a readonly graph configuration, and embeds the generated manifest JSON before translation.
 
-At submit time, beampipe looks for a node named `beampipe-ingest` with a string field named `manifest_path`. When that node exists, beampipe creates a readonly graph configuration, embeds the generated manifest JSON into the `manifest_path` field, and sets the configuration as the active graph config before translation.
+Typical graph contract:
 
-```yaml
-graph:
-  ingest_node:
-    name: beampipe-ingest
-    manifest_field: manifest_path
-```
+| Field | Meaning |
+|-------|---------|
+| `beampipe-ingest` node | Marker that the graph expects beampipe manifest injection |
+| `manifest_path` | Path or graph parameter where the manifest JSON should be placed |
+| Generated manifest | Source/SBID/dataset grouping from project config discovery |
 
-Operator notes:
-
-| Item | Requirement |
-|------|-------------|
-| Palette | Import the `beampipe-ingest` palette into EAGLE before editing the graph |
-| Node name | Keep the graph node name exactly `beampipe-ingest` |
-| Field name | Keep the manifest field exactly `manifest_path` |
-| Field type | Use a string-compatible field because beampipe writes manifest JSON text |
-| Graph config | beampipe creates a readonly `beampipe-core Auto-generated Manifest` graph config |
-
-The embedded manifest excludes internal `graph_overrides`; those overrides are consumed by beampipe while patching the graph and are not passed to the ingest drop. This keeps the drop focused on the science-run manifest that the graph needs at runtime.
+Use the palette when the science graph should consume beampipe-generated manifest data directly. Use plain patches when the graph only needs structural changes such as scatter counts.
 
 ## Operator checks
 
-Run validation before upload:
+| Check | Why |
+|-------|-----|
+| Patch target exists | Prevents silent no-op graph mutation |
+| Expression output is expected | Avoids wrong scatter size or missing parameters |
+| Manifest injection path is readable | Ensures graph apps can load the manifest |
+| Dry execution passes | Confirms graph preparation before real staging/submission |
 
-```bash
-beampipe project validate -f config/wallaby_hires.v1.yaml
-```
-
-Then create a dry-run execution with `do_stage=false` and `do_submit=false` to inspect the built manifest and patched graph path without contacting real backends.
+Next: use [Deployment profiles](../architecture/deployment-profiles.md) to select the backend that receives the prepared graph.

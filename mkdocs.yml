@@ -3,7 +3,7 @@ docs_dir: boilerplate_docs
 site_name: ~ beampipe-core
 site_description: Event-driven control plane for scheduler-aware radio astronomy workflows (Rust v2).
 site_author: Jack Blackwood
-site_url: https://beampipe-core-v2.readthedocs.io/
+site_url: https://beampipe-core.readthedocs.io/
 
 theme:
   name: material

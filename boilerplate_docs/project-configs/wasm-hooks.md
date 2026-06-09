@@ -1,48 +1,51 @@
 # WASM hooks
 
-WASM hooks are optional project-config extensions for survey logic that cannot be expressed with templates, transforms, and graph patches alone.
+WASM hooks are optional extensions for survey logic that cannot be expressed with templates, transforms, discovery flags, manifests, or DALiuGE Graph patches.
+
+## When to use WASM
+
+Prefer declarative YAML first. Reach for WASM only when the logic needs richer parsing, external algorithmic behavior, or a reusable survey-specific module.
+
+| Use YAML when | Use WASM when |
+|---------------|---------------|
+| A value can be normalized with a transform | Parsing needs custom code |
+| A manifest field can be templated | Manifest construction needs branching logic |
+| A graph value can be patched from `$count` or `$sum` | Graph preparation needs custom validation |
+| A readiness flag can be derived from enrichment presence | Readiness requires a survey algorithm |
 
 ## Upload flow
 
-Validate and upload a module for an active project config:
-
 ```bash
-beampipe wasm upload \
-  --config-id wallaby_hires \
-  --file target/wasm32-wasip1/release/hook.wasm
+beampipe wasm upload ./target/wasm32-wasip1/release/wallaby_hooks.wasm
 ```
 
-The CLI validates the module, stores bytes in PostgreSQL, and prints the module SHA-256.
+The upload returns a SHA-256 identifier. Store that identifier in the project config so future executions pin the hook module they used.
 
 ## Config link
 
-Reference the uploaded module in the project config:
-
 ```yaml
 extension:
-  wasm_sha256: "<sha256>"
+  wasm_sha256: "<uploaded-module-sha256>"
   hooks:
     - prepare_metadata
     - manifest
 ```
 
-Upload the updated YAML through `POST /api/v2/project-configs`.
+Validate the config after adding or changing hooks:
+
+```bash
+beampipe project validate -f config/wallaby_hires.v1.yaml
+```
 
 ## Boundary
 
-<div class="terminal-diagram">
-<pre>project config ---> WASM host ---> hook module
-      |                 |              |
-      |                 |              v
-      +---------- validated JSON <-----+</pre>
-</div>
-
-Use WASM only for logic that is hard to express declaratively. Prefer YAML transforms and graph patches for deterministic operator-readable behavior.
+WASM hooks should be deterministic from their inputs. Do not use them to hide credentials, call mutable external systems, or duplicate backend deployment logic. Keep operator-readable behavior in YAML whenever possible.
 
 ## Reference
 
-The WIT interface lives in the repository at `wit/beampipe-hooks.wit`. Link to the GitHub source when publishing docs outside the repository:
+| Hook | Typical purpose |
+|------|-----------------|
+| `prepare_metadata` | Extra metadata normalization after TAP rows and enrichments are available |
+| `manifest` | Custom manifest shaping before DALiuGE Graph preparation |
 
-```txt
-https://github.com/jbwod/beampipe-core-v2/blob/main/wit/beampipe-hooks.wit
-```
+Next: keep the generated API contract current with [OpenAPI export](../tools/openapi.md).
