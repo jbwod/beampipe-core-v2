@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && install -D target/release/beampipe /out/beampipe
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssh-client \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/beampipe /usr/local/bin/beampipe
 ENTRYPOINT ["beampipe"]

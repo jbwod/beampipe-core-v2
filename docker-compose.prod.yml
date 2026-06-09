@@ -1,0 +1,25 @@
+# Production overlay: use with
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up
+#
+# Requires BEAMPIPE_JWT_SECRET (≥32 chars) and strong DATABASE_URL in the environment.
+
+services:
+  postgres:
+    ports: []
+
+  api:
+    environment:
+      BEAMPIPE_ENV: production
+      BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
+
+  scheduler:
+    environment:
+      BEAMPIPE_ENV: production
+      BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
+      BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-true}
+
+  worker:
+    environment:
+      BEAMPIPE_ENV: production
+      BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
+      BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-true}

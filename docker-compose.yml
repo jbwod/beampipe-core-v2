@@ -18,6 +18,21 @@ x-beampipe-worker-env-file: &beampipe-worker-env-file
     - path: beampipe-core/.env
       required: false
 
+# Slurm SSH for scheduler/worker when BEAMPIPE_USE_REAL_BACKENDS=true (see deploy/ssh/README.md).
+x-beampipe-slurm-ssh-mounts: &beampipe-slurm-ssh-mounts
+  secrets:
+    - slurm_ssh_key
+  volumes:
+    - type: bind
+      source: ${SLURM_SSH_KNOWN_HOSTS_SOURCE:-./deploy/ssh/known_hosts}
+      target: /run/slurm-ssh/known_hosts
+      read_only: true
+
+x-beampipe-slurm-ssh-env: &beampipe-slurm-ssh-env
+  SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+  SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+  BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: "true"
+
 # One image for api / scheduler / worker — build once: docker compose build beampipe
 x-beampipe-image: &beampipe-image
   image: beampipe-v2:local
@@ -58,13 +73,19 @@ services:
     ports:
       - "8080:8080"
       - "9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/api/v2/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     depends_on:
       postgres:
         condition: service_healthy
 
   # One scheduler replica — enqueues discovery/execution ticks + runs a few jobs
   scheduler:
-    <<: [*beampipe-image, *beampipe-worker-env-file]
+    <<: [*beampipe-image, *beampipe-worker-env-file, *beampipe-slurm-ssh-mounts]
     command: ["serve", "--worker", "true"]
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/beampipe
@@ -75,7 +96,8 @@ services:
       BEAMPIPE_WORKER_CONCURRENCY: "2"
       BEAMPIPE_WORKER_SCHEDULER_ENABLED: "true"
       BEAMPIPE_DB_MAX_CONNECTIONS: "20"
-      <<: [*beampipe-shaping, *beampipe-backend-env]
+      BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      <<: [*beampipe-shaping, *beampipe-backend-env, *beampipe-slurm-ssh-env]
     expose:
       - "9090"
     depends_on:
@@ -85,7 +107,7 @@ services:
   # Worker-only replicas — default 8 for 1000-source discovery throughput
   # Override: BEAMPIPE_WORKER_CONCURRENCY=8 docker compose up --scale worker=4
   worker:
-    <<: [*beampipe-image, *beampipe-worker-env-file]
+    <<: [*beampipe-image, *beampipe-worker-env-file, *beampipe-slurm-ssh-mounts]
     command: ["worker"]
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/beampipe
@@ -97,7 +119,8 @@ services:
       BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY: ${BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY:-5}
       BEAMPIPE_DB_MAX_CONNECTIONS: "25"
       BEAMPIPE_WORKER_POLL_INTERVAL_MS: "200"
-      <<: [*beampipe-shaping, *beampipe-backend-env]
+      BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      <<: [*beampipe-shaping, *beampipe-backend-env, *beampipe-slurm-ssh-env]
     expose:
       - "9090"
     depends_on:
@@ -124,6 +147,10 @@ services:
       - "9094:9093"
     depends_on:
       - prometheus
+
+secrets:
+  slurm_ssh_key:
+    file: ${SLURM_SSH_PRIVATE_KEY_FILE:-./deploy/ssh/id_slurm}
 
 volumes:
   beampipe_pgdata:

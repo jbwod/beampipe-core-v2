@@ -50,7 +50,7 @@ BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
 <div class="terminal-diagram terminal-diagram--center">
 <pre>+---------+   +-----------+   +----------+   +-----------+
 | sources |-->| discovery |-->| ledger   |-->| backends  |
-| config  |   | TAP rows  |   | manifest |   | DIM/Slurm |
+| config   |   | TAP rows  |   | manifest |   | DIM/Slurm |
 +---------+   +-----------+   +----------+   +-----------+
      ^              |              |              |
      +--------- operator API / metrics -----------+</pre>
