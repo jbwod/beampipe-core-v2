@@ -1,6 +1,7 @@
 mod otel;
 pub mod refresh;
 pub mod server;
+pub mod tracing_layer;
 
 pub use beampipe_db::test_modules::INTEGRATION_TEST_MODULE_REGEX as INTERNAL_TEST_MODULE_REGEX;
 pub use otel::init_if_enabled;
@@ -164,6 +165,34 @@ pub fn set_slurm_ssh_sessions_active(login_node: &str, count: usize) {
     .set(count as f64);
 }
 
+pub fn set_slurm_ssh_configured(configured: bool) {
+    gauge!("beampipe_slurm_ssh_configured").set(if configured { 1.0 } else { 0.0 });
+}
+
+pub fn record_security_check_failure(check: &str) {
+    counter!(
+        "beampipe_security_check_failures",
+        "check" => check.to_string()
+    )
+    .increment(1);
+}
+
+pub fn record_secret_ref_configured(kind: &str) {
+    counter!(
+        "beampipe_secret_refs_configured",
+        "kind" => kind.to_string()
+    )
+    .increment(1);
+}
+
+pub fn record_unsafe_inline_secret_rejected(surface: &str) {
+    counter!(
+        "beampipe_unsafe_inline_secret_rejected_total",
+        "surface" => surface.to_string()
+    )
+    .increment(1);
+}
+
 pub fn record_execute_terminal(project_module: &str, status: &str) {
     counter!(
         "beampipe_execute_terminal_total",
@@ -214,14 +243,25 @@ pub fn record_execute_duration(phase: &str, seconds: f64) {
     .record(seconds);
 }
 
-pub fn record_api_request(method: &str, path: &str, status: u16) {
+pub fn record_api_request(method: &str, route: &str, status: u16) {
     counter!(
         "beampipe_api_requests_total",
         "method" => method.to_string(),
-        "path" => path.to_string(),
+        "route" => route.to_string(),
         "status" => status.to_string()
     )
     .increment(1);
+}
+
+pub fn record_api_request_duration(method: &str, route: &str, status: u16, seconds: f64) {
+    record_api_request(method, route, status);
+    histogram!(
+        "beampipe_api_request_duration_seconds",
+        "method" => method.to_string(),
+        "route" => route.to_string(),
+        "status" => status.to_string()
+    )
+    .record(seconds);
 }
 
 pub fn record_discovery_batch_stats(

@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use beampipe_adapters::{
     extract_scan_id, parse_casda_datalink, parse_eval_job_results, parse_job_results,
 };
+use beampipe_security::{resolve_secret, SecretPolicy, SecretRef};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -24,7 +25,17 @@ pub struct CasdaStagingClient {
 impl CasdaStagingClient {
     pub fn from_env() -> Option<Self> {
         let username = std::env::var("CASDA_USERNAME").ok()?;
-        let password = std::env::var("CASDA_PASSWORD").ok()?;
+        let password = if let Ok(path) = std::env::var("CASDA_PASSWORD_FILE") {
+            resolve_secret(
+                &SecretRef::File { file: path },
+                SecretPolicy::from_process_env(),
+            )
+            .ok()?
+            .expose()
+            .to_string()
+        } else {
+            std::env::var("CASDA_PASSWORD").ok()?
+        };
         let login_url = std::env::var("CASDA_LOGIN_URL")
             .unwrap_or_else(|_| DEFAULT_CASDA_LOGIN_URL.to_string());
         Some(Self {

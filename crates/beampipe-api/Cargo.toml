@@ -17,6 +17,7 @@ beampipe-metrics = { path = "../beampipe-metrics" }
 beampipe-orchestration = { path = "../beampipe-orchestration" }
 beampipe-profiles = { path = "../beampipe-profiles" }
 beampipe-project = { path = "../beampipe-project" }
+beampipe-security = { path = "../beampipe-security" }
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true

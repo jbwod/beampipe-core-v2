@@ -8,9 +8,11 @@ authors.workspace = true
 [dependencies]
 async-trait.workspace = true
 beampipe-adapters = { path = "../beampipe-adapters" }
+beampipe-config = { path = "../beampipe-config" }
 beampipe-domain = { path = "../beampipe-domain" }
 beampipe-profiles = { path = "../beampipe-profiles" }
 beampipe-project = { path = "../beampipe-project" }
+beampipe-security = { path = "../beampipe-security" }
 chrono.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
@@ -21,7 +23,10 @@ tracing.workspace = true
 uuid.workspace = true
 russh.workspace = true
 ssh-key.workspace = true
+libc.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"

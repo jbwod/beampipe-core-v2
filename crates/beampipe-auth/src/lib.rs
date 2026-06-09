@@ -3,11 +3,13 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub typ: TokenType,
+    pub jti: String,
     pub exp: usize,
     pub iat: usize,
 }
@@ -75,6 +77,7 @@ pub fn issue_token(
     let claims = Claims {
         sub: subject.to_string(),
         typ,
+        jti: Uuid::now_v7().to_string(),
         iat: now.timestamp() as usize,
         exp: (now + ttl).timestamp() as usize,
     };
@@ -116,4 +119,31 @@ pub fn decode_refresh_token(token: &str, secret: &str) -> Result<Claims, AuthErr
 
 pub fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issued_tokens_include_distinct_jti() {
+        let one = issue_token(
+            "admin",
+            "01234567890123456789012345678901",
+            TokenType::Access,
+            Duration::minutes(5),
+        )
+        .unwrap();
+        let two = issue_token(
+            "admin",
+            "01234567890123456789012345678901",
+            TokenType::Access,
+            Duration::minutes(5),
+        )
+        .unwrap();
+        let c1 = decode_access_token(&one, "01234567890123456789012345678901").unwrap();
+        let c2 = decode_access_token(&two, "01234567890123456789012345678901").unwrap();
+        assert!(!c1.jti.is_empty());
+        assert_ne!(c1.jti, c2.jti);
+    }
 }

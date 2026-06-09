@@ -4,7 +4,6 @@ use anyhow::Context;
 use beampipe_config::Settings;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Debug, Parser)]
 #[command(name = "beampipe", version, about = "Beampipe v2 Rust control plane")]
@@ -25,6 +24,12 @@ enum CliCommand {
     Worker,
     /// Apply SQLx migrations.
     Migrate,
+    /// Delete provenance events older than retention window.
+    PurgeProvenance {
+        /// Retention in days (default from BEAMPIPE_PROVENANCE_RETENTION_DAYS or 90).
+        #[arg(long)]
+        days: Option<i32>,
+    },
     /// Export the v2 OpenAPI document to stdout.
     Openapi {
         #[command(subcommand)]
@@ -52,6 +57,11 @@ enum CliCommand {
         #[command(subcommand)]
         command: SlurmCommand,
     },
+    /// Validate JWT, Slurm SSH, CASDA, and database security settings.
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommand,
+    },
     /// Export data migration guidance (Python → Rust Postgres).
     MigrateData,
     /// Measure TAP and discovery latency (requires network).
@@ -59,6 +69,12 @@ enum CliCommand {
         #[command(subcommand)]
         command: BenchCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecurityCommand {
+    /// Print pass/fail for security configuration (no live SSH).
+    Check,
 }
 
 #[derive(Debug, Subcommand)]
@@ -133,15 +149,7 @@ enum AdminCommand {
 
 fn init_tracing() {
     beampipe_metrics::init_recorder();
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("BEAMPIPE_LOG_JSON")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
-    if json {
-        fmt().with_env_filter(filter).json().init();
-    } else {
-        fmt().with_env_filter(filter).init();
-    }
+    beampipe_metrics::tracing_layer::init_subscriber();
 }
 
 #[tokio::main]
@@ -153,11 +161,16 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::Serve { worker } => {
             let settings = Settings::from_env()?;
             let pool = beampipe_db::connect(&settings.database_url).await?;
-            beampipe_db::migrate(&pool).await?;
+            if settings.migrate_on_serve {
+                beampipe_db::migrate(&pool).await?;
+            }
             beampipe_api::serve(settings, pool, worker).await?;
         }
         CliCommand::Worker => {
             let settings = Settings::from_env()?;
+            if let Err(errors) = beampipe_orchestration::validate_security(&settings) {
+                anyhow::bail!("security validation failed:\n  - {}", errors.join("\n  - "));
+            }
             let pool = beampipe_db::connect(&settings.database_url).await?;
             beampipe_metrics::init_recorder();
             if settings.metrics_server_enabled {
@@ -173,14 +186,23 @@ async fn main() -> anyhow::Result<()> {
                 discovery_source_concurrency = config.discovery_source_concurrency,
                 "event=worker_only_started"
             );
-            let _workers = beampipe_jobs::spawn_workers(pool, config);
-            tokio::signal::ctrl_c().await?;
+            let workers = beampipe_jobs::spawn_workers(pool, config);
+            shutdown_signal().await;
+            workers.shutdown().await;
         }
         CliCommand::Migrate => {
             let settings = Settings::from_env()?;
             let pool = beampipe_db::connect(&settings.database_url).await?;
             beampipe_db::migrate(&pool).await?;
             println!("migrations applied");
+        }
+        CliCommand::PurgeProvenance { days } => {
+            let settings = Settings::from_env()?;
+            let pool = beampipe_db::connect(&settings.database_url).await?;
+            let retention = days.unwrap_or(settings.provenance_retention_days);
+            let deleted =
+                beampipe_db::repo::purge_provenance_events_older_than(&pool, retention).await?;
+            println!("purged {deleted} provenance events older than {retention} days");
         }
         CliCommand::Openapi {
             command: OpenApiCommand::Export,
@@ -317,44 +339,68 @@ async fn main() -> anyhow::Result<()> {
                 )
             };
             let remote_user = remote_user.ok_or_else(|| anyhow::anyhow!("remote user required"))?;
-            let target = format!("{remote_user}@{login}");
-            let mut squeue_cmd = std::process::Command::new("ssh");
-            squeue_cmd
-                .arg("-p")
-                .arg(ssh_port.to_string())
-                .arg("-oBatchMode=yes")
-                .arg("-oStrictHostKeyChecking=accept-new");
-            for arg in beampipe_orchestration::slurm_deploy::ssh_option_args() {
-                squeue_cmd.arg(arg);
-            }
-            let squeue = squeue_cmd
-                .arg(&target)
-                .arg("squeue -u $USER -h | head -3")
-                .output()?;
-            let mut sacct_cmd = std::process::Command::new("ssh");
-            sacct_cmd
-                .arg("-p")
-                .arg(ssh_port.to_string())
-                .arg("-oBatchMode=yes")
-                .arg("-oStrictHostKeyChecking=accept-new");
-            for arg in beampipe_orchestration::slurm_deploy::ssh_option_args() {
-                sacct_cmd.arg(arg);
-            }
-            let sacct = sacct_cmd
-                .arg(&target)
-                .arg("sacct -u $USER --format=JobID,State --noheader | head -3")
-                .output()?;
+            let deployment = beampipe_profiles::SlurmRemoteDeploymentConfig {
+                login_node: login,
+                ssh_port,
+                remote_user: Some(remote_user.clone()),
+                account: String::new(),
+                home_dir: String::new(),
+                log_dir: String::new(),
+                exec_prefix: String::new(),
+                dlg_root: String::new(),
+                venv: None,
+                modules: None,
+                facility: String::new(),
+                job_duration_minutes: 0,
+                num_nodes: 1,
+                num_islands: 1,
+                verbose_level: 0,
+                max_threads: 0,
+                all_nics: false,
+                zerorun: false,
+                sleepncopy: false,
+                check_with_session: false,
+                verify_ssl: None,
+                slurm_template: None,
+            };
+            let target =
+                beampipe_orchestration::SlurmTarget::from_deployment(&deployment, &remote_user);
+            let mut session = beampipe_orchestration::SlurmSshSession::connect(&target).await?;
+            let squeue_out = session
+                .run_command("squeue -u $USER -h | head -3")
+                .await
+                .context("squeue via russh")?;
+            let sacct_out = session
+                .run_command("sacct -u $USER --format=JobID,State --noheader | head -3")
+                .await
+                .unwrap_or_else(|e| format!("(sacct failed: {e})"));
+            let _ = session.close().await;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "target": target,
-                    "squeue_ok": squeue.status.success(),
-                    "squeue_stdout": String::from_utf8_lossy(&squeue.stdout).trim(),
-                    "sacct_ok": sacct.status.success(),
-                    "sacct_stdout": String::from_utf8_lossy(&sacct.stdout).trim(),
+                    "target": format!("{remote_user}@{}", deployment.login_node),
+                    "transport": "russh",
+                    "squeue_stdout": squeue_out.trim(),
+                    "sacct_stdout": sacct_out.trim(),
                 }))?
             );
-            if !squeue.status.success() {
+        }
+        CliCommand::Security {
+            command: SecurityCommand::Check,
+        } => {
+            let settings = Settings::from_env()?;
+            let issues = beampipe_orchestration::collect_security_issues(&settings);
+            let slurm_ok = beampipe_orchestration::SlurmSshCredentials::try_resolve_ok();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": issues.is_empty(),
+                    "beampipe_env": settings.beampipe_env,
+                    "slurm_ssh_configured": slurm_ok,
+                    "issues": issues,
+                }))?
+            );
+            if !issues.is_empty() {
                 std::process::exit(1);
             }
         }
@@ -376,4 +422,26 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("event=shutdown_signal_received");
 }

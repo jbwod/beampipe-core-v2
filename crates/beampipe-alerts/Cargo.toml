@@ -8,6 +8,7 @@ authors.workspace = true
 [dependencies]
 beampipe-db = { path = "../beampipe-db" }
 beampipe-domain = { path = "../beampipe-domain" }
+beampipe-security = { path = "../beampipe-security" }
 chrono.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true

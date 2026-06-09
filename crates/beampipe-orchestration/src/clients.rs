@@ -348,36 +348,6 @@ pub struct SshSlurmClient {
     pub deployment: Option<SlurmRemoteDeploymentConfig>,
 }
 
-impl SshSlurmClient {
-    async fn run_ssh(&self, remote_cmd: &str) -> Result<String, OrchestrationError> {
-        let target = match &self.remote_user {
-            Some(user) => format!("{user}@{}", self.login_node),
-            None => self.login_node.clone(),
-        };
-        let mut cmd = tokio::process::Command::new("ssh");
-        cmd.arg("-p")
-            .arg(self.ssh_port.to_string())
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new");
-        for arg in crate::slurm_deploy::ssh_option_args() {
-            cmd.arg(arg);
-        }
-        let output = cmd
-            .arg(&target)
-            .arg(remote_cmd)
-            .output()
-            .await
-            .map_err(|e| OrchestrationError::Backend(format!("ssh spawn failed: {e}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(OrchestrationError::Backend(format!("ssh failed: {stderr}")));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
-}
-
 #[async_trait]
 impl SlurmClient for SshSlurmClient {
     async fn submit(
@@ -460,7 +430,18 @@ impl SlurmClient for SshSlurmClient {
         } else {
             parsed.slurm_job_id
         };
-        let _ = self.run_ssh(&format!("scancel {slurm_id}")).await?;
+        let deployment = self.deployment.clone().ok_or_else(|| {
+            OrchestrationError::Backend("slurm deployment config required".into())
+        })?;
+        let username = self
+            .remote_user
+            .clone()
+            .or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
+            .unwrap_or_else(|| "root".into());
+        let target = SlurmTarget::from_deployment(&deployment, &username);
+        let mut session = SlurmSshSession::connect(&target).await?;
+        session.run_command(&format!("scancel {slurm_id}")).await?;
+        let _ = session.close().await;
         Ok(())
     }
 }

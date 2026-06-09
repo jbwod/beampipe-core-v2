@@ -9,6 +9,9 @@ authors.workspace = true
 beampipe-adapters = { path = "../beampipe-adapters" }
 beampipe-db = { path = "../beampipe-db" }
 beampipe-domain = { path = "../beampipe-domain" }
+beampipe-orchestration = { path = "../beampipe-orchestration" }
+beampipe-security = { path = "../beampipe-security" }
+redis.workspace = true
 axum.workspace = true
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
@@ -18,3 +21,5 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-opentelemetry = "0.28"
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }

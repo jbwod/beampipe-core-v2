@@ -75,12 +75,10 @@ fn apply_info(doc: &mut utoipa::openapi::OpenApi) {
     if doc.info.license.is_none() {
         doc.info.license = Some(utoipa::openapi::LicenseBuilder::new().name("MIT").build());
     }
-    doc.servers = Some(vec![
-        utoipa::openapi::ServerBuilder::new()
-            .url("/")
-            .description(Some("Current host (API routes are under /api/v2)"))
-            .build(),
-    ]);
+    doc.servers = Some(vec![utoipa::openapi::ServerBuilder::new()
+        .url("/")
+        .description(Some("Current host (API routes are under /api/v2)"))
+        .build()]);
 }
 
 fn polish_json(spec: &mut Value) {
@@ -90,6 +88,7 @@ fn polish_json(spec: &mut Value) {
         .insert("x-tagGroups".into(), tag_groups());
 
     inject_error_detail_schema(spec);
+    alias_observability_schemas(spec);
     apply_operation_docs(spec);
     apply_security(spec);
     enrich_error_responses(spec);
@@ -147,13 +146,7 @@ fn error_ref() -> Value {
 }
 
 fn apply_security(spec: &mut Value) {
-    const PUBLIC: &[&str] = &[
-        "/api/v2/health",
-        "/api/v2/health/tap",
-        "/api/v2/ready",
-        "/api/v2/login",
-        "/api/v2/metrics",
-    ];
+    const PUBLIC: &[&str] = &["/api/v2/health", "/api/v2/health/tap", "/api/v2/login"];
     let Some(paths) = spec.get_mut("paths").and_then(Value::as_object_mut) else {
         return;
     };
@@ -168,6 +161,32 @@ fn apply_security(spec: &mut Value) {
             op.as_object_mut()
                 .expect("operation object")
                 .insert("security".into(), json!([{"OAuth2PasswordBearer": []}]));
+        }
+    }
+}
+
+fn alias_observability_schemas(spec: &mut Value) {
+    let Some(schemas) = spec
+        .pointer_mut("/components/schemas")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for name in [
+        "NotificationChannelResponse",
+        "AlertDeliveryResponse",
+        "ProvenanceEventResponse",
+    ] {
+        let qualified = format!("observability.{name}");
+        if !schemas.contains_key(name) {
+            if let Some(schema) = schemas.get(&qualified).cloned() {
+                schemas.insert(name.into(), schema);
+            }
+        }
+        if !schemas.contains_key(&qualified) {
+            if let Some(schema) = schemas.get(name).cloned() {
+                schemas.insert(qualified, schema);
+            }
         }
     }
 }
@@ -329,7 +348,10 @@ mod tests {
     use std::collections::HashSet;
 
     fn collect_unresolved_schema_refs(spec: &Value) -> Vec<String> {
-        let Some(schemas) = spec.pointer("/components/schemas").and_then(Value::as_object) else {
+        let Some(schemas) = spec
+            .pointer("/components/schemas")
+            .and_then(Value::as_object)
+        else {
             return vec!["components.schemas missing".into()];
         };
         let names: HashSet<&str> = schemas.keys().map(String::as_str).collect();
@@ -370,18 +392,19 @@ mod tests {
         assert_eq!(spec["openapi"], "3.1.0");
         assert!(spec["components"]["securitySchemes"]["OAuth2PasswordBearer"].is_object());
         assert!(spec["paths"]["/api/v2/sources"]["get"]["security"].is_array());
-        assert!(spec["paths"]["/api/v2/health"]["get"]["security"].is_null()
-            || spec["paths"]["/api/v2/health"]["get"].get("security").is_none());
+        assert!(
+            spec["paths"]["/api/v2/health"]["get"]["security"].is_null()
+                || spec["paths"]["/api/v2/health"]["get"]
+                    .get("security")
+                    .is_none()
+        );
     }
 
     #[test]
     fn polished_openapi_schema_refs_resolve() {
         let spec = export_openapi_json();
         let missing = collect_unresolved_schema_refs(&spec);
-        assert!(
-            missing.is_empty(),
-            "unresolved $ref targets: {missing:?}"
-        );
+        assert!(missing.is_empty(), "unresolved $ref targets: {missing:?}");
         assert!(spec["components"]["schemas"]["ReadyResponse"].is_object());
     }
 }

@@ -12,7 +12,7 @@ use beampipe_domain::{
     readiness::{
         parsed_source_readiness_error, ArchiveMetadataReadiness, RegisteredSourceReadiness,
     },
-    ExecutionStatus, LedgerPatch, LedgerState,
+    ExecutionPhase, ExecutionStatus, LedgerPatch, LedgerState,
 };
 use beampipe_project::SignatureConfig;
 use chrono::{DateTime, Utc};
@@ -883,18 +883,56 @@ pub async fn persist_discovery_results(
                 checked.push(source_identifier.clone());
             }
             DiscoverySourceResult::Timeout {
-                source_identifier, ..
+                source_identifier,
+                error,
+                duration_ms,
+                ..
             } => {
                 stats.timeout_count += 1;
                 stats.failed_sources.push(source_identifier.clone());
                 attempted.push(source_identifier.clone());
+                let payload = serde_json::json!({
+                    "error": error,
+                    "duration_ms": duration_ms,
+                    "claim_token": claim_token,
+                });
+                crate::provenance::record_provenance_event(
+                    pool,
+                    beampipe_domain::provenance::ProvenanceEventType::DiscoveryTimeout.as_str(),
+                    project_module,
+                    Some(source_identifier.as_str()),
+                    None,
+                    Some("system:discovery"),
+                    Some(claim_token),
+                    &payload,
+                )
+                .await;
             }
             DiscoverySourceResult::Error {
-                source_identifier, ..
+                source_identifier,
+                error,
+                duration_ms,
+                ..
             } => {
                 stats.error_count += 1;
                 stats.failed_sources.push(source_identifier.clone());
                 attempted.push(source_identifier.clone());
+                let payload = serde_json::json!({
+                    "error": error,
+                    "duration_ms": duration_ms,
+                    "claim_token": claim_token,
+                });
+                crate::provenance::record_provenance_event(
+                    pool,
+                    beampipe_domain::provenance::ProvenanceEventType::DiscoveryError.as_str(),
+                    project_module,
+                    Some(source_identifier.as_str()),
+                    None,
+                    Some("system:discovery"),
+                    Some(claim_token),
+                    &payload,
+                )
+                .await;
             }
         }
     }
@@ -1002,7 +1040,7 @@ async fn persist_changed_or_unchanged(
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        let _ = insert_provenance_event(
+        crate::provenance::record_provenance_event(
             pool,
             "discovery.unchanged",
             project_module,
@@ -1069,7 +1107,7 @@ async fn persist_changed_or_unchanged(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    let _ = insert_provenance_event(
+    crate::provenance::record_provenance_event(
         pool,
         "discovery.changed",
         project_module,
@@ -1222,7 +1260,8 @@ pub async fn create_execution(
     .bind(created_by_id)
     .fetch_one(pool)
     .await?;
-    let _ = insert_provenance_event(
+    let payload = serde_json::json!({"archive_name": archive_name, "sources": sources});
+    crate::provenance::record_provenance_event(
         pool,
         "execution.created",
         project_module,
@@ -1230,10 +1269,73 @@ pub async fn create_execution(
         Some(id),
         created_by_id.map(|_| "system:api"),
         None,
-        &serde_json::json!({"archive_name": archive_name, "sources": sources}),
+        &payload,
+    )
+    .await;
+    Ok(row)
+}
+
+pub async fn create_execution_with_correlation(
+    pool: &PgPool,
+    project_module: &str,
+    sources: Value,
+    archive_name: &str,
+    deployment_profile_id: Option<Uuid>,
+    project_config_id: Option<Uuid>,
+    created_by_id: Option<i32>,
+    correlation_id: Option<&str>,
+) -> Result<ExecutionRow, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let id = Uuid::now_v7();
+    let row = sqlx::query_as::<_, ExecutionRow>(
+        r#"
+        INSERT INTO batch_execution_record (
+            uuid, project_module, sources, archive_name, deployment_profile_id,
+            project_config_id, created_by_id, status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(project_module)
+    .bind(sources.clone())
+    .bind(archive_name)
+    .bind(deployment_profile_id)
+    .bind(project_config_id)
+    .bind(created_by_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let payload = serde_json::json!({"archive_name": archive_name, "sources": sources});
+    insert_provenance_event(
+        &mut *tx,
+        "execution.created",
+        project_module,
+        None,
+        Some(id),
+        created_by_id.map(|_| "system:api"),
+        correlation_id,
+        &payload,
     )
     .await?;
+    tx.commit().await?;
     Ok(row)
+}
+
+pub async fn purge_provenance_events_older_than(
+    pool: &PgPool,
+    retention_days: i32,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM provenance_events
+        WHERE occurred_at < now() - ($1::int * interval '1 day')
+        "#,
+    )
+    .bind(retention_days)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn get_execution(pool: &PgPool, id: Uuid) -> Result<Option<ExecutionRow>, sqlx::Error> {
@@ -1268,12 +1370,26 @@ pub async fn apply_execution_patch(
     id: Uuid,
     patch: LedgerPatch,
 ) -> Result<Option<ExecutionRow>, sqlx::Error> {
+    apply_execution_patch_with_correlation(pool, id, patch, None).await
+}
+
+pub async fn apply_execution_patch_with_correlation(
+    pool: &PgPool,
+    id: Uuid,
+    patch: LedgerPatch,
+    correlation_id: Option<&str>,
+) -> Result<Option<ExecutionRow>, sqlx::Error> {
     let Some(row) = get_execution(pool, id).await? else {
         return Ok(None);
     };
+    let prev_status = row.status_enum().unwrap_or(ExecutionStatus::Pending);
+    let prev_phase = row.phase_enum();
+    let project_module = row.project_module.clone();
+    let patch_status = patch.status;
+    let patch_phase = patch.execution_phase;
     let mut state = LedgerState {
-        status: row.status_enum().unwrap_or(ExecutionStatus::Pending),
-        execution_phase: row.phase_enum(),
+        status: prev_status,
+        execution_phase: prev_phase,
         retry_count: row.retry_count,
         scheduler_name: row.scheduler_name,
         scheduler_job_id: row.scheduler_job_id,
@@ -1286,6 +1402,63 @@ pub async fn apply_execution_patch(
     state
         .apply_patch(patch, Utc::now())
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+    let correlation = correlation_id
+        .map(str::to_string)
+        .or_else(|| Some(id.to_string()));
+
+    if let Some(next) = patch_status {
+        if next != prev_status {
+            let event_type = match next {
+                ExecutionStatus::Running => {
+                    Some(beampipe_domain::provenance::ProvenanceEventType::ExecutionRunning)
+                }
+                ExecutionStatus::AwaitingScheduler => Some(
+                    beampipe_domain::provenance::ProvenanceEventType::ExecutionAwaitingScheduler,
+                ),
+                _ => None,
+            };
+            if let Some(ev) = event_type {
+                let payload = serde_json::json!({
+                    "from_status": prev_status.as_str(),
+                    "to_status": next.as_str(),
+                });
+                crate::provenance::record_provenance_event(
+                    pool,
+                    ev.as_str(),
+                    &project_module,
+                    None,
+                    Some(id),
+                    Some("system:execution"),
+                    correlation.as_deref(),
+                    &payload,
+                )
+                .await;
+            }
+        }
+    }
+    if patch_phase.is_some() {
+        let new_phase = state.execution_phase;
+        if new_phase != prev_phase {
+            if matches!(new_phase, Some(ExecutionPhase::Submit)) {
+                let payload = serde_json::json!({
+                    "execution_phase": "submit",
+                });
+                crate::provenance::record_provenance_event(
+                    pool,
+                    beampipe_domain::provenance::ProvenanceEventType::ExecutionExecuteStarted
+                        .as_str(),
+                    &project_module,
+                    None,
+                    Some(id),
+                    Some("system:execution"),
+                    correlation.as_deref(),
+                    &payload,
+                )
+                .await;
+            }
+        }
+    }
 
     sqlx::query_as::<_, ExecutionRow>(
         r#"
@@ -1621,6 +1794,13 @@ pub async fn is_token_blacklisted(pool: &PgPool, token_hash: &str) -> Result<boo
     Ok(count > 0)
 }
 
+pub async fn cleanup_expired_blacklisted_tokens(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM token_blacklist WHERE expires_at <= now()")
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedExecutions {
     pub items: Vec<ExecutionRow>,
@@ -1796,7 +1976,7 @@ pub async fn insert_project_config(
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
-    let _ = insert_provenance_event(
+    crate::provenance::record_provenance_event(
         pool,
         "config.activated",
         project_id,
@@ -2101,8 +2281,8 @@ pub async fn list_internal_test_project_modules(pool: &PgPool) -> Result<Vec<Str
     .await
 }
 
-pub async fn insert_provenance_event(
-    pool: &PgPool,
+pub async fn insert_provenance_event<'e, E>(
+    executor: E,
     event_type: &str,
     project_module: &str,
     source_identifier: Option<&str>,
@@ -2110,7 +2290,10 @@ pub async fn insert_provenance_event(
     actor: Option<&str>,
     correlation_id: Option<&str>,
     payload: &serde_json::Value,
-) -> Result<Uuid, sqlx::Error> {
+) -> Result<Uuid, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
@@ -2127,7 +2310,7 @@ pub async fn insert_provenance_event(
     .bind(actor)
     .bind(correlation_id)
     .bind(payload)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(id)
 }
@@ -2412,8 +2595,8 @@ pub async fn insert_alert_delivery(
     .bind(rule_id)
     .bind(channel_id)
     .bind(status)
-    .bind(payload)
-    .bind(error)
+    .bind(beampipe_security::redact_value(payload))
+    .bind(error.map(beampipe_security::redact_string))
     .execute(pool)
     .await?;
     Ok(id)

@@ -136,6 +136,15 @@ pub struct WorkerPool {
     pub handles: Vec<JoinHandle<()>>,
 }
 
+impl WorkerPool {
+    pub async fn shutdown(self) {
+        tracing::info!("event=worker_pool_shutdown");
+        for handle in self.handles {
+            handle.abort();
+        }
+    }
+}
+
 pub fn spawn_workers(pool: PgPool, config: WorkerConfig) -> WorkerPool {
     metrics::init_recorder();
     let mut handles = Vec::new();
@@ -269,10 +278,15 @@ pub async fn tick(pool: &PgPool, config: &WorkerConfig) -> Result<(), sqlx::Erro
     let job_started = std::time::Instant::now();
     metrics::record_job(&job.kind, "claimed");
     debug!(job_id = %job.uuid, kind = %job.kind, "event=job_claimed");
+    let correlation = correlation_id_from_payload(&job.payload)
+        .map(str::to_string)
+        .or_else(|| job.execution_id.map(|id| id.to_string()))
+        .unwrap_or_default();
     let span = tracing::info_span!(
         "job",
         job_id = %job.uuid,
         job_kind = %job.kind,
+        correlation_id = %correlation,
         execution_id = job.execution_id.map(|id| id.to_string()).unwrap_or_default()
     );
     let runner = ConfigDiscoveryRunner::from_env_with_pool(Some(pool.clone()));
@@ -592,7 +606,7 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
                                     "source_identifier": source_identifier,
                                     "reason": "signature_unchanged",
                                 });
-                                let _ = repo::insert_provenance_event(
+                                beampipe_db::provenance::record_provenance_event(
                                     pool,
                                     beampipe_domain::provenance::ProvenanceEventType::DiscoveryTapSkipped
                                         .as_str(),
@@ -1265,7 +1279,7 @@ async fn finalize_execution_source_pending(
         "source_identifiers": sources,
         "status": status.as_str(),
     });
-    let _ = repo::insert_provenance_event(
+    beampipe_db::provenance::record_provenance_event(
         pool,
         event_type.as_str(),
         project_module,
@@ -1869,7 +1883,7 @@ async fn schedule_project_executions(
             None,
         )
         .await?;
-        repo::apply_execution_patch(
+        repo::apply_execution_patch_with_correlation(
             pool,
             execution.uuid,
             LedgerPatch {
@@ -1886,6 +1900,7 @@ async fn schedule_project_executions(
                 })),
                 ..beampipe_domain::LedgerPatch::default()
             },
+            None,
         )
         .await?;
         repo::enqueue_job(
@@ -1929,7 +1944,7 @@ async fn terminal_execute_failure(
         error = %error,
         event = "execute_failed"
     );
-    repo::apply_execution_patch(
+    repo::apply_execution_patch_with_correlation(
         pool,
         execution_id,
         LedgerPatch {
@@ -1938,6 +1953,7 @@ async fn terminal_execute_failure(
             error: Some(error.clone()),
             ..LedgerPatch::default()
         },
+        None,
     )
     .await?;
     repo::mark_sources_pending_workflow_run(pool, project_module, source_identifiers).await?;
@@ -1946,7 +1962,7 @@ async fn terminal_execute_failure(
         "source_identifiers": source_identifiers,
         "error": error,
     });
-    let _ = repo::insert_provenance_event(
+    beampipe_db::provenance::record_provenance_event(
         pool,
         beampipe_domain::provenance::ProvenanceEventType::ExecutionFailed.as_str(),
         project_module,
@@ -2091,8 +2107,16 @@ async fn preflight_execute(
     Ok(())
 }
 
+fn correlation_id_from_payload(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("correlation_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
 async fn run_execute(pool: &PgPool, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
     let started = std::time::Instant::now();
+    let correlation_id = correlation_id_from_payload(payload);
     let execution_id = payload
         .get("execution_id")
         .and_then(serde_json::Value::as_str)
@@ -2103,7 +2127,7 @@ async fn run_execute(pool: &PgPool, payload: &serde_json::Value) -> Result<(), s
     };
     let project_module = execution.project_module.clone();
     let source_identifiers = source_identifiers_from_json(&execution.sources);
-    let result = run_execute_body(pool, execution_id, &execution, payload).await;
+    let result = run_execute_body(pool, execution_id, &execution, payload, correlation_id).await;
     metrics::record_execute_duration("total", started.elapsed().as_secs_f64());
     if let Err(msg) = result {
         terminal_execute_failure(
@@ -2123,6 +2147,7 @@ async fn run_execute_body(
     execution_id: uuid::Uuid,
     execution: &beampipe_db::models::ExecutionRow,
     payload: &serde_json::Value,
+    correlation_id: Option<&str>,
 ) -> Result<(), String> {
     let do_stage = payload
         .get("do_stage")
@@ -2172,7 +2197,7 @@ async fn run_execute_body(
     )
     .await?;
     if !replay_manifest {
-        repo::apply_execution_patch(
+        repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
@@ -2180,6 +2205,7 @@ async fn run_execute_body(
                 execution_phase: Some(Some(ExecutionPhase::StageAndManifest)),
                 ..LedgerPatch::default()
             },
+            correlation_id,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -2275,7 +2301,7 @@ async fn run_execute_body(
     let graph =
         prepare_graph_for_manifest(graph, &manifest, manifest_path).map_err(|e| e.to_string())?;
     if !do_submit {
-        repo::apply_execution_patch(
+        repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
@@ -2284,6 +2310,7 @@ async fn run_execute_body(
                 workflow_manifest: Some(manifest),
                 ..LedgerPatch::default()
             },
+            correlation_id,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -2305,7 +2332,7 @@ async fn run_execute_body(
         metrics::record_execute_terminal(&execution.project_module, "not_submitted");
         return Ok(());
     }
-    repo::apply_execution_patch(
+    repo::apply_execution_patch_with_correlation(
         pool,
         execution_id,
         LedgerPatch {
@@ -2313,6 +2340,7 @@ async fn run_execute_body(
             workflow_manifest: Some(manifest.clone()),
             ..LedgerPatch::default()
         },
+        correlation_id,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -2416,7 +2444,7 @@ async fn apply_submit_result(
     use_real: bool,
 ) -> Result<(), sqlx::Error> {
     let scheduler_name = submitted.scheduler_name.clone();
-    repo::apply_execution_patch(
+    repo::apply_execution_patch_with_correlation(
         pool,
         execution_id,
         LedgerPatch {
@@ -2427,6 +2455,7 @@ async fn apply_submit_result(
             execution_phase: Some(Some(ExecutionPhase::Submit)),
             ..LedgerPatch::default()
         },
+        None,
     )
     .await?;
     if scheduler_name != "slurm" && !use_real {
@@ -2595,6 +2624,8 @@ async fn apply_dim_poll_update(
 ) -> Result<(), sqlx::Error> {
     let max_rounds = policy.rest_max_rounds.unwrap_or(240);
     let interval_secs = policy.rest_interval_secs.unwrap_or(3.0) as i64;
+    let correlation = execution_id.to_string();
+    let correlation_id = Some(correlation.as_str());
     let session_id = execution
         .scheduler_job_id
         .clone()
@@ -2642,7 +2673,7 @@ async fn apply_dim_poll_update(
                 let _ = client.destroy_session(&session_id).await;
             }
         }
-        repo::apply_execution_patch(
+        repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
@@ -2650,6 +2681,7 @@ async fn apply_dim_poll_update(
                 workflow_manifest: Some(manifest),
                 ..LedgerPatch::default()
             },
+            correlation_id,
         )
         .await?;
         let sources = source_identifiers_from_json(&execution.sources);
@@ -2667,7 +2699,7 @@ async fn apply_dim_poll_update(
     if poll_round + 1 >= max_rounds {
         let timed_out =
             merge_scheduler_timeout_into_manifest(Some(manifest), "DIM poll exceeded max rounds");
-        repo::apply_execution_patch(
+        repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
@@ -2676,6 +2708,7 @@ async fn apply_dim_poll_update(
                 error: Some("DIM poll timeout".into()),
                 ..LedgerPatch::default()
             },
+            correlation_id,
         )
         .await?;
         let sources = source_identifiers_from_json(&execution.sources);
@@ -2686,7 +2719,7 @@ async fn apply_dim_poll_update(
     if from_tick {
         manifest = merge_dim_poll_tick_round(Some(manifest), poll_round + 1);
     }
-    repo::apply_execution_patch(
+    repo::apply_execution_patch_with_correlation(
         pool,
         execution_id,
         LedgerPatch {
@@ -2694,6 +2727,7 @@ async fn apply_dim_poll_update(
             workflow_manifest: Some(manifest),
             ..LedgerPatch::default()
         },
+        None,
     )
     .await?;
     if !from_tick {
@@ -2849,6 +2883,8 @@ async fn apply_slurm_poll_update(
     policy: &PollPolicy,
 ) -> Result<(), sqlx::Error> {
     let max_rounds = policy.slurm_max_rounds.unwrap_or(480);
+    let correlation = execution_id.to_string();
+    let correlation_id = Some(correlation.as_str());
     let scheduler_job_id = execution.scheduler_job_id.clone().unwrap_or_default();
     let parsed = beampipe_domain::slurm::parse_scheduler_job_id(&scheduler_job_id);
 
@@ -2860,13 +2896,14 @@ async fn apply_slurm_poll_update(
         );
         let manifest =
             manifest_for_slurm_poll(execution, result, &scheduler_job_id, false, None, None);
-        repo::apply_execution_patch(
+        repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
                 workflow_manifest: Some(manifest),
                 ..LedgerPatch::default()
             },
+            correlation_id,
         )
         .await?;
         return Ok(());
@@ -2899,7 +2936,7 @@ async fn apply_slurm_poll_update(
                 Some(manifest),
                 "Slurm poll exceeded max rounds",
             );
-            repo::apply_execution_patch(
+            repo::apply_execution_patch_with_correlation(
                 pool,
                 execution_id,
                 LedgerPatch {
@@ -2908,6 +2945,7 @@ async fn apply_slurm_poll_update(
                     error: Some("Slurm poll timeout".into()),
                     ..LedgerPatch::default()
                 },
+                None,
             )
             .await?;
             let sources = source_identifiers_from_json(&execution.sources);
@@ -2917,7 +2955,7 @@ async fn apply_slurm_poll_update(
             return Ok(());
         }
         manifest = merge_slurm_poll_tick_round(Some(manifest), next_round);
-        repo::apply_execution_patch(
+        repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
@@ -2925,6 +2963,7 @@ async fn apply_slurm_poll_update(
                 workflow_manifest: Some(manifest),
                 ..LedgerPatch::default()
             },
+            correlation_id,
         )
         .await?;
         return Ok(());
@@ -2958,7 +2997,7 @@ async fn apply_slurm_poll_update(
         }
         error = Some(msg);
     }
-    repo::apply_execution_patch(
+    repo::apply_execution_patch_with_correlation(
         pool,
         execution_id,
         LedgerPatch {
@@ -2967,6 +3006,7 @@ async fn apply_slurm_poll_update(
             error,
             ..LedgerPatch::default()
         },
+        None,
     )
     .await?;
     let sources = source_identifiers_from_json(&execution.sources);

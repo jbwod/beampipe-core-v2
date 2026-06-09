@@ -1,18 +1,19 @@
+mod correlation;
 mod observability;
 mod openapi;
 mod rate_limit;
+mod route_metrics;
 
 use axum::{
     body::Body,
     extract::{FromRef, FromRequestParts, Path, Query, State},
-    http::{request::Parts, Request, StatusCode},
+    http::{request::Parts, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use beampipe_adapters::probe_tap_health;
-use beampipe_auth::TokenType;
 use beampipe_config::Settings;
 use beampipe_db::{models::*, repo};
 use beampipe_domain::{
@@ -27,15 +28,23 @@ use beampipe_metrics as metrics;
 use beampipe_orchestration::{cancel::CancelParams, cancel_scheduler_session};
 use beampipe_profiles::DeploymentProfile;
 use beampipe_project::{ProjectConfig, ValidationReport, WasmHost};
+use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
 use rate_limit::{check_rate_limit, client_ip, RateLimitError, RateLimiter};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    trace::TraceLayer,
+};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
@@ -70,12 +79,12 @@ pub struct AppState {
         observability::list_project_events
     ),
     components(schemas(
-        HealthResponse, ReadyResponse, LoginRequest, TokenResponse,
+        HealthResponse, ReadyResponse, LoginRequest, TokenResponse, CurrentUserResponse,
         RefreshRequest, LogoutRequest,
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
-        DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow,
+        DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
         ExecutionCreate, ExecutionPatchRequest, ExecuteRequest, ExecutionStatus,
-        JobCreate, WasmUploadResponse,
+        JobCreate, JobResponse, WasmUploadResponse,
         ProjectConfig, ValidationReport,
         beampipe_project::ProjectMetadata,
         beampipe_project::AdapterConfig,
@@ -95,7 +104,7 @@ pub struct AppState {
         beampipe_project::SourceIdentityConfig,
         beampipe_project::TemplateVarSpec,
         beampipe_project::TransformSpec,
-        DeploymentProfile,
+        DeploymentProfile, DeploymentProfileResponse,
         beampipe_profiles::DaliugeTranslationConfig,
         beampipe_profiles::DaliugeAlgo,
         beampipe_profiles::DeploymentConfig,
@@ -103,6 +112,8 @@ pub struct AppState {
         beampipe_profiles::SlurmRemoteDeploymentConfig,
         SourceExecutionStatus,
         observability::NotificationChannelCreate, observability::NotificationChannelUpdate,
+        observability::NotificationChannelResponse, observability::AlertDeliveryResponse,
+        observability::ProvenanceEventResponse, beampipe_security::SecretRef,
         observability::AlertRuleCreate, observability::AlertRuleUpdate,
         ProvenanceEventRow, NotificationChannelRow, AlertRuleRow, AlertDeliveryRow,
         ProvenanceSummary,
@@ -125,6 +136,7 @@ pub use openapi::{build_openapi, export_openapi_json};
 
 pub fn router(state: AppState) -> Router {
     let state = Arc::new(state);
+    let cors = cors_layer(&state.settings);
     let sensitive = Router::new()
         .route("/api/v2/login", post(login))
         .route("/api/v2/executions", post(create_execution))
@@ -235,29 +247,75 @@ pub fn router(state: AppState) -> Router {
             get(observability::list_project_events),
         )
         .merge(SwaggerUi::new("/api/v2/docs").url("/api/v2/openapi.json", openapi::build_openapi()))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(middleware::from_fn(api_metrics_middleware))
+        .layer(middleware::from_fn(correlation::correlation_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
+fn cors_layer(settings: &Settings) -> CorsLayer {
+    if let Some(raw) = settings.cors_allow_origins.as_deref() {
+        let origins: Vec<HeaderValue> = raw
+            .split(',')
+            .filter_map(|origin| origin.trim().parse::<HeaderValue>().ok())
+            .collect();
+        if !origins.is_empty() {
+            return CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(Any)
+                .allow_headers(Any);
+        }
+    }
+    CorsLayer::permissive()
+}
+
+fn reject_inline_secrets_in_production(
+    settings: &Settings,
+    surface: &str,
+    value: &Value,
+) -> Result<(), ApiError> {
+    let policy = SecretPolicy::from_env_name(&settings.beampipe_env);
+    let paths = unsafe_inline_secret_paths(value, policy);
+    if !paths.is_empty() {
+        metrics::record_unsafe_inline_secret_rejected(surface);
+        return Err(ApiError::BadRequest(format!(
+            "inline secrets are not allowed in production for {surface}; use env/file secret refs for: {}",
+            paths.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 async fn api_metrics_middleware(request: Request<Body>, next: Next) -> Response {
     let method = request.method().to_string();
-    let path = request.uri().path().to_string();
+    let route = route_metrics::normalize_api_route(request.uri().path());
+    let started = Instant::now();
     let response = next.run(request).await;
-    metrics::record_api_request(&method, &path, response.status().as_u16());
+    let status = response.status().as_u16();
+    metrics::record_api_request_duration(&method, &route, status, started.elapsed().as_secs_f64());
     response
 }
 
 pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyhow::Result<()> {
+    if let Err(errors) = beampipe_orchestration::validate_security(&settings) {
+        anyhow::bail!("security validation failed:\n  - {}", errors.join("\n  - "));
+    }
     metrics::init_recorder();
+    beampipe_metrics::set_slurm_ssh_configured(
+        beampipe_orchestration::SlurmSshCredentials::try_resolve_ok(),
+    );
+    let mut worker_pool = None;
     if settings.metrics_server_enabled {
         if let Ok(addr) = settings.metrics_bind_addr.parse() {
             let _ = metrics::server::spawn_metrics_server(addr, Some(pool.clone()));
         }
     }
     if with_worker {
-        let _workers = spawn_workers(pool.clone(), WorkerConfig::from_settings(&settings));
+        worker_pool = Some(spawn_workers(
+            pool.clone(),
+            WorkerConfig::from_settings(&settings),
+        ));
     }
     let rate_limiter = RateLimiter::from_settings(&settings).await;
     let bind_addr: SocketAddr = settings.bind_addr.parse()?;
@@ -269,8 +327,36 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
     });
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!(addr = %bind_addr, "event=api_listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    if let Some(workers) = worker_pool {
+        workers.shutdown().await;
+    }
+    tracing::info!("event=api_shutdown_complete");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("event=shutdown_signal_received");
 }
 
 #[derive(Debug, Error)]
@@ -283,6 +369,8 @@ pub enum ApiError {
     BadRequest(String),
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error("auth error: {0}")]
@@ -301,6 +389,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) | ApiError::Project(_) => StatusCode::BAD_REQUEST,
             ApiError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -313,6 +402,16 @@ impl IntoResponse for ApiError {
 
 #[derive(Clone)]
 struct AuthUser(UserRow);
+
+impl AuthUser {
+    fn require_superuser(&self) -> Result<(), ApiError> {
+        if self.0.is_superuser {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden("superuser required".into()))
+        }
+    }
+}
 
 #[axum::async_trait]
 impl<S> FromRequestParts<S> for AuthUser
@@ -378,18 +477,12 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-fn metrics_public() -> bool {
-    std::env::var("BEAMPIPE_METRICS_PUBLIC")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-}
-
 #[utoipa::path(get, path = "/api/v2/metrics", tag = "health", responses((status = 200), (status = 401)))]
 async fn metrics(
     State(state): State<Arc<AppState>>,
     mut parts: Parts,
 ) -> Result<Response, ApiError> {
-    if !metrics_public() {
+    if !state.settings.metrics_public {
         AuthUser::from_request_parts(&mut parts, &state).await?;
     }
     metrics::refresh_gauges_from_pool(&state.pool).await;
@@ -419,6 +512,7 @@ pub struct ReadyResponse {
 #[utoipa::path(get, path = "/api/v2/ready", tag = "health", responses((status = 200, body = ReadyResponse), (status = 503)))]
 async fn ready(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
 ) -> Result<(StatusCode, Json<ReadyResponse>), ApiError> {
     let database = match sqlx::query("SELECT 1").execute(&state.pool).await {
         Ok(_) => {
@@ -539,6 +633,7 @@ async fn refresh(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
+    let _ = repo::cleanup_expired_blacklisted_tokens(&state.pool).await;
     let Some(token) = req.refresh_token else {
         return Err(ApiError::BadRequest("refresh_token required".into()));
     };
@@ -546,16 +641,20 @@ async fn refresh(
         return Err(ApiError::BadRequest("token revoked".into()));
     }
     let claims = beampipe_auth::decode_refresh_token(&token, &state.settings.jwt_secret)?;
-    let access = beampipe_auth::issue_token(
+    let exp = chrono::DateTime::<Utc>::from_timestamp(claims.exp as i64, 0).unwrap_or_else(|| {
+        Utc::now() + chrono::Duration::days(state.settings.refresh_token_expire_days)
+    });
+    repo::blacklist_token(&state.pool, &beampipe_auth::token_hash(&token), exp).await?;
+    let pair = beampipe_auth::issue_token_pair(
         &claims.sub,
         &state.settings.jwt_secret,
-        TokenType::Access,
-        chrono::Duration::minutes(state.settings.access_token_expire_minutes),
+        state.settings.access_token_expire_minutes,
+        state.settings.refresh_token_expire_days,
     )?;
     Ok(Json(TokenResponse {
-        access_token: access,
-        refresh_token: token,
-        token_type: "bearer".into(),
+        access_token: pair.access_token,
+        refresh_token: pair.refresh_token,
+        token_type: pair.token_type,
     }))
 }
 
@@ -570,6 +669,7 @@ async fn logout(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let _ = repo::cleanup_expired_blacklisted_tokens(&state.pool).await;
     let exp = chrono::Utc::now() + chrono::Duration::days(state.settings.refresh_token_expire_days);
     if let Some(token) = req.access_token {
         repo::blacklist_token(&state.pool, &beampipe_auth::token_hash(&token), exp).await?;
@@ -583,6 +683,7 @@ async fn logout(
 #[utoipa::path(get, path = "/api/v2/executions", tag = "executions")]
 async fn list_executions(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Query(query): Query<ListExecutionsQuery>,
 ) -> Result<Json<repo::PaginatedExecutions>, ApiError> {
     Ok(Json(
@@ -609,7 +710,13 @@ pub struct ListExecutionsQuery {
 pub struct ProvenanceSummary {
     pub config_version: Option<i32>,
     pub discovery_signature: Option<String>,
-    pub recent_events: Vec<ProvenanceEventRow>,
+    pub recent_events: Vec<observability::ProvenanceEventResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LedgerSnapshotQuery {
+    #[serde(default = "default_true")]
+    pub include_manifest: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -619,8 +726,10 @@ pub struct LedgerSnapshotResponse {
     pub execution_phase: Option<String>,
     pub scheduler_name: Option<String>,
     pub scheduler_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_manifest: Option<Value>,
     pub last_error: Option<String>,
+    pub run_record_phases: Value,
     pub provenance_summary: ProvenanceSummary,
 }
 
@@ -632,10 +741,17 @@ pub struct LedgerSnapshotResponse {
 async fn execution_ledger_snapshot(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    Query(query): Query<LedgerSnapshotQuery>,
 ) -> Result<Json<LedgerSnapshotResponse>, ApiError> {
     let row = repo::get_execution(&state.pool, id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let run_record = row
+        .workflow_manifest
+        .as_ref()
+        .and_then(beampipe_domain::run_record::extract_beampipe_run_record);
+    let run_record_phases =
+        beampipe_domain::run_record::summarize_run_record_phases(run_record.as_ref());
     let config_version = repo::get_active_project_config(&state.pool, &row.project_module)
         .await?
         .map(|c| c.version);
@@ -653,15 +769,24 @@ async fn execution_ledger_snapshot(
     } else {
         None
     };
-    let recent_events = repo::list_provenance_events_for_execution(&state.pool, id, 5).await?;
+    let recent_events = repo::list_provenance_events_for_execution(&state.pool, id, 5)
+        .await?
+        .into_iter()
+        .map(observability::ProvenanceEventResponse::from)
+        .collect();
     Ok(Json(LedgerSnapshotResponse {
         uuid: row.uuid,
         status: row.status,
         execution_phase: row.execution_phase,
         scheduler_name: row.scheduler_name,
         scheduler_job_id: row.scheduler_job_id,
-        workflow_manifest: row.workflow_manifest,
-        last_error: row.last_error,
+        workflow_manifest: if query.include_manifest {
+            row.workflow_manifest.map(|v| redact_value(&v))
+        } else {
+            None
+        },
+        last_error: row.last_error.map(|e| redact_string(&e)),
+        run_record_phases: redact_value(&run_record_phases),
         provenance_summary: ProvenanceSummary {
             config_version,
             discovery_signature,
@@ -680,6 +805,7 @@ pub struct ProjectListItem {
 #[utoipa::path(get, path = "/api/v2/projects", tag = "project-configs")]
 async fn list_projects(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
 ) -> Result<Json<Vec<ProjectListItem>>, ApiError> {
     let rows = repo::list_active_project_configs(&state.pool).await?;
     Ok(Json(
@@ -696,6 +822,7 @@ async fn list_projects(
 #[utoipa::path(get, path = "/api/v2/projects/contracts", tag = "project-configs")]
 async fn list_project_contracts(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
 ) -> Result<Json<Vec<ValidationReport>>, ApiError> {
     let rows = repo::list_active_project_configs(&state.pool).await?;
     let mut reports = Vec::new();
@@ -710,6 +837,7 @@ async fn list_project_contracts(
 #[utoipa::path(get, path = "/api/v2/projects/contracts/{id}", tag = "project-configs")]
 async fn get_project_contract(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ValidationReport>, ApiError> {
     let row = repo::get_active_project_config(&state.pool, &id)
@@ -758,9 +886,36 @@ async fn login(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/user/me", tag = "auth", responses((status = 200), (status = 401)))]
-async fn current_user(AuthUser(user): AuthUser) -> Json<UserRow> {
-    Json(user)
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CurrentUserResponse {
+    pub uuid: Uuid,
+    pub name: String,
+    pub username: String,
+    pub email: String,
+    pub profile_image_url: String,
+    pub is_superuser: bool,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<UserRow> for CurrentUserResponse {
+    fn from(user: UserRow) -> Self {
+        Self {
+            uuid: user.uuid,
+            name: user.name,
+            username: user.username,
+            email: user.email,
+            profile_image_url: user.profile_image_url,
+            is_superuser: user.is_superuser,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+        }
+    }
+}
+
+#[utoipa::path(get, path = "/api/v2/user/me", tag = "auth", responses((status = 200, body = CurrentUserResponse), (status = 401)))]
+async fn current_user(AuthUser(user): AuthUser) -> Json<CurrentUserResponse> {
+    Json(user.into())
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -791,8 +946,33 @@ pub struct SourceUpdate {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SourceMetadataResponse {
     pub source: SourceRegistryRow,
-    pub metadata: Vec<ArchiveMetadataRow>,
+    pub metadata: Vec<ArchiveMetadataResponse>,
     pub metadata_count: usize,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArchiveMetadataResponse {
+    pub uuid: Uuid,
+    pub project_module: String,
+    pub source_identifier: String,
+    pub sbid: String,
+    pub metadata_json: Option<Value>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<ArchiveMetadataRow> for ArchiveMetadataResponse {
+    fn from(row: ArchiveMetadataRow) -> Self {
+        Self {
+            uuid: row.uuid,
+            project_module: row.project_module,
+            source_identifier: row.source_identifier,
+            sbid: row.sbid,
+            metadata_json: row.metadata_json.map(|v| redact_value(&v)),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -889,6 +1069,7 @@ async fn discover_sources(
 #[utoipa::path(get, path = "/api/v2/sources", tag = "sources", responses((status = 200)))]
 async fn list_sources(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Query(query): Query<ListSourcesQuery>,
 ) -> Result<Json<Vec<SourceRegistryRow>>, ApiError> {
     Ok(Json(
@@ -905,6 +1086,7 @@ async fn list_sources(
 #[utoipa::path(get, path = "/api/v2/sources/{id}", tag = "sources", responses((status = 200), (status = 404)))]
 async fn get_source(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SourceRegistryRow>, ApiError> {
     repo::get_source(&state.pool, id)
@@ -916,6 +1098,7 @@ async fn get_source(
 #[utoipa::path(get, path = "/api/v2/sources/{id}/status", tag = "sources", responses((status = 200, body = SourceExecutionStatus), (status = 404)))]
 async fn get_source_status(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SourceExecutionStatus>, ApiError> {
     let source = repo::get_source(&state.pool, id)
@@ -972,6 +1155,7 @@ async fn delete_source(
 #[utoipa::path(get, path = "/api/v2/sources/{id}/metadata", tag = "sources", responses((status = 200), (status = 404)))]
 async fn get_source_metadata(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SourceMetadataResponse>, ApiError> {
     let source = repo::get_source(&state.pool, id)
@@ -981,13 +1165,17 @@ async fn get_source_metadata(
     Ok(Json(SourceMetadataResponse {
         metadata_count: metadata.len(),
         source,
-        metadata,
+        metadata: metadata
+            .into_iter()
+            .map(ArchiveMetadataResponse::from)
+            .collect(),
     }))
 }
 
 #[utoipa::path(get, path = "/api/v2/sources/{id}/executions", tag = "sources", responses((status = 200), (status = 404)))]
 async fn list_source_executions(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
     Query(query): Query<ListSourcesQuery>,
 ) -> Result<Json<Vec<ExecutionRow>>, ApiError> {
@@ -1160,6 +1348,7 @@ async fn prepare_execution(
 #[utoipa::path(post, path = "/api/v2/executions", tag = "executions", request_body = ExecutionCreate, responses((status = 201)))]
 async fn create_execution(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     AuthUser(user): AuthUser,
     Json(req): Json<ExecutionCreate>,
 ) -> Result<(StatusCode, Json<ExecutionRead>), ApiError> {
@@ -1175,7 +1364,7 @@ async fn create_execution(
     let project_config_id = repo::get_active_project_config(&state.pool, &req.project_module)
         .await?
         .map(|c| c.uuid);
-    let row = repo::create_execution(
+    let row = repo::create_execution_with_correlation(
         &state.pool,
         &req.project_module,
         Value::Array(req.sources),
@@ -1183,6 +1372,7 @@ async fn create_execution(
         deployment_profile_id,
         project_config_id,
         Some(user.id),
+        Some(ctx.correlation_id()),
     )
     .await?;
     Ok((
@@ -1194,6 +1384,7 @@ async fn create_execution(
 #[utoipa::path(get, path = "/api/v2/executions/{id}", tag = "executions", responses((status = 200), (status = 404)))]
 async fn get_execution(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ExecutionRead>, ApiError> {
     let row = repo::get_execution(&state.pool, id)
@@ -1206,7 +1397,8 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
     let beampipe_run_record = row
         .workflow_manifest
         .as_ref()
-        .and_then(beampipe_domain::run_record::extract_beampipe_run_record);
+        .and_then(beampipe_domain::run_record::extract_beampipe_run_record)
+        .map(|v| redact_value(&v));
     let debug_urls = execution_debug_urls(pool, &row).await?;
     let project_config_version = if let Some(id) = row.project_config_id {
         repo::get_project_config_by_uuid(pool, id)
@@ -1224,9 +1416,9 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
         execution_phase: row.execution_phase,
         scheduler_name: row.scheduler_name.clone(),
         scheduler_job_id: row.scheduler_job_id.clone(),
-        workflow_manifest: row.workflow_manifest,
+        workflow_manifest: row.workflow_manifest.map(|v| redact_value(&v)),
         beampipe_run_record,
-        last_error: row.last_error,
+        last_error: row.last_error.map(|e| redact_string(&e)),
         retry_count: row.retry_count,
         started_at: row.started_at,
         completed_at: row.completed_at,
@@ -1301,6 +1493,7 @@ async fn execution_debug_urls(
 #[utoipa::path(get, path = "/api/v2/executions/{id}/status", tag = "executions", responses((status = 200), (status = 404)))]
 async fn execution_status(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ExecutionStatusResponse>, ApiError> {
     let row = repo::get_execution(&state.pool, id)
@@ -1312,7 +1505,7 @@ async fn execution_status(
         execution_phase: row.execution_phase.clone(),
         scheduler_name: row.scheduler_name.clone(),
         scheduler_job_id: row.scheduler_job_id.clone(),
-        last_error: row.last_error.clone(),
+        last_error: row.last_error.clone().map(|e| redact_string(&e)),
         retry_count: row.retry_count,
         started_at: row.started_at,
         completed_at: row.completed_at,
@@ -1326,6 +1519,7 @@ async fn execution_status(
 #[utoipa::path(get, path = "/api/v2/executions/{id}/summary", tag = "executions", responses((status = 200), (status = 404)))]
 async fn execution_summary(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ExecutionSummaryResponse>, ApiError> {
     let row = repo::get_execution(&state.pool, id)
@@ -1341,7 +1535,7 @@ async fn execution_summary(
         requested_source_identifiers: source_ids,
         scheduler_name: row.scheduler_name,
         scheduler_job_id: row.scheduler_job_id,
-        last_error: row.last_error,
+        last_error: row.last_error.map(|e| redact_string(&e)),
     }))
 }
 
@@ -1360,7 +1554,7 @@ async fn patch_execution(
     AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<ExecutionPatchRequest>,
-) -> Result<Json<ExecutionRow>, ApiError> {
+) -> Result<Json<ExecutionRead>, ApiError> {
     if req.status == Some(ExecutionStatus::Cancelled) {
         let execution = repo::get_execution(&state.pool, id)
             .await?
@@ -1381,10 +1575,10 @@ async fn patch_execution(
         execution_phase: None,
         clear_error: false,
     };
-    repo::apply_execution_patch(&state.pool, id, patch)
+    let row = repo::apply_execution_patch_with_correlation(&state.pool, id, patch, None)
         .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(enrich_execution(&state.pool, row).await?))
 }
 
 async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
@@ -1423,6 +1617,7 @@ fn default_true() -> bool {
 #[utoipa::path(post, path = "/api/v2/executions/{id}/execute", tag = "executions", responses((status = 202)))]
 async fn execute_execution(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<ExecuteRequest>,
@@ -1431,6 +1626,7 @@ async fn execute_execution(
         "execution_id": id,
         "do_stage": req.do_stage,
         "do_submit": req.do_submit,
+        "correlation_id": ctx.correlation_id(),
     });
     let job = repo::enqueue_job(
         &state.pool,
@@ -1455,9 +1651,10 @@ async fn execute_execution(
 #[utoipa::path(post, path = "/api/v2/project-configs", tag = "project-configs", request_body = String, responses((status = 201, body = ValidationReport), (status = 400)))]
 async fn upload_project_config(
     State(state): State<Arc<AppState>>,
-    AuthUser(_user): AuthUser,
+    user: AuthUser,
     body: String,
 ) -> Result<(StatusCode, Json<ValidationReport>), ApiError> {
+    user.require_superuser()?;
     let config = ProjectConfig::from_slice(body.as_bytes())?;
     let previous = repo::get_active_project_config(&state.pool, &config.metadata.id)
         .await?
@@ -1480,6 +1677,7 @@ async fn upload_project_config(
         return Err(ApiError::BadRequest(report.errors.join("; ")));
     }
     let spec = serde_json::to_value(&config).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    reject_inline_secrets_in_production(&state.settings, "project_config", &spec)?;
     repo::insert_project_config(&state.pool, &config.metadata.id, spec, &report.spec_sha256)
         .await?;
     Ok((StatusCode::CREATED, Json(report)))
@@ -1488,6 +1686,7 @@ async fn upload_project_config(
 #[utoipa::path(get, path = "/api/v2/project-configs/{id}", tag = "project-configs", responses((status = 200), (status = 404)))]
 async fn get_project_config(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ProjectConfigRow>, ApiError> {
     repo::get_active_project_config(&state.pool, &id)
@@ -1499,6 +1698,7 @@ async fn get_project_config(
 #[utoipa::path(get, path = "/api/v2/project-configs/{id}/versions", tag = "project-configs", responses((status = 200)))]
 async fn list_project_config_versions(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ProjectConfigRow>>, ApiError> {
     Ok(Json(
@@ -1515,10 +1715,11 @@ pub struct WasmUploadResponse {
 #[utoipa::path(post, path = "/api/v2/project-configs/{id}/wasm", tag = "project-configs", responses((status = 201, body = WasmUploadResponse)))]
 async fn upload_project_config_wasm(
     State(state): State<Arc<AppState>>,
-    AuthUser(_user): AuthUser,
+    user: AuthUser,
     Path(project_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<WasmUploadResponse>), ApiError> {
+    user.require_superuser()?;
     let config_row = repo::get_active_project_config(&state.pool, &project_id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1598,12 +1799,82 @@ pub struct JobCreate {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct JobResponse {
+    pub uuid: Uuid,
+    pub kind: String,
+    pub payload: Value,
+    pub status: String,
+    pub execution_id: Option<Uuid>,
+    pub phase: Option<String>,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub next_run_at: chrono::DateTime<Utc>,
+    pub locked_until: Option<chrono::DateTime<Utc>>,
+    pub idempotency_key: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<JobRow> for JobResponse {
+    fn from(row: JobRow) -> Self {
+        Self {
+            uuid: row.uuid,
+            kind: row.kind,
+            payload: redact_value(&row.payload),
+            status: row.status,
+            execution_id: row.execution_id,
+            phase: row.phase,
+            attempts: row.attempts,
+            max_attempts: row.max_attempts,
+            next_run_at: row.next_run_at,
+            locked_until: row.locked_until,
+            idempotency_key: row.idempotency_key,
+            last_error: row.last_error.map(|e| redact_string(&e)),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeploymentProfileResponse {
+    pub uuid: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub project_module: Option<String>,
+    pub is_default: bool,
+    pub translation: Value,
+    pub deployment: Value,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<DeploymentProfileRow> for DeploymentProfileResponse {
+    fn from(row: DeploymentProfileRow) -> Self {
+        Self {
+            uuid: row.uuid,
+            name: row.name,
+            description: row.description,
+            project_module: row.project_module,
+            is_default: row.is_default,
+            translation: redact_value(&row.translation),
+            deployment: redact_value(&row.deployment),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
 #[utoipa::path(post, path = "/api/v2/jobs", tag = "jobs", request_body = JobCreate, responses((status = 202)))]
 async fn enqueue_job(
     State(state): State<Arc<AppState>>,
-    AuthUser(_user): AuthUser,
+    user: AuthUser,
     Json(req): Json<JobCreate>,
-) -> Result<(StatusCode, Json<JobRow>), ApiError> {
+) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
+    user.require_superuser()?;
+    reject_inline_secrets_in_production(&state.settings, "job_payload", &req.payload)?;
     let job = repo::enqueue_job(
         &state.pool,
         &req.kind,
@@ -1612,18 +1883,29 @@ async fn enqueue_job(
         req.idempotency_key.as_deref(),
     )
     .await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
+    Ok((StatusCode::ACCEPTED, Json(job.into())))
 }
 
 #[utoipa::path(post, path = "/api/v2/deployment-profiles", tag = "deployment-profiles", request_body = DeploymentProfile, responses((status = 201)))]
 async fn create_deployment_profile(
     State(state): State<Arc<AppState>>,
-    AuthUser(_user): AuthUser,
+    user: AuthUser,
     Json(profile): Json<DeploymentProfile>,
-) -> Result<(StatusCode, Json<DeploymentProfileRow>), ApiError> {
+) -> Result<(StatusCode, Json<DeploymentProfileResponse>), ApiError> {
+    user.require_superuser()?;
     profile
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    reject_inline_secrets_in_production(
+        &state.settings,
+        "deployment_profile.translation",
+        &serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
+    )?;
+    reject_inline_secrets_in_production(
+        &state.settings,
+        "deployment_profile.deployment",
+        &serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
+    )?;
     let row = sqlx::query_as::<_, DeploymentProfileRow>(
         r#"
         INSERT INTO daliuge_deployment_profile
@@ -1641,20 +1923,24 @@ async fn create_deployment_profile(
     .bind(serde_json::to_value(&profile.deployment).unwrap_or(Value::Null))
     .fetch_one(&state.pool)
     .await?;
-    Ok((StatusCode::CREATED, Json(row)))
+    Ok((StatusCode::CREATED, Json(row.into())))
 }
 
 #[utoipa::path(get, path = "/api/v2/deployment-profiles", tag = "deployment-profiles", responses((status = 200)))]
 async fn list_deployment_profiles(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
-) -> Result<Json<Vec<DeploymentProfileRow>>, ApiError> {
+) -> Result<Json<Vec<DeploymentProfileResponse>>, ApiError> {
     let rows = sqlx::query_as::<_, DeploymentProfileRow>(
         "SELECT * FROM daliuge_deployment_profile ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(rows))
+    Ok(Json(
+        rows.into_iter()
+            .map(DeploymentProfileResponse::from)
+            .collect(),
+    ))
 }
 
 #[utoipa::path(get, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", responses((status = 200), (status = 404)))]
@@ -1662,9 +1948,10 @@ async fn get_deployment_profile(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
-) -> Result<Json<DeploymentProfileRow>, ApiError> {
+) -> Result<Json<DeploymentProfileResponse>, ApiError> {
     repo::get_deployment_profile(&state.pool, id)
         .await?
+        .map(DeploymentProfileResponse::from)
         .map(Json)
         .ok_or(ApiError::NotFound)
 }
@@ -1672,13 +1959,24 @@ async fn get_deployment_profile(
 #[utoipa::path(patch, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", request_body = DeploymentProfile, responses((status = 200), (status = 404)))]
 async fn update_deployment_profile(
     State(state): State<Arc<AppState>>,
-    AuthUser(_user): AuthUser,
+    user: AuthUser,
     Path(id): Path<Uuid>,
     Json(profile): Json<DeploymentProfile>,
-) -> Result<Json<DeploymentProfileRow>, ApiError> {
+) -> Result<Json<DeploymentProfileResponse>, ApiError> {
+    user.require_superuser()?;
     profile
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    reject_inline_secrets_in_production(
+        &state.settings,
+        "deployment_profile.translation",
+        &serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
+    )?;
+    reject_inline_secrets_in_production(
+        &state.settings,
+        "deployment_profile.deployment",
+        &serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
+    )?;
     let row = sqlx::query_as::<_, DeploymentProfileRow>(
         r#"
         UPDATE daliuge_deployment_profile
@@ -1702,15 +2000,18 @@ async fn update_deployment_profile(
     .bind(serde_json::to_value(&profile.deployment).unwrap_or(Value::Null))
     .fetch_optional(&state.pool)
     .await?;
-    row.map(Json).ok_or(ApiError::NotFound)
+    row.map(DeploymentProfileResponse::from)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 #[utoipa::path(delete, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", responses((status = 204), (status = 404)))]
 async fn delete_deployment_profile(
     State(state): State<Arc<AppState>>,
-    AuthUser(_user): AuthUser,
+    user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    user.require_superuser()?;
     let result = sqlx::query("DELETE FROM daliuge_deployment_profile WHERE uuid = $1")
         .bind(id)
         .execute(&state.pool)
@@ -1742,6 +2043,33 @@ fn dataset_count_from_metadata_json(value: &Value) -> usize {
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn current_user_response_excludes_hashed_password() {
+        let user = UserRow {
+            id: 42,
+            uuid: Uuid::now_v7(),
+            name: "Admin".into(),
+            username: "admin".into(),
+            email: "admin@example.test".into(),
+            hashed_password: "$2b$redacted".into(),
+            profile_image_url: "".into(),
+            is_deleted: false,
+            is_superuser: true,
+            created_at: Utc::now(),
+            updated_at: None,
+            deleted_at: None,
+        };
+        let value = serde_json::to_value(CurrentUserResponse::from(user)).unwrap();
+        assert!(value.get("hashed_password").is_none());
+        assert!(value.get("id").is_none());
+        assert!(value.get("deleted_at").is_none());
+    }
 }
 
 fn observed_slurm_state(row: &ExecutionRow) -> Option<String> {

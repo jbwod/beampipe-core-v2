@@ -1,4 +1,7 @@
 use beampipe_db::{models::AlertRuleRow, repo};
+use beampipe_security::{
+    redact_string, redact_value, resolve_secret_value_strict, SecretPolicy, SecretValue,
+};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -46,6 +49,8 @@ pub async fn fire_alert(
     }
     let body = serde_json::to_value(payload).unwrap_or(json!({}));
     let mut delivery_ids = Vec::new();
+    let mut any_failed = false;
+    let mut failure_details = Vec::new();
     for channel_id in &rule.channel_ids {
         let Some(channel) = repo::get_notification_channel(pool, *channel_id).await? else {
             continue;
@@ -62,31 +67,64 @@ pub async fn fire_alert(
         };
         let (status, err) = match result {
             Ok(()) => ("sent", None),
-            Err(e) => ("failed", Some(e.to_string())),
+            Err(e) => {
+                any_failed = true;
+                let error = redact_string(&e.to_string());
+                failure_details.push(json!({
+                    "channel_id": channel.uuid,
+                    "error": error,
+                }));
+                ("failed", Some(error))
+            }
         };
         let id = repo::insert_alert_delivery(
             pool,
             Some(rule.uuid),
             Some(channel.uuid),
             status,
-            &body,
+            &redact_value(&body),
             err.as_deref(),
         )
         .await?;
         delivery_ids.push(id);
     }
     repo::mark_alert_rule_fired(pool, rule.uuid).await?;
-    let _ = repo::insert_provenance_event(
-        pool,
-        beampipe_domain::provenance::ProvenanceEventType::AlertFired.as_str(),
-        &payload.project_module,
-        payload.source_identifiers.first().map(String::as_str),
-        payload.execution_id,
-        Some("system:alerts"),
-        None,
-        &body,
-    )
-    .await;
+    if delivery_ids.is_empty() && !rule.channel_ids.is_empty() {
+        any_failed = true;
+        failure_details.push(json!({"error": "no enabled channels delivered"}));
+    }
+    if any_failed {
+        let fail_payload = json!({
+            "rule_id": rule.uuid,
+            "alert": payload.alert,
+            "failures": redact_value(&Value::Array(failure_details)),
+            "original": redact_value(&body),
+        });
+        beampipe_db::provenance::record_provenance_event(
+            pool,
+            beampipe_domain::provenance::ProvenanceEventType::AlertDeliveryFailed.as_str(),
+            &payload.project_module,
+            payload.source_identifiers.first().map(String::as_str),
+            payload.execution_id,
+            Some("system:alerts"),
+            None,
+            &fail_payload,
+        )
+        .await;
+    }
+    if !delivery_ids.is_empty() {
+        beampipe_db::provenance::record_provenance_event(
+            pool,
+            beampipe_domain::provenance::ProvenanceEventType::AlertFired.as_str(),
+            &payload.project_module,
+            payload.source_identifiers.first().map(String::as_str),
+            payload.execution_id,
+            Some("system:alerts"),
+            None,
+            &redact_value(&body),
+        )
+        .await;
+    }
     Ok(delivery_ids)
 }
 
@@ -121,10 +159,12 @@ async fn deliver_webhook(config: &Value, body: &Value) -> Result<(), AlertError>
         .get("template")
         .and_then(Value::as_str)
         .unwrap_or("generic");
+    let routing_key =
+        resolve_secret_field(config, "routing_key", "routing_key_ref")?.unwrap_or_default();
     let payload = match template {
         "slack" => json!({ "text": format_slack_text(body) }),
         "pagerduty" => json!({
-            "routing_key": config.get("routing_key").and_then(Value::as_str).unwrap_or(""),
+            "routing_key": routing_key,
             "event_action": "trigger",
             "payload": {
                 "summary": body.get("summary").and_then(Value::as_str).unwrap_or("beampipe alert"),
@@ -139,8 +179,8 @@ async fn deliver_webhook(config: &Value, body: &Value) -> Result<(), AlertError>
     let mut req = client.post(url).json(&payload);
     if let Some(headers) = config.get("headers").and_then(Value::as_object) {
         for (k, v) in headers {
-            if let Some(s) = v.as_str() {
-                req = req.header(k, s);
+            if let Some(secret) = resolve_header_value(v)? {
+                req = req.header(k, secret.expose());
             }
         }
     }
@@ -152,6 +192,33 @@ async fn deliver_webhook(config: &Value, body: &Value) -> Result<(), AlertError>
         return Err(AlertError::Delivery(format!("HTTP {}", resp.status())));
     }
     Ok(())
+}
+
+fn secret_policy() -> SecretPolicy {
+    SecretPolicy::from_process_env()
+}
+
+fn resolve_secret_field(
+    config: &Value,
+    key: &str,
+    ref_key: &str,
+) -> Result<Option<String>, AlertError> {
+    if let Some(value) = config.get(ref_key) {
+        return resolve_secret_value_strict(value, secret_policy())
+            .map_err(|e| AlertError::Delivery(e.to_string()))
+            .map(|v| v.map(|secret| secret.expose().to_string()));
+    }
+    if let Some(value) = config.get(key) {
+        return resolve_secret_value_strict(value, secret_policy())
+            .map_err(|e| AlertError::Delivery(e.to_string()))
+            .map(|v| v.map(|secret| secret.expose().to_string()));
+    }
+    Ok(None)
+}
+
+fn resolve_header_value(value: &Value) -> Result<Option<SecretValue>, AlertError> {
+    resolve_secret_value_strict(value, secret_policy())
+        .map_err(|e| AlertError::Delivery(e.to_string()))
 }
 
 async fn deliver_email(config: &Value, payload: &AlertPayload) -> Result<(), AlertError> {
@@ -206,7 +273,7 @@ async fn deliver_email(config: &Value, payload: &AlertPayload) -> Result<(), Ale
             .port(port);
         if let (Some(user), Some(pass)) = (
             config.get("user").and_then(Value::as_str),
-            config.get("password").and_then(Value::as_str),
+            resolve_secret_field(config, "password", "password_ref")?,
         ) {
             builder = builder.credentials(Credentials::new(user.to_string(), pass.to_string()));
         }

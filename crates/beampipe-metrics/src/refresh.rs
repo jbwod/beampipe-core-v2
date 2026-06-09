@@ -2,6 +2,8 @@
 
 use beampipe_adapters::probe_tap_health;
 use beampipe_db::test_modules::is_integration_test_project_module;
+use beampipe_orchestration::slurm_credentials::SlurmSshCredentials;
+use beampipe_orchestration::tm_health::{probe_dim_reachable, probe_tm_reachable, TmProbeResult};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
@@ -52,6 +54,49 @@ pub async fn refresh_dependencies(pool: &PgPool) {
         "vizier",
         tap_report.vizier.reachable || !tap_report.vizier.configured,
     );
+
+    let redis_up = match std::env::var("BEAMPIPE_REDIS_URL") {
+        Ok(url) if !url.is_empty() => {
+            if let Ok(client) = redis::Client::open(url.as_str()) {
+                if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
+                    redis::cmd("PING")
+                        .query_async::<()>(&mut conn)
+                        .await
+                        .is_ok()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        _ => true,
+    };
+    crate::set_dependency_up("redis", redis_up);
+
+    crate::set_slurm_ssh_configured(SlurmSshCredentials::try_resolve_ok());
+
+    let tm_url = std::env::var("BEAMPIPE_TM_HEALTH_URL")
+        .or_else(|_| std::env::var("BEAMPIPE_TM_URL"))
+        .unwrap_or_else(|_| "http://localhost:9000".into());
+    let tm_up = matches!(
+        probe_tm_reachable(&tm_url, Duration::from_secs(timeout_secs)).await,
+        TmProbeResult::Ok | TmProbeResult::NotConfigured
+    );
+    crate::set_dependency_up("tm", tm_up);
+
+    let dim_url = std::env::var("BEAMPIPE_DIM_HEALTH_URL")
+        .or_else(|_| std::env::var("BEAMPIPE_DIM_URL"))
+        .unwrap_or_default();
+    let dim_up = if dim_url.trim().is_empty() {
+        true
+    } else {
+        matches!(
+            probe_dim_reachable(&dim_url, Duration::from_secs(timeout_secs)).await,
+            TmProbeResult::Ok | TmProbeResult::NotConfigured
+        )
+    };
+    crate::set_dependency_up("dim", dim_up);
 }
 
 /// Refresh queue, pending backlog, and execution gauges from Postgres.

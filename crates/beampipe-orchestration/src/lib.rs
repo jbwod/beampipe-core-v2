@@ -10,7 +10,9 @@ pub mod dim;
 pub mod graph;
 pub mod http_client;
 pub mod manifest;
+pub mod security;
 pub mod slurm_batch;
+pub mod slurm_credentials;
 pub mod slurm_deploy;
 pub mod slurm_ssh;
 pub mod staging;
@@ -28,9 +30,11 @@ pub use manifest::{
     apply_project_graph_patches, build_manifest_from_config,
     build_manifest_from_config_with_staging,
 };
+pub use security::{collect_security_issues, validate_security};
 pub use slurm_batch::SlurmJobPollResult;
+pub use slurm_credentials::{beampipe_env, is_production_env, SlurmSshCredentials};
 pub use slurm_deploy::probe_slurm_login;
-pub use slurm_ssh::{query_slurm_states_batch, SlurmSshPool, SlurmTarget};
+pub use slurm_ssh::{query_slurm_states_batch, SlurmSshPool, SlurmSshSession, SlurmTarget};
 pub use staging::CasdaStagingClient;
 pub use tm_health::{
     dim_unreachable_message, format_service_request_error, probe_dim_reachable, probe_tm_reachable,

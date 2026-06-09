@@ -9,6 +9,7 @@ authors.workspace = true
 beampipe-domain = { path = "../beampipe-domain" }
 beampipe-project = { path = "../beampipe-project" }
 beampipe-profiles = { path = "../beampipe-profiles" }
+beampipe-security = { path = "../beampipe-security" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,4 +21,3 @@ utoipa = { version = "4", features = ["chrono", "uuid"] }
 
 [dev-dependencies]
 tokio.workspace = true
-

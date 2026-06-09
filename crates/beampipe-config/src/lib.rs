@@ -5,6 +5,8 @@ use thiserror::Error;
 pub struct Settings {
     pub database_url: String,
     pub bind_addr: String,
+    /// `BEAMPIPE_ENV` — `development` (default) or `production` / `prod`.
+    pub beampipe_env: String,
     pub jwt_secret: String,
     pub access_token_expire_minutes: i64,
     pub refresh_token_expire_days: i64,
@@ -27,10 +29,16 @@ pub struct Settings {
     pub rate_limit_period_seconds: u64,
     pub metrics_bind_addr: String,
     pub metrics_server_enabled: bool,
+    pub metrics_public: bool,
+    pub cors_allow_origins: Option<String>,
+    pub require_rate_limiter: bool,
     pub log_json: bool,
     pub otel_enabled: bool,
     pub otel_endpoint: String,
     pub otel_service_name: String,
+    pub otel_sampler_ratio: f64,
+    pub provenance_retention_days: i32,
+    pub migrate_on_serve: bool,
 }
 
 #[derive(Debug, Error)]
@@ -48,6 +56,7 @@ impl Settings {
             database_url: required("DATABASE_URL")?,
             bind_addr: std::env::var("BEAMPIPE_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:8080".into()),
+            beampipe_env: std::env::var("BEAMPIPE_ENV").unwrap_or_else(|_| "development".into()),
             jwt_secret: std::env::var("BEAMPIPE_JWT_SECRET")
                 .unwrap_or_else(|_| "secret-key".into()),
             access_token_expire_minutes: parse_or("BEAMPIPE_ACCESS_TOKEN_EXPIRE_MINUTES", 30)?,
@@ -89,12 +98,20 @@ impl Settings {
             metrics_bind_addr: std::env::var("BEAMPIPE_METRICS_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:9090".into()),
             metrics_server_enabled: parse_bool_or("BEAMPIPE_METRICS_SERVER_ENABLED", true)?,
+            metrics_public: parse_bool_or("BEAMPIPE_METRICS_PUBLIC", false)?,
+            cors_allow_origins: std::env::var("BEAMPIPE_CORS_ALLOW_ORIGINS")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            require_rate_limiter: parse_bool_or("BEAMPIPE_REQUIRE_RATE_LIMITER", false)?,
             log_json: parse_bool_or("BEAMPIPE_LOG_JSON", false)?,
             otel_enabled: parse_bool_or("BEAMPIPE_OTEL_ENABLED", false)?,
             otel_endpoint: std::env::var("BEAMPIPE_OTEL_ENDPOINT")
                 .unwrap_or_else(|_| "http://127.0.0.1:4317".into()),
             otel_service_name: std::env::var("BEAMPIPE_OTEL_SERVICE_NAME")
                 .unwrap_or_else(|_| "beampipe-v2".into()),
+            otel_sampler_ratio: parse_or("BEAMPIPE_OTEL_SAMPLER_RATIO", 1.0_f64)?,
+            provenance_retention_days: parse_or("BEAMPIPE_PROVENANCE_RETENTION_DAYS", 90)?,
+            migrate_on_serve: parse_bool_or("BEAMPIPE_MIGRATE_ON_SERVE", false)?,
         })
     }
 }

@@ -1,9 +1,7 @@
+use crate::slurm_ssh::{SlurmSshSession, SlurmTarget};
 use crate::OrchestrationError;
 use beampipe_profiles::{DaliugeAlgo, SlurmRemoteDeploymentConfig};
 use serde_json::Value;
-use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
 
@@ -154,33 +152,30 @@ pub async fn submit_slurm_session(
         }
     }
 
-    let target = ssh_target(&deployment, &username);
-    run_ssh(
-        &target,
-        deployment.ssh_port,
-        &format!("mkdir -p {staging_dir}"),
-    )
-    .await?;
-    put_text_via_ssh(
-        &target,
-        deployment.ssh_port,
-        &pgt_remote_path,
-        &serde_json::to_string(&pgt_json)
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?,
-    )
-    .await?;
-    put_text_via_ssh(
-        &target,
-        deployment.ssh_port,
-        &config_file_remote_path,
-        &render_generated_ini(&deployment, &username, &pgt_remote_path, &dlg_root),
-    )
-    .await?;
+    let target = SlurmTarget::from_deployment(&deployment, &username);
+    let mut session = SlurmSshSession::connect(&target).await?;
+
+    session
+        .run_command(&format!("mkdir -p {staging_dir}"))
+        .await?;
+    session
+        .upload_text(
+            &pgt_remote_path,
+            &serde_json::to_string(&pgt_json)
+                .map_err(|e| OrchestrationError::Backend(e.to_string()))?,
+        )
+        .await?;
+    session
+        .upload_text(
+            &config_file_remote_path,
+            &render_generated_ini(&deployment, &username, &pgt_remote_path, &dlg_root),
+        )
+        .await?;
     if let (Some(template_body), Some(template_path)) = (
         deployment.slurm_template.as_deref(),
         slurm_template_remote_path.as_deref(),
     ) {
-        put_text_via_ssh(&target, deployment.ssh_port, template_path, template_body).await?;
+        session.upload_text(template_path, template_body).await?;
     }
 
     let argv = create_dlg_job_argv(
@@ -198,19 +193,15 @@ pub async fn submit_slurm_session(
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let create_out = run_ssh(
-        &target,
-        deployment.ssh_port,
-        &format!("bash -lc {}", shell_quote(&inner)),
-    )
-    .await?;
+    let create_out = session
+        .run_command(&format!("bash -lc {}", shell_quote(&inner)))
+        .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
-    let sbatch_out = run_ssh(
-        &target,
-        deployment.ssh_port,
-        &format!("sbatch --parsable {}", shell_quote(&jobsub_path)),
-    )
-    .await?;
+    let sbatch_out = session
+        .run_command(&format!("sbatch --parsable {}", shell_quote(&jobsub_path)))
+        .await?;
+    let _ = session.close().await;
+
     let slurm_job_id = sbatch_out
         .split(';')
         .next()
@@ -239,109 +230,20 @@ pub async fn probe_slurm_login(
     deployment: &SlurmRemoteDeploymentConfig,
     username: &str,
 ) -> Result<(), String> {
-    let target = ssh_target(deployment, username);
-    run_ssh(&target, deployment.ssh_port, "echo ok")
-        .await
-        .map(|_| ())
-        .map_err(|e| {
-            format!(
-                "Slurm login node {} ({target}) unreachable: {e}. Check VPN/SSH before submit.",
-                deployment.login_node
-            )
-        })
-}
-
-fn ssh_target(deployment: &SlurmRemoteDeploymentConfig, username: &str) -> String {
-    format!("{}@{}", username, deployment.login_node)
-}
-
-/// Extra `ssh` CLI args from `SLURM_SSH_PRIVATE_KEY_FILE` and `SLURM_SSH_KNOWN_HOSTS_SOURCE` (Python parity).
-pub fn ssh_option_args() -> Vec<String> {
-    let mut args = Vec::new();
-    if let Ok(key) = std::env::var("SLURM_SSH_PRIVATE_KEY_FILE") {
-        if !key.trim().is_empty() {
-            args.push("-i".into());
-            args.push(key);
-        }
-    }
-    if let Ok(hosts) = std::env::var("SLURM_SSH_KNOWN_HOSTS_SOURCE") {
-        if !hosts.trim().is_empty() {
-            args.push("-o".into());
-            args.push(format!("UserKnownHostsFile={hosts}"));
-        }
-    }
-    args
-}
-
-fn append_ssh_options(cmd: &mut Command) {
-    for arg in ssh_option_args() {
-        cmd.arg(arg);
-    }
-}
-
-async fn run_ssh(target: &str, port: i32, remote_cmd: &str) -> Result<String, OrchestrationError> {
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-p")
-        .arg(port.to_string())
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new");
-    append_ssh_options(&mut cmd);
-    let output = cmd
-        .arg(target)
-        .arg(remote_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| OrchestrationError::Backend(format!("ssh spawn failed: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(OrchestrationError::Backend(format!("ssh failed: {stderr}")));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-async fn put_text_via_ssh(
-    target: &str,
-    port: i32,
-    remote_path: &str,
-    content: &str,
-) -> Result<(), OrchestrationError> {
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-p")
-        .arg(port.to_string())
-        .arg("-oBatchMode=yes")
-        .arg("-oStrictHostKeyChecking=accept-new");
-    append_ssh_options(&mut cmd);
-    let mut child = cmd
-        .arg(target)
-        .arg(format!("tee {remote_path}"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| OrchestrationError::Backend(format!("ssh tee spawn failed: {e}")))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| OrchestrationError::Backend("ssh stdin unavailable".into()))?;
-    stdin
-        .write_all(content.as_bytes())
-        .await
-        .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(OrchestrationError::Backend(format!(
-            "ssh tee failed: {stderr}"
-        )));
-    }
+    let target = SlurmTarget::from_deployment(deployment, username);
+    let mut session = SlurmSshSession::connect(&target).await.map_err(|e| {
+        format!(
+            "Slurm login node {} ({}@{}) unreachable: {e}. Check VPN/SSH before submit.",
+            deployment.login_node, username, deployment.login_node
+        )
+    })?;
+    session.run_command("echo ok").await.map_err(|e| {
+        format!(
+            "Slurm login node {} ({}@{}) unreachable: {e}. Check VPN/SSH before submit.",
+            deployment.login_node, username, deployment.login_node
+        )
+    })?;
+    let _ = session.close().await;
     Ok(())
 }
 

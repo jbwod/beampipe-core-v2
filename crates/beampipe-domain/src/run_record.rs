@@ -276,6 +276,35 @@ pub fn merge_dim_poll_into_manifest(
     Value::Object(base)
 }
 
+/// Operator-facing summary of recent scheduler phases from run record.
+pub fn summarize_run_record_phases(run_record: Option<&Value>) -> Value {
+    let Some(rr) = run_record.and_then(|v| v.as_object()) else {
+        return json!({});
+    };
+    let mut out = Map::new();
+    for key in ["slurm", "dim", "scheduler", "slurm_poll", "dim_poll"] {
+        if let Some(obj) = rr.get(key).and_then(Value::as_object) {
+            let mut phase = Map::new();
+            if let Some(t) = obj.get("started_at").or(obj.get("submitted_at")) {
+                phase.insert("last_at".into(), t.clone());
+            }
+            if let Some(s) = obj.get("state").or(obj.get("terminal")) {
+                phase.insert("state".into(), s.clone());
+            }
+            if let Some(r) = obj.get("round") {
+                phase.insert("round".into(), r.clone());
+            }
+            if !phase.is_empty() {
+                out.insert(key.into(), Value::Object(phase));
+            }
+        }
+    }
+    if let Some(req) = rr.get("requested_sources") {
+        out.insert("requested_sources".into(), req.clone());
+    }
+    Value::Object(out)
+}
+
 pub fn extract_beampipe_run_record(workflow_manifest: &Value) -> Option<Value> {
     workflow_manifest
         .get(BEAMPIPE_RUN_RECORD_KEY)
