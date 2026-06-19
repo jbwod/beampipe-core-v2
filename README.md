@@ -33,9 +33,9 @@
 > - **`Workflow-agnostic execution`**: treats pipelines as portable work items to support [DALiuGE](https://daliuge.icrar.org/) or future WMS.
 
 <h1 align="center">
-  <a href="https://beampipe-core-v2.readthedocs.io/"><kbd>&gt; docs</kbd></a>
+  <a href="https://beampipe.jackblackwood.com/"><kbd>&gt; docs</kbd></a>
   &nbsp;&nbsp;
-  <a href="https://beampipe-core-v2.readthedocs.io/api/reference/"><kbd>&gt; api</kbd></a>
+  <a href="https://beampipe.jackblackwood.com/api/reference/"><kbd>&gt; api</kbd></a>
 </h1>
 
 
