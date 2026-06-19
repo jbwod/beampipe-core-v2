@@ -5,8 +5,7 @@ hide:
 
 <div class="terminal-panel beampipe-hero" markdown>
 <picture class="bp-hero-logo">
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e">
-  <img src="https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e" alt="beampipe-core">
+  <img src="assets/brand/beampipe-terminal-logo.png" alt="beampipe-core">
 </picture>
 
 # ~ beampipe-core
@@ -47,14 +46,7 @@ BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
 
 ## Control plane
 
-<div class="terminal-diagram terminal-diagram--center">
-<pre>+---------+   +-----------+   +----------+   +-----------+
-| sources |-->| discovery |-->| ledger   |-->| backends  |
-| config   |   | TAP rows  |   | manifest |   | DIM/Slurm |
-+---------+   +-----------+   +----------+   +-----------+
-     ^              |              |              |
-     +--------- operator API / metrics -----------+</pre>
-</div>
+![Terminal-style Beampipe control plane diagram](assets/readme/control-plane-terminal-dark.png)
 
 beampipe-core does not replace the science workflow. It coordinates the archive-facing and scheduler-facing work around that workflow: source registration, metadata discovery, manifest preparation, graph mutation, backend submission, state, provenance, metrics, and retryable jobs.
 

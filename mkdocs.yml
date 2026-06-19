@@ -9,8 +9,8 @@ theme:
   name: material
   custom_dir: boilerplate_docs/overrides
   font: false
-  logo: https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e
-  favicon: https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e
+  logo: assets/brand/beampipe-terminal-icon.png
+  favicon: assets/brand/beampipe-terminal-icon.png
   features:
     - navigation.instant
     - navigation.expand

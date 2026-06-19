@@ -1,25 +1,21 @@
 
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/4414e79f-7431-4999-b2ef-28cf9f0b254e">
-  <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/648d6a14-e1ee-4297-aa36-ff58f130e5d8">
-   <img src="" />
-</picture>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/2f989202-a13f-4928-b897-5aa595a5fb54">
-  <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/1f545ee5-2ef3-4a50-adbf-df96e2acba27">
-   <img src="" />
-</picture>
+<p align="center">
+  <img src="assets/brand/beampipe-terminal-logo.png" alt="beampipe-core terminal logo" width="920" />
+</p>
 
 
 > `beampipe-core` is an external orchestration and triggering framework for archive-driven radio astronomy workflows. It operates as an external control plane that continuously monitors scientific archives (ie; CASDA), determines when datasets are ready, and orchestrates scheduler-aware execution of distributed workflows (ie; DALiuGe) on heterogeneous HPC systems.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/v2-Rust-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust v2"/>
-  <img src="https://img.shields.io/badge/API-%2Fapi%2Fv2-818cf8?style=flat-square" alt="/api/v2"/>
-  <img src="https://img.shields.io/badge/jobs-PostgreSQL-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL jobs"/>
-  <img src="https://img.shields.io/badge/docs-MkDocs-c9d1d9?style=flat-square" alt="MkDocs"/>
+  <img src="https://img.shields.io/badge/%3E__Rust-v2-d6c178?style=flat-square&labelColor=050505" alt="Rust v2"/>
+  <img src="https://img.shields.io/badge/%3E__API-%2Fapi%2Fv2-7fd7e6?style=flat-square&labelColor=050505" alt="/api/v2"/>
+  <img src="https://img.shields.io/badge/%3E__ledger-PostgreSQL-a7cfa3?style=flat-square&labelColor=050505" alt="PostgreSQL ledger"/>
+  <img src="https://img.shields.io/badge/%E6%B5%81-DALiuGE-e6edf3?style=flat-square&labelColor=050505" alt="DALiuGE"/>
+</p>
+
+<p align="center">
+  <img src="assets/readme/control-plane-terminal-dark.png" alt="Terminal-style Beampipe control plane diagram" />
 </p>
 
 ## `What it does`
@@ -145,19 +141,18 @@ cargo run -p beampipe-cli --bin beampipe -- serve
 
 ## `Control Plane`
 
-<pre>
-+---------+   +-----------+   +----------+   +-----------+
-| sources |-->| discovery |-->| ledger   |-->| backends  |
-| config  |   | TAP rows  |   | manifest |   | DIM/Slurm |
-+---------+   +-----------+   +----------+   +-----------+
-     ^              |              |              |
-     +--------- operator API / metrics -----------+
-</pre>
+<p align="center">
+  <img src="assets/readme/execution-lifecycle-terminal-dark.png" alt="Terminal-style Beampipe execution lifecycle diagram" />
+</p>
 
 > beampipe-core does not replace the science workflow.
 > It prepares and submits work to the configured backend while keeping state, provenance, and retries in PostgreSQL.
 
 ## `Project Configs and DALiuGE Graphs`
+
+<p align="center">
+  <img src="assets/readme/graph-patch-flow-terminal-dark.png" alt="Terminal-style Beampipe graph patch flow diagram" />
+</p>
 
 > Project configs are YAML documents (`apiVersion: beampipe.dev/v2`) that define archive adapters, discovery queries, metadata transforms, manifest shape, DALiuGE graph patches, automation caps, and optional WASM hooks.
 
@@ -207,6 +202,10 @@ cp openapi.json boilerplate_docs/openapi.json
 > Use the MkDocs API workflow and Bruno documentation for login, project config upload, source registration, discovery, execution, and polling examples.
 
 ## `Documentation`
+
+<p align="center">
+  <img src="assets/readme/operations-observability-terminal-dark.png" alt="Terminal-style Beampipe operations and observability diagram" />
+</p>
 
 | Page | Link |
 |------|------|

@@ -202,6 +202,8 @@ body[data-md-color-scheme="slate"]::after {
   width: 1.2rem;
   height: 1.2rem;
   object-fit: contain;
+  border: 1px solid var(--bp-border-soft);
+  background: #000;
 }
 
 .md-header__button.md-logo::after {
@@ -476,7 +478,7 @@ body[data-md-color-scheme="slate"]::after {
 .bp-hero-logo,
 .bp-hero-logo img {
   display: block;
-  width: min(30rem, 92%);
+  width: min(42rem, 96%);
   height: auto;
   margin: 0 auto 0.9rem;
   border: 0;
@@ -486,6 +488,7 @@ body[data-md-color-scheme="slate"]::after {
 .bp-hero-logo img {
   width: 100%;
   margin-bottom: 0;
+  filter: drop-shadow(0 0 0.7rem rgba(127, 215, 230, 0.16));
 }
 
 .bp-ascii-logo {
@@ -551,6 +554,16 @@ body[data-md-color-scheme="slate"]::after {
   text-decoration: none;
 }
 
+.md-typeset .terminal-button:nth-child(1) {
+  border-color: var(--bp-code-name);
+  color: var(--bp-code-name);
+}
+
+.md-typeset .terminal-button:nth-child(2) {
+  border-color: var(--bp-code-key);
+  color: var(--bp-code-key);
+}
+
 .md-typeset .terminal-button::before {
   content: "[ ";
 }
@@ -562,6 +575,18 @@ body[data-md-color-scheme="slate"]::after {
 .md-typeset .terminal-button:hover {
   color: #000;
   background: var(--bp-highlight);
+}
+
+.md-typeset img[src*="assets/readme/"] {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0.75rem auto 1rem;
+  border: 1px solid var(--bp-border);
+  background: #000;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 0 1.2rem rgba(127, 215, 230, 0.08);
 }
 
 .terminal-command {

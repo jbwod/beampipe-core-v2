@@ -4,26 +4,7 @@ beampipe-core coordinates archive discovery and execution state. It prepares man
 
 ## System shape
 
-<div class="terminal-diagram">
-<pre>                 +----------------+
-                 | operator/API   |
-                 | /api/v2        |
-                 +--------+-------+
-                          |
-                          v
-+-----------+     +-------+--------+     +------------------+
-| project   | --> | PostgreSQL     | <-- | workers          |
-| config    |     | configs/jobs   |     | discovery/exec   |
-+-----------+     | ledger/events  |     +--------+---------+
-                  +-------+--------+              |
-                          |                       v
-                          |              +--------+---------+
-                          |              | adapters/backends|
-                          |              | CASDA/TM/DIM/SSH |
-                          |              +------------------+
-                          v
-                   metrics + alerts</pre>
-</div>
+![Terminal-style Beampipe control plane diagram](../assets/readme/control-plane-terminal-dark.png)
 
 ## Responsibilities
 

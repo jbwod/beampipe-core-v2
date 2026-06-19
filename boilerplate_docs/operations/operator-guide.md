@@ -6,22 +6,7 @@ This is the daily operating map for beampipe-core v2. Use it after installation 
 
 beampipe-core is one binary with multiple roles. All roles share PostgreSQL as the durable state store.
 
-<div class="terminal-diagram">
-<pre>operator / API
-      |
-      v
-+---------------+      +----------------+      +------------------+
-| API process   | ---> | PostgreSQL     | <--- | worker replicas  |
-| /api/v2       |      | configs/jobs   |      | claim/run jobs   |
-| auth/uploads  |      | events/ledger  |      | TAP/TM/DIM/Slurm |
-+-------+-------+      +-------+--------+      +--------+---------+
-        |                      ^                        ^
-        |                      |                        |
-        +--------------+-------+------------------------+
-                       |
-                 scheduler role
-                 enqueue ticks</pre>
-</div>
+![Terminal-style Beampipe operations and observability diagram](../assets/readme/operations-observability-terminal-dark.png)
 
 Run exactly one scheduler-enabled process per environment. Scale API processes for HTTP traffic and worker-only processes for queue throughput.
 
@@ -30,7 +15,7 @@ Run exactly one scheduler-enabled process per environment. Scale API processes f
 | Role | Starts with | Owns | Scale rule |
 |------|-------------|------|------------|
 | API | `beampipe serve --worker false` | HTTP API, auth, uploads, readiness, metrics | Scale for request volume |
-| Scheduler | `beampipe serve --worker true` or scheduler-enabled `beampipe worker` | Recurring discovery, execution, DIM, and Slurm poll ticks | Run exactly one |
+| Scheduler | `beampipe serve --worker true` or scheduler-enabled `beampipe worker` | Recurring discovery, execution, 流 DIM, and Slurm poll ticks | Run exactly one |
 | Worker | `BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker` | Queue claims, TAP calls, manifests, staging, translation, deployment, polling | Scale horizontally |
 | Database | PostgreSQL | Configs, source metadata, jobs, executions, provenance | One logical primary |
 
@@ -54,7 +39,7 @@ Use [API workflow guide](../api/index.md) for concrete request examples.
 
 ## Mock to real backend path
 
-Start with mock backends to validate project config, discovery, manifest construction, and dry execution. Move to real backends only after the environment has credentials, TAP reachability, Translator Manager access, and a tested DIM or Slurm deployment profile.
+Start with mock backends to validate project config, discovery, manifest construction, and dry execution. Move to real backends only after the environment has credentials, TAP reachability, 流 Translator Manager access, and a tested 流 DIM or Slurm deployment profile.
 
 ```bash
 export BEAMPIPE_USE_REAL_BACKENDS=true
@@ -76,7 +61,7 @@ Run `beampipe security check` before production startup and `beampipe slurm ping
 | Oldest queued job | Stays near expected job time | metrics |
 | Discovery metadata | Sources receive metadata and discovery flags | source events |
 | Execution ledger | Runs move through stage, translate, submit, poll, terminal state | execution events |
-| Backend debug fields | DIM or Slurm fields appear on execution responses | execution response |
+| Backend debug fields | 流 DIM or Slurm fields appear on execution responses | execution response |
 
 ## First triage
 

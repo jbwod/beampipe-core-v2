@@ -2,29 +2,9 @@
 
 The lifecycle starts with an operator registering a source and ends with an execution record containing manifest, backend status, and provenance.
 
-## Discovery
+![Terminal-style Beampipe execution lifecycle diagram](../assets/readme/execution-lifecycle-terminal-dark.png)
 
-<div class="terminal-diagram">
-<pre>register source
-      |
-      v
-mark for discovery
-      |
-      v
-scheduler_tick
-      |
-      v
-discover_batch
-      |
-      v
-TAP queries -> field map -> metadata rows
-                         |
-                         v
-                discovery signature
-                         |
-                         v
-                workflow_run_pending</pre>
-</div>
+## Discovery
 
 | Control | Source |
 |---------|--------|
@@ -37,25 +17,6 @@ TAP queries -> field map -> metadata rows
 Discovery signatures determine whether prepared metadata changed enough to trigger future work. Exclude volatile archive fields such as access URLs, file sizes, and timestamps when they should not cause reruns.
 
 ## Execution
-
-<div class="terminal-diagram">
-<pre>pending source(s)
-      |
-      v
-create execution
-      |
-      v
-build manifest -> DALiuGE Graphs -> stage / translate / submit
-      |                |                              |
-      v                v                              v
-ledger row       prepared graph                  backend run
-      |                                               |
-      v                                               v
-poll tick <---------- REST DIM or Slurm status -------+
-      |
-      v
-completed / failed / cancelled</pre>
-</div>
 
 | Control | Source |
 |---------|--------|

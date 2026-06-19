@@ -4,21 +4,7 @@ DALiuGE Graph support covers the final graph-shaping step before translation and
 
 ## Flow
 
-<div class="terminal-diagram terminal-diagram--center">
-<pre>project config
-     |
-     v
-manifest build
-     |
-     v
-apply graph_patches
-     |
-     v
-Translator Manager
-     |
-     v
-REST / Slurm deployment</pre>
-</div>
+![Terminal-style Beampipe graph patch flow diagram](../assets/readme/graph-patch-flow-terminal-dark.png)
 
 ## Example
 
@@ -76,4 +62,4 @@ Use the palette when the science graph should consume beampipe-generated manifes
 | Manifest injection path is readable | Ensures graph apps can load the manifest |
 | Dry execution passes | Confirms graph preparation before real staging/submission |
 
-Next: use [Deployment profiles](../architecture/deployment-profiles.md) to select the backend that receives the prepared graph.
+Next: use [Deployment profiles](../architecture/deployment-profiles.md) to select the backend that receives the prepared graph through 流 Translator Manager.

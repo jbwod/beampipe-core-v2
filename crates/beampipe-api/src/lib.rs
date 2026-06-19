@@ -27,7 +27,9 @@ use beampipe_jobs::{spawn_workers, WorkerConfig};
 use beampipe_metrics as metrics;
 use beampipe_orchestration::{cancel::CancelParams, cancel_scheduler_session};
 use beampipe_profiles::DeploymentProfile;
-use beampipe_project::{ProjectConfig, ValidationDiagnostic, ValidationReport, WasmHost};
+use beampipe_project::{
+    DiagnosticSeverity, ProjectConfig, ValidationDiagnostic, ValidationReport, WasmHost,
+};
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
 use rate_limit::{check_rate_limit, client_ip, RateLimitError, RateLimiter};
@@ -85,7 +87,7 @@ pub struct AppState {
         DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
         ExecutionCreate, ExecutionPatchRequest, ExecuteRequest, ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
-        ProjectConfig, ValidationReport,
+        ProjectConfig, ValidationReport, ValidationDiagnostic, DiagnosticSeverity,
         beampipe_project::ProjectMetadata,
         beampipe_project::AdapterConfig,
         beampipe_project::TapConfig,
@@ -96,14 +98,20 @@ pub struct AppState {
         beampipe_project::SignatureConfig,
         beampipe_project::ManifestConfig,
         beampipe_project::GraphPatch,
+        beampipe_project::GraphPatchMatch,
+        beampipe_project::GraphPatchMatchKind,
         beampipe_project::AutomationConfig,
         beampipe_project::DiscoveryAutomationConfig,
         beampipe_project::ExecutionAutomationConfig,
         beampipe_project::ExtensionConfig,
+        beampipe_project::ExtensionHook,
         beampipe_project::DefinitionsConfig,
         beampipe_project::SourceIdentityConfig,
         beampipe_project::TemplateVarSpec,
         beampipe_project::TransformSpec,
+        beampipe_project::TransformKind,
+        beampipe_project::TransformRef,
+        beampipe_project::MappingSpec,
         DeploymentProfile, DeploymentProfileResponse,
         beampipe_profiles::DaliugeTranslationConfig,
         beampipe_profiles::DaliugeAlgo,
