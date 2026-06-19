@@ -27,7 +27,7 @@ use beampipe_jobs::{spawn_workers, WorkerConfig};
 use beampipe_metrics as metrics;
 use beampipe_orchestration::{cancel::CancelParams, cancel_scheduler_session};
 use beampipe_profiles::DeploymentProfile;
-use beampipe_project::{ProjectConfig, ValidationReport, WasmHost};
+use beampipe_project::{ProjectConfig, ValidationDiagnostic, ValidationReport, WasmHost};
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
 use rate_limit::{check_rate_limit, client_ip, RateLimitError, RateLimiter};
@@ -367,6 +367,8 @@ pub enum ApiError {
     ServiceUnavailable,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("project config validation failed")]
+    Validation(ValidationReport),
     #[error("unauthorized: {0}")]
     Unauthorized(String),
     #[error("forbidden: {0}")]
@@ -391,12 +393,17 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
-            ApiError::BadRequest(_) | ApiError::Project(_) => StatusCode::BAD_REQUEST,
+            ApiError::BadRequest(_) | ApiError::Project(_) | ApiError::Validation(_) => {
+                StatusCode::BAD_REQUEST
+            }
             ApiError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Auth(_) => StatusCode::UNAUTHORIZED,
             ApiError::Wasm(_) => StatusCode::BAD_REQUEST,
         };
-        (status, Json(json!({"error": self.to_string()}))).into_response()
+        match self {
+            ApiError::Validation(report) => (status, Json(json!(report))).into_response(),
+            other => (status, Json(json!({"error": other.to_string()}))).into_response(),
+        }
     }
 }
 
@@ -1668,13 +1675,15 @@ async fn upload_project_config(
         )
         .await?;
         if pinned > 0 {
-            report.warnings.push(format!(
-                "{pinned} in-flight execution(s) pin a different project config spec_sha256; new config applies to future runs only"
+            report.warnings.push(ValidationDiagnostic::warning(
+                "spec_sha256",
+                "in_flight_config_pins",
+                format!("{pinned} in-flight execution(s) pin a different project config spec_sha256; new config applies to future runs only"),
             ));
         }
     }
     if !report.valid {
-        return Err(ApiError::BadRequest(report.errors.join("; ")));
+        return Err(ApiError::Validation(report));
     }
     let spec = serde_json::to_value(&config).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     reject_inline_secrets_in_production(&state.settings, "project_config", &spec)?;

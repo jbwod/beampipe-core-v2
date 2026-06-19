@@ -52,7 +52,7 @@
 | beampipe migrate                                                         |
 | beampipe admin create-user --username admin --password change-me \       |
 |   --email admin@example.test                                             |
-| beampipe project validate -f config/wallaby_hires.v1.yaml                |
+| beampipe project validate -f config/wallaby_hires.v2.yaml                |
 | beampipe serve --worker false                                            |
 +-------------------------------------------------------------------------+
 </pre>
@@ -159,10 +159,10 @@ cargo run -p beampipe-cli --bin beampipe -- serve
 
 ## `Project Configs and DALiuGE Graphs`
 
-> Project configs are YAML documents (`apiVersion: beampipe.dev/v1`) that define archive adapters, discovery queries, metadata transforms, manifest shape, DALiuGE graph patches, automation caps, and optional WASM hooks.
+> Project configs are YAML documents (`apiVersion: beampipe.dev/v2`) that define archive adapters, discovery queries, metadata transforms, manifest shape, DALiuGE graph patches, automation caps, and optional WASM hooks.
 
 ```yaml
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata:
   id: wallaby_hires

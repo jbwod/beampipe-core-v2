@@ -75,7 +75,7 @@ fn inject_manifest_embed_excludes_graph_overrides_key() {
 #[test]
 fn wallaby_manifest_and_prepare_graph_applies_scatter_patch() {
     let config =
-        ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v1.yaml")).unwrap();
+        ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml")).unwrap();
     let mut manifest = json!({
         "sources": [{
             "source_identifier": "HIPASSJ0000-00",

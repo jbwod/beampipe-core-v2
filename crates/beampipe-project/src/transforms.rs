@@ -1,4 +1,7 @@
-use crate::{ProjectConfig, TemplateVarSpec, TransformSpec};
+use crate::{
+    MappingSpec, ProjectConfig, TemplateVarSpec, TransformKind, TransformRef, TransformSpec,
+    ValidationDiagnostic,
+};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -20,12 +23,25 @@ impl TransformRegistry {
         if let Some(spec) = self.named.get(name) {
             return Some(spec.clone());
         }
-        legacy_transform_spec(name)
+        None
+    }
+
+    pub fn resolve_spec_with_legacy(&self, name: &str) -> Option<TransformSpec> {
+        self.resolve_spec(name)
+            .or_else(|| legacy_transform_spec(name))
     }
 
     pub fn apply_named(&self, name: &str, input: &Value) -> Option<Value> {
         let spec = self.resolve_spec(name)?;
-        if spec.kind == "chain" {
+        if spec.kind == TransformKind::Chain {
+            return apply_chain(self, &spec, input);
+        }
+        apply_transform_spec(&spec, input)
+    }
+
+    pub fn apply_named_with_legacy(&self, name: &str, input: &Value) -> Option<Value> {
+        let spec = self.resolve_spec_with_legacy(name)?;
+        if spec.kind == TransformKind::Chain {
             return apply_chain(self, &spec, input);
         }
         apply_transform_spec(&spec, input)
@@ -47,7 +63,7 @@ fn apply_chain(registry: &TransformRegistry, spec: &TransformSpec, input: &Value
 
 fn legacy_transform_spec(name: &str) -> Option<TransformSpec> {
     let mut spec = TransformSpec {
-        kind: String::new(),
+        kind: TransformKind::Unknown,
         prefix: None,
         suffix: None,
         separators: None,
@@ -60,45 +76,51 @@ fn legacy_transform_spec(name: &str) -> Option<TransformSpec> {
     };
     match name {
         "strip_hipass_prefix" => {
-            spec.kind = "strip_prefix".into();
+            spec.kind = TransformKind::StripPrefix;
             spec.prefix = Some("HIPASS".into());
         }
-        "extract_askap_sbid" => spec.kind = "extract_digits".into(),
+        "extract_askap_sbid" => spec.kind = TransformKind::ExtractDigits,
         "extract_scan_id" => {
-            spec.kind = "split_last".into();
+            spec.kind = TransformKind::SplitLast;
             spec.separators = Some(vec!["/".into(), ":".into(), "#".into()]);
         }
-        "is_present" => spec.kind = "is_present".into(),
-        "select_eval_file_by_size" => spec.kind = "select_eval_file_by_size".into(),
-        "identity" => spec.kind = "identity".into(),
+        "is_present" => spec.kind = TransformKind::IsPresent,
+        "select_eval_file_by_size" => spec.kind = TransformKind::SelectEvalFileBySize,
+        "identity" => spec.kind = TransformKind::Identity,
         _ => return None,
     }
     Some(spec)
 }
 
 pub fn apply_transform_spec(spec: &TransformSpec, input: &Value) -> Option<Value> {
-    match spec.kind.as_str() {
-        "identity" => Some(input.clone()),
-        "trim" => value_string(Some(input)).map(|s| Value::String(s.trim().to_string())),
-        "lowercase" => value_string(Some(input)).map(|s| Value::String(s.to_ascii_lowercase())),
-        "uppercase" => value_string(Some(input)).map(|s| Value::String(s.to_ascii_uppercase())),
-        "replace" => {
+    match spec.kind {
+        TransformKind::Identity => Some(input.clone()),
+        TransformKind::Trim => {
+            value_string(Some(input)).map(|s| Value::String(s.trim().to_string()))
+        }
+        TransformKind::Lowercase => {
+            value_string(Some(input)).map(|s| Value::String(s.to_ascii_lowercase()))
+        }
+        TransformKind::Uppercase => {
+            value_string(Some(input)).map(|s| Value::String(s.to_ascii_uppercase()))
+        }
+        TransformKind::Replace => {
             let raw = value_string(Some(input))?;
             let from = spec.from.as_deref()?;
             let to = spec.to.as_deref().unwrap_or("");
             Some(Value::String(raw.replace(from, to)))
         }
-        "add_prefix" => {
+        TransformKind::AddPrefix => {
             let prefix = spec.prefix.as_deref()?;
             let raw = value_string(Some(input))?;
             Some(Value::String(format!("{prefix}{raw}")))
         }
-        "add_suffix" => {
+        TransformKind::AddSuffix => {
             let suffix = spec.suffix.as_deref()?;
             let raw = value_string(Some(input))?;
             Some(Value::String(format!("{raw}{suffix}")))
         }
-        "default_if_empty" => {
+        TransformKind::DefaultIfEmpty => {
             if is_empty_value(input) {
                 spec.default
                     .as_ref()
@@ -108,15 +130,15 @@ pub fn apply_transform_spec(spec: &TransformSpec, input: &Value) -> Option<Value
                 Some(input.clone())
             }
         }
-        "strip_prefix" => {
+        TransformKind::StripPrefix => {
             let prefix = spec.prefix.as_deref()?;
             let raw = value_string(Some(input))?;
             Some(Value::String(
                 raw.strip_prefix(prefix).unwrap_or(&raw).to_string(),
             ))
         }
-        "extract_digits" => extract_digits(input).map(Value::String),
-        "split_last" => {
+        TransformKind::ExtractDigits => extract_digits(input).map(Value::String),
+        TransformKind::SplitLast => {
             let raw = value_string(Some(input))?;
             let separators: Vec<char> = spec
                 .separators
@@ -130,9 +152,9 @@ pub fn apply_transform_spec(spec: &TransformSpec, input: &Value) -> Option<Value
                 .trim();
             Some(Value::String(segment.to_string()))
         }
-        "is_present" => Some(json!(!is_empty_value(input))),
-        "select_eval_file_by_size" => select_eval_file_by_size(input),
-        "regex_extract" => {
+        TransformKind::IsPresent => Some(json!(!is_empty_value(input))),
+        TransformKind::SelectEvalFileBySize => select_eval_file_by_size(input),
+        TransformKind::RegexExtract => {
             let pattern = spec.pattern.as_deref()?;
             let group = spec.group.unwrap_or(1) as usize;
             let raw = value_string(Some(input))?;
@@ -141,7 +163,7 @@ pub fn apply_transform_spec(spec: &TransformSpec, input: &Value) -> Option<Value
             caps.get(group)
                 .map(|m| Value::String(m.as_str().to_string()))
         }
-        _ => None,
+        TransformKind::Chain | TransformKind::Unknown => None,
     }
 }
 
@@ -175,7 +197,7 @@ pub fn build_template_context(
         .first()
         .and_then(|q| q.source_id_transform.as_deref());
     let source_name = legacy_transform
-        .and_then(|name| registry.apply_named(name, &json!(source_identifier)))
+        .and_then(|name| registry.apply_named_with_legacy(name, &json!(source_identifier)))
         .and_then(|v| value_string(Some(&v)))
         .unwrap_or_else(|| source_identifier.to_string());
     context.insert("source_name".into(), json!(source_name));
@@ -191,53 +213,54 @@ fn template_var_base(source_identifier: &str, spec: &TemplateVarSpec) -> Value {
 
 pub fn apply_field_transform(
     registry: &TransformRegistry,
-    spec: &Value,
+    spec: &MappingSpec,
     input: &Value,
 ) -> Option<Value> {
-    match spec.get("transform") {
-        Some(Value::String(name)) => registry.apply_named(name, input),
-        Some(Value::Array(steps)) => {
-            let names: Vec<String> = steps
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect();
-            if names.len() != steps.len() {
-                return None;
-            }
-            registry.apply_steps(&names, input)
-        }
-        _ => None,
+    match spec.transform.as_ref()? {
+        TransformRef::Name(name) => registry.apply_named(name, input),
+        TransformRef::Chain(steps) => registry.apply_steps(steps, input),
     }
 }
 
-pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<String> {
+pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<ValidationDiagnostic> {
     let registry = TransformRegistry::from_config(config);
     let mut errors = Vec::new();
 
-    fn check(registry: &TransformRegistry, errors: &mut Vec<String>, name: &str, location: &str) {
+    fn check(
+        registry: &TransformRegistry,
+        errors: &mut Vec<ValidationDiagnostic>,
+        name: &str,
+        location: &str,
+    ) {
         if registry.resolve_spec(name).is_none() {
-            errors.push(format!("unknown transform '{name}' at {location}"));
+            errors.push(ValidationDiagnostic::error(
+                location,
+                "unknown_transform",
+                format!("unknown transform '{name}'"),
+            ));
         }
     }
 
-    fn check_transform_value(
+    fn check_transform_ref(
         registry: &TransformRegistry,
-        errors: &mut Vec<String>,
-        value: &Value,
+        errors: &mut Vec<ValidationDiagnostic>,
+        transform: &TransformRef,
         location: &str,
     ) {
-        match value {
-            Value::String(name) => check(registry, errors, name, location),
-            Value::Array(steps) => {
+        match transform {
+            TransformRef::Name(name) => check(registry, errors, name, location),
+            TransformRef::Chain(steps) => {
+                if steps.is_empty() {
+                    errors.push(ValidationDiagnostic::error(
+                        location,
+                        "empty_transform_chain",
+                        "transform chain must include at least one step",
+                    ));
+                }
                 for (i, step) in steps.iter().enumerate() {
-                    if let Some(name) = step.as_str() {
-                        check(registry, errors, name, &format!("{location}[{i}]"));
-                    } else {
-                        errors.push(format!("{location}[{i}] must be a transform name string"));
-                    }
+                    check(registry, errors, step, &format!("{location}[{i}]"));
                 }
             }
-            _ => {}
         }
     }
 
@@ -266,92 +289,109 @@ pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<String> {
     }
 
     if let Some(prepare) = &config.discovery.prepare_metadata {
-        if let Some(field_map) = prepare.field_map.as_object() {
-            for (field, spec) in field_map {
-                if let Some(transform) = spec.get("transform") {
-                    check_transform_value(
-                        &registry,
-                        &mut errors,
-                        transform,
-                        &format!("discovery.prepare_metadata.field_map.{field}.transform"),
-                    );
-                }
+        for (field, spec) in &prepare.field_map {
+            if spec.from.trim().is_empty() {
+                errors.push(ValidationDiagnostic::error(
+                    format!("discovery.prepare_metadata.field_map.{field}.from"),
+                    "required",
+                    "field_map entries require from",
+                ));
+            }
+            if let Some(transform) = spec.transform.as_ref() {
+                check_transform_ref(
+                    &registry,
+                    &mut errors,
+                    transform,
+                    &format!("discovery.prepare_metadata.field_map.{field}.transform"),
+                );
             }
         }
-        if let Some(flags) = prepare.discovery_flags.as_object() {
-            for (flag, spec) in flags {
-                if let Some(transform) = spec.get("transform") {
-                    check_transform_value(
-                        &registry,
-                        &mut errors,
-                        transform,
-                        &format!("discovery.prepare_metadata.discovery_flags.{flag}.transform"),
-                    );
-                }
+        for (flag, spec) in &prepare.discovery_flags {
+            if spec.from.trim().is_empty() {
+                errors.push(ValidationDiagnostic::error(
+                    format!("discovery.prepare_metadata.discovery_flags.{flag}.from"),
+                    "required",
+                    "discovery_flags entries require from",
+                ));
+            }
+            if let Some(transform) = spec.transform.as_ref() {
+                check_transform_ref(
+                    &registry,
+                    &mut errors,
+                    transform,
+                    &format!("discovery.prepare_metadata.discovery_flags.{flag}.transform"),
+                );
             }
         }
     }
 
     if let Some(defs) = &config.definitions {
         for (name, spec) in &defs.transforms {
-            if !matches!(
-                spec.kind.as_str(),
-                "identity"
-                    | "trim"
-                    | "lowercase"
-                    | "uppercase"
-                    | "replace"
-                    | "add_prefix"
-                    | "add_suffix"
-                    | "default_if_empty"
-                    | "chain"
-                    | "strip_prefix"
-                    | "extract_digits"
-                    | "split_last"
-                    | "is_present"
-                    | "select_eval_file_by_size"
-                    | "regex_extract"
-            ) {
-                errors.push(format!(
-                    "definitions.transforms.{name} has unknown kind '{}'",
-                    spec.kind
+            if spec.kind == TransformKind::Unknown {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.kind"),
+                    "unknown_transform_kind",
+                    "transform has an unknown kind",
                 ));
             }
-            if spec.kind == "strip_prefix" && spec.prefix.as_deref().unwrap_or("").is_empty() {
-                errors.push(format!(
-                    "definitions.transforms.{name} strip_prefix requires prefix"
+            if spec.kind == TransformKind::StripPrefix
+                && spec.prefix.as_deref().unwrap_or("").is_empty()
+            {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.prefix"),
+                    "required",
+                    "strip_prefix requires prefix",
                 ));
             }
-            if spec.kind == "add_prefix" && spec.prefix.as_deref().unwrap_or("").is_empty() {
-                errors.push(format!(
-                    "definitions.transforms.{name} add_prefix requires prefix"
+            if spec.kind == TransformKind::AddPrefix
+                && spec.prefix.as_deref().unwrap_or("").is_empty()
+            {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.prefix"),
+                    "required",
+                    "add_prefix requires prefix",
                 ));
             }
-            if spec.kind == "add_suffix" && spec.suffix.as_deref().unwrap_or("").is_empty() {
-                errors.push(format!(
-                    "definitions.transforms.{name} add_suffix requires suffix"
+            if spec.kind == TransformKind::AddSuffix
+                && spec.suffix.as_deref().unwrap_or("").is_empty()
+            {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.suffix"),
+                    "required",
+                    "add_suffix requires suffix",
                 ));
             }
-            if spec.kind == "replace" && spec.from.as_deref().unwrap_or("").is_empty() {
-                errors.push(format!(
-                    "definitions.transforms.{name} replace requires from"
+            if spec.kind == TransformKind::Replace && spec.from.as_deref().unwrap_or("").is_empty()
+            {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.from"),
+                    "required",
+                    "replace requires from",
                 ));
             }
-            if spec.kind == "regex_extract" && spec.pattern.as_deref().unwrap_or("").is_empty() {
-                errors.push(format!(
-                    "definitions.transforms.{name} regex_extract requires pattern"
+            if spec.kind == TransformKind::RegexExtract
+                && spec.pattern.as_deref().unwrap_or("").is_empty()
+            {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.pattern"),
+                    "required",
+                    "regex_extract requires pattern",
                 ));
             }
-            if spec.kind == "chain" {
+            if spec.kind == TransformKind::Chain {
                 let Some(steps) = spec.steps.as_ref() else {
-                    errors.push(format!(
-                        "definitions.transforms.{name} chain requires steps"
+                    errors.push(ValidationDiagnostic::error(
+                        format!("definitions.transforms.{name}.steps"),
+                        "required",
+                        "chain requires steps",
                     ));
                     continue;
                 };
                 if steps.is_empty() {
-                    errors.push(format!(
-                        "definitions.transforms.{name} chain requires steps"
+                    errors.push(ValidationDiagnostic::error(
+                        format!("definitions.transforms.{name}.steps"),
+                        "required",
+                        "chain requires steps",
                     ));
                 }
                 for (i, step) in steps.iter().enumerate() {
@@ -449,7 +489,7 @@ fn is_empty_value(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ProjectConfig;
+    use crate::{MappingSpec, ProjectConfig, TransformRef};
 
     #[test]
     fn strip_prefix_named_definition() {
@@ -480,7 +520,7 @@ mod tests {
     fn legacy_strip_hipass_alias() {
         let registry = TransformRegistry::from_config(&ProjectConfig::default());
         let out = registry
-            .apply_named("strip_hipass_prefix", &json!("HIPASSJ1313-15"))
+            .apply_named_with_legacy("strip_hipass_prefix", &json!("HIPASSJ1313-15"))
             .unwrap();
         assert_eq!(out, json!("J1313-15"));
     }
@@ -609,7 +649,13 @@ mod tests {
         assert_eq!(out, json!("123"));
         let inline = apply_field_transform(
             &registry,
-            &json!({"transform": ["askap_sbid", "trim"]}),
+            &MappingSpec {
+                from: "obs_id".into(),
+                transform: Some(TransformRef::Chain(vec![
+                    "askap_sbid".into(),
+                    "trim".into(),
+                ])),
+            },
             &json!(" ASKAP-456 "),
         )
         .unwrap();
@@ -643,7 +689,7 @@ mod tests {
     #[test]
     fn build_template_context_from_source_identity() {
         let yaml = r#"
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata:
   id: test
@@ -669,7 +715,7 @@ source_identity:
     #[test]
     fn validate_unknown_transform_fails() {
         let yaml = r#"
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata:
   id: test
@@ -684,13 +730,13 @@ discovery:
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         let errors = validate_transform_refs(&config);
-        assert!(errors.iter().any(|e| e.contains("does_not_exist")));
+        assert!(errors.iter().any(|e| e.message.contains("does_not_exist")));
     }
 
     #[test]
     fn validate_inline_chain_refs() {
         let yaml = r#"
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata:
   id: test
@@ -709,6 +755,6 @@ discovery:
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         let errors = validate_transform_refs(&config);
-        assert!(errors.iter().any(|e| e.contains("missing_step")));
+        assert!(errors.iter().any(|e| e.message.contains("missing_step")));
     }
 }

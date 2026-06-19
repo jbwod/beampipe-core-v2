@@ -34,7 +34,7 @@ extension:
 Validate the config after adding or changing hooks:
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v1.yaml
+beampipe project validate -f config/wallaby_hires.v2.yaml
 ```
 
 ## Boundary

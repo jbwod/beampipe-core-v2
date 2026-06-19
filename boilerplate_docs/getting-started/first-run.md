@@ -34,7 +34,7 @@ AUTH="Authorization: Bearer $TOKEN"
 Validate locally before API upload:
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v1.yaml
+beampipe project validate -f config/wallaby_hires.v2.yaml
 ```
 
 Upload the YAML:
@@ -43,7 +43,7 @@ Upload the YAML:
 curl -s -X POST "$BASE/api/v2/project-configs" \
   -H "$AUTH" \
   -H 'Content-Type: application/x-yaml' \
-  --data-binary @config/wallaby_hires.v1.yaml | jq .
+  --data-binary @config/wallaby_hires.v2.yaml | jq .
 ```
 
 Confirm the active config:

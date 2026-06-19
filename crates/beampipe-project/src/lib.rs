@@ -2,6 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -18,16 +19,16 @@ pub use wasm::{shared_host, HookKind, WasmHost, WasmHostError};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct DefinitionsConfig {
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub transforms: std::collections::BTreeMap<String, TransformSpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub transforms: BTreeMap<String, TransformSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct SourceIdentityConfig {
     #[serde(default = "default_canonical_field")]
     pub canonical: String,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub template_vars: std::collections::BTreeMap<String, TemplateVarSpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub template_vars: BTreeMap<String, TemplateVarSpec>,
 }
 
 fn default_canonical_field() -> String {
@@ -42,9 +43,83 @@ pub struct TemplateVarSpec {
     pub transform: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformKind {
+    Identity,
+    Trim,
+    Lowercase,
+    Uppercase,
+    Replace,
+    AddPrefix,
+    AddSuffix,
+    DefaultIfEmpty,
+    Chain,
+    StripPrefix,
+    ExtractDigits,
+    SplitLast,
+    IsPresent,
+    SelectEvalFileBySize,
+    RegexExtract,
+    #[serde(other)]
+    Unknown,
+}
+
+impl TransformKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Trim => "trim",
+            Self::Lowercase => "lowercase",
+            Self::Uppercase => "uppercase",
+            Self::Replace => "replace",
+            Self::AddPrefix => "add_prefix",
+            Self::AddSuffix => "add_suffix",
+            Self::DefaultIfEmpty => "default_if_empty",
+            Self::Chain => "chain",
+            Self::StripPrefix => "strip_prefix",
+            Self::ExtractDigits => "extract_digits",
+            Self::SplitLast => "split_last",
+            Self::IsPresent => "is_present",
+            Self::SelectEvalFileBySize => "select_eval_file_by_size",
+            Self::RegexExtract => "regex_extract",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl From<&str> for TransformKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "identity" => Self::Identity,
+            "trim" => Self::Trim,
+            "lowercase" => Self::Lowercase,
+            "uppercase" => Self::Uppercase,
+            "replace" => Self::Replace,
+            "add_prefix" => Self::AddPrefix,
+            "add_suffix" => Self::AddSuffix,
+            "default_if_empty" => Self::DefaultIfEmpty,
+            "chain" => Self::Chain,
+            "strip_prefix" => Self::StripPrefix,
+            "extract_digits" => Self::ExtractDigits,
+            "split_last" => Self::SplitLast,
+            "is_present" => Self::IsPresent,
+            "select_eval_file_by_size" => Self::SelectEvalFileBySize,
+            "regex_extract" => Self::RegexExtract,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<String> for TransformKind {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct TransformSpec {
-    pub kind: String,
+    pub kind: TransformKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +138,22 @@ pub struct TransformSpec {
     pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(untagged)]
+pub enum TransformRef {
+    Name(String),
+    Chain(Vec<String>),
+}
+
+impl TransformRef {
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            Self::Name(name) => vec![name.as_str()],
+            Self::Chain(steps) => steps.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -106,7 +197,7 @@ pub struct ProjectConfig {
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
-            api_version: "beampipe.dev/v1".into(),
+            api_version: "beampipe.dev/v2".into(),
             kind: "ProjectConfig".into(),
             metadata: ProjectMetadata {
                 id: String::new(),
@@ -194,11 +285,19 @@ pub struct DiscoveryQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct PrepareMetadataConfig {
     #[serde(default)]
-    pub field_map: serde_json::Value,
+    pub field_map: BTreeMap<String, MappingSpec>,
     #[serde(default)]
-    pub discovery_flags: serde_json::Value,
+    pub discovery_flags: BTreeMap<String, MappingSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<SignatureConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+pub struct MappingSpec {
+    #[serde(default)]
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<TransformRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -217,8 +316,36 @@ pub struct ManifestConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct GraphPatch {
-    pub r#match: serde_json::Value,
-    pub set: serde_json::Value,
+    #[serde(default)]
+    pub r#match: GraphPatchMatch,
+    #[serde(default)]
+    pub set: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+pub struct GraphPatchMatch {
+    #[serde(default = "default_graph_patch_match_kind")]
+    pub kind: GraphPatchMatchKind,
+    #[serde(default)]
+    pub equals: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphPatchMatchKind {
+    NodeName,
+    #[serde(other)]
+    Unknown,
+}
+
+impl Default for GraphPatchMatchKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+fn default_graph_patch_match_kind() -> GraphPatchMatchKind {
+    GraphPatchMatchKind::Unknown
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -322,17 +449,90 @@ pub struct ExtensionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_sha256: Option<String>,
     #[serde(default)]
-    pub hooks: Vec<String>,
+    pub hooks: Vec<ExtensionHook>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionHook {
+    PrepareMetadata,
+    Manifest,
+    GraphPatches,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ExtensionHook {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PrepareMetadata => "prepare_metadata",
+            Self::Manifest => "manifest",
+            Self::GraphPatches => "graph_patches",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct ValidationReport {
     pub project_id: String,
     pub valid: bool,
-    pub errors: Vec<String>,
+    pub errors: Vec<ValidationDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ValidationDiagnostic>,
     pub spec_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+pub struct ValidationDiagnostic {
+    pub path: String,
+    pub severity: DiagnosticSeverity,
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl ValidationDiagnostic {
+    pub fn error(
+        path: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            severity: DiagnosticSeverity::Error,
+            code: code.into(),
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    pub fn warning(
+        path: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            severity: DiagnosticSeverity::Warning,
+            code: code.into(),
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
 }
 
 #[derive(Debug, Error)]
@@ -363,59 +563,112 @@ impl ProjectConfig {
         if let Err(schema_errors) = validate_against_json_schema(self) {
             errors.extend(schema_errors);
         }
-        if self.api_version != "beampipe.dev/v1" {
-            errors.push("apiVersion must be beampipe.dev/v1".into());
+        if self.api_version != "beampipe.dev/v2" {
+            let mut diag = ValidationDiagnostic::error(
+                "apiVersion",
+                "legacy_api_version",
+                "apiVersion must be beampipe.dev/v2",
+            );
+            if self.api_version == "beampipe.dev/v1" {
+                diag = diag.with_hint("v1 project configs are legacy; convert the document to the v2 typed shape before upload");
+            }
+            errors.push(diag);
         }
         if self.kind != "ProjectConfig" {
-            errors.push("kind must be ProjectConfig".into());
+            errors.push(ValidationDiagnostic::error(
+                "kind",
+                "invalid_kind",
+                "kind must be ProjectConfig",
+            ));
         }
         if self.metadata.id.trim().is_empty() {
-            errors.push("metadata.id is required".into());
+            errors.push(ValidationDiagnostic::error(
+                "metadata.id",
+                "required",
+                "metadata.id is required",
+            ));
         }
         if self.adapters.required.is_empty() {
-            errors.push("adapters.required must include at least one adapter".into());
+            errors.push(ValidationDiagnostic::error(
+                "adapters.required",
+                "required",
+                "adapters.required must include at least one adapter",
+            ));
         }
         if self.adapters.tap.timeout_seconds == 0 {
-            errors.push("adapters.tap.timeout_seconds must be > 0".into());
+            errors.push(ValidationDiagnostic::error(
+                "adapters.tap.timeout_seconds",
+                "invalid_limit",
+                "adapters.tap.timeout_seconds must be > 0",
+            ));
         }
         if let Some(discovery) = &self.automation.discovery {
             if discovery.batch_size <= 0 {
-                errors.push("automation.discovery.batch_size must be > 0".into());
+                errors.push(ValidationDiagnostic::error(
+                    "automation.discovery.batch_size",
+                    "invalid_limit",
+                    "automation.discovery.batch_size must be > 0",
+                ));
             }
             if discovery.tick_discovery_source_limit <= 0 {
-                errors.push("automation.discovery.tick_discovery_source_limit must be > 0".into());
+                errors.push(ValidationDiagnostic::error(
+                    "automation.discovery.tick_discovery_source_limit",
+                    "invalid_limit",
+                    "automation.discovery.tick_discovery_source_limit must be > 0",
+                ));
             }
         }
         if let Some(execution) = &self.automation.execution {
             if execution.max_sources_per_execution <= 0 {
-                errors.push("automation.execution.max_sources_per_execution must be > 0".into());
+                errors.push(ValidationDiagnostic::error(
+                    "automation.execution.max_sources_per_execution",
+                    "invalid_limit",
+                    "automation.execution.max_sources_per_execution must be > 0",
+                ));
             }
             if execution.tick_execution_run_limit <= 0 {
-                errors.push("automation.execution.tick_execution_run_limit must be > 0".into());
+                errors.push(ValidationDiagnostic::error(
+                    "automation.execution.tick_execution_run_limit",
+                    "invalid_limit",
+                    "automation.execution.tick_execution_run_limit must be > 0",
+                ));
             }
         }
         if let Some(graph) = &self.graph {
             if graph.url.is_some() && graph.path.is_some() {
-                errors.push("graph must use only one of url or path".into());
+                errors.push(ValidationDiagnostic::error(
+                    "graph",
+                    "mutually_exclusive",
+                    "graph must use only one of url or path",
+                ));
             }
         }
         if let Some(ext) = &self.extension {
-            const ALLOWED: &[&str] = &["prepare_metadata", "manifest", "graph_patches"];
-            for hook in &ext.hooks {
-                if !ALLOWED.contains(&hook.as_str()) {
-                    errors.push(format!(
-                        "extension.hooks contains unknown hook '{hook}'; allowed: {ALLOWED:?}"
-                    ));
+            for (i, hook) in ext.hooks.iter().enumerate() {
+                if hook == &ExtensionHook::Unknown {
+                    errors.push(
+                        ValidationDiagnostic::error(
+                            format!("extension.hooks[{i}]"),
+                            "unknown_extension_hook",
+                            "extension.hooks contains an unknown hook",
+                        )
+                        .with_hint(
+                            "allowed hooks are prepare_metadata, manifest, and graph_patches",
+                        ),
+                    );
                 }
             }
         }
         errors.extend(validate_transform_refs(self));
+        errors.extend(validate_graph_patches(self));
         if let Some(prepare) = &self.discovery.prepare_metadata {
             if let Some(sig) = &prepare.signature {
                 for (i, field) in sig.exclude_fields.iter().enumerate() {
                     if field.trim().is_empty() {
-                        errors.push(format!(
-                            "discovery.prepare_metadata.signature.exclude_fields[{i}] must be non-empty"
+                        errors.push(ValidationDiagnostic::error(
+                            format!("discovery.prepare_metadata.signature.exclude_fields[{i}]"),
+                            "required",
+                            "signature exclude fields must be non-empty",
                         ));
                     }
                 }
@@ -440,7 +693,7 @@ impl ProjectConfig {
 fn collect_config_warnings(
     config: &ProjectConfig,
     previous: Option<&ProjectConfig>,
-) -> Vec<String> {
+) -> Vec<ValidationDiagnostic> {
     let mut warnings = Vec::new();
     let Some(prev) = previous else {
         return warnings;
@@ -456,9 +709,11 @@ fn collect_config_warnings(
         .as_ref()
         .and_then(|p| p.signature.as_ref());
     if json_value_fingerprint(&old_sig) != json_value_fingerprint(&new_sig) {
-        warnings.push(
-            "discovery.prepare_metadata.signature added or changed; expect discovery re-signatures and a workflow_run_pending wave".into(),
-        );
+        warnings.push(ValidationDiagnostic::warning(
+            "discovery.prepare_metadata.signature",
+            "signature_changed",
+            "discovery signature config changed; expect discovery re-signatures and a workflow_run_pending wave",
+        ));
     }
     let old_field_map = prev
         .discovery
@@ -471,14 +726,18 @@ fn collect_config_warnings(
         .as_ref()
         .map(|p| &p.field_map);
     if json_value_fingerprint(&old_field_map) != json_value_fingerprint(&new_field_map) {
-        warnings.push(
-            "discovery.prepare_metadata.field_map changed; prepared metadata shape and discovery signatures may change".into(),
-        );
+        warnings.push(ValidationDiagnostic::warning(
+            "discovery.prepare_metadata.field_map",
+            "field_map_changed",
+            "field_map changed; prepared metadata shape and discovery signatures may change",
+        ));
     }
     if json_value_fingerprint(&prev.definitions) != json_value_fingerprint(&config.definitions) {
-        warnings.push(
-            "definitions.transforms changed; prepared metadata shape and discovery signatures may change".into(),
-        );
+        warnings.push(ValidationDiagnostic::warning(
+            "definitions.transforms",
+            "definitions_changed",
+            "definitions.transforms changed; prepared metadata shape and discovery signatures may change",
+        ));
     }
     warnings
 }
@@ -487,12 +746,18 @@ fn json_value_fingerprint<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
-fn validate_against_json_schema(config: &ProjectConfig) -> Result<(), Vec<String>> {
+fn validate_against_json_schema(config: &ProjectConfig) -> Result<(), Vec<ValidationDiagnostic>> {
     let schema = schemars::schema_for!(ProjectConfig);
     let schema_value = serde_json::to_value(&schema).unwrap_or(Value::Null);
     let compiled = match jsonschema::JSONSchema::compile(&schema_value) {
         Ok(v) => v,
-        Err(e) => return Err(vec![format!("internal JSON Schema build failed: {e}")]),
+        Err(e) => {
+            return Err(vec![ValidationDiagnostic::error(
+                "$",
+                "internal_schema_error",
+                format!("internal JSON Schema build failed: {e}"),
+            )])
+        }
     };
     let value = serde_json::to_value(config).unwrap_or(Value::Null);
     if compiled.is_valid(&value) {
@@ -501,10 +766,65 @@ fn validate_against_json_schema(config: &ProjectConfig) -> Result<(), Vec<String
     let mut msgs = Vec::new();
     if let Err(errors) = compiled.validate(&value) {
         for e in errors {
-            msgs.push(format!("schema: {e}"));
+            msgs.push(ValidationDiagnostic::error(
+                e.instance_path.to_string(),
+                "schema",
+                e.to_string(),
+            ));
         }
     }
     Err(msgs)
+}
+
+fn validate_graph_patches(config: &ProjectConfig) -> Vec<ValidationDiagnostic> {
+    let mut errors = Vec::new();
+    for (i, patch) in config.graph_patches.iter().enumerate() {
+        if patch.r#match.kind == GraphPatchMatchKind::Unknown {
+            errors.push(
+                ValidationDiagnostic::error(
+                    format!("graph_patches[{i}].match.kind"),
+                    "unknown_graph_patch_match_kind",
+                    "graph patch match kind is unknown",
+                )
+                .with_hint("allowed match kind is node_name"),
+            );
+        }
+        if patch.r#match.equals.trim().is_empty() {
+            errors.push(ValidationDiagnostic::error(
+                format!("graph_patches[{i}].match.equals"),
+                "required",
+                "graph patch match equals must be non-empty",
+            ));
+        }
+        if patch.set.is_empty() {
+            errors.push(ValidationDiagnostic::error(
+                format!("graph_patches[{i}].set"),
+                "required",
+                "graph patch set must include at least one field",
+            ));
+        }
+        for (field, value) in &patch.set {
+            if field.trim().is_empty() {
+                errors.push(ValidationDiagnostic::error(
+                    format!("graph_patches[{i}].set"),
+                    "required",
+                    "graph patch set field names must be non-empty",
+                ));
+            }
+            if let Some(expr) = value.as_str().filter(|s| s.starts_with('$')) {
+                let valid = expr.starts_with("$count(") && expr.ends_with(')')
+                    || expr.starts_with("$sum(") && expr.ends_with(')');
+                if !valid {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("graph_patches[{i}].set.{field}"),
+                        "invalid_expression",
+                        "graph patch expressions must use existing $count(...) or $sum(...) forms",
+                    ));
+                }
+            }
+        }
+    }
+    errors
 }
 
 fn default_tap_timeout_seconds() -> u64 {
@@ -566,7 +886,7 @@ mod config_golden_tests {
     #[test]
     fn wallaby_reference_config_validates() {
         let config =
-            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v1.yaml"))
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
                 .expect("parse wallaby yaml");
         let report = config.validate_report();
         assert!(report.valid, "wallaby config invalid: {:?}", report.errors);
@@ -575,7 +895,7 @@ mod config_golden_tests {
     #[test]
     fn minimal_survey_example_validates() {
         let config = ProjectConfig::from_slice(include_bytes!(
-            "../../../config/examples/minimal_survey.v1.yaml"
+            "../../../config/examples/minimal_survey.v2.yaml"
         ))
         .expect("parse minimal survey yaml");
         let report = config.validate_report();
@@ -587,7 +907,7 @@ mod config_golden_tests {
     }
 
     #[test]
-    fn legacy_field_map_transform_aliases_resolve() {
+    fn legacy_v1_config_parses_but_does_not_validate() {
         let yaml = r#"
 apiVersion: beampipe.dev/v1
 kind: ProjectConfig
@@ -603,13 +923,15 @@ discovery:
         transform: extract_askap_sbid
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
-        assert!(config.validate_report().valid);
+        let report = config.validate_report();
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|e| e.code == "legacy_api_version"));
     }
 
     #[test]
     fn inline_chain_field_map_validates() {
         let yaml = r#"
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata:
   id: chain-test

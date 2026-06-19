@@ -10,7 +10,7 @@ Use this page for promotion, incident response, and config change control. It as
 | Database | Migrations have run once | `beampipe migrate` exits cleanly |
 | Security | Production gates pass | `beampipe security check` |
 | Identity | First operator exists | Admin login succeeds |
-| Config | Project YAML validates | `beampipe project validate -f config/wallaby_hires.v1.yaml` |
+| Config | Project YAML validates | `beampipe project validate -f config/wallaby_hires.v2.yaml` |
 | Profiles | Deployment profiles validate and upload | profile API response |
 | API | Health and readiness are green | `GET /api/v2/health`, `GET /api/v2/ready` |
 | Metrics | API and workers are scraped | Prometheus targets up |

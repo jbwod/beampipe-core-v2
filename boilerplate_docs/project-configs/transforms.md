@@ -228,7 +228,7 @@ When enrichment rows include `format: calibration`, the transform chooses the la
 Run validation before upload:
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v1.yaml
+beampipe project validate -f config/wallaby_hires.v2.yaml
 ```
 
 Validation checks that referenced transforms exist, supported kinds are used, and required fields such as `prefix`, `from`, `pattern`, or `steps` are present. Legacy transform names such as `strip_hipass_prefix`, `extract_askap_sbid`, and `extract_scan_id` still resolve, but new configs should define explicit names under `definitions.transforms`.

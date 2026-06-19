@@ -1,4 +1,4 @@
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata:
   id: wallaby_hires

@@ -127,20 +127,12 @@ pub fn apply_project_graph_patches(manifest: &mut Value, config: &ProjectConfig)
         .graph_patches
         .iter()
         .filter_map(|patch| {
-            let match_spec = patch.r#match.as_object()?;
-            let set = patch.set.as_object()?;
-            let equals = match_spec
-                .get("equals")
-                .or_else(|| {
-                    if match_spec.get("kind").and_then(Value::as_str) == Some("node_name") {
-                        match_spec.get("equals")
-                    } else {
-                        None
-                    }
-                })
-                .and_then(Value::as_str)?;
+            let equals = patch.r#match.equals.as_str();
+            if equals.trim().is_empty() {
+                return None;
+            }
             let mut fields = Vec::new();
-            for (name, raw_value) in set {
+            for (name, raw_value) in &patch.set {
                 let value = if let Some(s) = raw_value.as_str() {
                     evaluate_expression(s, &expr_ctx).unwrap_or_else(|| raw_value.clone())
                 } else {

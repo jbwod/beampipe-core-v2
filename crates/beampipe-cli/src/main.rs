@@ -98,7 +98,7 @@ enum BenchCommand {
     Tap {
         #[arg(long, default_value = "HIPASSJ1313-15")]
         source: String,
-        #[arg(long, default_value = "config/wallaby_hires.v1.yaml")]
+        #[arg(long, default_value = "config/wallaby_hires.v2.yaml")]
         config: PathBuf,
         #[arg(long, default_value_t = 3)]
         runs: u32,
@@ -220,7 +220,10 @@ async fn main() -> anyhow::Result<()> {
             let report = config.validate_report();
             if !report.warnings.is_empty() {
                 for warning in &report.warnings {
-                    eprintln!("warning: {warning}");
+                    eprintln!(
+                        "warning[{}] {}: {}",
+                        warning.code, warning.path, warning.message
+                    );
                 }
             }
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -267,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "8. Run: beampipe admin create-user --username admin --password ... --email ..."
             );
-            println!("9. Upload config: beampipe project validate -f config/wallaby_hires.v1.yaml");
+            println!("9. Upload config: beampipe project validate -f config/wallaby_hires.v2.yaml");
             println!("10. Optional WASM: beampipe wasm upload --config-id wallaby_hires --file hook.wasm");
             println!("11. Start API: beampipe serve --worker false");
             println!("12. Start workers: beampipe worker  (scale replicas; set BEAMPIPE_WORKER_SCHEDULER_ENABLED=false on workers when one scheduler pod runs serve --worker true)");

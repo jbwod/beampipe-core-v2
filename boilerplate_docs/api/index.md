@@ -17,12 +17,12 @@ Create the admin user with `beampipe admin create-user` before logging in.
 ## Project config
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v1.yaml
+beampipe project validate -f config/wallaby_hires.v2.yaml
 
 curl -s -X POST "$BASE/api/v2/project-configs" \
   -H "$AUTH" \
   -H 'Content-Type: application/x-yaml' \
-  --data-binary @config/wallaby_hires.v1.yaml | jq .
+  --data-binary @config/wallaby_hires.v2.yaml | jq .
 
 curl -s "$BASE/api/v2/project-configs/wallaby_hires" -H "$AUTH" | jq .
 curl -s "$BASE/api/v2/project-configs/wallaby_hires/versions" -H "$AUTH" | jq .

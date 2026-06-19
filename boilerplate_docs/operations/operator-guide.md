@@ -40,7 +40,7 @@ Run exactly one scheduler-enabled process per environment. Scale API processes f
 |-------|--------|----------------|
 | Bootstrap | Apply migrations | `beampipe migrate` |
 | Bootstrap | Create first operator | `beampipe admin create-user --username admin --password ... --email ...` |
-| Config | Validate survey YAML | `beampipe project validate -f config/wallaby_hires.v1.yaml` |
+| Config | Validate survey YAML | `beampipe project validate -f config/wallaby_hires.v2.yaml` |
 | Config | Upload survey YAML | `POST /api/v2/project-configs` |
 | Config | Upload deployment profile | `POST /api/v2/deployment-profiles` |
 | Source load | Register sources | `POST /api/v2/sources` or `POST /api/v2/sources/bulk` |

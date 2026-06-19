@@ -5,7 +5,7 @@ use serde_json::json;
 #[test]
 fn manifest_excludes_failed_sbids() {
     let config =
-        ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v1.yaml")).unwrap();
+        ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml")).unwrap();
     let metadata = vec![
         json!({"source_identifier": "s1", "sbid": "1", "dataset_id": "d1", "discovery_flags": {"ra_string": "1:2:3"}}),
         json!({"source_identifier": "s1", "sbid": "2", "dataset_id": "d2"}),

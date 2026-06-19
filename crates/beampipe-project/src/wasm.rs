@@ -4,6 +4,7 @@
 //! named `prepare_metadata`, `manifest`, or `graph_patches` with signature
 //! `(input_ptr: i32, input_len: i32) -> i64` (high 32 bits = output length, low 32 = output ptr).
 
+use crate::ExtensionHook;
 use serde_json::Value;
 use std::sync::Arc;
 use thiserror::Error;
@@ -101,13 +102,13 @@ impl WasmHost {
     pub fn maybe_apply_hook(
         &self,
         bytes: Option<&[u8]>,
-        hooks: &[String],
+        hooks: &[ExtensionHook],
         hook: HookKind,
         declarative: &Value,
         envelope: &Value,
     ) -> Result<Value, WasmHostError> {
         let hook_name = hook.export_name();
-        if !hooks.iter().any(|h| h == hook_name) {
+        if !hooks.iter().any(|h| h.as_str() == hook_name) {
             return Ok(declarative.clone());
         }
         let Some(bytes) = bytes else {

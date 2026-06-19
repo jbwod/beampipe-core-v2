@@ -5,7 +5,7 @@ Project configs are the survey configuration surface for beampipe-core. They des
 ## Anatomy
 
 ```yaml
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata: {}
 definitions: {}
@@ -21,7 +21,7 @@ extension: {}
 
 | Section | Purpose |
 |---------|---------|
-| `apiVersion` | Config API version, currently `beampipe.dev/v1` |
+| `apiVersion` | Config API version, currently `beampipe.dev/v2` |
 | `kind` | Must be `ProjectConfig` |
 | `metadata` | Project ID and description |
 | `definitions` | Named reusable transforms |
@@ -37,7 +37,7 @@ extension: {}
 Validate before upload:
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v1.yaml
+beampipe project validate -f config/wallaby_hires.v2.yaml
 ```
 
 Upload through the API:
@@ -46,7 +46,7 @@ Upload through the API:
 curl -s -X POST "$BASE/api/v2/project-configs" \
   -H "$AUTH" \
   -H 'Content-Type: application/x-yaml' \
-  --data-binary @config/wallaby_hires.v1.yaml | jq .
+  --data-binary @config/wallaby_hires.v2.yaml | jq .
 ```
 
 ## Metadata

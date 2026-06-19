@@ -1311,13 +1311,8 @@ fn prepare_metadata_record(
     registry: &TransformRegistry,
 ) -> Value {
     let mut out = Map::new();
-    if let Some(field_map) = config
-        .discovery
-        .prepare_metadata
-        .as_ref()
-        .and_then(|p| p.field_map.as_object())
-    {
-        for (target, spec) in field_map {
+    if let Some(prepare) = config.discovery.prepare_metadata.as_ref() {
+        for (target, spec) in &prepare.field_map {
             if let Some(value) = mapped_value(source_identifier, row, spec, enrichments, registry) {
                 out.insert(target.clone(), value);
             }
@@ -1352,11 +1347,11 @@ fn prepare_metadata_record(
 fn mapped_value(
     source_identifier: &str,
     row: &TapRow,
-    spec: &Value,
+    spec: &beampipe_project::MappingSpec,
     enrichments: &Map<String, Value>,
     registry: &TransformRegistry,
 ) -> Option<Value> {
-    let from = spec.get("from").and_then(Value::as_str)?;
+    let from = spec.from.as_str();
     let value = if from == "source_identifier" {
         json!(source_identifier)
     } else if let Some(enrichment_key) = from.strip_prefix("enrichments.") {
@@ -1380,7 +1375,7 @@ fn mapped_value(
     } else {
         row_value(row, from)?.clone()
     };
-    if spec.get("transform").and_then(Value::as_str).is_some() {
+    if spec.transform.is_some() {
         return apply_field_transform(registry, spec, &value);
     }
     Some(value)
@@ -1407,18 +1402,12 @@ fn discovery_flags_from_config(
     registry: &TransformRegistry,
 ) -> Value {
     let mut out = Map::new();
-    if let Some(flags) = config
-        .discovery
-        .prepare_metadata
-        .as_ref()
-        .and_then(|p| p.discovery_flags.as_object())
-    {
+    if let Some(prepare) = config.discovery.prepare_metadata.as_ref() {
         let enrichment_value = json!({"enrichments": enrichments});
-        for (target, spec) in flags {
-            let source = spec.get("from").and_then(Value::as_str).unwrap_or_default();
-            let raw = value_at_path(&enrichment_value, source);
+        for (target, spec) in &prepare.discovery_flags {
+            let raw = value_at_path(&enrichment_value, &spec.from);
             let raw_value = raw.cloned().unwrap_or(Value::Null);
-            let value = if spec.get("transform").and_then(Value::as_str).is_some() {
+            let value = if spec.transform.is_some() {
                 apply_field_transform(registry, spec, &raw_value).unwrap_or(raw_value)
             } else {
                 raw_value
@@ -3509,7 +3498,7 @@ mod tests {
         clients.insert("vizier".into(), Arc::new(vizier));
         let runner = ConfigDiscoveryRunner::with_clients(clients);
         let config =
-            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v1.yaml"))
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
                 .unwrap();
         let result = runner
             .discover_source(Some(&config), "wallaby_hires", "HIPASSJ1")
