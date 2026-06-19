@@ -43,5 +43,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Migration smoke
+        run: |
+          cargo run -p beampipe-cli -- migrate
+          cargo run -p beampipe-cli -- migrate
+
+      - name: Promtool alert rules
+        run: bash scripts/promtool-test-alerts.sh
+
       - name: Run tests
         run: cargo test --workspace
