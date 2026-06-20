@@ -21,7 +21,7 @@ For a stuck source or run, inspect in this order:
 1. `GET /api/v2/ready` for database, queue, worker, and dependency state.
 2. Prometheus gauges for queue depth, oldest queued job age, dependency health, and execution state counts.
 3. Provenance events for source/execution milestones.
-4. Execution response run record for DIM/Slurm submit and poll details.
+4. Execution response run record for 流 DIM/Slurm submit and poll details.
 
 ## Metrics flow
 
@@ -63,8 +63,8 @@ Execution responses include backend-specific fields when available:
 
 | Field | Backend |
 |-------|---------|
-| `dim_session_status_url` | REST/DIM |
-| `dim_graph_status_url` | REST/DIM |
+| `dim_session_status_url` | REST/流 DIM |
+| `dim_graph_status_url` | REST/流 DIM |
 | `slurm_session_dir` | Slurm |
 | `slurm_login_node` | Slurm |
 | `slurm_remote_user` | Slurm |

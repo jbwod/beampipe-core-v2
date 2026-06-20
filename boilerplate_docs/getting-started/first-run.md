@@ -1,6 +1,6 @@
 # First run
 
-This workflow proves the control plane path with one `wallaby_hires` source: authenticate, upload config, register a source, run discovery, create an execution, and queue a dry backend run. Keep `do_stage` and `do_submit` disabled until real CASDA, Translator Manager, DIM, or Slurm access is configured.
+This workflow proves the control plane path with one `wallaby_hires` source: authenticate, upload config, register a source, run discovery, create an execution, and queue a dry backend run. Keep `do_stage` and `do_submit` disabled until real CASDA, 流 Translator Manager, 流 DIM, or Slurm access is configured.
 
 ## 1. Start services
 

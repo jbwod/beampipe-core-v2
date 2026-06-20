@@ -14,13 +14,13 @@ Use this page for promotion, incident response, and config change control. It as
 | Profiles | Deployment profiles validate and upload | profile API response |
 | API | Health and readiness are green | `GET /api/v2/health`, `GET /api/v2/ready` |
 | Metrics | API and workers are scraped | Prometheus targets up |
-| Backend | TAP, Translator Manager, DIM or Slurm reachable | dependency checks, `beampipe slurm ping --profile <name>` |
+| Backend | TAP, 流 Translator Manager, 流 DIM, or Slurm reachable | dependency checks, `beampipe slurm ping --profile <name>` |
 
 ## Backend preflight
 
 <div class="terminal-diagram">
 <pre>CASDA TAP ----\
-VizieR TAP ----+--> worker --> metadata --> manifest --> TM --> DIM/Slurm
+VizieR TAP ----+--> worker --> metadata --> manifest --> 流 TM --> 流 DIM/Slurm
 Postgres  ----/        |          |           |          |       |
                        v          v           v          v       v
                     events     signature    graph     deploy   poll</pre>
@@ -30,8 +30,8 @@ Postgres  ----/        |          |           |          |       |
 |---------|---------------------------|
 | CASDA | Credentials, TAP endpoint, staging account, expected collections |
 | VizieR | TAP endpoint reachable from workers |
-| Translator Manager | `tm_url` reachable and compatible with the graph format |
-| DIM REST | Deploy host/port reachable; status URLs readable |
+| 流 Translator Manager | `tm_url` reachable and compatible with the graph format |
+| 流 DIM REST | Deploy host/port reachable; status URLs readable |
 | Slurm | SSH key, known hosts, login node, account/partition, DALiuGE install path |
 
 Keep `BEAMPIPE_USE_REAL_BACKENDS=false` until project config validation, manifest creation, and dry execution are proven.
@@ -61,7 +61,7 @@ Keep `BEAMPIPE_USE_REAL_BACKENDS=false` until project config validation, manifes
 | Metadata changes every run | Inspect signature exclusions and volatile TAP columns | Exclude URLs, sizes, and timestamps that should not trigger reruns |
 | Execution stuck pending | Check metadata readiness, automation caps, queue depth | Confirm deployment profile name matches project config |
 | Slurm polling failures | Check known hosts, key permissions, login node reachability | Run `beampipe slurm ping --profile <name>` |
-| DIM errors | Read execution debug URLs and provenance events | Verify Translator Manager output and DIM endpoint |
+| 流 DIM errors | Read execution debug URLs and provenance events | Verify 流 Translator Manager output and 流 DIM endpoint |
 | Alerts silent | Send test notification | Check secret references and production redaction rules |
 
 ## Change control

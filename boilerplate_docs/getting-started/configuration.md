@@ -61,7 +61,7 @@ Use environment shaping for cluster-wide safety limits. Use project config `auto
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `BEAMPIPE_USE_REAL_BACKENDS` | `false` | Use real CASDA/TM/DIM/Slurm clients instead of mocks |
+| `BEAMPIPE_USE_REAL_BACKENDS` | `false` | Use real CASDA, 流 Translator Manager, 流 DIM, or Slurm clients instead of mocks |
 | `CASDA_USERNAME`, `CASDA_PASSWORD_FILE` | unset | CASDA staging credentials; prefer file secrets in production |
 | `CASDA_PASSWORD` | unset | Inline CASDA password for local/dev injection |
 | `SLURM_SSH_PRIVATE_KEY_FILE` / `SLURM_SSH_PRIVATE_KEY_PATH` | unset | Mounted Slurm SSH private key |

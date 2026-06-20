@@ -1,11 +1,11 @@
 
 
 <p align="center">
-  <img src="assets/brand/beampipe-terminal-logo.png" alt="beampipe-core terminal logo" width="920" />
+  <img src="assets/brand/beampipe-terminal-logo.png" alt="beampipe-core terminal logo" width="920" style="border-radius: 12px; background: #000;" />
 </p>
 
 
-> `beampipe-core` is an external orchestration and triggering framework for archive-driven radio astronomy workflows. It operates as an external control plane that continuously monitors scientific archives (ie; CASDA), determines when datasets are ready, and orchestrates scheduler-aware execution of distributed workflows (ie; DALiuGe) on heterogeneous HPC systems.
+> `beampipe-core` is an external orchestration and triggering framework for archive-driven radio astronomy workflows. It operates as an external control plane that continuously monitors scientific archives (ie; CASDA), determines when datasets are ready, and orchestrates scheduler-aware execution of distributed workflows (ie; DALiuGE) on heterogeneous HPC systems.
 
 <p align="center">
   <img src="https://img.shields.io/badge/%3E__Rust-v2-d6c178?style=flat-square&labelColor=050505" alt="Rust v2"/>
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/readme/control-plane-terminal-dark.png" alt="Terminal-style Beampipe control plane diagram" />
+  <img src="assets/readme/control-plane-terminal-dark.png" alt="Terminal-style Beampipe control plane diagram" style="border-radius: 12px; background: #000;" />
 </p>
 
 ## `What it does`
@@ -142,7 +142,7 @@ cargo run -p beampipe-cli --bin beampipe -- serve
 ## `Control Plane`
 
 <p align="center">
-  <img src="assets/readme/execution-lifecycle-terminal-dark.png" alt="Terminal-style Beampipe execution lifecycle diagram" />
+  <img src="assets/readme/execution-lifecycle-terminal-dark.png" alt="Terminal-style Beampipe execution lifecycle diagram" style="border-radius: 12px; background: #000;" />
 </p>
 
 > beampipe-core does not replace the science workflow.
@@ -151,7 +151,7 @@ cargo run -p beampipe-cli --bin beampipe -- serve
 ## `Project Configs and DALiuGE Graphs`
 
 <p align="center">
-  <img src="assets/readme/graph-patch-flow-terminal-dark.png" alt="Terminal-style Beampipe graph patch flow diagram" />
+  <img src="assets/readme/graph-patch-flow-terminal-dark.png" alt="Terminal-style Beampipe graph patch flow diagram" style="border-radius: 12px; background: #000;" />
 </p>
 
 > Project configs are YAML documents (`apiVersion: beampipe.dev/v2`) that define archive adapters, discovery queries, metadata transforms, manifest shape, DALiuGE graph patches, automation caps, and optional WASM hooks.
@@ -204,7 +204,7 @@ cp openapi.json boilerplate_docs/openapi.json
 ## `Documentation`
 
 <p align="center">
-  <img src="assets/readme/operations-observability-terminal-dark.png" alt="Terminal-style Beampipe operations and observability diagram" />
+  <img src="assets/readme/operations-observability-terminal-dark.png" alt="Terminal-style Beampipe operations and observability diagram" style="border-radius: 12px; background: #000;" />
 </p>
 
 | Page | Link |
