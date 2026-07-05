@@ -1439,24 +1439,21 @@ pub async fn apply_execution_patch_with_correlation(
     }
     if patch_phase.is_some() {
         let new_phase = state.execution_phase;
-        if new_phase != prev_phase {
-            if matches!(new_phase, Some(ExecutionPhase::Submit)) {
-                let payload = serde_json::json!({
-                    "execution_phase": "submit",
-                });
-                crate::provenance::record_provenance_event(
-                    pool,
-                    beampipe_domain::provenance::ProvenanceEventType::ExecutionExecuteStarted
-                        .as_str(),
-                    &project_module,
-                    None,
-                    Some(id),
-                    Some("system:execution"),
-                    correlation.as_deref(),
-                    &payload,
-                )
-                .await;
-            }
+        if new_phase != prev_phase && matches!(new_phase, Some(ExecutionPhase::Submit)) {
+            let payload = serde_json::json!({
+                "execution_phase": "submit",
+            });
+            crate::provenance::record_provenance_event(
+                pool,
+                beampipe_domain::provenance::ProvenanceEventType::ExecutionExecuteStarted.as_str(),
+                &project_module,
+                None,
+                Some(id),
+                Some("system:execution"),
+                correlation.as_deref(),
+                &payload,
+            )
+            .await;
         }
     }
 
@@ -1692,6 +1689,114 @@ pub async fn enqueue_job_deferred(
         },
     )
     .await
+}
+
+/// Most recent non-terminal job for an execution (queued or running).
+pub async fn get_active_job_for_execution(
+    pool: &PgPool,
+    execution_id: Uuid,
+) -> Result<Option<JobRow>, sqlx::Error> {
+    sqlx::query_as::<_, JobRow>(
+        r#"
+        SELECT *
+        FROM jobs
+        WHERE execution_id = $1
+          AND status IN ('queued', 'running')
+        ORDER BY
+          CASE status WHEN 'running' THEN 0 ELSE 1 END,
+          CASE kind
+            WHEN 'execute' THEN 0
+            WHEN 'dim_poll' THEN 1
+            ELSE 2
+          END,
+          created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(execution_id)
+    .fetch_optional(pool)
+    .await
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionTraceSummary {
+    pub correlation_id: Option<String>,
+    pub active_job_id: Option<Uuid>,
+    pub active_job_kind: Option<String>,
+    pub events: Vec<crate::models::ProvenanceEventRow>,
+}
+
+pub async fn execution_trace_summary(
+    pool: &PgPool,
+    execution_id: Uuid,
+    event_limit: i64,
+) -> Result<ExecutionTraceSummary, sqlx::Error> {
+    let events = list_provenance_events_for_execution(pool, execution_id, event_limit).await?;
+    let correlation_id = events.iter().rev().find_map(|e| e.correlation_id.clone());
+    let active_job = get_active_job_for_execution(pool, execution_id).await?;
+    Ok(ExecutionTraceSummary {
+        correlation_id,
+        active_job_id: active_job.as_ref().map(|j| j.uuid),
+        active_job_kind: active_job.map(|j| j.kind),
+        events,
+    })
+}
+
+/// Mark sources for rediscovery and enqueue a scheduler tick in one transaction.
+pub async fn mark_sources_and_enqueue_discovery_tick(
+    pool: &PgPool,
+    project_module: &str,
+    source_identifiers: Option<&[String]>,
+    payload: Value,
+    idempotency_key: &str,
+) -> Result<(Vec<String>, Option<JobRow>), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        r#"
+        UPDATE source_registry
+        SET last_checked_at = NULL,
+            last_attempted_at = NULL,
+            discovery_claim_token = NULL,
+            discovery_claim_expires_at = NULL,
+            workflow_claim_token = NULL,
+            workflow_claimed_at = NULL,
+            workflow_claim_expires_at = NULL
+        WHERE project_module =
+        "#,
+    );
+    qb.push_bind(project_module);
+    qb.push(" AND enabled = true");
+    if let Some(ids) = source_identifiers.filter(|ids| !ids.is_empty()) {
+        qb.push(" AND source_identifier = ANY(")
+            .push_bind(ids)
+            .push(")");
+    }
+    qb.push(" RETURNING source_identifier");
+    let marked = qb
+        .build_query_scalar::<String>()
+        .fetch_all(&mut *tx)
+        .await?;
+    if marked.is_empty() {
+        tx.commit().await?;
+        return Ok((marked, None));
+    }
+    let job = sqlx::query_as::<_, JobRow>(
+        r#"
+        INSERT INTO jobs (uuid, kind, payload, idempotency_key, next_run_at)
+        VALUES ($1, $2, $3, $4, now())
+        ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+        DO UPDATE SET updated_at = now()
+        RETURNING *
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind("scheduler_tick")
+    .bind(payload)
+    .bind(idempotency_key)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((marked, Some(job)))
 }
 
 /// Enqueue or re-queue a recurring scheduler job (discovery/execution ticks).

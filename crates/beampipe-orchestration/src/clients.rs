@@ -392,7 +392,8 @@ impl SlurmClient for SshSlurmClient {
         })?;
         let target = SlurmTarget::from_deployment(&deployment, &username);
         let mut session = SlurmSshSession::connect(&target).await?;
-        let results = query_slurm_states_batch(&mut session, &[slurm_id.clone()]).await?;
+        let results =
+            query_slurm_states_batch(&mut session, std::slice::from_ref(&slurm_id)).await?;
         let _ = session.close().await;
         let result = results.get(&slurm_id).cloned().ok_or_else(|| {
             OrchestrationError::Backend(format!("no poll result for slurm job {slurm_id}"))

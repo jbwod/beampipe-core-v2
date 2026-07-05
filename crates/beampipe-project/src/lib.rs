@@ -332,16 +332,12 @@ pub struct GraphPatchMatch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum GraphPatchMatchKind {
     NodeName,
     #[serde(other)]
+    #[default]
     Unknown,
-}
-
-impl Default for GraphPatchMatchKind {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 fn default_graph_patch_match_kind() -> GraphPatchMatchKind {

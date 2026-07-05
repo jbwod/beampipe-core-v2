@@ -125,7 +125,7 @@ pub fn apply_transform_spec(spec: &TransformSpec, input: &Value) -> Option<Value
                 spec.default
                     .as_ref()
                     .map(|d| Value::String(d.clone()))
-                    .or_else(|| Some(Value::Null))
+                    .or(Some(Value::Null))
             } else {
                 Some(input.clone())
             }

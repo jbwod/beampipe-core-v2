@@ -1,11 +1,20 @@
 mod otel;
 pub mod refresh;
 pub mod server;
+pub mod trace_context;
 pub mod tracing_layer;
 
 pub use beampipe_db::test_modules::INTEGRATION_TEST_MODULE_REGEX as INTERNAL_TEST_MODULE_REGEX;
 pub use otel::init_if_enabled;
 pub use refresh::{is_internal_test_module, refresh_dependencies, refresh_gauges_from_pool};
+pub use trace_context::{
+    correlation_id_from_payload, correlation_only, extract_parent_context,
+    extract_parent_from_traceparent, header_map_from_pairs, inject_current_traceparent,
+    inject_into_payload, new_tick_correlation_id, parent_context_from_payload, payload_with_trace,
+    set_span_parent_from_payload, sources_attr_value, trace_context_from_http,
+    trace_context_from_payload, traceparent_from_payload, worker_role_from_env, TraceContext,
+    CORRELATION_ID_KEY, TRACEPARENT_HEADER, TRACEPARENT_KEY,
+};
 
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};

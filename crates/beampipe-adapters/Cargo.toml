@@ -7,7 +7,6 @@ authors.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-beampipe-domain = { path = "../beampipe-domain" }
 quick-xml.workspace = true
 reqwest.workspace = true
 serde.workspace = true

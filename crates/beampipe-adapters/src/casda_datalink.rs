@@ -84,25 +84,25 @@ fn extract_soda_access_url(xml: &str, service_name: &str) -> Option<String> {
                     }
                 }
             }
-            Ok(quick_xml::events::Event::Empty(e)) => {
-                if in_target_resource && e.name().local_name().as_ref() == b"PARAM" {
-                    let mut param_name = None;
-                    let mut param_value = None;
-                    for attr in e.attributes().flatten() {
-                        match attr.key.local_name().as_ref() {
-                            b"name" => {
-                                param_name = Some(String::from_utf8_lossy(&attr.value).to_string())
-                            }
-                            b"value" => {
-                                param_value = Some(String::from_utf8_lossy(&attr.value).to_string())
-                            }
-                            _ => {}
+            Ok(quick_xml::events::Event::Empty(e))
+                if in_target_resource && e.name().local_name().as_ref() == b"PARAM" =>
+            {
+                let mut param_name = None;
+                let mut param_value = None;
+                for attr in e.attributes().flatten() {
+                    match attr.key.local_name().as_ref() {
+                        b"name" => {
+                            param_name = Some(String::from_utf8_lossy(&attr.value).to_string())
                         }
+                        b"value" => {
+                            param_value = Some(String::from_utf8_lossy(&attr.value).to_string())
+                        }
+                        _ => {}
                     }
-                    if param_name.as_deref() == Some("accessURL") {
-                        if let Some(value) = param_value.filter(|v| !v.trim().is_empty()) {
-                            return Some(value);
-                        }
+                }
+                if param_name.as_deref() == Some("accessURL") {
+                    if let Some(value) = param_value.filter(|v| !v.trim().is_empty()) {
+                        return Some(value);
                     }
                 }
             }

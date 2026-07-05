@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use beampipe_adapters::{all_reachable, probe_tap_health, unreachable_adapters, TapClient};
 use beampipe_adapters::{casda_tap, vizier_tap, AdapterError, TapRow};
 use beampipe_config::Settings;
-use beampipe_db::{models::DeploymentProfileRow, repo};
+use beampipe_db::{
+    models::{DeploymentProfileRow, JobRow},
+    repo,
+};
 use beampipe_domain::run_record::{
     dim_logs_url, dim_poll_round_from_manifest, merge_dim_poll_into_manifest,
     merge_dim_poll_tick_round, merge_scheduler_timeout_into_manifest,
@@ -43,6 +46,22 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn, Instrument};
 
 static SLURM_SSH_POOL: LazyLock<SlurmSshPool> = LazyLock::new(SlurmSshPool::new_from_env);
+
+fn trace_context_for_job(job: &JobRow) -> metrics::TraceContext {
+    let fallback = job
+        .execution_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| job.uuid.to_string());
+    metrics::trace_context_from_payload(&job.payload, &fallback)
+}
+
+fn job_phase_label(kind: &str) -> &'static str {
+    match kind {
+        "scheduler_tick" | "discover_batch" => "discovering",
+        "execution_scheduler_tick" => "admitting",
+        _ => "executing",
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -278,19 +297,27 @@ pub async fn tick(pool: &PgPool, config: &WorkerConfig) -> Result<(), sqlx::Erro
     let job_started = std::time::Instant::now();
     metrics::record_job(&job.kind, "claimed");
     debug!(job_id = %job.uuid, kind = %job.kind, "event=job_claimed");
-    let correlation = correlation_id_from_payload(&job.payload)
-        .map(str::to_string)
-        .or_else(|| job.execution_id.map(|id| id.to_string()))
+    let trace_context = trace_context_for_job(&job);
+    let payload = metrics::payload_with_trace(job.payload.clone(), &trace_context);
+    let correlation = trace_context.correlation_id.as_deref().unwrap_or_default();
+    let project_module = payload
+        .get("project_module")
+        .and_then(Value::as_str)
         .unwrap_or_default();
+    let phase = job_phase_label(&job.kind);
     let span = tracing::info_span!(
         "job",
         job_id = %job.uuid,
         job_kind = %job.kind,
         correlation_id = %correlation,
-        execution_id = job.execution_id.map(|id| id.to_string()).unwrap_or_default()
+        execution_id = job.execution_id.map(|id| id.to_string()).unwrap_or_default(),
+        project_module = %project_module,
+        phase = %phase,
+        worker_role = %metrics::worker_role_from_env(),
     );
+    metrics::set_span_parent_from_payload(&span, &payload);
     let runner = ConfigDiscoveryRunner::from_env_with_pool(Some(pool.clone()));
-    let result = async { dispatch(pool, config, &runner, &job.kind, &job.payload).await }
+    let result = async { dispatch(pool, config, &runner, &job.kind, &payload).await }
         .instrument(span)
         .await;
     match result {
@@ -1008,9 +1035,8 @@ async fn run_scheduler_tick(
                 );
                 break;
             }
-            repo::enqueue_job(
-                pool,
-                "discover_batch",
+            let tc = metrics::trace_context_from_payload(payload, &claim_token);
+            let job_payload = metrics::payload_with_trace(
                 json!({
                     "project_module": module,
                     "source_identifiers": source_identifiers,
@@ -1020,6 +1046,12 @@ async fn run_scheduler_tick(
                         "admitted_source_count": source_identifiers.len(),
                     },
                 }),
+                &tc,
+            );
+            repo::enqueue_job(
+                pool,
+                "discover_batch",
+                job_payload,
                 None,
                 Some(&format!("discover:{module}:{claim_token}")),
             )
@@ -1136,13 +1168,26 @@ async fn run_discover_batch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
     let project_config = repo::get_active_project_config(pool, project_module)
         .await?
         .and_then(|row| serde_json::from_value::<ProjectConfig>(row.spec).ok());
-    let results = discover_sources_parallel(
-        runner,
-        project_config.as_ref(),
-        project_module,
-        source_identifiers,
-        config.discovery_source_concurrency as usize,
-    )
+    let correlation = metrics::trace_context_from_payload(payload, claim_token)
+        .correlation_id
+        .unwrap_or_else(|| claim_token.to_string());
+    let results = async {
+        discover_sources_parallel(
+            runner,
+            project_config.as_ref(),
+            project_module,
+            source_identifiers.clone(),
+            config.discovery_source_concurrency as usize,
+        )
+        .await
+    }
+    .instrument(tracing::info_span!(
+        "discover_batch",
+        phase = "discovering",
+        project_module = %project_module,
+        correlation_id = %correlation,
+        source_identifiers = %metrics::sources_attr_value(&source_identifiers),
+    ))
     .await;
     let signature_config = project_config
         .as_ref()
@@ -1702,6 +1747,7 @@ async fn schedule_project_executions(
     policy: &ExecutionAutomationPolicy,
 ) -> Result<(), sqlx::Error> {
     let started = std::time::Instant::now();
+    let tick_correlation = metrics::new_tick_correlation_id();
     let mut result = SchedulerTickResult::new(project_module);
 
     if let Some(cap) = policy.concurrent_execution_run_limit {
@@ -1892,10 +1938,14 @@ async fn schedule_project_executions(
             None,
         )
         .await?;
+        let job_payload = metrics::payload_with_trace(
+            json!({"execution_id": execution.uuid}),
+            &metrics::correlation_only(tick_correlation.clone()),
+        );
         repo::enqueue_job(
             pool,
             "execute",
-            json!({"execution_id": execution.uuid}),
+            job_payload,
             Some(execution.uuid),
             Some(&format!("execute:{}", execution.uuid)),
         )
@@ -2096,16 +2146,9 @@ async fn preflight_execute(
     Ok(())
 }
 
-fn correlation_id_from_payload(payload: &serde_json::Value) -> Option<&str> {
-    payload
-        .get("correlation_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-}
-
 async fn run_execute(pool: &PgPool, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
     let started = std::time::Instant::now();
-    let correlation_id = correlation_id_from_payload(payload);
+    let correlation_id = metrics::correlation_id_from_payload(payload);
     let execution_id = payload
         .get("execution_id")
         .and_then(serde_json::Value::as_str)
@@ -2203,7 +2246,6 @@ async fn run_execute_body(
     let manifest = if replay_manifest {
         execution.workflow_manifest.clone().unwrap_or(json!({}))
     } else {
-        let mut skipped_sbids: Vec<String> = Vec::new();
         let metadata_rows = repo::list_archive_metadata_for_sources(
             pool,
             &execution.project_module,
@@ -2211,7 +2253,7 @@ async fn run_execute_body(
         )
         .await
         .map_err(|e| e.to_string())?;
-        let mut metadata: Vec<_> = metadata_rows
+        let metadata: Vec<_> = metadata_rows
             .into_iter()
             .filter_map(|row| row.metadata_json)
             .flat_map(|value| {
@@ -2222,33 +2264,15 @@ async fn run_execute_body(
                     .unwrap_or_default()
             })
             .collect();
-        if do_stage {
-            let staging: Arc<dyn StagingClient> = if let Some(client) = casda_client {
-                Arc::new(client)
-            } else if requires_casda {
-                return Err("CASDA staging credentials required but not configured".into());
-            } else {
-                Arc::new(PassThroughStagingClient)
-            };
-            info!(
-                event = "execute_stage_start",
-                execution_id = %execution_id,
-                dataset_count = metadata.len()
-            );
-            match staging.stage(&metadata).await {
-                Ok(outcome) => {
-                    info!(
-                        event = "execute_stage_complete",
-                        execution_id = %execution_id,
-                        staged_count = outcome.staged_count,
-                        skipped_sbids = ?outcome.skipped_sbids
-                    );
-                    metadata = outcome.metadata;
-                    skipped_sbids = outcome.skipped_sbids;
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-        }
+        let (metadata, skipped_sbids) = run_stage_phase(
+            execution_id,
+            do_stage,
+            requires_casda,
+            casda_client,
+            metadata,
+            correlation_id,
+        )
+        .await?;
         let staging_context = staging_context_from_metadata(&metadata);
         let mut built = if let Some(ref cfg) = project_config {
             build_manifest_from_config_with_staging(
@@ -2347,80 +2371,123 @@ async fn run_execute_body(
     {
         return Ok(());
     }
-    let created_at = execution.created_at;
-    let tm_url = profile_tm_url(profile.as_ref()).unwrap_or_default();
+    run_submit_phase(
+        pool,
+        execution_id,
+        execution,
+        profile.as_ref(),
+        backend_kind,
+        use_real,
+        manifest,
+        graph,
+        correlation_id,
+    )
+    .await
+}
+
+async fn run_stage_phase(
+    execution_id: uuid::Uuid,
+    do_stage: bool,
+    requires_casda: bool,
+    casda_client: Option<CasdaStagingClient>,
+    metadata: Vec<Value>,
+    correlation_id: Option<&str>,
+) -> Result<(Vec<Value>, Vec<String>), String> {
+    if !do_stage {
+        return Ok((metadata, Vec::new()));
+    }
+
+    let staging: Arc<dyn StagingClient> = if let Some(client) = casda_client {
+        Arc::new(client)
+    } else if requires_casda {
+        return Err("CASDA staging credentials required but not configured".into());
+    } else {
+        Arc::new(PassThroughStagingClient)
+    };
+    info!(
+        event = "execute_stage_start",
+        execution_id = %execution_id,
+        correlation_id = correlation_id.unwrap_or_default(),
+        dataset_count = metadata.len()
+    );
+    let started = std::time::Instant::now();
+    let outcome = async { staging.stage(&metadata).await }
+        .instrument(tracing::info_span!(
+            "execute_phase",
+            phase = "stage",
+            execution_id = %execution_id,
+            correlation_id = correlation_id.unwrap_or_default(),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+    metrics::record_execute_duration("stage", started.elapsed().as_secs_f64());
+    info!(
+        event = "execute_stage_complete",
+        execution_id = %execution_id,
+        staged_count = outcome.staged_count,
+        skipped_sbids = ?outcome.skipped_sbids
+    );
+    Ok((outcome.metadata, outcome.skipped_sbids))
+}
+
+fn execution_backend(
+    profile: Option<&DeploymentProfileRow>,
+    backend_kind: &str,
+    use_real: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> Box<dyn beampipe_orchestration::ExecutionBackend> {
+    match (backend_kind, use_real) {
+        ("slurm_remote", true) => Box::new(slurm_backend_from_profile(profile, true, created_at)),
+        ("slurm_remote", false) => Box::new(SlurmExecutionBackend {
+            session_created_at: created_at,
+            ..Default::default()
+        }),
+        (_, true) => Box::new(rest_backend_from_profile(profile, true, created_at)),
+        (_, false) => Box::new(RestExecutionBackend {
+            session_created_at: created_at,
+            ..Default::default()
+        }),
+    }
+}
+
+async fn run_submit_phase(
+    pool: &PgPool,
+    execution_id: uuid::Uuid,
+    execution: &beampipe_db::models::ExecutionRow,
+    profile: Option<&DeploymentProfileRow>,
+    backend_kind: &str,
+    use_real: bool,
+    manifest: Value,
+    graph: Value,
+    correlation_id: Option<&str>,
+) -> Result<(), String> {
+    let tm_url = profile_tm_url(profile).unwrap_or_default();
     info!(
         event = "execute_submit_start",
         execution_id = %execution_id,
+        correlation_id = correlation_id.unwrap_or_default(),
         backend_kind,
         tm_url = %tm_url
     );
-    match backend_kind {
-        "slurm_remote" => {
-            if use_real {
-                let backend = slurm_backend_from_profile(profile.as_ref(), true, created_at);
-                let submitted = beampipe_orchestration::ExecutionBackend::submit(
-                    &backend,
-                    &execution_id.to_string(),
-                    manifest,
-                    graph,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                apply_submit_result(pool, execution_id, execution, submitted, use_real)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let backend = SlurmExecutionBackend {
-                    session_created_at: created_at,
-                    ..Default::default()
-                };
-                let submitted = beampipe_orchestration::ExecutionBackend::submit(
-                    &backend,
-                    &execution_id.to_string(),
-                    manifest,
-                    graph,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                apply_submit_result(pool, execution_id, execution, submitted, use_real)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        _ => {
-            if use_real {
-                let backend = rest_backend_from_profile(profile.as_ref(), true, created_at);
-                let submitted = beampipe_orchestration::ExecutionBackend::submit(
-                    &backend,
-                    &execution_id.to_string(),
-                    manifest,
-                    graph,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                apply_submit_result(pool, execution_id, execution, submitted, use_real)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let backend = RestExecutionBackend {
-                    session_created_at: created_at,
-                    ..Default::default()
-                };
-                let submitted = beampipe_orchestration::ExecutionBackend::submit(
-                    &backend,
-                    &execution_id.to_string(),
-                    manifest,
-                    graph,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                apply_submit_result(pool, execution_id, execution, submitted, use_real)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-        }
+    let backend = execution_backend(profile, backend_kind, use_real, execution.created_at);
+    let started = std::time::Instant::now();
+    async {
+        let submitted = backend
+            .submit(&execution_id.to_string(), manifest, graph)
+            .await
+            .map_err(|e| e.to_string())?;
+        apply_submit_result(pool, execution_id, execution, submitted, use_real)
+            .await
+            .map_err(|e| e.to_string())
     }
+    .instrument(tracing::info_span!(
+        "execute_phase",
+        phase = "submit",
+        execution_id = %execution_id,
+        correlation_id = correlation_id.unwrap_or_default(),
+    ))
+    .await?;
+    metrics::record_execute_duration("submit", started.elapsed().as_secs_f64());
     info!(event = "execute_submit_complete", execution_id = %execution_id);
     Ok(())
 }
@@ -2448,14 +2515,18 @@ async fn apply_submit_result(
     )
     .await?;
     if scheduler_name != "slurm" && !use_real {
-        repo::enqueue_job(
-            pool,
-            "dim_poll",
+        let job_payload = metrics::payload_with_trace(
             json!({
                 "execution_id": execution_id,
                 "poll_round": 0,
                 "use_real_backends": use_real,
             }),
+            &metrics::correlation_only(execution_id.to_string()),
+        );
+        repo::enqueue_job(
+            pool,
+            "dim_poll",
+            job_payload,
             Some(execution_id),
             Some(&format!("dim_poll:{execution_id}:0")),
         )
@@ -2720,14 +2791,18 @@ async fn apply_dim_poll_update(
     )
     .await?;
     if !from_tick {
-        repo::enqueue_job_deferred(
-            pool,
-            "dim_poll",
+        let job_payload = metrics::payload_with_trace(
             json!({
                 "execution_id": execution_id,
                 "poll_round": poll_round + 1,
                 "use_real_backends": use_real,
             }),
+            &metrics::correlation_only(correlation.clone()),
+        );
+        repo::enqueue_job_deferred(
+            pool,
+            "dim_poll",
+            job_payload,
             interval_secs,
             Some(execution_id),
             Some(&format!("dim_poll:{execution_id}:{}", poll_round + 1)),

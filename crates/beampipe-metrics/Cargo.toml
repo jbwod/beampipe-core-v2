@@ -10,9 +10,10 @@ beampipe-adapters = { path = "../beampipe-adapters" }
 beampipe-db = { path = "../beampipe-db" }
 beampipe-domain = { path = "../beampipe-domain" }
 beampipe-orchestration = { path = "../beampipe-orchestration" }
-beampipe-security = { path = "../beampipe-security" }
 redis.workspace = true
 axum.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 opentelemetry = { version = "0.27", features = ["trace"] }

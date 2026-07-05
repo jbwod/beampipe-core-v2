@@ -1,15 +1,15 @@
 use axum::{
     body::Body,
-    http::{HeaderMap, Request},
+    http::{HeaderMap, HeaderValue, Request, Response},
     middleware::Next,
-    response::Response,
 };
+use beampipe_metrics::trace_context::{extract_parent_from_traceparent, TRACEPARENT_HEADER};
 use std::sync::Arc;
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
-pub const TRACEPARENT_HEADER: &str = "traceparent";
 
 #[derive(Clone, Debug)]
 pub struct RequestContext {
@@ -20,6 +20,12 @@ pub struct RequestContext {
 impl RequestContext {
     pub fn correlation_id(&self) -> &str {
         &self.request_id
+    }
+
+    pub fn trace_context(&self) -> beampipe_metrics::TraceContext {
+        let traceparent =
+            beampipe_metrics::inject_current_traceparent().or_else(|| self.traceparent.clone());
+        beampipe_metrics::trace_context_from_http(&self.request_id, traceparent.as_deref())
     }
 }
 
@@ -32,30 +38,39 @@ pub fn request_id_from_headers(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| Uuid::now_v7().to_string())
 }
 
-pub async fn correlation_middleware(mut request: Request<Body>, next: Next) -> Response {
-    let request_id = request_id_from_headers(request.headers());
-    let traceparent = request
-        .headers()
+fn traceparent_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
         .get(TRACEPARENT_HEADER)
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub async fn correlation_middleware(mut request: Request<Body>, next: Next) -> Response<Body> {
+    let request_id = request_id_from_headers(request.headers());
+    let traceparent = traceparent_from_headers(request.headers());
     let ctx = Arc::new(RequestContext {
         request_id: request_id.clone(),
-        traceparent,
+        traceparent: traceparent.clone(),
     });
     request.extensions_mut().insert(ctx);
+
     let span = tracing::info_span!(
         "http_request",
         request_id = %request_id,
         method = %request.method(),
         uri = %request.uri().path()
     );
-    async move { next.run(request).await }
-        .instrument(span)
-        .await
-}
+    if let Some(tp) = traceparent.as_deref() {
+        span.set_parent(extract_parent_from_traceparent(tp));
+    }
 
-#[allow(dead_code)]
-pub fn extension_from_request(request: &Request<Body>) -> Option<Arc<RequestContext>> {
-    request.extensions().get::<Arc<RequestContext>>().cloned()
+    let mut response = async move { next.run(request).await }
+        .instrument(span)
+        .await;
+
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
 }

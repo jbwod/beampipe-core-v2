@@ -69,7 +69,7 @@ pub struct AppState {
         upload_project_config, get_project_config, list_project_config_versions,
         upload_project_config_wasm, get_project_config_wasm,
         list_projects, list_project_contracts, get_project_contract,
-        enqueue_job,
+        enqueue_job_handler,
         create_deployment_profile, list_deployment_profiles, get_deployment_profile,
         update_deployment_profile, delete_deployment_profile,
         observability::list_notification_channels, observability::create_notification_channel,
@@ -153,7 +153,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v2/project-configs/:id/wasm",
             post(upload_project_config_wasm),
         )
-        .route("/api/v2/jobs", post(enqueue_job))
+        .route("/api/v2/jobs", post(enqueue_job_handler))
         .route("/api/v2/executions/:id/execute", post(execute_execution))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -316,7 +316,10 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
     let mut worker_pool = None;
     if settings.metrics_server_enabled {
         if let Ok(addr) = settings.metrics_bind_addr.parse() {
-            let _ = metrics::server::spawn_metrics_server(addr, Some(pool.clone()));
+            drop(metrics::server::spawn_metrics_server(
+                addr,
+                Some(pool.clone()),
+            ));
         }
     }
     if with_worker {
@@ -742,6 +745,10 @@ pub struct LedgerSnapshotResponse {
     pub scheduler_name: Option<String>,
     pub scheduler_job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_job_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_manifest: Option<Value>,
     pub last_error: Option<String>,
     pub run_record_phases: Value,
@@ -784,8 +791,9 @@ async fn execution_ledger_snapshot(
     } else {
         None
     };
-    let recent_events = repo::list_provenance_events_for_execution(&state.pool, id, 5)
-        .await?
+    let trace = repo::execution_trace_summary(&state.pool, id, 5).await?;
+    let recent_events: Vec<observability::ProvenanceEventResponse> = trace
+        .events
         .into_iter()
         .map(observability::ProvenanceEventResponse::from)
         .collect();
@@ -795,6 +803,8 @@ async fn execution_ledger_snapshot(
         execution_phase: row.execution_phase,
         scheduler_name: row.scheduler_name,
         scheduler_job_id: row.scheduler_job_id,
+        correlation_id: trace.correlation_id,
+        active_job_id: trace.active_job_id,
         workflow_manifest: if query.include_manifest {
             row.workflow_manifest.map(|v| redact_value(&v))
         } else {
@@ -1056,6 +1066,7 @@ async fn bulk_create_sources(
 #[utoipa::path(post, path = "/api/v2/sources/discover", tag = "sources", request_body = DiscoverTriggerRequest, responses((status = 200), (status = 400)))]
 async fn discover_sources(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     AuthUser(_user): AuthUser,
     Json(req): Json<DiscoverTriggerRequest>,
 ) -> Result<Json<DiscoverTriggerResponse>, ApiError> {
@@ -1070,9 +1081,18 @@ async fn discover_sources(
         (None, None) => None,
         (Some(_), Some(_)) => unreachable!(),
     };
-    let marked =
-        repo::mark_sources_for_rediscovery(&state.pool, &req.project_module, ids.as_deref())
-            .await?;
+    let tc = ctx.trace_context();
+    let payload =
+        metrics::payload_with_trace(json!({ "project_module": req.project_module.clone() }), &tc);
+    let idempotency_key = format!("discover_trigger:{}", req.project_module);
+    let (marked, _) = repo::mark_sources_and_enqueue_discovery_tick(
+        &state.pool,
+        &req.project_module,
+        ids.as_deref(),
+        payload,
+        &idempotency_key,
+    )
+    .await?;
     Ok(Json(DiscoverTriggerResponse {
         project_module: req.project_module,
         marked_count: marked.len(),
@@ -1637,12 +1657,13 @@ async fn execute_execution(
     Path(id): Path<Uuid>,
     Json(req): Json<ExecuteRequest>,
 ) -> Result<(StatusCode, Json<ExecuteResponse>), ApiError> {
+    let tc = ctx.trace_context();
     let payload = json!({
         "execution_id": id,
         "do_stage": req.do_stage,
         "do_submit": req.do_submit,
-        "correlation_id": ctx.correlation_id(),
     });
+    let payload = metrics::payload_with_trace(payload, &tc);
     let job = repo::enqueue_job(
         &state.pool,
         "execute",
@@ -1885,17 +1906,20 @@ impl From<DeploymentProfileRow> for DeploymentProfileResponse {
 }
 
 #[utoipa::path(post, path = "/api/v2/jobs", tag = "jobs", request_body = JobCreate, responses((status = 202)))]
-async fn enqueue_job(
+async fn enqueue_job_handler(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     user: AuthUser,
     Json(req): Json<JobCreate>,
 ) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
     user.require_superuser()?;
     reject_inline_secrets_in_production(&state.settings, "job_payload", &req.payload)?;
+    let tc = ctx.trace_context();
+    let payload = metrics::payload_with_trace(req.payload, &tc);
     let job = repo::enqueue_job(
         &state.pool,
         &req.kind,
-        req.payload,
+        payload,
         req.execution_id,
         req.idempotency_key.as_deref(),
     )
@@ -2062,33 +2086,6 @@ fn dataset_count_from_metadata_json(value: &Value) -> usize {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
-mod security_tests {
-    use super::*;
-
-    #[test]
-    fn current_user_response_excludes_hashed_password() {
-        let user = UserRow {
-            id: 42,
-            uuid: Uuid::now_v7(),
-            name: "Admin".into(),
-            username: "admin".into(),
-            email: "admin@example.test".into(),
-            hashed_password: "$2b$redacted".into(),
-            profile_image_url: "".into(),
-            is_deleted: false,
-            is_superuser: true,
-            created_at: Utc::now(),
-            updated_at: None,
-            deleted_at: None,
-        };
-        let value = serde_json::to_value(CurrentUserResponse::from(user)).unwrap();
-        assert!(value.get("hashed_password").is_none());
-        assert!(value.get("id").is_none());
-        assert!(value.get("deleted_at").is_none());
-    }
-}
-
 fn observed_slurm_state(row: &ExecutionRow) -> Option<String> {
     row.workflow_manifest
         .as_ref()
@@ -2133,4 +2130,31 @@ fn duration_seconds(row: &ExecutionRow) -> Option<i64> {
     let start = row.started_at?;
     let end = row.completed_at.unwrap_or_else(chrono::Utc::now);
     Some((end - start).num_seconds())
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn current_user_response_excludes_hashed_password() {
+        let user = UserRow {
+            id: 42,
+            uuid: Uuid::now_v7(),
+            name: "Admin".into(),
+            username: "admin".into(),
+            email: "admin@example.test".into(),
+            hashed_password: "$2b$redacted".into(),
+            profile_image_url: "".into(),
+            is_deleted: false,
+            is_superuser: true,
+            created_at: Utc::now(),
+            updated_at: None,
+            deleted_at: None,
+        };
+        let value = serde_json::to_value(CurrentUserResponse::from(user)).unwrap();
+        assert!(value.get("hashed_password").is_none());
+        assert!(value.get("id").is_none());
+        assert!(value.get("deleted_at").is_none());
+    }
 }

@@ -1,9 +1,13 @@
 mod bench_tap;
+mod doctor;
+mod setup;
+mod timeline;
 
 use anyhow::Context;
 use beampipe_config::Settings;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(name = "beampipe", version, about = "Beampipe v2 Rust control plane")]
@@ -45,8 +49,38 @@ enum CliCommand {
         #[command(subcommand)]
         command: WasmCommand,
     },
-    /// Print first-run setup guidance.
-    Setup,
+    /// Interactive first-run setup (use --yes for CI/non-interactive).
+    Setup {
+        #[command(subcommand)]
+        command: Option<SetupCommand>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        database_url: Option<String>,
+        #[arg(long)]
+        jwt_secret: Option<String>,
+        #[arg(long)]
+        admin_user: Option<String>,
+        #[arg(long)]
+        admin_password: Option<String>,
+        #[arg(long)]
+        admin_email: Option<String>,
+        #[arg(long)]
+        project_config: Option<PathBuf>,
+        #[arg(long)]
+        skip_admin: bool,
+        #[arg(long)]
+        skip_upload: bool,
+    },
+    /// Health and configuration preflight checks.
+    Doctor,
+    /// Queue and backlog summary.
+    Status,
+    /// Operator timelines for executions, sources, and projects.
+    Timeline {
+        #[command(subcommand)]
+        command: TimelineCommand,
+    },
     /// Administrative user operations.
     Admin {
         #[command(subcommand)]
@@ -119,6 +153,37 @@ enum ProjectCommand {
         #[arg(short, long)]
         file: PathBuf,
     },
+    Upload {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SetupCommand {
+    /// Re-run doctor checks (same as `beampipe doctor`).
+    Check,
+}
+
+#[derive(Debug, Subcommand)]
+enum TimelineCommand {
+    Execution {
+        id: Uuid,
+        #[arg(long)]
+        table: bool,
+    },
+    Source {
+        id: Uuid,
+        #[arg(long)]
+        table: bool,
+    },
+    Project {
+        module: String,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        #[arg(long)]
+        table: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,6 +224,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         CliCommand::Serve { worker } => {
+            std::env::set_var(
+                "BEAMPIPE_PROCESS_ROLE",
+                if worker { "scheduler" } else { "api" },
+            );
             let settings = Settings::from_env()?;
             let pool = beampipe_db::connect(&settings.database_url).await?;
             if settings.migrate_on_serve {
@@ -167,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
             beampipe_api::serve(settings, pool, worker).await?;
         }
         CliCommand::Worker => {
+            std::env::set_var("BEAMPIPE_PROCESS_ROLE", "worker");
             let settings = Settings::from_env()?;
             if let Err(errors) = beampipe_orchestration::validate_security(&settings) {
                 anyhow::bail!("security validation failed:\n  - {}", errors.join("\n  - "));
@@ -175,8 +245,10 @@ async fn main() -> anyhow::Result<()> {
             beampipe_metrics::init_recorder();
             if settings.metrics_server_enabled {
                 if let Ok(addr) = settings.metrics_bind_addr.parse() {
-                    let _ =
-                        beampipe_metrics::server::spawn_metrics_server(addr, Some(pool.clone()));
+                    drop(beampipe_metrics::server::spawn_metrics_server(
+                        addr,
+                        Some(pool.clone()),
+                    ));
                 }
             }
             let config = beampipe_jobs::WorkerConfig::from_settings(&settings);
@@ -212,25 +284,31 @@ async fn main() -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&beampipe_api::export_openapi_json())?
             );
         }
-        CliCommand::Project {
-            command: ProjectCommand::Validate { file },
-        } => {
-            let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
-            let config = beampipe_project::ProjectConfig::from_slice(&bytes)?;
-            let report = config.validate_report();
-            if !report.warnings.is_empty() {
-                for warning in &report.warnings {
-                    eprintln!(
-                        "warning[{}] {}: {}",
-                        warning.code, warning.path, warning.message
-                    );
+        CliCommand::Project { command } => match command {
+            ProjectCommand::Validate { file } => {
+                let bytes =
+                    std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
+                let config = beampipe_project::ProjectConfig::from_slice(&bytes)?;
+                let report = config.validate_report();
+                if !report.warnings.is_empty() {
+                    for warning in &report.warnings {
+                        eprintln!(
+                            "warning[{}] {}: {}",
+                            warning.code, warning.path, warning.message
+                        );
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                if !report.valid {
+                    std::process::exit(1);
                 }
             }
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            if !report.valid {
-                std::process::exit(1);
+            ProjectCommand::Upload { file } => {
+                let settings = Settings::from_env()?;
+                let pool = beampipe_db::connect(&settings.database_url).await?;
+                setup::upload_project_config_file(&pool, &file).await?;
             }
-        }
+        },
         CliCommand::Wasm {
             command: WasmCommand::Upload { config_id, file },
         } => {
@@ -258,23 +336,79 @@ async fn main() -> anyhow::Result<()> {
                 }))?
             );
         }
-        CliCommand::Setup => {
-            println!("Beampipe v2 setup");
-            println!("1. Set DATABASE_URL (Postgres connection string)");
-            println!("2. Set BEAMPIPE_JWT_SECRET");
-            println!("3. Optional: BEAMPIPE_CASDA_TAP_URL, BEAMPIPE_VIZIER_TAP_URL");
-            println!("4. Optional: BEAMPIPE_SHAPING_* and BEAMPIPE_REDIS_URL for rate limits");
-            println!("5. Optional worker scale: BEAMPIPE_WORKER_CONCURRENCY, BEAMPIPE_WORKER_SCHEDULER_ENABLED, BEAMPIPE_DB_MAX_CONNECTIONS, BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY");
-            println!("6. Optional: CASDA_USERNAME, CASDA_PASSWORD for staging");
-            println!("7. Run: beampipe migrate");
-            println!(
-                "8. Run: beampipe admin create-user --username admin --password ... --email ..."
-            );
-            println!("9. Upload config: beampipe project validate -f config/wallaby_hires.v2.yaml");
-            println!("10. Optional WASM: beampipe wasm upload --config-id wallaby_hires --file hook.wasm");
-            println!("11. Start API: beampipe serve --worker false");
-            println!("12. Start workers: beampipe worker  (scale replicas; set BEAMPIPE_WORKER_SCHEDULER_ENABLED=false on workers when one scheduler pod runs serve --worker true)");
-            println!("\nPostgres-only stack: docker compose up -d");
+        CliCommand::Setup {
+            command,
+            yes,
+            database_url,
+            jwt_secret,
+            admin_user,
+            admin_password,
+            admin_email,
+            project_config,
+            skip_admin,
+            skip_upload,
+        } => {
+            if matches!(command, Some(SetupCommand::Check)) {
+                setup::run_setup_check().await?;
+            } else {
+                setup::run_setup(setup::SetupOptions {
+                    yes,
+                    database_url,
+                    jwt_secret,
+                    admin_user,
+                    admin_password,
+                    admin_email,
+                    project_config,
+                    skip_admin,
+                    skip_upload,
+                })
+                .await?;
+            }
+        }
+        CliCommand::Doctor => {
+            setup::run_setup_check().await?;
+        }
+        CliCommand::Status => {
+            let settings = Settings::from_env()?;
+            let pool = beampipe_db::connect(&settings.database_url).await?;
+            let summary = doctor::run_status(&pool).await;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+        CliCommand::Timeline { command } => {
+            let settings = Settings::from_env()?;
+            let pool = beampipe_db::connect(&settings.database_url).await?;
+            match command {
+                TimelineCommand::Execution { id, table } => {
+                    let t = timeline::execution_timeline(&pool, id).await?;
+                    if table {
+                        timeline::print_table_execution(&t);
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&t)?);
+                    }
+                }
+                TimelineCommand::Source { id, table } => {
+                    let t = timeline::source_timeline(&pool, id).await?;
+                    if table {
+                        timeline::print_table_source(&t);
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&t)?);
+                    }
+                }
+                TimelineCommand::Project {
+                    module,
+                    limit,
+                    table,
+                } => {
+                    let events = timeline::project_timeline(&pool, &module, limit).await?;
+                    if table {
+                        for e in &events {
+                            println!("{} {} {:?}", e.at, e.event_type, e.correlation_id);
+                        }
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&events)?);
+                    }
+                }
+            }
         }
         CliCommand::Admin {
             command:

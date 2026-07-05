@@ -403,7 +403,6 @@ name = "beampipe-adapters"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "beampipe-domain",
  "quick-xml",
  "reqwest",
  "serde",
@@ -428,7 +427,6 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -452,7 +450,6 @@ dependencies = [
  "beampipe-security",
  "chrono",
  "redis",
- "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -461,6 +458,7 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-opentelemetry",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
@@ -496,13 +494,14 @@ dependencies = [
  "beampipe-profiles",
  "beampipe-project",
  "clap",
+ "redis",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "tokio",
  "tracing",
- "tracing-subscriber",
- "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -519,14 +518,12 @@ name = "beampipe-db"
 version = "0.1.0"
 dependencies = [
  "beampipe-domain",
- "beampipe-profiles",
  "beampipe-project",
  "beampipe-security",
  "chrono",
  "serde",
  "serde_json",
  "sqlx",
- "thiserror 1.0.69",
  "tokio",
  "tracing",
  "utoipa",
@@ -578,18 +575,19 @@ dependencies = [
  "beampipe-db",
  "beampipe-domain",
  "beampipe-orchestration",
- "beampipe-security",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "redis",
+ "serde_json",
  "sqlx",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

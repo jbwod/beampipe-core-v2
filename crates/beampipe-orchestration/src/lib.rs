@@ -720,7 +720,7 @@ fn aggregate_dim_node_states(states: &[ExecutionStatus]) -> ExecutionStatus {
     if states.is_empty() {
         return ExecutionStatus::Running;
     }
-    if states.iter().any(|s| *s == ExecutionStatus::Failed) {
+    if states.contains(&ExecutionStatus::Failed) {
         return ExecutionStatus::Failed;
     }
     if states.iter().all(|s| *s == ExecutionStatus::Completed) {

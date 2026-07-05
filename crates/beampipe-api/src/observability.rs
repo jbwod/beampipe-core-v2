@@ -4,7 +4,6 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use beampipe_alerts;
 use beampipe_db::{models::*, repo};
 use beampipe_security::{
     redact_string, redact_value, secret_paths, unsafe_inline_secret_paths, SecretPolicy,

@@ -63,7 +63,7 @@ async fn discovery_signature_unchanged_skips_pending() {
     .await
     .unwrap();
     assert_eq!(stats.changed_count, 1);
-    repo::release_discovery_claim(&pool, &module, &[source.clone()], &claim1)
+    repo::release_discovery_claim(&pool, &module, std::slice::from_ref(&source), &claim1)
         .await
         .unwrap();
 
@@ -93,7 +93,7 @@ async fn discovery_signature_unchanged_skips_pending() {
     .await
     .unwrap();
     assert_eq!(stats2.unchanged_count, 1);
-    repo::release_discovery_claim(&pool, &module, &[source.clone()], &claim2)
+    repo::release_discovery_claim(&pool, &module, std::slice::from_ref(&source), &claim2)
         .await
         .unwrap();
 
@@ -124,7 +124,7 @@ async fn discovery_signature_unchanged_skips_pending() {
     .await
     .unwrap();
     assert_eq!(stats3.unchanged_count, 1);
-    repo::release_discovery_claim(&pool, &module, &[source.clone()], &claim3)
+    repo::release_discovery_claim(&pool, &module, std::slice::from_ref(&source), &claim3)
         .await
         .unwrap();
 
@@ -161,13 +161,13 @@ async fn failed_execute_requeues_pending_without_changing_last_executed() {
     .await
     .unwrap();
 
-    repo::mark_sources_pending_workflow_run(&pool, &module, &[source.clone()])
+    repo::mark_sources_pending_workflow_run(&pool, &module, std::slice::from_ref(&source))
         .await
         .unwrap();
-    repo::clear_workflow_pending_for_sources(&pool, &module, &[source.clone()])
+    repo::clear_workflow_pending_for_sources(&pool, &module, std::slice::from_ref(&source))
         .await
         .unwrap();
-    repo::mark_sources_pending_workflow_run(&pool, &module, &[source.clone()])
+    repo::mark_sources_pending_workflow_run(&pool, &module, std::slice::from_ref(&source))
         .await
         .unwrap();
 
@@ -215,7 +215,7 @@ async fn execution_skips_already_executed_signature() {
     .unwrap();
 
     let (valid, skipped) =
-        repo::partition_sources_ready_for_execution(&pool, &module, &[source.clone()])
+        repo::partition_sources_ready_for_execution(&pool, &module, std::slice::from_ref(&source))
             .await
             .unwrap();
     assert!(valid.is_empty());
