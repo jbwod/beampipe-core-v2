@@ -6,7 +6,7 @@ x-beampipe-shaping: &beampipe-shaping
   BEAMPIPE_SHAPING_QUEUE_MAX_DEPTH: "5000"
   BEAMPIPE_WORKER_LOCK_SECONDS: "600"
 
-# TAP + optional Slurm SSH (from beampipe-core/.env when present). Export BEAMPIPE_USE_REAL_BACKENDS=true for real discovery/execute.
+# TAP endpoints. Export BEAMPIPE_USE_REAL_BACKENDS=true only after `beampipe doctor` passes.
 x-beampipe-backend-env: &beampipe-backend-env
   BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-false}
   BEAMPIPE_CASDA_TAP_URL: ${BEAMPIPE_CASDA_TAP_URL:-https://casda.csiro.au/casda_vo_tools/tap/sync}
@@ -15,25 +15,10 @@ x-beampipe-backend-env: &beampipe-backend-env
 
 x-beampipe-worker-env-file: &beampipe-worker-env-file
   env_file:
-    - path: beampipe-core/.env
+    - path: .env
       required: false
 
-# Slurm SSH for scheduler/worker when BEAMPIPE_USE_REAL_BACKENDS=true (see deploy/ssh/README.md).
-x-beampipe-slurm-ssh-mounts: &beampipe-slurm-ssh-mounts
-  secrets:
-    - slurm_ssh_key
-  volumes:
-    - type: bind
-      source: ${SLURM_SSH_KNOWN_HOSTS_SOURCE:-./deploy/ssh/known_hosts}
-      target: /run/slurm-ssh/known_hosts
-      read_only: true
-
-x-beampipe-slurm-ssh-env: &beampipe-slurm-ssh-env
-  SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
-  SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
-  BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: "true"
-
-# One image for api / scheduler / worker — build once: docker compose build beampipe
+# One image for API, scheduler, and workers. Build once with `docker compose build api`.
 x-beampipe-image: &beampipe-image
   image: beampipe-v2:local
   build:
@@ -82,10 +67,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    init: true
+    restart: unless-stopped
 
   # One scheduler replica — enqueues discovery/execution ticks + runs a few jobs
   scheduler:
-    <<: [*beampipe-image, *beampipe-worker-env-file, *beampipe-slurm-ssh-mounts]
+    <<: [*beampipe-image, *beampipe-worker-env-file]
     command: ["serve", "--worker", "true"]
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/beampipe
@@ -97,17 +84,19 @@ services:
       BEAMPIPE_WORKER_SCHEDULER_ENABLED: "true"
       BEAMPIPE_DB_MAX_CONNECTIONS: "20"
       BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
-      <<: [*beampipe-shaping, *beampipe-backend-env, *beampipe-slurm-ssh-env]
+      <<: [*beampipe-shaping, *beampipe-backend-env]
     expose:
       - "9090"
     depends_on:
       postgres:
         condition: service_healthy
+    init: true
+    restart: unless-stopped
 
   # Worker-only replicas — default 8 for 1000-source discovery throughput
   # Override: BEAMPIPE_WORKER_CONCURRENCY=8 docker compose up --scale worker=4
   worker:
-    <<: [*beampipe-image, *beampipe-worker-env-file, *beampipe-slurm-ssh-mounts]
+    <<: [*beampipe-image, *beampipe-worker-env-file]
     command: ["worker"]
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/beampipe
@@ -120,12 +109,14 @@ services:
       BEAMPIPE_DB_MAX_CONNECTIONS: "25"
       BEAMPIPE_WORKER_POLL_INTERVAL_MS: "200"
       BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
-      <<: [*beampipe-shaping, *beampipe-backend-env, *beampipe-slurm-ssh-env]
+      <<: [*beampipe-shaping, *beampipe-backend-env]
     expose:
       - "9090"
     depends_on:
       postgres:
         condition: service_healthy
+    init: true
+    restart: unless-stopped
 
   prometheus:
     profiles: [observability]
@@ -147,10 +138,6 @@ services:
       - "9094:9093"
     depends_on:
       - prometheus
-
-secrets:
-  slurm_ssh_key:
-    file: ${SLURM_SSH_PRIVATE_KEY_FILE:-./deploy/ssh/id_slurm}
 
 volumes:
   beampipe_pgdata:

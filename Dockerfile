@@ -12,6 +12,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 beampipe \
+    && useradd --uid 10001 --gid beampipe --create-home --home-dir /var/lib/beampipe beampipe
 COPY --from=builder /out/beampipe /usr/local/bin/beampipe
+WORKDIR /var/lib/beampipe
+USER 10001:10001
 ENTRYPOINT ["beampipe"]

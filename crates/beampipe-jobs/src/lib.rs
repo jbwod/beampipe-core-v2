@@ -3,7 +3,10 @@ use beampipe_adapters::{all_reachable, probe_tap_health, unreachable_adapters, T
 use beampipe_adapters::{casda_tap, vizier_tap, AdapterError, TapRow};
 use beampipe_config::Settings;
 use beampipe_db::{
-    models::{DeploymentProfileRow, JobRow},
+    models::{
+        DeploymentProfileRow, ExecutionArtifactInput, ExecutionObservationInput,
+        ExecutionProvenancePatch, ExecutionStatePatch, JobRow, WorkerRegistration,
+    },
     repo,
 };
 use beampipe_domain::run_record::{
@@ -15,8 +18,9 @@ use beampipe_domain::run_record::{
 use beampipe_domain::{
     can_admit_by_in_flight,
     discovery::{should_skip_tap, DiscoverySourceResult, SignatureOptions},
-    discovery_admission_budget, execute_admission_budget, is_non_retryable_job_error,
-    ExecutionPhase, ExecutionStatus, LedgerPatch, SchedulerTickResult, SkipReason,
+    discovery_admission_budget, execute_admission_budget, is_non_retryable_job_error, ControlPhase,
+    DaliugeState, ExecutionPhase, ExecutionStatus, FailureClass, LedgerPatch, SchedulerState,
+    SchedulerTickResult, SkipReason, SubmissionState, TerminalOutcome,
 };
 use beampipe_metrics as metrics;
 use beampipe_orchestration::slurm_deploy::resolve_remote_user;
@@ -24,10 +28,10 @@ use beampipe_orchestration::{
     apply_project_graph_patches, beampipe_session_id, build_manifest_from_config_with_staging,
     dim_unreachable_message, prepare_graph_for_manifest, probe_dim_reachable, probe_slurm_login,
     probe_tm_reachable, resolve_graph, tm_unreachable_message, translate_config_from_profile,
-    BackendPoll, CasdaStagingClient, DimClient, HttpClientOptions, HttpDimClient,
-    HttpTranslatorClient, MockDimClient, PassThroughStagingClient, RestExecutionBackend,
-    SlurmExecutionBackend, SlurmJobPollResult, SlurmSshPool, SlurmTarget, SshSlurmClient,
-    StagingClient, TmProbeResult,
+    BackendPoll, CasdaStagingClient, DaliugeComponent, DaliugeErrorKind, DimClient,
+    HttpClientOptions, HttpDimClient, HttpTranslatorClient, MockDimClient, OrchestrationError,
+    PassThroughStagingClient, RestExecutionBackend, SchedulerAdapter, SlurmExecutionBackend,
+    SlurmJobPollResult, SlurmSshPool, SlurmTarget, SshSlurmClient, StagingClient, TmProbeResult,
 };
 use beampipe_profiles::{
     DeploymentConfig, RestRemoteDeploymentConfig, SlurmRemoteDeploymentConfig,
@@ -36,7 +40,9 @@ use beampipe_project::{
     apply_field_transform, build_template_context, ExecutionAutomationConfig, HookKind,
     ProjectConfig, TransformRegistry, WasmHost,
 };
+use chrono::Utc;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -44,8 +50,10 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn, Instrument};
+use uuid::Uuid;
 
 static SLURM_SSH_POOL: LazyLock<SlurmSshPool> = LazyLock::new(SlurmSshPool::new_from_env);
+static SINGLE_TICK_WORKER_ID: LazyLock<Uuid> = LazyLock::new(Uuid::now_v7);
 
 fn trace_context_for_job(job: &JobRow) -> metrics::TraceContext {
     let fallback = job
@@ -87,6 +95,16 @@ pub struct WorkerConfig {
     pub discovery_source_concurrency: u32,
     pub metrics_bind_addr: String,
     pub metrics_server_enabled: bool,
+    pub casda_tap_url: Option<String>,
+    pub vizier_tap_url: Option<String>,
+    pub dim_destroy_session: bool,
+    pub dim_poll_interval_seconds: Option<u64>,
+    pub slurm_poll_interval_seconds: Option<u64>,
+    pub heartbeat_interval: Duration,
+    pub instance_name: Option<String>,
+    pub pool: String,
+    pub capabilities: Vec<String>,
+    pub labels: BTreeMap<String, String>,
 }
 
 impl WorkerConfig {
@@ -105,14 +123,24 @@ impl WorkerConfig {
             discovery_tap_health_check_enabled: settings.discovery_tap_health_check_enabled,
             discovery_tap_health_timeout_seconds: settings.discovery_tap_health_timeout_seconds,
             shaping_enqueue_pacing_ms: settings.shaping_enqueue_pacing_ms,
-            use_real_backends: std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            use_real_backends: settings.use_real_backends,
             concurrency: settings.worker_concurrency.max(1),
             scheduler_enabled: settings.worker_scheduler_enabled,
             discovery_source_concurrency: settings.discovery_source_concurrency.max(1),
             metrics_bind_addr: settings.metrics_bind_addr.clone(),
             metrics_server_enabled: settings.metrics_server_enabled,
+            casda_tap_url: settings.casda_tap_url.clone(),
+            vizier_tap_url: settings.vizier_tap_url.clone(),
+            dim_destroy_session: settings.dim_destroy_session,
+            dim_poll_interval_seconds: settings.dim_poll_interval_seconds,
+            slurm_poll_interval_seconds: settings.slurm_poll_interval_seconds,
+            heartbeat_interval: Duration::from_secs(
+                settings.worker_heartbeat_interval_seconds.max(1),
+            ),
+            instance_name: settings.worker_instance_name.clone(),
+            pool: settings.worker_pool.clone(),
+            capabilities: settings.worker_capabilities.clone(),
+            labels: settings.worker_labels.clone(),
         }
     }
 
@@ -138,35 +166,126 @@ impl WorkerConfig {
                 discovery_tap_health_check_enabled: true,
                 discovery_tap_health_timeout_seconds: 10,
                 shaping_enqueue_pacing_ms: 0,
-                use_real_backends: std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false),
+                use_real_backends: false,
                 concurrency: 1,
                 scheduler_enabled: true,
                 discovery_source_concurrency: 5,
                 metrics_bind_addr: "127.0.0.1:9090".into(),
                 metrics_server_enabled: true,
+                casda_tap_url: None,
+                vizier_tap_url: None,
+                dim_destroy_session: false,
+                dim_poll_interval_seconds: None,
+                slurm_poll_interval_seconds: None,
+                heartbeat_interval: Duration::from_secs(10),
+                instance_name: None,
+                pool: "default".into(),
+                capabilities: vec![
+                    "casda-discovery".into(),
+                    "manifest-generation".into(),
+                    "daliuge-translation".into(),
+                    "daliuge-deployment".into(),
+                    "slurm-remote".into(),
+                    "output-verification".into(),
+                ],
+                labels: BTreeMap::new(),
             })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerIdentity {
+    pub id: Uuid,
+    pub instance_name: String,
+    pub host_name: String,
+    pub role: String,
+}
+
+impl WorkerIdentity {
+    fn from_config(config: &WorkerConfig) -> Self {
+        Self::from_config_with_id(config, Uuid::now_v7())
+    }
+
+    fn from_config_with_id(config: &WorkerConfig, id: Uuid) -> Self {
+        let host_name = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "unknown-host".into());
+        let instance_name = config.instance_name.clone().unwrap_or_else(|| {
+            let short_id = id.simple().to_string();
+            format!("{host_name}:{}:{}", std::process::id(), &short_id[..8])
+        });
+        Self {
+            id,
+            instance_name,
+            host_name,
+            role: if config.scheduler_enabled {
+                "scheduler_worker".into()
+            } else {
+                "worker".into()
+            },
+        }
+    }
+
+    fn registration(&self, config: &WorkerConfig) -> WorkerRegistration {
+        WorkerRegistration {
+            uuid: self.id,
+            instance_name: self.instance_name.clone(),
+            host_name: self.host_name.clone(),
+            process_id: i32::try_from(std::process::id()).ok(),
+            role: self.role.clone(),
+            pool: config.pool.clone(),
+            capabilities: config.capabilities.clone(),
+            labels: json!(config.labels),
+            version: env!("CARGO_PKG_VERSION").into(),
+            concurrency_limit: i32::try_from(config.concurrency).unwrap_or(i32::MAX),
+        }
     }
 }
 
 /// Background worker pool: optional scheduler bootstrap + N parallel job consumers.
 pub struct WorkerPool {
     pub handles: Vec<JoinHandle<()>>,
+    pub worker_id: Uuid,
+    pool: PgPool,
+    shutdown_grace: Duration,
 }
 
 impl WorkerPool {
     pub async fn shutdown(self) {
-        tracing::info!("event=worker_pool_shutdown");
+        tracing::info!(worker_id = %self.worker_id, "event=worker_pool_draining");
+        let _ = repo::set_worker_draining(&self.pool, self.worker_id, true).await;
+        let started = std::time::Instant::now();
+        while started.elapsed() < self.shutdown_grace {
+            match repo::active_worker_lease_count(&self.pool, self.worker_id).await {
+                Ok(0) => break,
+                Ok(active) => {
+                    debug!(worker_id = %self.worker_id, active_leases = active, "event=worker_drain_wait");
+                }
+                Err(err) => {
+                    warn!(worker_id = %self.worker_id, error = %err, "event=worker_drain_query_failed");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         for handle in self.handles {
             handle.abort();
         }
+        let _ = repo::mark_worker_stopped(&self.pool, self.worker_id).await;
+        tracing::info!(worker_id = %self.worker_id, "event=worker_pool_stopped");
     }
 }
 
 pub fn spawn_workers(pool: PgPool, config: WorkerConfig) -> WorkerPool {
     metrics::init_recorder();
     let mut handles = Vec::new();
+    let identity = WorkerIdentity::from_config(&config);
+    let heartbeat_pool = pool.clone();
+    let heartbeat_config = config.clone();
+    let heartbeat_identity = identity.clone();
+    handles.push(tokio::spawn(async move {
+        run_worker_heartbeat(heartbeat_pool, heartbeat_config, heartbeat_identity).await;
+    }));
     if config.metrics_server_enabled {
         if let Ok(addr) = config.metrics_bind_addr.parse() {
             handles.push(metrics::server::spawn_metrics_server(
@@ -194,29 +313,72 @@ pub fn spawn_workers(pool: PgPool, config: WorkerConfig) -> WorkerPool {
         }));
     }
     let consumer_count = config.concurrency.max(1);
-    for worker_id in 0..consumer_count {
+    for consumer_slot in 0..consumer_count {
         let pool = pool.clone();
         let worker_config = config.clone();
+        let worker_identity = identity.clone();
         handles.push(tokio::spawn(async move {
             info!(
-                worker_id,
+                worker_id = %worker_identity.id,
+                consumer_slot,
                 concurrency = consumer_count,
-                "event=job_worker_started"
+                "event=job_consumer_started"
             );
             loop {
-                if let Err(err) = tick(&pool, &worker_config).await {
-                    error!(worker_id, error = %err, "event=job_worker_tick_error");
+                if let Err(err) = tick_for_worker(&pool, &worker_config, &worker_identity).await {
+                    error!(worker_id = %worker_identity.id, consumer_slot, error = %err, "event=job_worker_tick_error");
                 }
                 tokio::time::sleep(worker_config.poll_interval).await;
             }
         }));
     }
-    WorkerPool { handles }
+    WorkerPool {
+        handles,
+        worker_id: identity.id,
+        pool,
+        shutdown_grace: Duration::from_secs(config.lock_seconds.clamp(1, 30) as u64),
+    }
 }
 
 /// Start scheduler bootstrap (optional) + N parallel job consumers.
 pub fn spawn_worker(pool: PgPool, config: WorkerConfig) -> WorkerPool {
     spawn_workers(pool, config)
+}
+
+async fn run_worker_heartbeat(pool: PgPool, config: WorkerConfig, identity: WorkerIdentity) {
+    let registration = identity.registration(&config);
+    loop {
+        match repo::register_worker_instance(&pool, &registration).await {
+            Ok(_) => break,
+            Err(err) => {
+                error!(worker_id = %identity.id, error = %err, "event=worker_registration_failed");
+                tokio::time::sleep(config.heartbeat_interval).await;
+            }
+        }
+    }
+    info!(
+        worker_id = %identity.id,
+        instance_name = identity.instance_name,
+        host_name = identity.host_name,
+        role = identity.role,
+        pool = config.pool,
+        capabilities = ?config.capabilities,
+        "event=worker_registered"
+    );
+    let mut interval = tokio::time::interval(config.heartbeat_interval);
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        match repo::heartbeat_worker(&pool, identity.id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(worker_id = %identity.id, "event=worker_heartbeat_rejected");
+            }
+            Err(err) => {
+                error!(worker_id = %identity.id, error = %err, "event=worker_heartbeat_failed");
+            }
+        }
+    }
 }
 
 async fn bootstrap_schedulers(pool: &PgPool, config: &WorkerConfig) -> Result<(), sqlx::Error> {
@@ -238,11 +400,15 @@ async fn bootstrap_schedulers(pool: &PgPool, config: &WorkerConfig) -> Result<()
                 "tick_discovery_batch_limit": discovery.tick_discovery_batch_limit,
                 "concurrent_discovery_batch_limit": discovery.concurrent_discovery_batch_limit,
             });
-            let _ = repo::enqueue_recurring_job(
+            let _ = repo::enqueue_recurring_job_with_options(
                 pool,
                 "scheduler_tick",
                 payload,
                 &format!("scheduler_tick:{}", project_config.project_id),
+                repo::JobEnqueueOptions {
+                    pool: Some(config.pool.clone()),
+                    ..Default::default()
+                },
             )
             .await;
         }
@@ -253,50 +419,94 @@ async fn bootstrap_schedulers(pool: &PgPool, config: &WorkerConfig) -> Result<()
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         if execution_enabled {
-            let _ = repo::enqueue_recurring_job(
+            let _ = repo::enqueue_recurring_job_with_options(
                 pool,
                 "execution_scheduler_tick",
                 json!({"project_module": project_config.project_id}),
                 &format!("execution_scheduler_tick:{}", project_config.project_id),
+                repo::JobEnqueueOptions {
+                    pool: Some(config.pool.clone()),
+                    ..Default::default()
+                },
             )
             .await;
         }
     }
     let _modules = repo::get_enabled_project_modules(pool).await?;
-    let _ = repo::enqueue_recurring_job(
+    let _ = repo::enqueue_recurring_job_with_options(
         pool,
         "alert_evaluator_tick",
         json!({}),
         "alert_evaluator_tick",
+        repo::JobEnqueueOptions {
+            pool: Some(config.pool.clone()),
+            ..Default::default()
+        },
     )
     .await;
-    let tick_interval = slurm_poll_tick_interval_secs(pool).await.unwrap_or(30);
-    let _ = repo::enqueue_recurring_job(
+    let tick_interval = slurm_poll_tick_interval_secs(pool, config)
+        .await
+        .unwrap_or(30);
+    let _ = repo::enqueue_recurring_job_with_options(
         pool,
         "slurm_poll_tick",
         json!({ "interval_secs": tick_interval }),
         "slurm_poll_tick",
+        repo::JobEnqueueOptions {
+            pool: Some(config.pool.clone()),
+            ..Default::default()
+        },
     )
     .await;
-    let dim_tick_interval = dim_poll_tick_interval_secs(pool).await.unwrap_or(3);
-    let _ = repo::enqueue_recurring_job(
+    let dim_tick_interval = dim_poll_tick_interval_secs(pool, config).await.unwrap_or(3);
+    let _ = repo::enqueue_recurring_job_with_options(
         pool,
         "dim_poll_tick",
         json!({ "interval_secs": dim_tick_interval }),
         "dim_poll_tick",
+        repo::JobEnqueueOptions {
+            pool: Some(config.pool.clone()),
+            ..Default::default()
+        },
     )
     .await;
-    let _ = config;
     Ok(())
 }
 
 pub async fn tick(pool: &PgPool, config: &WorkerConfig) -> Result<(), sqlx::Error> {
-    let Some(job) = repo::claim_next_job(pool, config.lock_seconds).await? else {
+    let identity = WorkerIdentity::from_config_with_id(config, *SINGLE_TICK_WORKER_ID);
+    repo::register_worker_instance(pool, &identity.registration(config)).await?;
+    tick_for_worker(pool, config, &identity).await
+}
+
+async fn tick_for_worker(
+    pool: &PgPool,
+    config: &WorkerConfig,
+    identity: &WorkerIdentity,
+) -> Result<(), sqlx::Error> {
+    let Some(job) = repo::claim_next_job_for_worker(
+        pool,
+        identity.id,
+        &config.pool,
+        &config.capabilities,
+        config.lock_seconds,
+    )
+    .await?
+    else {
         return Ok(());
     };
+    let lease_token = job
+        .lease_token
+        .ok_or_else(|| sqlx::Error::Protocol("claimed job has no lease token".into()))?;
     let job_started = std::time::Instant::now();
     metrics::record_job(&job.kind, "claimed");
-    debug!(job_id = %job.uuid, kind = %job.kind, "event=job_claimed");
+    debug!(
+        job_id = %job.uuid,
+        kind = %job.kind,
+        worker_id = %identity.id,
+        claim_id = %lease_token,
+        "event=job_claimed"
+    );
     let trace_context = trace_context_for_job(&job);
     let payload = metrics::payload_with_trace(job.payload.clone(), &trace_context);
     let correlation = trace_context.correlation_id.as_deref().unwrap_or_default();
@@ -313,39 +523,149 @@ pub async fn tick(pool: &PgPool, config: &WorkerConfig) -> Result<(), sqlx::Erro
         execution_id = job.execution_id.map(|id| id.to_string()).unwrap_or_default(),
         project_module = %project_module,
         phase = %phase,
-        worker_role = %metrics::worker_role_from_env(),
+        worker_id = %identity.id,
+        claim_id = %lease_token,
+        worker_role = %identity.role,
     );
     metrics::set_span_parent_from_payload(&span, &payload);
-    let runner = ConfigDiscoveryRunner::from_env_with_pool(Some(pool.clone()));
-    let result = async { dispatch(pool, config, &runner, &job.kind, &payload).await }
-        .instrument(span)
-        .await;
+    let runner = ConfigDiscoveryRunner::from_worker_config_with_pool(config, Some(pool.clone()));
+    let result = dispatch_with_lease(
+        pool,
+        config,
+        &runner,
+        &job,
+        identity.id,
+        lease_token,
+        &payload,
+        span,
+    )
+    .await?;
+    let Some(result) = result else {
+        metrics::record_job(&job.kind, "lease_lost");
+        warn!(job_id = %job.uuid, worker_id = %identity.id, claim_id = %lease_token, "event=job_lease_lost");
+        return Ok(());
+    };
     match result {
         Ok(()) => {
             metrics::record_job(&job.kind, "completed");
             metrics::record_job_duration(&job.kind, job_started.elapsed().as_secs_f64());
-            if job.kind == "slurm_poll_tick" || job.kind == "dim_poll_tick" {
+            let updated = if job.kind == "slurm_poll_tick" || job.kind == "dim_poll_tick" {
                 let interval = job
                     .payload
                     .get("interval_secs")
                     .and_then(serde_json::Value::as_i64)
                     .unwrap_or(if job.kind == "dim_poll_tick" { 3 } else { 30 });
-                repo::reschedule_recurring_job(pool, job.uuid, interval).await?;
+                repo::reschedule_recurring_job_with_lease(
+                    pool,
+                    job.uuid,
+                    identity.id,
+                    lease_token,
+                    interval,
+                )
+                .await?
             } else {
-                repo::complete_job(pool, job.uuid).await?;
+                repo::complete_job_with_lease(pool, job.uuid, identity.id, lease_token).await?
+            };
+            if !updated {
+                metrics::record_job(&job.kind, "lease_lost");
+                warn!(job_id = %job.uuid, worker_id = %identity.id, claim_id = %lease_token, "event=job_fenced_update_rejected");
             }
         }
         Err(err) => {
             metrics::record_job(&job.kind, "failed");
             metrics::record_job_duration(&job.kind, job_started.elapsed().as_secs_f64());
-            if is_non_retryable_job_error(&job.kind, &err) {
-                repo::fail_job_permanently(pool, job.uuid, &err).await?;
+            let failure_class = classify_job_failure(&job.kind, &err);
+            let updated = if is_non_retryable_job_error(&job.kind, &err) {
+                repo::fail_job_permanently_with_lease(
+                    pool,
+                    job.uuid,
+                    identity.id,
+                    lease_token,
+                    &err,
+                    failure_class.as_str(),
+                )
+                .await?
             } else {
-                repo::fail_or_retry_job(pool, job.uuid, &err).await?;
+                repo::fail_or_retry_job_with_lease(
+                    pool,
+                    job.uuid,
+                    identity.id,
+                    lease_token,
+                    &err,
+                    failure_class.as_str(),
+                    retry_delay_seconds(&job),
+                )
+                .await?
+            };
+            if !updated {
+                metrics::record_job(&job.kind, "lease_lost");
+                warn!(job_id = %job.uuid, worker_id = %identity.id, claim_id = %lease_token, "event=job_fenced_failure_rejected");
             }
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_with_lease<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
+    pool: &PgPool,
+    config: &WorkerConfig,
+    runner: &R,
+    job: &JobRow,
+    worker_id: Uuid,
+    lease_token: Uuid,
+    payload: &Value,
+    span: tracing::Span,
+) -> Result<Option<Result<(), String>>, sqlx::Error> {
+    let dispatch =
+        async { dispatch(pool, config, runner, &job.kind, payload).await }.instrument(span);
+    tokio::pin!(dispatch);
+    let renewal_seconds = (config.lock_seconds / 3).max(1) as u64;
+    let start = tokio::time::Instant::now() + Duration::from_secs(renewal_seconds);
+    let mut renewals = tokio::time::interval_at(start, Duration::from_secs(renewal_seconds));
+    loop {
+        tokio::select! {
+            result = &mut dispatch => return Ok(Some(result)),
+            _ = renewals.tick() => {
+                if !repo::renew_job_lease(
+                    pool,
+                    job.uuid,
+                    worker_id,
+                    lease_token,
+                    config.lock_seconds,
+                )
+                .await?
+                {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
+fn classify_job_failure(kind: &str, error: &str) -> FailureClass {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
+        FailureClass::Timeout
+    } else if lower.contains("unauthorized")
+        || lower.contains("authentication")
+        || lower.contains("credential")
+    {
+        FailureClass::Authentication
+    } else if is_non_retryable_job_error(kind, error) {
+        FailureClass::Configuration
+    } else if lower.contains("conflict") || lower.contains("already exists") {
+        FailureClass::Conflict
+    } else {
+        FailureClass::DependencyUnavailable
+    }
+}
+
+fn retry_delay_seconds(job: &JobRow) -> i64 {
+    let exponent = u32::try_from(job.attempts.saturating_sub(1).clamp(0, 8)).unwrap_or(0);
+    let base = 15_i64.saturating_mul(2_i64.saturating_pow(exponent));
+    let jitter = (job.uuid.as_u128() % 11) as i64;
+    (base + jitter).min(3600)
 }
 
 async fn dispatch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
@@ -374,12 +694,16 @@ async fn dispatch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
                 .map_err(|e| e.to_string())?;
             Ok(())
         }
-        "execute" => run_execute(pool, payload).await.map_err(|e| e.to_string()),
-        "dim_poll" => run_dim_poll(pool, payload).await.map_err(|e| e.to_string()),
-        "dim_poll_tick" => run_dim_poll_tick(pool, payload)
+        "execute" => run_execute(pool, config, payload)
             .await
             .map_err(|e| e.to_string()),
-        "slurm_poll_tick" => run_slurm_poll_tick(pool, payload)
+        "dim_poll" => run_dim_poll(pool, config, payload)
+            .await
+            .map_err(|e| e.to_string()),
+        "dim_poll_tick" => run_dim_poll_tick(pool, config, payload)
+            .await
+            .map_err(|e| e.to_string()),
+        "slurm_poll_tick" => run_slurm_poll_tick(pool, config, payload)
             .await
             .map_err(|e| e.to_string()),
         "alert_evaluator_tick" => run_alert_evaluator_tick(pool)
@@ -523,6 +847,8 @@ impl DiscoveryRunner for DeterministicDiscoveryRunner {
 pub struct ConfigDiscoveryRunner {
     clients: BTreeMap<String, Arc<dyn TapClient>>,
     pool: Option<PgPool>,
+    casda_tap_url: Option<String>,
+    vizier_tap_url: Option<String>,
 }
 
 impl ConfigDiscoveryRunner {
@@ -531,14 +857,38 @@ impl ConfigDiscoveryRunner {
     }
 
     pub fn from_env_with_pool(pool: Option<PgPool>) -> Self {
+        let settings = Settings::from_env().ok();
+        let casda_tap_url = settings.as_ref().and_then(|s| s.casda_tap_url.clone());
+        let vizier_tap_url = settings.as_ref().and_then(|s| s.vizier_tap_url.clone());
+        Self::with_urls(pool, casda_tap_url, vizier_tap_url)
+    }
+
+    fn from_worker_config_with_pool(config: &WorkerConfig, pool: Option<PgPool>) -> Self {
+        Self::with_urls(
+            pool,
+            config.casda_tap_url.clone(),
+            config.vizier_tap_url.clone(),
+        )
+    }
+
+    fn with_urls(
+        pool: Option<PgPool>,
+        casda_tap_url: Option<String>,
+        vizier_tap_url: Option<String>,
+    ) -> Self {
         let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
-        if let Ok(url) = std::env::var("BEAMPIPE_CASDA_TAP_URL") {
+        if let Some(url) = casda_tap_url.as_ref() {
             clients.insert("casda".into(), Arc::new(casda_tap(url)));
         }
-        if let Ok(url) = std::env::var("BEAMPIPE_VIZIER_TAP_URL") {
+        if let Some(url) = vizier_tap_url.as_ref() {
             clients.insert("vizier".into(), Arc::new(vizier_tap(url)));
         }
-        Self { clients, pool }
+        Self {
+            clients,
+            pool,
+            casda_tap_url,
+            vizier_tap_url,
+        }
     }
 
     fn client_for<'a>(
@@ -551,15 +901,13 @@ impl ConfigDiscoveryRunner {
         }
         let timeout = Duration::from_secs(config.adapters.tap.timeout_seconds);
         let retries = config.adapters.tap.retries;
-        let casda_env = std::env::var("BEAMPIPE_CASDA_TAP_URL").ok();
-        let vizier_env = std::env::var("BEAMPIPE_VIZIER_TAP_URL").ok();
         let client: Arc<dyn TapClient> = match adapter {
             "casda" => {
                 let url = config
                     .adapters
                     .casda_tap_url
                     .as_deref()
-                    .or(casda_env.as_deref())
+                    .or(self.casda_tap_url.as_deref())
                     .ok_or_else(|| ConfigDiscoveryError::MissingAdapter("casda".into()))?;
                 Arc::new(casda_tap(url).with_policy(timeout, retries))
             }
@@ -568,7 +916,7 @@ impl ConfigDiscoveryRunner {
                     .adapters
                     .vizier_tap_url
                     .as_deref()
-                    .or(vizier_env.as_deref())
+                    .or(self.vizier_tap_url.as_deref())
                     .ok_or_else(|| ConfigDiscoveryError::MissingAdapter("vizier".into()))?;
                 Arc::new(vizier_tap(url).with_policy(timeout, retries))
             }
@@ -582,6 +930,8 @@ impl ConfigDiscoveryRunner {
         Self {
             clients,
             pool: None,
+            casda_tap_url: None,
+            vizier_tap_url: None,
         }
     }
 }
@@ -867,18 +1217,16 @@ async fn run_scheduler_tick(
     if config.discovery_tap_health_check_enabled {
         if let Some(cfg) = parsed_config.as_ref() {
             let timeout = Duration::from_secs(config.discovery_tap_health_timeout_seconds);
-            let casda_env = std::env::var("BEAMPIPE_CASDA_TAP_URL").ok();
-            let vizier_env = std::env::var("BEAMPIPE_VIZIER_TAP_URL").ok();
             let casda_url = cfg
                 .adapters
                 .casda_tap_url
                 .as_deref()
-                .or(casda_env.as_deref());
+                .or(config.casda_tap_url.as_deref());
             let vizier_url = cfg
                 .adapters
                 .vizier_tap_url
                 .as_deref()
-                .or(vizier_env.as_deref());
+                .or(config.vizier_tap_url.as_deref());
             let report = probe_tap_health(casda_url, vizier_url, timeout).await;
             if !all_reachable(&report, &cfg.adapters.required) {
                 result.tap_unreachable = unreachable_adapters(&report, &cfg.adapters.required);
@@ -1048,12 +1396,15 @@ async fn run_scheduler_tick(
                 }),
                 &tc,
             );
-            repo::enqueue_job(
+            repo::enqueue_job_with_options(
                 pool,
                 "discover_batch",
                 job_payload,
-                None,
-                Some(&format!("discover:{module}:{claim_token}")),
+                repo::JobEnqueueOptions {
+                    idempotency_key: Some(format!("discover:{module}:{claim_token}")),
+                    pool: Some(config.pool.clone()),
+                    ..Default::default()
+                },
             )
             .await?;
             result.total_sources += source_identifiers.len() as u64;
@@ -1826,25 +2177,11 @@ async fn schedule_project_executions(
         return Ok(());
     }
 
-    let (claim_token, pending_sources) = repo::claim_pending_sources_for_workflow_run(
-        pool,
-        project_module,
-        policy.tick_execution_source_limit,
-        policy.claim_ttl_minutes,
-    )
-    .await?;
-    let Some(claim_token) = claim_token else {
-        return Ok(());
+    let deployment_profile = match &policy.deployment_profile_name {
+        Some(name) => repo::get_deployment_profile_by_name(pool, name).await?,
+        None => repo::get_default_deployment_profile(pool, project_module).await?,
     };
-
-    let deployment_profile_id = match &policy.deployment_profile_name {
-        Some(name) => repo::get_deployment_profile_by_name(pool, name)
-            .await?
-            .map(|p| p.uuid),
-        None => repo::get_default_deployment_profile(pool, project_module)
-            .await?
-            .map(|p| p.uuid),
-    };
+    let deployment_profile_id = deployment_profile.as_ref().map(|profile| profile.uuid);
 
     let mut run_limit = policy.tick_execution_run_limit;
     if let Some(cap) = policy.concurrent_execution_run_limit {
@@ -1855,6 +2192,35 @@ async fn schedule_project_executions(
             result.bump(SkipReason::ProjectInFlightCap);
             info!(
                 project_module,
+                current,
+                cap,
+                reason_counts = ?result.reason_counts,
+                "event=execution_scheduler_tick_complete"
+            );
+            flush_execution_scheduler_metrics(pool, project_module, &result, 0, started).await;
+            return Ok(());
+        }
+    }
+    if let Some(cap) = config.execution_global_in_flight_limit {
+        let current = repo::count_execute_in_flight_runs(pool).await?;
+        run_limit = run_limit.min((cap - current).max(0));
+        if run_limit <= 0 {
+            result.bump(SkipReason::InFlightCap);
+            flush_execution_scheduler_metrics(pool, project_module, &result, 0, started).await;
+            return Ok(());
+        }
+    }
+    if let Some((profile, cap)) = deployment_profile
+        .as_ref()
+        .and_then(|profile| profile.max_concurrent_executions.map(|cap| (profile, cap)))
+    {
+        let current = repo::count_in_flight_for_profile(pool, profile.uuid).await?;
+        run_limit = run_limit.min((i64::from(cap) - current).max(0));
+        if run_limit <= 0 {
+            result.bump(SkipReason::ProfileInFlightCap);
+            info!(
+                project_module,
+                profile = %profile.name,
                 current,
                 cap,
                 reason_counts = ?result.reason_counts,
@@ -1876,6 +2242,20 @@ async fn schedule_project_executions(
         flush_execution_scheduler_metrics(pool, project_module, &result, 0, started).await;
         return Ok(());
     }
+
+    let source_claim_limit = policy
+        .tick_execution_source_limit
+        .min(run_limit.saturating_mul(policy.max_sources_per_execution));
+    let (claim_token, pending_sources) = repo::claim_pending_sources_for_workflow_run(
+        pool,
+        project_module,
+        source_claim_limit,
+        policy.claim_ttl_minutes,
+    )
+    .await?;
+    let Some(claim_token) = claim_token else {
+        return Ok(());
+    };
 
     let mut created_runs = 0_i64;
     let mut admitted_sources = Vec::new();
@@ -1908,7 +2288,7 @@ async fn schedule_project_executions(
         let project_config_id = repo::get_active_project_config(pool, project_module)
             .await?
             .map(|c| c.uuid);
-        let execution = repo::create_execution(
+        let execution = match repo::create_execution(
             pool,
             project_module,
             sources,
@@ -1917,7 +2297,17 @@ async fn schedule_project_executions(
             project_config_id,
             None,
         )
-        .await?;
+        .await
+        {
+            Ok(execution) => execution,
+            Err(sqlx::Error::Protocol(message))
+                if message.contains("concurrency limit reached") =>
+            {
+                result.bump(SkipReason::ProfileInFlightCap);
+                break;
+            }
+            Err(error) => return Err(error),
+        };
         repo::apply_execution_patch_with_correlation(
             pool,
             execution.uuid,
@@ -1942,12 +2332,16 @@ async fn schedule_project_executions(
             json!({"execution_id": execution.uuid}),
             &metrics::correlation_only(tick_correlation.clone()),
         );
-        repo::enqueue_job(
+        repo::enqueue_job_with_options(
             pool,
             "execute",
             job_payload,
-            Some(execution.uuid),
-            Some(&format!("execute:{}", execution.uuid)),
+            repo::JobEnqueueOptions {
+                execution_id: Some(execution.uuid),
+                idempotency_key: Some(format!("execute:{}", execution.uuid)),
+                pool: Some(config.pool.clone()),
+                ..Default::default()
+            },
         )
         .await?;
         pacing_sleep(config).await;
@@ -1970,6 +2364,210 @@ async fn schedule_project_executions(
     Ok(())
 }
 
+fn json_sha256(value: &Value) -> Result<(String, i64), String> {
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    Ok((format!("{:x}", Sha256::digest(&bytes)), bytes.len() as i64))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GraphPreparationPreview {
+    pub project_module: String,
+    pub source_identifiers: Vec<String>,
+    pub project_config_id: Uuid,
+    pub project_config_version: i32,
+    pub project_spec_sha256: String,
+    pub manifest_sha256: String,
+    pub source_graph_sha256: String,
+    pub patched_graph_sha256: String,
+    pub patch_summary: Value,
+    pub manifest: Value,
+    pub source_graph: Value,
+    pub patched_graph: Value,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GraphPreparationError {
+    #[error("no active project config exists for {0}")]
+    ProjectConfigNotFound(String),
+    #[error("active project config is invalid: {0}")]
+    InvalidProjectConfig(String),
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Orchestration(#[from] OrchestrationError),
+}
+
+pub async fn prepare_execution_graph(
+    pool: &PgPool,
+    project_module: &str,
+    source_identifiers: &[String],
+) -> Result<GraphPreparationPreview, GraphPreparationError> {
+    let config_row = repo::get_active_project_config(pool, project_module)
+        .await?
+        .ok_or_else(|| GraphPreparationError::ProjectConfigNotFound(project_module.into()))?;
+    let config: ProjectConfig = serde_json::from_value(config_row.spec.clone())
+        .map_err(|error| GraphPreparationError::InvalidProjectConfig(error.to_string()))?;
+    let report = config.validate_report();
+    if !report.valid {
+        return Err(GraphPreparationError::InvalidProjectConfig(
+            report
+                .errors
+                .iter()
+                .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    let metadata_rows =
+        repo::list_archive_metadata_for_sources(pool, project_module, source_identifiers).await?;
+    let metadata: Vec<Value> = metadata_rows
+        .into_iter()
+        .filter_map(|row| row.metadata_json)
+        .flat_map(|value| {
+            value
+                .get("datasets")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut manifest =
+        build_manifest_from_config_with_staging(&config, &metadata, &[], &json!({}))?;
+    manifest = apply_wasm_manifest(pool, &config, &metadata, manifest).await?;
+    apply_project_graph_patches(&mut manifest, &config);
+    manifest = apply_wasm_graph_patches(pool, &config, &manifest).await?;
+    let source_graph = resolve_graph(&config).await?;
+    let manifest_path = config
+        .manifest
+        .as_ref()
+        .map(|manifest| manifest.path.as_str())
+        .unwrap_or("manifest.json");
+    let patched_graph = prepare_graph_for_manifest(source_graph.clone(), &manifest, manifest_path)?;
+    let (manifest_sha256, _) =
+        json_sha256(&manifest).map_err(GraphPreparationError::InvalidProjectConfig)?;
+    let (source_graph_sha256, _) =
+        json_sha256(&source_graph).map_err(GraphPreparationError::InvalidProjectConfig)?;
+    let (patched_graph_sha256, _) =
+        json_sha256(&patched_graph).map_err(GraphPreparationError::InvalidProjectConfig)?;
+    Ok(GraphPreparationPreview {
+        project_module: project_module.into(),
+        source_identifiers: source_identifiers.to_vec(),
+        project_config_id: config_row.uuid,
+        project_config_version: config_row.version,
+        project_spec_sha256: config_row.spec_sha256,
+        manifest_sha256,
+        source_graph_sha256,
+        patched_graph_sha256,
+        patch_summary: graph_diff_summary(&source_graph, &patched_graph),
+        manifest,
+        source_graph,
+        patched_graph,
+    })
+}
+
+pub fn graph_diff_summary(before: &Value, after: &Value) -> Value {
+    fn node_key(node: &Value) -> Option<String> {
+        node.get("id")
+            .and_then(Value::as_str)
+            .or_else(|| node.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+    }
+    fn field_map(node: &Value) -> BTreeMap<String, Value> {
+        node.get("fields")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|field| {
+                field
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| (name.to_string(), field.clone()))
+            })
+            .collect()
+    }
+    let before_nodes: BTreeMap<String, &Value> = before
+        .get("nodeDataArray")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node_key(node).map(|key| (key, node)))
+        .collect();
+    let after_nodes: BTreeMap<String, &Value> = after
+        .get("nodeDataArray")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node_key(node).map(|key| (key, node)))
+        .collect();
+    let mut changed = Vec::new();
+    for (key, after_node) in &after_nodes {
+        let Some(before_node) = before_nodes.get(key) else {
+            changed.push(json!({"node": key, "change": "added"}));
+            continue;
+        };
+        if *before_node == *after_node {
+            continue;
+        }
+        let before_fields = field_map(before_node);
+        let after_fields = field_map(after_node);
+        let fields: Vec<String> = before_fields
+            .keys()
+            .chain(after_fields.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|name| before_fields.get(*name) != after_fields.get(*name))
+            .cloned()
+            .collect();
+        changed.push(json!({
+            "node": after_node.get("name").and_then(Value::as_str).unwrap_or(key),
+            "change": "modified",
+            "fields": fields,
+        }));
+    }
+    for key in before_nodes
+        .keys()
+        .filter(|key| !after_nodes.contains_key(*key))
+    {
+        changed.push(json!({"node": key, "change": "removed"}));
+    }
+    json!({
+        "before_node_count": before_nodes.len(),
+        "after_node_count": after_nodes.len(),
+        "changed_node_count": changed.len(),
+        "changed_nodes": changed,
+        "graph_configuration_changed": before.get("graphConfigurations") != after.get("graphConfigurations"),
+    })
+}
+
+async fn persist_inline_json_artifact(
+    pool: &PgPool,
+    execution_id: Uuid,
+    kind: &str,
+    producer_phase: &str,
+    value: &Value,
+    metadata: Value,
+) -> Result<String, String> {
+    let (sha256, size_bytes) = json_sha256(value)?;
+    repo::store_execution_artifact(
+        pool,
+        execution_id,
+        ExecutionArtifactInput {
+            kind: kind.into(),
+            storage_kind: "database".into(),
+            uri: None,
+            inline_json: Some(value.clone()),
+            media_type: "application/json".into(),
+            sha256: sha256.clone(),
+            size_bytes: Some(size_bytes),
+            producer_phase: producer_phase.into(),
+            metadata,
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(sha256)
+}
+
 async fn terminal_execute_failure(
     pool: &PgPool,
     execution_id: uuid::Uuid,
@@ -1983,12 +2581,26 @@ async fn terminal_execute_failure(
         error = %error,
         event = "execute_failed"
     );
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            terminal_outcome: Some(TerminalOutcome::Failed),
+            failure_class: Some(FailureClass::Internal),
+            last_error: Some(error.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let failed_phase = repo::get_execution(pool, execution_id)
+        .await?
+        .and_then(|execution| execution.phase_enum());
     repo::apply_execution_patch_with_correlation(
         pool,
         execution_id,
         LedgerPatch {
             status: Some(ExecutionStatus::Failed),
-            execution_phase: Some(None),
+            execution_phase: Some(failed_phase),
             error: Some(error.clone()),
             ..LedgerPatch::default()
         },
@@ -2033,6 +2645,58 @@ async fn terminal_execute_failure(
     )
     .await;
     Ok(())
+}
+
+fn profile_from_execution_snapshot(
+    execution: &beampipe_db::models::ExecutionRow,
+) -> Option<DeploymentProfileRow> {
+    let snapshot = execution.deployment_profile_snapshot.as_ref()?;
+    Some(DeploymentProfileRow {
+        uuid: snapshot.get("id")?.as_str()?.parse().ok()?,
+        name: snapshot.get("name")?.as_str()?.to_string(),
+        description: snapshot
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        project_module: snapshot
+            .get("project_module")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        is_default: snapshot
+            .get("is_default")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        max_concurrent_executions: snapshot
+            .get("max_concurrent_executions")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        translation: snapshot.get("translation")?.clone(),
+        deployment: snapshot.get("deployment")?.clone(),
+        revision: snapshot
+            .get("revision")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(1),
+        spec_sha256: snapshot
+            .get("spec_sha256")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        created_at: execution.created_at,
+        updated_at: None,
+    })
+}
+
+async fn deployment_profile_for_execution(
+    pool: &PgPool,
+    execution: &beampipe_db::models::ExecutionRow,
+) -> Result<Option<DeploymentProfileRow>, sqlx::Error> {
+    if let Some(profile) = profile_from_execution_snapshot(execution) {
+        return Ok(Some(profile));
+    }
+    match execution.deployment_profile_id {
+        Some(id) => repo::get_deployment_profile(pool, id).await,
+        None => repo::get_default_deployment_profile(pool, &execution.project_module).await,
+    }
 }
 
 fn profile_tm_url(profile: Option<&DeploymentProfileRow>) -> Option<String> {
@@ -2146,7 +2810,11 @@ async fn preflight_execute(
     Ok(())
 }
 
-async fn run_execute(pool: &PgPool, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+async fn run_execute(
+    pool: &PgPool,
+    config: &WorkerConfig,
+    payload: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
     let started = std::time::Instant::now();
     let correlation_id = metrics::correlation_id_from_payload(payload);
     let execution_id = payload
@@ -2159,9 +2827,46 @@ async fn run_execute(pool: &PgPool, payload: &serde_json::Value) -> Result<(), s
     };
     let project_module = execution.project_module.clone();
     let source_identifiers = source_identifiers_from_json(&execution.sources);
-    let result = run_execute_body(pool, execution_id, &execution, payload, correlation_id).await;
+    let result = run_execute_body(
+        pool,
+        config,
+        execution_id,
+        &execution,
+        payload,
+        correlation_id,
+    )
+    .await;
     metrics::record_execute_duration("total", started.elapsed().as_secs_f64());
     if let Err(msg) = result {
+        let submission_is_uncertain = repo::get_execution(pool, execution_id)
+            .await?
+            .and_then(|row| row.submission_state)
+            .as_deref()
+            .and_then(SubmissionState::parse)
+            == Some(SubmissionState::Uncertain);
+        if submission_is_uncertain {
+            warn!(
+                execution_id = %execution_id,
+                project_module,
+                error = %msg,
+                event = "execute_submission_uncertain"
+            );
+            beampipe_db::provenance::record_provenance_event(
+                pool,
+                "execution.submission_uncertain",
+                &project_module,
+                source_identifiers.first().map(String::as_str),
+                Some(execution_id),
+                Some("system:execute"),
+                Some(&execution_id.to_string()),
+                &json!({
+                    "error": msg,
+                    "system_action": "submission is held for reconciliation and will not be repeated automatically",
+                }),
+            )
+            .await;
+            return Ok(());
+        }
         terminal_execute_failure(
             pool,
             execution_id,
@@ -2176,6 +2881,7 @@ async fn run_execute(pool: &PgPool, payload: &serde_json::Value) -> Result<(), s
 
 async fn run_execute_body(
     pool: &PgPool,
+    config: &WorkerConfig,
     execution_id: uuid::Uuid,
     execution: &beampipe_db::models::ExecutionRow,
     payload: &serde_json::Value,
@@ -2192,11 +2898,7 @@ async fn run_execute_body(
     let use_real = payload
         .get("use_real_backends")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or_else(|| {
-            std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        });
+        .unwrap_or(config.use_real_backends);
     let phase_is_submit = execution.phase_enum() == Some(ExecutionPhase::Submit);
     let replay_manifest = phase_is_submit && execution.workflow_manifest.is_some();
     let project_config_row = repo::get_project_config_for_execution(pool, execution)
@@ -2205,18 +2907,28 @@ async fn run_execute_body(
     let project_config: Option<ProjectConfig> = project_config_row
         .as_ref()
         .and_then(|row| serde_json::from_value(row.spec.clone()).ok());
-    let profile = match execution.deployment_profile_id {
-        Some(id) => repo::get_deployment_profile(pool, id)
-            .await
-            .map_err(|e| e.to_string())?,
-        None => repo::get_default_deployment_profile(pool, &execution.project_module)
-            .await
-            .map_err(|e| e.to_string())?,
-    };
+    let profile = deployment_profile_for_execution(pool, execution)
+        .await
+        .map_err(|e| e.to_string())?;
     let backend_kind = profile
         .as_ref()
         .and_then(|row| deployment_kind(&row.deployment))
         .unwrap_or("rest_remote");
+    if execution
+        .submission_state
+        .as_deref()
+        .and_then(SubmissionState::parse)
+        == Some(SubmissionState::Submitted)
+        && (execution.scheduler_job_id.is_some() || execution.daliuge_session_id.is_some())
+    {
+        info!(
+            event = "execute_submit_already_recorded",
+            execution_id = %execution_id,
+            scheduler_job_id = execution.scheduler_job_id.as_deref().unwrap_or_default(),
+            daliuge_session_id = execution.daliuge_session_id.as_deref().unwrap_or_default(),
+        );
+        return Ok(());
+    }
     let requires_casda = execution_requires_casda(execution, project_config.as_ref());
     let casda_client = CasdaStagingClient::from_env();
     preflight_execute(
@@ -2228,6 +2940,31 @@ async fn run_execute_body(
         casda_client.as_ref(),
     )
     .await?;
+    if replay_manifest && execution.status_enum() == Some(ExecutionStatus::Retrying) {
+        repo::apply_execution_patch_with_correlation(
+            pool,
+            execution_id,
+            LedgerPatch {
+                status: Some(ExecutionStatus::Running),
+                execution_phase: Some(Some(ExecutionPhase::Submit)),
+                clear_error: true,
+                ..LedgerPatch::default()
+            },
+            correlation_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::Admitted),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if !replay_manifest {
         repo::apply_execution_patch_with_correlation(
             pool,
@@ -2301,7 +3038,7 @@ async fn run_execute_body(
         .and_then(|c| c.manifest.as_ref())
         .map(|m| m.path.as_str())
         .unwrap_or("manifest.json");
-    let graph = if let Some(ref cfg) = project_config {
+    let source_graph = if let Some(ref cfg) = project_config {
         resolve_graph(cfg).await.map_err(|e| e.to_string())?
     } else {
         json!({
@@ -2311,8 +3048,60 @@ async fn run_execute_body(
             ]
         })
     };
-    let graph =
-        prepare_graph_for_manifest(graph, &manifest, manifest_path).map_err(|e| e.to_string())?;
+    let graph = prepare_graph_for_manifest(source_graph.clone(), &manifest, manifest_path)
+        .map_err(|e| e.to_string())?;
+    let manifest_sha256 = persist_inline_json_artifact(
+        pool,
+        execution_id,
+        "manifest",
+        "manifest_generated",
+        &manifest,
+        json!({"project_module": execution.project_module}),
+    )
+    .await?;
+    let source_graph_sha256 = persist_inline_json_artifact(
+        pool,
+        execution_id,
+        "source_graph",
+        "graph_loaded",
+        &source_graph,
+        json!({"immutable": true}),
+    )
+    .await?;
+    let patched_graph_sha256 = persist_inline_json_artifact(
+        pool,
+        execution_id,
+        "patched_graph",
+        "graph_patched",
+        &graph,
+        json!({
+            "manifest_path": manifest_path,
+            "manifest_sha256": manifest_sha256,
+        }),
+    )
+    .await?;
+    repo::apply_execution_provenance_patch(
+        pool,
+        execution_id,
+        ExecutionProvenancePatch {
+            manifest_sha256: Some(manifest_sha256),
+            source_graph_sha256: Some(source_graph_sha256),
+            patched_graph_sha256: Some(patched_graph_sha256),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::GraphPatched),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if !do_submit {
         repo::apply_execution_patch_with_correlation(
             pool,
@@ -2357,20 +3146,17 @@ async fn run_execute_body(
     )
     .await
     .map_err(|e| e.to_string())?;
-    let session_id = beampipe_session_id(&execution_id.to_string(), execution.created_at);
-    if execution.scheduler_name.as_deref() == Some("daliuge")
-        && execution.scheduler_job_id.as_deref() == Some(session_id.as_str())
-    {
-        return Ok(());
-    }
-    if execution.scheduler_name.as_deref() == Some("slurm")
-        && execution
-            .scheduler_job_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with(&session_id))
-    {
-        return Ok(());
-    }
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::SubmissionPending),
+            submission_state: Some(SubmissionState::Preparing),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     run_submit_phase(
         pool,
         execution_id,
@@ -2381,6 +3167,7 @@ async fn run_execute_body(
         manifest,
         graph,
         correlation_id,
+        &config.pool,
     )
     .await
 }
@@ -2450,6 +3237,21 @@ fn execution_backend(
     }
 }
 
+fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
+    match error {
+        OrchestrationError::GraphNotObject
+        | OrchestrationError::NoUsableDatasets
+        | OrchestrationError::GraphPatchNodeNotFound(_)
+        | OrchestrationError::GraphPatchFieldNotFound { .. } => false,
+        OrchestrationError::Daliuge(error) => {
+            error.component != DaliugeComponent::Translator
+                || !matches!(error.operation.as_str(), "unroll_and_partition" | "map")
+        }
+        OrchestrationError::Backend(_) => true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_submit_phase(
     pool: &PgPool,
     execution_id: uuid::Uuid,
@@ -2460,6 +3262,7 @@ async fn run_submit_phase(
     manifest: Value,
     graph: Value,
     correlation_id: Option<&str>,
+    worker_pool: &str,
 ) -> Result<(), String> {
     let tm_url = profile_tm_url(profile).unwrap_or_default();
     info!(
@@ -2471,14 +3274,93 @@ async fn run_submit_phase(
     );
     let backend = execution_backend(profile, backend_kind, use_real, execution.created_at);
     let started = std::time::Instant::now();
+    let expected_session_id = beampipe_session_id(&execution_id.to_string(), execution.created_at);
+    let daliuge_manager_url = profile.and_then(|profile| {
+        serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
+            .ok()
+            .and_then(|deployment| match deployment {
+                DeploymentConfig::RestRemote(rest) => rest_endpoint(&rest),
+                DeploymentConfig::SlurmRemote(_) => None,
+            })
+    });
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::SubmissionPending),
+            submission_state: Some(SubmissionState::InFlight),
+            scheduler_name: Some(if backend_kind == "slurm_remote" {
+                "slurm".into()
+            } else {
+                "daliuge".into()
+            }),
+            daliuge_session_id: Some(expected_session_id.clone()),
+            daliuge_manager_url,
+            daliuge_state: Some(DaliugeState::NotCreated),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    repo::record_execution_observation(
+        pool,
+        execution_id,
+        ExecutionObservationInput {
+            kind: "daliuge_session".into(),
+            normalized_state: SubmissionState::InFlight.as_str().into(),
+            raw_state: Some("intent_persisted".into()),
+            reason: None,
+            payload: json!({
+                "daliuge_session_id": expected_session_id,
+                "backend": backend_kind,
+            }),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     async {
-        let submitted = backend
+        let submitted = match backend
             .submit(&execution_id.to_string(), manifest, graph)
             .await
-            .map_err(|e| e.to_string())?;
-        apply_submit_result(pool, execution_id, execution, submitted, use_real)
-            .await
-            .map_err(|e| e.to_string())
+        {
+            Ok(submitted) => submitted,
+            Err(error) => {
+                let uncertain = submission_error_is_uncertain(&error);
+                repo::apply_execution_state_patch(
+                    pool,
+                    execution_id,
+                    ExecutionStatePatch {
+                        submission_state: Some(if uncertain {
+                            SubmissionState::Uncertain
+                        } else {
+                            SubmissionState::Failed
+                        }),
+                        failure_class: Some(if uncertain {
+                            FailureClass::InconsistentState
+                        } else {
+                            FailureClass::DependencyUnavailable
+                        }),
+                        last_error: Some(error.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|db_error| db_error.to_string())?;
+                return Err(error.to_string());
+            }
+        };
+        apply_submit_result(
+            pool,
+            execution_id,
+            execution,
+            submitted,
+            use_real,
+            worker_pool,
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
     .instrument(tracing::info_span!(
         "execute_phase",
@@ -2498,22 +3380,126 @@ async fn apply_submit_result(
     execution: &beampipe_db::models::ExecutionRow,
     submitted: beampipe_orchestration::BackendSubmit,
     use_real: bool,
+    worker_pool: &str,
 ) -> Result<(), sqlx::Error> {
     let scheduler_name = submitted.scheduler_name.clone();
+    let legacy_scheduler_job_id = submitted.scheduler_job_id.clone();
+    let parsed_scheduler = legacy_scheduler_job_id
+        .as_deref()
+        .map(beampipe_domain::slurm::parse_scheduler_job_id);
+    let scheduler_job_id = if scheduler_name == "slurm" {
+        parsed_scheduler
+            .as_ref()
+            .map(|parsed| parsed.slurm_job_id.clone())
+            .filter(|id| !id.is_empty())
+            .or(legacy_scheduler_job_id.clone())
+    } else {
+        None
+    };
+    let remote_session_dir = submitted.remote_session_dir.clone().or_else(|| {
+        parsed_scheduler
+            .as_ref()
+            .and_then(|parsed| parsed.session_dir.clone())
+    });
+    let daliuge_session_id = submitted.session_id.clone();
+    let workflow_manifest = submitted.workflow_manifest;
     repo::apply_execution_patch_with_correlation(
         pool,
         execution_id,
         LedgerPatch {
             status: Some(submitted.next_status),
             scheduler_name: Some(submitted.scheduler_name),
-            scheduler_job_id: submitted.scheduler_job_id.clone(),
-            workflow_manifest: Some(submitted.workflow_manifest),
+            scheduler_job_id: scheduler_job_id.clone(),
+            workflow_manifest: Some(workflow_manifest),
             execution_phase: Some(Some(ExecutionPhase::Submit)),
             ..LedgerPatch::default()
         },
         None,
     )
     .await?;
+    let physical_graph_sha256 = if let Some(physical_graph) = submitted.physical_graph.as_ref() {
+        Some(
+            persist_inline_json_artifact(
+                pool,
+                execution_id,
+                "physical_graph",
+                "translated",
+                physical_graph,
+                json!({"backend": scheduler_name}),
+            )
+            .await
+            .map_err(sqlx::Error::Protocol)?,
+        )
+    } else {
+        None
+    };
+    repo::apply_execution_provenance_patch(
+        pool,
+        execution_id,
+        ExecutionProvenancePatch {
+            physical_graph_sha256,
+            ..Default::default()
+        },
+    )
+    .await?;
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::Submitted),
+            submission_state: Some(SubmissionState::Submitted),
+            scheduler_name: Some(scheduler_name.clone()),
+            scheduler_job_id: scheduler_job_id.clone(),
+            scheduler_state: Some(if scheduler_name == "slurm" {
+                SchedulerState::Pending
+            } else {
+                SchedulerState::NotSubmitted
+            }),
+            daliuge_session_id: daliuge_session_id.clone(),
+            daliuge_state: Some(if scheduler_name == "slurm" {
+                DaliugeState::NotCreated
+            } else {
+                DaliugeState::Running
+            }),
+            remote_session_dir,
+            ..Default::default()
+        },
+    )
+    .await?;
+    if let Some(job_id) = scheduler_job_id {
+        repo::record_execution_observation(
+            pool,
+            execution_id,
+            ExecutionObservationInput {
+                kind: "scheduler".into(),
+                normalized_state: SchedulerState::Pending.as_str().into(),
+                raw_state: Some("SUBMITTED".into()),
+                reason: None,
+                payload: json!({"scheduler_job_id": job_id}),
+                source_version: None,
+                observed_at: Some(Utc::now()),
+            },
+        )
+        .await?;
+    }
+    if scheduler_name != "slurm" {
+        if let Some(session_id) = daliuge_session_id {
+            repo::record_execution_observation(
+                pool,
+                execution_id,
+                ExecutionObservationInput {
+                    kind: "daliuge_session".into(),
+                    normalized_state: DaliugeState::Running.as_str().into(),
+                    raw_state: Some("deployed".into()),
+                    reason: None,
+                    payload: json!({"daliuge_session_id": session_id}),
+                    source_version: None,
+                    observed_at: Some(Utc::now()),
+                },
+            )
+            .await?;
+        }
+    }
     if scheduler_name != "slurm" && !use_real {
         let job_payload = metrics::payload_with_trace(
             json!({
@@ -2523,12 +3509,16 @@ async fn apply_submit_result(
             }),
             &metrics::correlation_only(execution_id.to_string()),
         );
-        repo::enqueue_job(
+        repo::enqueue_job_with_options(
             pool,
             "dim_poll",
             job_payload,
-            Some(execution_id),
-            Some(&format!("dim_poll:{execution_id}:0")),
+            repo::JobEnqueueOptions {
+                execution_id: Some(execution_id),
+                idempotency_key: Some(format!("dim_poll:{execution_id}:0")),
+                pool: Some(worker_pool.to_string()),
+                ..Default::default()
+            },
         )
         .await?;
     }
@@ -2536,7 +3526,11 @@ async fn apply_submit_result(
     Ok(())
 }
 
-async fn run_dim_poll(pool: &PgPool, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+async fn run_dim_poll(
+    pool: &PgPool,
+    config: &WorkerConfig,
+    payload: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
     let execution_id = execution_id_from_payload(payload, "dim_poll")?;
     let poll_round = payload
         .get("poll_round")
@@ -2547,17 +3541,13 @@ async fn run_dim_poll(pool: &PgPool, payload: &serde_json::Value) -> Result<(), 
     };
     let policy = poll_policy_for_module(pool, &execution.project_module).await?;
     let session_id = execution
-        .scheduler_job_id
+        .daliuge_session_id
         .clone()
         .unwrap_or_else(|| execution_id.to_string());
     let use_real = payload
         .get("use_real_backends")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or_else(|| {
-            std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        });
+        .unwrap_or(config.use_real_backends);
     let poll = if use_real {
         let dim = build_dim_client(&execution, pool).await?;
         dim.poll(&session_id)
@@ -2580,6 +3570,8 @@ async fn run_dim_poll(pool: &PgPool, payload: &serde_json::Value) -> Result<(), 
         None,
         false,
         use_real,
+        config.dim_destroy_session,
+        &config.pool,
     )
     .await
 }
@@ -2590,11 +3582,13 @@ struct DimPollExec {
     verify_ssl: bool,
 }
 
-async fn run_dim_poll_tick(pool: &PgPool, _payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+async fn run_dim_poll_tick(
+    pool: &PgPool,
+    config: &WorkerConfig,
+    _payload: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
     metrics::set_dim_poll_batch_size(0);
-    let use_real = std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let use_real = config.use_real_backends;
     let executions = repo::list_rest_executions_pending_poll(pool).await?;
     metrics::set_dim_poll_batch_size(executions.len());
     if executions.is_empty() {
@@ -2603,31 +3597,31 @@ async fn run_dim_poll_tick(pool: &PgPool, _payload: &serde_json::Value) -> Resul
 
     let mut by_endpoint: HashMap<String, Vec<DimPollExec>> = HashMap::new();
     for execution in executions {
-        let session_id = match execution.scheduler_job_id.as_deref() {
+        let session_id = match execution.daliuge_session_id.as_deref() {
             Some(id) if !id.is_empty() => id.to_string(),
             _ => continue,
         };
-        let profile = match execution.deployment_profile_id {
-            Some(id) => repo::get_deployment_profile(pool, id).await?,
-            None => repo::get_default_deployment_profile(pool, &execution.project_module).await?,
-        };
-        let Some(rest) = profile.as_ref().and_then(|p| {
+        let profile = deployment_profile_for_execution(pool, &execution).await?;
+        let rest = profile.as_ref().and_then(|p| {
             serde_json::from_value::<DeploymentConfig>(p.deployment.clone())
                 .ok()
                 .and_then(|d| match d {
                     DeploymentConfig::RestRemote(rest) => Some(rest),
                     _ => None,
                 })
-        }) else {
-            continue;
-        };
-        let Some(endpoint) = rest_endpoint(&rest) else {
+        });
+        let endpoint = execution
+            .daliuge_manager_url
+            .clone()
+            .filter(|endpoint| !endpoint.trim().is_empty())
+            .or_else(|| rest.as_ref().and_then(rest_endpoint));
+        let Some(endpoint) = endpoint else {
             continue;
         };
         by_endpoint.entry(endpoint).or_default().push(DimPollExec {
             execution,
             session_id,
-            verify_ssl: rest.verify_ssl,
+            verify_ssl: rest.as_ref().is_none_or(|rest| rest.verify_ssl),
         });
     }
 
@@ -2642,15 +3636,17 @@ async fn run_dim_poll_tick(pool: &PgPool, _payload: &serde_json::Value) -> Resul
             let poll_round =
                 dim_poll_round_from_manifest(item.execution.workflow_manifest.as_ref());
             let policy = poll_policy_for_module(pool, &item.execution.project_module).await?;
-            let poll = if use_real {
-                dim.poll(&item.session_id)
-                    .await
-                    .map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+            let poll_result = if use_real {
+                dim.poll(&item.session_id).await
             } else {
-                MockDimClient
-                    .poll(&item.session_id)
-                    .await
-                    .map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+                MockDimClient.poll(&item.session_id).await
+            };
+            let poll = match poll_result {
+                Ok(poll) => poll,
+                Err(error) => {
+                    record_dim_reconciliation_error(pool, &item.execution, &error).await?;
+                    continue;
+                }
             };
             apply_dim_poll_update(
                 pool,
@@ -2663,6 +3659,8 @@ async fn run_dim_poll_tick(pool: &PgPool, _payload: &serde_json::Value) -> Resul
                 Some(&dim),
                 true,
                 use_real,
+                config.dim_destroy_session,
+                &config.pool,
             )
             .await?;
         }
@@ -2670,6 +3668,7 @@ async fn run_dim_poll_tick(pool: &PgPool, _payload: &serde_json::Value) -> Resul
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_dim_poll_update(
     pool: &PgPool,
     execution_id: uuid::Uuid,
@@ -2681,20 +3680,71 @@ async fn apply_dim_poll_update(
     dim_client: Option<&HttpDimClient>,
     from_tick: bool,
     use_real: bool,
+    destroy_on_terminal: bool,
+    worker_pool: &str,
 ) -> Result<(), sqlx::Error> {
     let max_rounds = policy.rest_max_rounds.unwrap_or(240);
     let interval_secs = policy.rest_interval_secs.unwrap_or(3.0) as i64;
     let correlation = execution_id.to_string();
     let correlation_id = Some(correlation.as_str());
     let session_id = execution
-        .scheduler_job_id
+        .daliuge_session_id
         .clone()
         .unwrap_or_else(|| execution_id.to_string());
+    let poll_summary = poll.poll_summary;
+    let daliuge_state = poll_summary
+        .get("normalized_session_state")
+        .and_then(Value::as_str)
+        .and_then(DaliugeState::parse)
+        .unwrap_or(match poll.status {
+            ExecutionStatus::Completed => DaliugeState::Finished,
+            ExecutionStatus::Failed => DaliugeState::Failed,
+            ExecutionStatus::Cancelled => DaliugeState::Cancelled,
+            _ => DaliugeState::Running,
+        });
+    repo::record_execution_observation(
+        pool,
+        execution_id,
+        ExecutionObservationInput {
+            kind: "daliuge_session".into(),
+            normalized_state: daliuge_state.as_str().into(),
+            raw_state: poll_summary
+                .get("status")
+                .map(Value::to_string)
+                .map(|value| value.chars().take(128).collect()),
+            reason: None,
+            payload: poll_summary.clone(),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::Monitoring),
+            submission_state: matches!(
+                execution
+                    .submission_state
+                    .as_deref()
+                    .and_then(SubmissionState::parse),
+                Some(SubmissionState::InFlight | SubmissionState::Uncertain)
+            )
+            .then_some(SubmissionState::Submitted),
+            daliuge_state: Some(daliuge_state),
+            daliuge_raw_status: poll_summary.get("status").cloned(),
+            last_reconciled_at: Some(Utc::now()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    metrics::record_reconciliation_result("daliuge", "observed");
     let mut manifest = if poll.status.is_terminal() {
         merge_dim_poll_into_manifest(
             execution.workflow_manifest.clone(),
             &session_id,
-            poll.poll_summary
+            poll_summary
                 .get("status")
                 .and_then(|v| v.get("status").or(Some(v)))
                 .and_then(|v| v.as_str())
@@ -2707,7 +3757,7 @@ async fn apply_dim_poll_update(
                 _ => "unknown",
             }),
             None,
-            poll.poll_summary
+            poll_summary
                 .get("error_drop_uids")
                 .and_then(|v| v.as_array())
                 .map(|a| a.len() as i64),
@@ -2716,7 +3766,7 @@ async fn apply_dim_poll_update(
         merge_poll_summary(
             execution.workflow_manifest.clone(),
             "dim_poll",
-            poll.poll_summary,
+            poll_summary,
         )
     };
     if poll.status.is_terminal() {
@@ -2728,7 +3778,7 @@ async fn apply_dim_poll_update(
                 }
             }
         }
-        if dim_destroy_on_terminal() {
+        if destroy_on_terminal {
             if let Some(client) = dim_client {
                 let _ = client.destroy_session(&session_id).await;
             }
@@ -2771,6 +3821,18 @@ async fn apply_dim_poll_update(
             correlation_id,
         )
         .await?;
+        repo::apply_execution_state_patch(
+            pool,
+            execution_id,
+            ExecutionStatePatch {
+                control_phase: Some(ControlPhase::Terminal),
+                terminal_outcome: Some(TerminalOutcome::Failed),
+                failure_class: Some(FailureClass::Timeout),
+                last_error: Some("DIM poll timeout".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
         let sources = source_identifiers_from_json(&execution.sources);
         repo::mark_sources_pending_workflow_run(pool, &execution.project_module, &sources).await?;
         metrics::record_execute_terminal(&execution.project_module, "failed");
@@ -2799,30 +3861,87 @@ async fn apply_dim_poll_update(
             }),
             &metrics::correlation_only(correlation.clone()),
         );
-        repo::enqueue_job_deferred(
+        repo::enqueue_job_deferred_with_options(
             pool,
             "dim_poll",
             job_payload,
             interval_secs,
-            Some(execution_id),
-            Some(&format!("dim_poll:{execution_id}:{}", poll_round + 1)),
+            repo::JobEnqueueOptions {
+                execution_id: Some(execution_id),
+                idempotency_key: Some(format!("dim_poll:{execution_id}:{}", poll_round + 1)),
+                pool: Some(worker_pool.to_string()),
+                ..Default::default()
+            },
         )
         .await?;
     }
     Ok(())
 }
 
-fn dim_destroy_on_terminal() -> bool {
-    std::env::var("BEAMPIPE_DIM_DESTROY_SESSION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+async fn record_dim_reconciliation_error(
+    pool: &PgPool,
+    execution: &beampipe_db::models::ExecutionRow,
+    error: &OrchestrationError,
+) -> Result<(), sqlx::Error> {
+    let (state, failure_class, kind, retryable) = match error {
+        OrchestrationError::Daliuge(error) => (
+            if error.kind == DaliugeErrorKind::NotFound {
+                DaliugeState::NotCreated
+            } else {
+                DaliugeState::Unreachable
+            },
+            error.failure_class(),
+            format!("{:?}", error.kind).to_ascii_lowercase(),
+            error.retryable,
+        ),
+        _ => (
+            DaliugeState::Unreachable,
+            FailureClass::DependencyUnavailable,
+            "backend".into(),
+            true,
+        ),
+    };
+    let detail = beampipe_security::redact_string(&error.to_string());
+    repo::record_execution_observation(
+        pool,
+        execution.uuid,
+        ExecutionObservationInput {
+            kind: "daliuge_session".into(),
+            normalized_state: state.as_str().into(),
+            raw_state: Some(kind.clone()),
+            reason: Some(detail.clone()),
+            payload: json!({
+                "error_kind": kind,
+                "retryable": retryable,
+                "system_action": "retain the stable session identifier and reconcile again",
+            }),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    repo::apply_execution_state_patch(
+        pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            daliuge_state: Some(state),
+            failure_class: Some(failure_class),
+            last_error: Some(detail),
+            last_reconciled_at: Some(Utc::now()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    metrics::record_reconciliation_result("daliuge", &kind);
+    Ok(())
 }
 
-async fn dim_poll_tick_interval_secs(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    if let Ok(v) = std::env::var("BEAMPIPE_DIM_POLL_INTERVAL_SECONDS") {
-        if let Ok(secs) = v.parse::<i64>() {
-            return Ok(secs.max(1));
-        }
+async fn dim_poll_tick_interval_secs(
+    pool: &PgPool,
+    config: &WorkerConfig,
+) -> Result<i64, sqlx::Error> {
+    if let Some(secs) = config.dim_poll_interval_seconds {
+        return Ok((secs as i64).max(1));
     }
     let mut min_interval = 3_i64;
     let configs = repo::list_active_project_configs(pool).await?;
@@ -2841,11 +3960,12 @@ async fn dim_poll_tick_interval_secs(pool: &PgPool) -> Result<i64, sqlx::Error> 
     Ok(min_interval.max(1))
 }
 
-async fn slurm_poll_tick_interval_secs(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    if let Ok(v) = std::env::var("BEAMPIPE_SLURM_POLL_INTERVAL_SECONDS") {
-        if let Ok(secs) = v.parse::<i64>() {
-            return Ok(secs.max(5));
-        }
+async fn slurm_poll_tick_interval_secs(
+    pool: &PgPool,
+    config: &WorkerConfig,
+) -> Result<i64, sqlx::Error> {
+    if let Some(secs) = config.slurm_poll_interval_seconds {
+        return Ok((secs as i64).max(5));
     }
     let mut min_interval = 30_i64;
     let configs = repo::list_active_project_configs(pool).await?;
@@ -2916,6 +4036,10 @@ fn manifest_for_slurm_poll(
     reason: Option<&str>,
 ) -> Value {
     let parsed = beampipe_domain::slurm::parse_scheduler_job_id(scheduler_job_id);
+    let remote_session_dir = parsed
+        .session_dir
+        .as_deref()
+        .or(execution.remote_session_dir.as_deref());
     let raw_line = result
         .raw_line
         .as_deref()
@@ -2931,9 +4055,9 @@ fn manifest_for_slurm_poll(
         terminal_ledger_status,
         SlurmPollManifestOpts {
             exit_code: result.exit_code,
-            remote_session_dir: parsed.session_dir.as_deref(),
+            remote_session_dir,
             reason,
-            diagnostics: stderr_diagnostics(parsed.session_dir.as_deref()),
+            diagnostics: stderr_diagnostics(remote_session_dir),
         },
     )
 }
@@ -2951,6 +4075,49 @@ async fn apply_slurm_poll_update(
     let correlation_id = Some(correlation.as_str());
     let scheduler_job_id = execution.scheduler_job_id.clone().unwrap_or_default();
     let parsed = beampipe_domain::slurm::parse_scheduler_job_id(&scheduler_job_id);
+    let scheduler_state = SchedulerState::from_normalized(&result.normalized_state);
+    let scheduler_reason = result
+        .raw_line
+        .as_deref()
+        .and_then(|line| line.split_once('|').map(|(_, reason)| reason.to_string()));
+    let inferred_daliuge_state =
+        (scheduler_state == SchedulerState::Succeeded).then_some(DaliugeState::Finished);
+    repo::record_execution_observation(
+        pool,
+        execution_id,
+        ExecutionObservationInput {
+            kind: "scheduler".into(),
+            normalized_state: scheduler_state.as_str().into(),
+            raw_state: Some(result.raw_state.clone()),
+            reason: scheduler_reason.clone(),
+            payload: json!({
+                "scheduler_job_id": scheduler_job_id,
+                "slurm_job_id": parsed.slurm_job_id,
+                "source": result.source,
+                "exit_code": result.exit_code,
+                "raw_line": result.raw_line,
+                "daliuge_completion_inferred": inferred_daliuge_state.is_some(),
+            }),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    repo::apply_execution_state_patch(
+        pool,
+        execution_id,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::Monitoring),
+            scheduler_state: Some(scheduler_state),
+            scheduler_raw_state: Some(result.raw_state.clone()),
+            scheduler_reason,
+            daliuge_state: inferred_daliuge_state,
+            last_reconciled_at: Some(Utc::now()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    metrics::record_reconciliation_result("slurm", scheduler_state.as_str());
 
     if slurm_poll_is_unknown(result) {
         warn!(
@@ -3053,7 +4220,12 @@ async fn apply_slurm_poll_update(
         if let Some(code) = result.exit_code {
             msg.push_str(&format!(" exit_code={code}"));
         }
-        if let Some(dir) = parsed.session_dir.as_deref().filter(|d| !d.is_empty()) {
+        if let Some(dir) = parsed
+            .session_dir
+            .as_deref()
+            .or(execution.remote_session_dir.as_deref())
+            .filter(|d| !d.is_empty())
+        {
             msg.push_str(&format!(
                 " stderr_glob={}/logs/err-*.log",
                 dir.trim_end_matches('/')
@@ -3093,12 +4265,12 @@ struct SlurmPollExec {
 
 async fn run_slurm_poll_tick(
     pool: &PgPool,
+    config: &WorkerConfig,
     _payload: &serde_json::Value,
 ) -> Result<(), sqlx::Error> {
     metrics::set_slurm_poll_batch_size(0);
-    let use_real = std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let use_real = config.use_real_backends;
+    reconcile_uncertain_slurm_submissions(pool, use_real).await?;
     let executions = repo::list_slurm_executions_pending_poll(pool).await?;
     metrics::set_slurm_poll_batch_size(executions.len());
     if executions.is_empty() {
@@ -3112,10 +4284,7 @@ async fn run_slurm_poll_tick(
             _ => continue,
         };
         let slurm_job_id = slurm_job_id_from_scheduler(scheduler_job_id);
-        let profile = match execution.deployment_profile_id {
-            Some(id) => repo::get_deployment_profile(pool, id).await?,
-            None => repo::get_default_deployment_profile(pool, &execution.project_module).await?,
-        };
+        let profile = deployment_profile_for_execution(pool, &execution).await?;
         let Some(profile) = profile else {
             continue;
         };
@@ -3140,7 +4309,13 @@ async fn run_slurm_poll_tick(
         let job_ids: Vec<String> = group.iter().map(|e| e.slurm_job_id.clone()).collect();
         let poll_map: HashMap<String, SlurmJobPollResult> = if use_real {
             let lock_key = target.advisory_lock_key();
-            if !repo::try_pg_advisory_lock(pool, lock_key).await? {
+            let mut lock_tx = pool.begin().await?;
+            let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .fetch_one(&mut *lock_tx)
+                .await?;
+            if !locked {
+                lock_tx.rollback().await?;
                 debug!(
                     login_node = %target.login_node,
                     "event=slurm_poll_tick_lock_busy"
@@ -3155,7 +4330,7 @@ async fn run_slurm_poll_tick(
                     metrics::record_slurm_poll_error("ssh_batch_failed");
                     sqlx::Error::Protocol(e.to_string())
                 });
-            let _ = repo::pg_advisory_unlock(pool, lock_key).await;
+            lock_tx.commit().await?;
             batch_result?
         } else {
             job_ids
@@ -3204,6 +4379,173 @@ async fn run_slurm_poll_tick(
     Ok(())
 }
 
+async fn reconcile_uncertain_slurm_submissions(
+    pool: &PgPool,
+    use_real: bool,
+) -> Result<(), sqlx::Error> {
+    if !use_real {
+        return Ok(());
+    }
+    for execution in repo::list_slurm_submissions_pending_reconciliation(pool).await? {
+        let Some(session_id) = execution
+            .daliuge_session_id
+            .as_deref()
+            .filter(|session_id| !session_id.is_empty())
+        else {
+            continue;
+        };
+        let Some(profile) = deployment_profile_for_execution(pool, &execution).await? else {
+            continue;
+        };
+        let client = slurm_backend_from_profile(Some(&profile), true, execution.created_at).slurm;
+        let matches = match client.find_by_name(session_id).await {
+            Ok(matches) => matches,
+            Err(error) => {
+                let detail = beampipe_security::redact_string(&error.to_string());
+                repo::record_execution_observation(
+                    pool,
+                    execution.uuid,
+                    ExecutionObservationInput {
+                        kind: "scheduler".into(),
+                        normalized_state: SchedulerState::Unknown.as_str().into(),
+                        raw_state: Some(format!("{:?}", error.kind).to_ascii_lowercase()),
+                        reason: Some(detail.clone()),
+                        payload: json!({
+                            "daliuge_session_id": session_id,
+                            "operation": "find_by_name",
+                            "retryable": error.retryable,
+                        }),
+                        source_version: None,
+                        observed_at: Some(Utc::now()),
+                    },
+                )
+                .await?;
+                repo::apply_execution_state_patch(
+                    pool,
+                    execution.uuid,
+                    ExecutionStatePatch {
+                        scheduler_state: Some(SchedulerState::Unknown),
+                        failure_class: Some(error.failure_class()),
+                        last_error: Some(detail),
+                        last_reconciled_at: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                metrics::record_reconciliation_result("slurm_submission", "lookup_error");
+                continue;
+            }
+        };
+        match matches.as_slice() {
+            [] => {
+                repo::record_execution_observation(
+                    pool,
+                    execution.uuid,
+                    ExecutionObservationInput {
+                        kind: "scheduler".into(),
+                        normalized_state: SchedulerState::Unknown.as_str().into(),
+                        raw_state: Some("not_found_by_name".into()),
+                        reason: Some(
+                            "no scheduler job currently matches the stable session name".into(),
+                        ),
+                        payload: json!({"daliuge_session_id": session_id}),
+                        source_version: None,
+                        observed_at: Some(Utc::now()),
+                    },
+                )
+                .await?;
+                metrics::record_reconciliation_result("slurm_submission", "not_found");
+                repo::apply_execution_state_patch(
+                    pool,
+                    execution.uuid,
+                    ExecutionStatePatch {
+                        scheduler_state: Some(SchedulerState::Unknown),
+                        failure_class: Some(FailureClass::NotFound),
+                        last_reconciled_at: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            [observation] => {
+                repo::record_execution_observation(
+                    pool,
+                    execution.uuid,
+                    ExecutionObservationInput {
+                        kind: "scheduler".into(),
+                        normalized_state: observation.state.as_str().into(),
+                        raw_state: Some(observation.raw_state.clone()),
+                        reason: observation.reason.clone(),
+                        payload: json!({
+                            "scheduler_job_id": observation.external_job_id,
+                            "daliuge_session_id": session_id,
+                            "recovered_after_lost_response": true,
+                            "source": observation.source,
+                        }),
+                        source_version: None,
+                        observed_at: Some(observation.observed_at),
+                    },
+                )
+                .await?;
+                repo::apply_execution_state_patch(
+                    pool,
+                    execution.uuid,
+                    ExecutionStatePatch {
+                        control_phase: Some(ControlPhase::Submitted),
+                        submission_state: Some(SubmissionState::Submitted),
+                        scheduler_job_id: Some(observation.external_job_id.clone()),
+                        scheduler_state: Some(observation.state),
+                        scheduler_raw_state: Some(observation.raw_state.clone()),
+                        scheduler_reason: observation.reason.clone(),
+                        last_reconciled_at: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                metrics::record_reconciliation_result("slurm_submission", "recovered");
+            }
+            observations => {
+                let job_ids: Vec<_> = observations
+                    .iter()
+                    .map(|observation| observation.external_job_id.clone())
+                    .collect();
+                let detail = format!(
+                    "multiple scheduler jobs match stable session name {session_id}: {}",
+                    job_ids.join(", ")
+                );
+                repo::record_execution_observation(
+                    pool,
+                    execution.uuid,
+                    ExecutionObservationInput {
+                        kind: "scheduler".into(),
+                        normalized_state: SchedulerState::Unknown.as_str().into(),
+                        raw_state: Some("ambiguous_name_match".into()),
+                        reason: Some(detail.clone()),
+                        payload: json!({"scheduler_job_ids": job_ids}),
+                        source_version: None,
+                        observed_at: Some(Utc::now()),
+                    },
+                )
+                .await?;
+                repo::apply_execution_state_patch(
+                    pool,
+                    execution.uuid,
+                    ExecutionStatePatch {
+                        scheduler_state: Some(SchedulerState::Unknown),
+                        failure_class: Some(FailureClass::InconsistentState),
+                        last_error: Some(detail),
+                        last_reconciled_at: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                metrics::record_reconciliation_result("slurm_submission", "ambiguous");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 struct PollPolicy {
     rest_max_rounds: Option<i64>,
@@ -3234,10 +4576,7 @@ async fn build_dim_client(
     execution: &beampipe_db::models::ExecutionRow,
     pool: &PgPool,
 ) -> Result<HttpDimClient, sqlx::Error> {
-    let profile = match execution.deployment_profile_id {
-        Some(id) => repo::get_deployment_profile(pool, id).await?,
-        None => repo::get_default_deployment_profile(pool, &execution.project_module).await?,
-    };
+    let profile = deployment_profile_for_execution(pool, execution).await?;
     let (endpoint, verify_ssl) = profile
         .as_ref()
         .and_then(|p| {
@@ -3461,11 +4800,11 @@ fn rest_endpoint(rest: &RestRemoteDeploymentConfig) -> Option<String> {
         return None;
     }
     let port = rest.deploy_port.unwrap_or(8001);
-    Some(if port == 80 {
-        format!("http://{host}")
-    } else {
-        format!("http://{host}:{port}")
-    })
+    Some(beampipe_orchestration::dim::dim_rest_base(
+        host,
+        port,
+        rest.use_https,
+    ))
 }
 
 fn merge_poll_summary(
@@ -3600,6 +4939,53 @@ mod tests {
             ),
             Some("slurm_remote")
         );
+    }
+
+    #[test]
+    fn graph_diff_reports_only_changed_fields_and_nodes() {
+        let before = json!({
+            "nodeDataArray": [
+                {"id": "ingest", "name": "beampipe-ingest", "fields": [
+                    {"name": "manifest_path", "value": "old.json"},
+                    {"name": "stable", "value": true}
+                ]},
+                {"id": "removed", "name": "removed-node", "fields": []}
+            ],
+            "graphConfigurations": {"activeGraphConfigId": "before"}
+        });
+        let after = json!({
+            "nodeDataArray": [
+                {"id": "ingest", "name": "beampipe-ingest", "fields": [
+                    {"name": "manifest_path", "value": "run.json"},
+                    {"name": "stable", "value": true}
+                ]},
+                {"id": "added", "name": "added-node", "fields": []}
+            ],
+            "graphConfigurations": {"activeGraphConfigId": "after"}
+        });
+
+        let summary = graph_diff_summary(&before, &after);
+        assert_eq!(summary["before_node_count"], 2);
+        assert_eq!(summary["after_node_count"], 2);
+        assert_eq!(summary["changed_node_count"], 3);
+        assert_eq!(summary["graph_configuration_changed"], true);
+        assert!(summary["changed_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| {
+                change["node"] == "beampipe-ingest" && change["fields"] == json!(["manifest_path"])
+            }));
+        assert!(summary["changed_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| { change["node"] == "added" && change["change"] == "added" }));
+        assert!(summary["changed_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| { change["node"] == "removed" && change["change"] == "removed" }));
     }
 
     #[test]

@@ -1,5 +1,14 @@
 {% extends "base.html" %}
 
-{% block announce %}
-  Under construction
+{% block extrahead %}
+  <meta name="theme-color" content="#050505">
+  {% if page and page.is_homepage %}
+    <link
+      rel="preload"
+      as="image"
+      href="{{ 'assets/brand/beampipe-control-room-v2.webp' | url }}"
+      type="image/webp"
+      fetchpriority="high"
+    >
+  {% endif %}
 {% endblock %}

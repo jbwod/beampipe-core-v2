@@ -1,6 +1,6 @@
 # First run
 
-This workflow proves the control plane path with one `wallaby_hires` source: authenticate, upload config, register a source, run discovery, create an execution, and queue a dry backend run. Keep `do_stage` and `do_submit` disabled until real CASDA, 流 Translator Manager, 流 DIM, or Slurm access is configured.
+This workflow proves the control-plane path with one `wallaby_hires` source: authenticate, upload config, register a source, run discovery, create an execution, and queue a dry backend run. Keep `do_stage` and `do_submit` disabled until real CASDA, DALiuGE Translator Manager, DALiuGE DIM, or Slurm access is configured.
 
 ## 1. Start services
 
@@ -25,7 +25,7 @@ Create an admin user first if you have not already done so.
 ```bash
 TOKEN=$(curl -s -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"change-me"}' | jq -r .access_token)
+  -d '{"username":"admin","password":"replace-this-local-password"}' | jq -r .access_token)
 AUTH="Authorization: Bearer $TOKEN"
 ```
 

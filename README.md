@@ -11,11 +11,11 @@
   <img src="https://img.shields.io/badge/%3E__Rust-v2-d6c178?style=flat-square&labelColor=050505" alt="Rust v2"/>
   <img src="https://img.shields.io/badge/%3E__API-%2Fapi%2Fv2-7fd7e6?style=flat-square&labelColor=050505" alt="/api/v2"/>
   <img src="https://img.shields.io/badge/%3E__ledger-PostgreSQL-a7cfa3?style=flat-square&labelColor=050505" alt="PostgreSQL ledger"/>
-  <img src="https://img.shields.io/badge/%E6%B5%81-DALiuGE-e6edf3?style=flat-square&labelColor=050505" alt="DALiuGE"/>
+  <img src="https://img.shields.io/badge/%3E__DALiuGE-runtime-e6edf3?style=flat-square&labelColor=050505" alt="DALiuGE runtime"/>
 </p>
 
 <p align="center">
-  <img src="assets/readme/control-plane-terminal-dark.png" alt="Terminal-style Beampipe control plane diagram" style="border-radius: 12px; background: #000;" />
+  <img src="boilerplate_docs/assets/brand/beampipe-control-room-v2.webp" alt="Radio telescope data flowing through the Beampipe control plane to compute infrastructure" style="border-radius: 4px; background: #000;" />
 </p>
 
 ## `What it does`
@@ -42,23 +42,22 @@
 
 <pre>
 +-- terminal ---------------------------------------------------------------+
-| docker compose up -d                                                     |
-| export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe |
-| export BEAMPIPE_JWT_SECRET=change-me                                     |
-| beampipe migrate                                                         |
-| beampipe admin create-user --username admin --password change-me \       |
-|   --email admin@example.test                                             |
-| beampipe project validate -f config/wallaby_hires.v2.yaml                |
-| beampipe serve --worker false                                            |
+| docker compose up -d postgres                                            |
+| beampipe init --directory operator-local                                 |
+| cd operator-local                                                        |
+| beampipe setup --yes --admin-password 'replace-this-local-password' \    |
+|   --project-config ../config/wallaby_hires.v2.yaml                       |
+| beampipe doctor                                                          |
+| beampipe start                                                           |
 +-------------------------------------------------------------------------+
 </pre>
 
-> Add worker capacity from another shell:
+> Inspect the live PostgreSQL-backed control plane from another shell:
 
 ```bash
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-export BEAMPIPE_JWT_SECRET=change-me
-BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
+cd operator-local
+beampipe status
+beampipe console
 ```
 
 ## `One Binary`
@@ -68,12 +67,20 @@ BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
 
 | Command | Purpose |
 |---------|---------|
+| `beampipe init` | Create safe local and production configuration templates |
+| `beampipe setup` | Configure PostgreSQL, admin, CASDA, DALiuGE, SLURM, profiles, and workers |
+| `beampipe doctor` | Run dependency, migration, SSH, scheduler, graph, and worker diagnostics |
+| `beampipe start` | Start the API and embedded worker for a compact deployment |
+| `beampipe console` | Open the live terminal operator console |
 | `beampipe serve` | Run the HTTP API, optionally with embedded worker ticks |
 | `beampipe serve --worker false` | API-only process |
 | `beampipe worker` | Worker-only process |
 | `beampipe migrate` | Apply database migrations |
 | `beampipe admin create-user` | Create an operator account |
 | `beampipe project validate` | Validate project config YAML/JSON |
+| `beampipe graph prepare` | Build and checksum a manifest/patched graph without submission |
+| `beampipe execution retry` | Retry only a provably safe failed stage |
+| `beampipe execution cancel` | Confirm external cancellation and audit the action |
 | `beampipe wasm upload` | Upload WASM hook modules |
 | `beampipe slurm ping` | Smoke-test Slurm SSH configuration |
 | `beampipe openapi export` | Export the OpenAPI contract |
@@ -94,8 +101,9 @@ BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
 > Preferred for operators and production-style process splits.
 
 ```bash
-beampipe migrate
-beampipe admin create-user --username admin --password change-me --email admin@example.test
+beampipe init
+beampipe setup
+beampipe doctor
 beampipe serve --worker false
 BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
 ```
@@ -111,7 +119,7 @@ docker compose up -d
 docker compose run --rm api migrate
 docker compose run --rm api admin create-user \
   --username admin \
-  --password change-me \
+  --password 'replace-this-local-password' \
   --email admin@example.test
 ```
 
@@ -209,15 +217,14 @@ cp openapi.json boilerplate_docs/openapi.json
 
 | Page | Link |
 |------|------|
-| Home | [beampipe-core.readthedocs.io](https://beampipe-core.readthedocs.io/) |
-| Installation | [Getting started / Installation](https://beampipe-core.readthedocs.io/getting-started/installation/) |
-| First run | [Getting started / First run](https://beampipe-core.readthedocs.io/getting-started/first-run/) |
-| Configuration | [Getting started / Configuration](https://beampipe-core.readthedocs.io/getting-started/configuration/) |
-| Deployment profiles | [Architecture / Deployment profiles](https://beampipe-core.readthedocs.io/architecture/deployment-profiles/) |
-| Project config YAML | [Project configs](https://beampipe-core.readthedocs.io/project-configs/) |
-| DALiuGE Graphs | [Project configs / DALiuGE Graphs](https://beampipe-core.readthedocs.io/project-configs/graph-patches/) |
-| API workflow | [API workflow](https://beampipe-core.readthedocs.io/api/) |
-| API reference | [Redoc reference](https://beampipe-core.readthedocs.io/api/reference/) |
+| Home | [Documentation home](https://beampipe-core.readthedocs.io/) |
+| Start | [Choose a setup path](https://beampipe-core.readthedocs.io/getting-started/) |
+| Operate | [Operator handbook](https://beampipe-core.readthedocs.io/operations/) |
+| Configure projects | [Project config YAML](https://beampipe-core.readthedocs.io/project-configs/) |
+| Understand | [Architecture map](https://beampipe-core.readthedocs.io/architecture/) |
+| CLI reference | [Command families](https://beampipe-core.readthedocs.io/reference/cli/) |
+| API workflow | [Task-oriented API guide](https://beampipe-core.readthedocs.io/api/) |
+| API schema | [Generated API reference](https://beampipe-core.readthedocs.io/api/reference/) |
 
 ## `Contributing`
 

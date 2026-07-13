@@ -21,11 +21,16 @@ use beampipe_domain::{
         parsed_source_readiness_error, source_execution_status, ArchiveMetadataReadiness,
         RegisteredSourceReadiness, SourceExecutionStatus,
     },
-    ExecutionStatus, LedgerPatch,
+    DaliugeState, ExecutionStatus, Failure, FailureClass, LedgerPatch, RetryDisposition,
+    SchedulerState,
 };
 use beampipe_jobs::{spawn_workers, WorkerConfig};
 use beampipe_metrics as metrics;
 use beampipe_orchestration::{cancel::CancelParams, cancel_scheduler_session};
+use beampipe_orchestration::{
+    DaliugeClientError, DaliugeManager, DaliugeTranslator, HttpDimClient, HttpTranslatorClient,
+    SchedulerAdapter, SchedulerAdapterError, SshSlurmClient,
+};
 use beampipe_profiles::DeploymentProfile;
 use beampipe_project::{
     DiagnosticSeverity, ProjectConfig, ValidationDiagnostic, ValidationReport, WasmHost,
@@ -62,10 +67,14 @@ pub struct AppState {
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        health, ready, metrics, health_tap, login, refresh, logout, current_user, create_source, bulk_create_sources, discover_sources,
+        health, ready, diagnostics, metrics, health_tap, login, refresh, logout, current_user, create_source, bulk_create_sources, discover_sources,
+        operator_overview, list_workers, get_worker, register_worker, heartbeat_worker,
+        drain_worker, resume_worker, list_worker_pools, list_worker_leases,
         list_sources, get_source, get_source_status, update_source, delete_source, get_source_metadata,
         list_source_executions, prepare_execution, create_execution, list_executions, get_execution,
-        execution_status, execution_summary, execution_ledger_snapshot, patch_execution, execute_execution,
+        execution_status, execution_summary, execution_ledger_snapshot, execution_observations,
+        execution_artifacts, patch_execution, execute_execution, retry_execution, prepare_graph,
+        scheduler_status, scheduler_jobs, daliuge_inspect, daliuge_sessions,
         upload_project_config, get_project_config, list_project_config_versions,
         upload_project_config_wasm, get_project_config_wasm,
         list_projects, list_project_contracts, get_project_contract,
@@ -85,9 +94,15 @@ pub struct AppState {
         RefreshRequest, LogoutRequest,
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
         DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
-        ExecutionCreate, ExecutionPatchRequest, ExecuteRequest, ExecutionStatus,
+        ExecutionCreate, ExecutionPatchRequest, ExecuteRequest, ExecutionRetryRequest,
+        ExecutionRetryResponse, GraphPrepareRequest, GraphPrepareResponse, ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
         ProjectConfig, ValidationReport, ValidationDiagnostic, DiagnosticSeverity,
+        ApiErrorResponse, beampipe_domain::Failure,
+        beampipe_domain::Diagnostic,
+        beampipe_domain::FailureClass,
+        beampipe_domain::RetryDisposition,
+        beampipe_domain::ExecutionRetryStage,
         beampipe_project::ProjectMetadata,
         beampipe_project::AdapterConfig,
         beampipe_project::TapConfig,
@@ -97,7 +112,9 @@ pub struct AppState {
         beampipe_project::PrepareMetadataConfig,
         beampipe_project::SignatureConfig,
         beampipe_project::ManifestConfig,
+        beampipe_project::ManifestTemplate,
         beampipe_project::GraphPatch,
+        beampipe_project::GraphPatchValue,
         beampipe_project::GraphPatchMatch,
         beampipe_project::GraphPatchMatchKind,
         beampipe_project::AutomationConfig,
@@ -118,6 +135,8 @@ pub struct AppState {
         beampipe_profiles::DeploymentConfig,
         beampipe_profiles::RestRemoteDeploymentConfig,
         beampipe_profiles::SlurmRemoteDeploymentConfig,
+        beampipe_profiles::SlurmResourceConfig,
+        beampipe_profiles::DaliugeManagerTopologyConfig,
         SourceExecutionStatus,
         observability::NotificationChannelCreate, observability::NotificationChannelUpdate,
         observability::NotificationChannelResponse, observability::AlertDeliveryResponse,
@@ -125,6 +144,12 @@ pub struct AppState {
         observability::AlertRuleCreate, observability::AlertRuleUpdate,
         ProvenanceEventRow, NotificationChannelRow, AlertRuleRow, AlertDeliveryRow,
         ProvenanceSummary,
+        OperatorOverviewResponse, WorkerRead, WorkerRegisterRequest, WorkerHeartbeatResponse,
+        WorkerLeaseRead, ExecutionRead, ExecutionDebugUrls, ExecutionStatusResponse,
+        ExecutionSummaryResponse,
+        SchedulerStatusResponse, SchedulerJobRead, DaliugeInspectResponse,
+        WorkerInstanceRow, WorkerPoolSummary, ExecutionObservationRow,
+        ExecutionArtifactRow, OperatorOverviewCounts, DiagnosticsResponse,
     )),
     tags(
         (name = "health", description = "Liveness, readiness, and archive TAP connectivity probes."),
@@ -135,7 +160,11 @@ pub struct AppState {
         (name = "jobs", description = "Postgres-backed async jobs."),
         (name = "deployment-profiles", description = "DALiuGE deployment profiles (translation + REST/Slurm remote deployment configuration)."),
         (name = "alerts", description = "Notification channels and alert rules."),
-        (name = "provenance", description = "Audit event stream.")
+        (name = "provenance", description = "Audit event stream."),
+        (name = "operators", description = "System overview and Beampipe control-plane workers."),
+        (name = "scheduler", description = "Scheduler connectivity, resources, and persisted jobs."),
+        (name = "daliuge", description = "DALiuGE translator, manager, and session inspection."),
+        (name = "graphs", description = "Deterministic graph preparation and patch diagnostics.")
     )
 )]
 pub struct ApiDoc;
@@ -155,6 +184,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v2/jobs", post(enqueue_job_handler))
         .route("/api/v2/executions/:id/execute", post(execute_execution))
+        .route("/api/v2/executions/:id/retry", post(retry_execution))
+        .route("/api/v2/graphs/prepare", post(prepare_graph))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_middleware,
@@ -165,6 +196,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/health/tap", get(health_tap))
         .route("/api/v2/metrics", get(metrics))
         .route("/api/v2/ready", get(ready))
+        .route("/api/v2/diagnostics", get(diagnostics))
+        .route("/api/v2/overview", get(operator_overview))
         .route("/api/v2/refresh", post(refresh))
         .route("/api/v2/logout", post(logout))
         .route("/api/v2/user/me", get(current_user))
@@ -190,6 +223,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/executions/:id/status", get(execution_status))
         .route("/api/v2/executions/:id/summary", get(execution_summary))
         .route(
+            "/api/v2/executions/:id/observations",
+            get(execution_observations),
+        )
+        .route("/api/v2/executions/:id/artifacts", get(execution_artifacts))
+        .route(
             "/api/v2/executions/:id/ledger-snapshot",
             get(execution_ledger_snapshot),
         )
@@ -205,6 +243,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/projects", get(list_projects))
         .route("/api/v2/projects/contracts", get(list_project_contracts))
         .route("/api/v2/projects/contracts/:id", get(get_project_contract))
+        .route("/api/v2/workers", get(list_workers).post(register_worker))
+        .route("/api/v2/workers/pools", get(list_worker_pools))
+        .route("/api/v2/workers/leases", get(list_worker_leases))
+        .route("/api/v2/workers/:id", get(get_worker))
+        .route("/api/v2/workers/:id/heartbeat", post(heartbeat_worker))
+        .route("/api/v2/workers/:id/drain", post(drain_worker))
+        .route("/api/v2/workers/:id/resume", post(resume_worker))
+        .route("/api/v2/scheduler/status", get(scheduler_status))
+        .route("/api/v2/scheduler/jobs", get(scheduler_jobs))
+        .route("/api/v2/daliuge/inspect", get(daliuge_inspect))
+        .route("/api/v2/daliuge/sessions", get(daliuge_sessions))
         .route(
             "/api/v2/deployment-profiles",
             post(create_deployment_profile).get(list_deployment_profiles),
@@ -394,6 +443,128 @@ pub enum ApiError {
     TooManyRequests,
     #[error("wasm error: {0}")]
     Wasm(#[from] beampipe_project::WasmHostError),
+    #[error("DALiuGE error: {0}")]
+    Daliuge(#[from] DaliugeClientError),
+    #[error("scheduler error: {0}")]
+    Scheduler(#[from] SchedulerAdapterError),
+    #[error("execution retry rejected ({code}): {message}")]
+    RetryRejected { code: String, message: String },
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ApiErrorResponse {
+    /// Kept for compatibility with existing `/api/v2` clients.
+    pub error: String,
+    pub code: String,
+    pub failure: Failure,
+}
+
+fn api_failure(error: &ApiError) -> Failure {
+    match error {
+        ApiError::NotFound => Failure::new(
+            "not_found",
+            "api",
+            FailureClass::NotFound,
+            "the requested resource was not found",
+            RetryDisposition::AfterRemediation,
+            "the request was not applied",
+        )
+        .with_operator_action("check the resource identifier and try again"),
+        ApiError::ServiceUnavailable => Failure::new(
+            "service_unavailable",
+            "beampipe",
+            FailureClass::DependencyUnavailable,
+            "the service is temporarily unavailable",
+            RetryDisposition::Safe,
+            "the request was not applied",
+        )
+        .with_operator_action("run `beampipe doctor` and retry when dependencies are healthy"),
+        ApiError::BadRequest(message) => Failure::new(
+            "bad_request",
+            "api",
+            FailureClass::Validation,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the request was rejected before execution",
+        )
+        .with_operator_action("correct the request using the reported message and retry"),
+        ApiError::Unauthorized(_) | ApiError::Auth(_) => Failure::new(
+            "unauthorized",
+            "authentication",
+            FailureClass::Authentication,
+            "authentication failed",
+            RetryDisposition::AfterRemediation,
+            "the request was not authorized",
+        )
+        .with_operator_action("authenticate again with valid credentials"),
+        ApiError::Forbidden(message) => Failure::new(
+            "forbidden",
+            "authorization",
+            FailureClass::Authorization,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the requested operation was not applied",
+        )
+        .with_operator_action("use an account with the required role"),
+        ApiError::Db(_) => Failure::new(
+            "database_error",
+            "postgres",
+            FailureClass::DependencyUnavailable,
+            "the database operation failed",
+            RetryDisposition::Safe,
+            "the request failed; Beampipe did not report it as successful",
+        )
+        .with_operator_action("check database health with `beampipe doctor` before retrying")
+        .with_log_reference("Beampipe API structured logs for this request"),
+        ApiError::Project(error) => Failure::new(
+            "project_config_parse_failed",
+            "project_config",
+            FailureClass::Configuration,
+            error.to_string(),
+            RetryDisposition::AfterRemediation,
+            "the project configuration was not loaded",
+        )
+        .with_operator_action("validate the project file and correct the reported syntax"),
+        ApiError::TooManyRequests => Failure::new(
+            "rate_limit_exceeded",
+            "api",
+            FailureClass::RateLimited,
+            "the request rate limit was exceeded",
+            RetryDisposition::Safe,
+            "the request was rejected without changing state",
+        )
+        .with_operator_action("wait for the rate-limit window before retrying"),
+        ApiError::Wasm(error) => Failure::new(
+            "wasm_validation_failed",
+            "project_wasm",
+            FailureClass::Validation,
+            error.to_string(),
+            RetryDisposition::AfterRemediation,
+            "the WASM module was not stored or executed",
+        )
+        .with_operator_action("correct or rebuild the module, then validate it again"),
+        ApiError::Validation(report) => Failure::new(
+            "project_config_validation_failed",
+            "project_config",
+            FailureClass::Validation,
+            "project config validation failed",
+            RetryDisposition::AfterRemediation,
+            "the project configuration was not activated",
+        )
+        .with_operator_action("correct the reported configuration paths and retry")
+        .with_diagnostics(report.errors.clone()),
+        ApiError::Daliuge(error) => error.as_failure(),
+        ApiError::Scheduler(error) => error.as_failure(),
+        ApiError::RetryRejected { code, message } => Failure::new(
+            code.clone(),
+            "execution_retry",
+            FailureClass::InconsistentState,
+            message,
+            RetryDisposition::AfterRemediation,
+            "no retry job was created and no external work was repeated",
+        )
+        .with_operator_action("reconcile external state or create a new execution as indicated"),
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -410,11 +581,19 @@ impl IntoResponse for ApiError {
             ApiError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Auth(_) => StatusCode::UNAUTHORIZED,
             ApiError::Wasm(_) => StatusCode::BAD_REQUEST,
+            ApiError::Daliuge(_) | ApiError::Scheduler(_) => StatusCode::BAD_GATEWAY,
+            ApiError::RetryRejected { .. } => StatusCode::CONFLICT,
         };
-        match self {
-            ApiError::Validation(report) => (status, Json(json!(report))).into_response(),
-            other => (status, Json(json!({"error": other.to_string()}))).into_response(),
+        if matches!(&self, ApiError::Db(_)) {
+            tracing::error!(error = %self, "event=api_request_failed");
         }
+        let failure = api_failure(&self);
+        let response = ApiErrorResponse {
+            error: failure.message.clone(),
+            code: failure.code.clone(),
+            failure,
+        };
+        (status, Json(response)).into_response()
     }
 }
 
@@ -557,11 +736,9 @@ async fn ready(
         "not_configured".into()
     };
     let timeout = Duration::from_secs(state.settings.discovery_tap_health_timeout_seconds);
-    let casda_url = std::env::var("BEAMPIPE_CASDA_TAP_URL").ok();
-    let vizier_url = std::env::var("BEAMPIPE_VIZIER_TAP_URL").ok();
     let tap_report = probe_tap_health(
-        casda_url.as_deref().filter(|u| !u.is_empty()),
-        vizier_url.as_deref().filter(|u| !u.is_empty()),
+        state.settings.casda_tap_url.as_deref(),
+        state.settings.vizier_tap_url.as_deref(),
         timeout,
     )
     .await;
@@ -605,23 +782,820 @@ async fn ready(
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticsResponse {
+    pub healthy: bool,
+    pub generated_at: chrono::DateTime<Utc>,
+    pub diagnostics: Vec<beampipe_domain::Diagnostic>,
+}
+
+#[utoipa::path(get, path = "/api/v2/diagnostics", tag = "health", responses((status = 200, body = DiagnosticsResponse)))]
+async fn diagnostics(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Query(query): Query<OperatorProfileQuery>,
+) -> Json<DiagnosticsResponse> {
+    let mut diagnostics = Vec::new();
+    if let Err(error) = sqlx::query("SELECT 1").execute(&state.pool).await {
+        diagnostics.push(
+            beampipe_domain::Diagnostic::error(
+                "database",
+                "database.unreachable",
+                "PostgreSQL connectivity check failed",
+            )
+            .with_hint(format!(
+                "check DATABASE_URL and PostgreSQL health; detail: {}",
+                redact_string(&error.to_string())
+            )),
+        );
+    } else {
+        match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM _sqlx_migrations WHERE success = false",
+        )
+        .fetch_one(&state.pool)
+        .await
+        {
+            Ok(0) => {}
+            Ok(count) => diagnostics.push(
+                beampipe_domain::Diagnostic::error(
+                    "database.migrations",
+                    "database.migration_failed",
+                    format!("{count} database migration(s) are marked unsuccessful"),
+                )
+                .with_hint("inspect migration logs before starting workers"),
+            ),
+            Err(error) => diagnostics.push(
+                beampipe_domain::Diagnostic::error(
+                    "database.migrations",
+                    "database.migration_state_unreadable",
+                    "the SQLx migration state could not be read",
+                )
+                .with_hint(redact_string(&error.to_string())),
+            ),
+        }
+    }
+    for issue in beampipe_orchestration::collect_security_issues(&state.settings) {
+        diagnostics.push(
+            beampipe_domain::Diagnostic::error(
+                "security",
+                "security.configuration",
+                redact_string(&issue),
+            )
+            .with_hint("run `beampipe security check` and correct the reported setting"),
+        );
+    }
+    let tap = probe_tap_health(
+        state.settings.casda_tap_url.as_deref(),
+        state.settings.vizier_tap_url.as_deref(),
+        Duration::from_secs(state.settings.discovery_tap_health_timeout_seconds),
+    )
+    .await;
+    for (name, endpoint) in [("casda", tap.casda), ("vizier", tap.vizier)] {
+        if endpoint.configured && !endpoint.reachable {
+            diagnostics.push(
+                beampipe_domain::Diagnostic::error(
+                    format!("adapters.{name}"),
+                    format!("{name}.unreachable"),
+                    format!("the configured {name} TAP endpoint is unreachable"),
+                )
+                .with_hint("check endpoint URL, network access, proxy, and credentials"),
+            );
+        }
+    }
+    if let Ok(risk) = repo::reconciliation_risk_count(&state.pool).await {
+        if risk > 0 {
+            diagnostics.push(
+                beampipe_domain::Diagnostic::warning(
+                    "executions.reconciliation",
+                    "reconciliation.operator_attention",
+                    format!("{risk} execution(s) have uncertain or inconsistent external state"),
+                )
+                .with_hint("inspect the execution ledger before retrying or resubmitting"),
+            );
+        }
+    }
+    let stale_after = (state.settings.worker_heartbeat_interval_seconds as i64 * 3).max(30);
+    if let Ok(overview) = repo::operator_overview_counts(&state.pool, stale_after).await {
+        if overview.stale_workers > 0 {
+            diagnostics.push(
+                beampipe_domain::Diagnostic::warning(
+                    "workers.heartbeat",
+                    "workers.stale",
+                    format!(
+                        "{} Beampipe worker heartbeat(s) are stale",
+                        overview.stale_workers
+                    ),
+                )
+                .with_hint("inspect worker leases and host clock skew before forcing recovery"),
+            );
+        }
+    }
+    let profile = resolve_operator_profile(&state.pool, query.profile.as_deref())
+        .await
+        .ok()
+        .flatten();
+    match daliuge_endpoints(&state.settings, profile.as_ref()) {
+        Ok(endpoints) => {
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                HttpTranslatorClient::new(endpoints.tm_url)
+                    .inspect(endpoints.manager_host.as_deref(), endpoints.manager_port),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => diagnostics.push(
+                    beampipe_domain::Diagnostic::error(
+                        "daliuge.translator",
+                        "daliuge.translator_unreachable",
+                        "DALiuGE Translator Manager compatibility probe failed",
+                    )
+                    .with_hint(redact_string(&error.to_string())),
+                ),
+                Err(_) => diagnostics.push(
+                    beampipe_domain::Diagnostic::error(
+                        "daliuge.translator",
+                        "daliuge.translator_timeout",
+                        "DALiuGE Translator Manager probe timed out",
+                    )
+                    .with_hint("check manager health and network routing"),
+                ),
+            }
+            if let Some(manager_url) = endpoints.manager_url {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    HttpDimClient::new(manager_url).inspect(),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => diagnostics.push(
+                        beampipe_domain::Diagnostic::error(
+                            "daliuge.manager",
+                            "daliuge.manager_unreachable",
+                            "DALiuGE Data Island Manager probe failed",
+                        )
+                        .with_hint(redact_string(&error.to_string())),
+                    ),
+                    Err(_) => diagnostics.push(
+                        beampipe_domain::Diagnostic::error(
+                            "daliuge.manager",
+                            "daliuge.manager_timeout",
+                            "DALiuGE Data Island Manager probe timed out",
+                        )
+                        .with_hint("check manager health and network routing"),
+                    ),
+                }
+            }
+        }
+        Err(error) => diagnostics.push(
+            beampipe_domain::Diagnostic::warning(
+                "daliuge",
+                "daliuge.not_configured",
+                "DALiuGE endpoints are not fully configured",
+            )
+            .with_hint(redact_string(&error.to_string())),
+        ),
+    }
+    if let Some(profile) = profile {
+        if let Ok(client) = scheduler_client_from_profile(&profile) {
+            match tokio::time::timeout(Duration::from_secs(10), client.test_connectivity()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => diagnostics.push(
+                    beampipe_domain::Diagnostic::error(
+                        "scheduler",
+                        "scheduler.connectivity_failed",
+                        "SLURM connectivity probe failed",
+                    )
+                    .with_hint(redact_string(&error.to_string())),
+                ),
+                Err(_) => diagnostics.push(
+                    beampipe_domain::Diagnostic::error(
+                        "scheduler",
+                        "scheduler.connectivity_timeout",
+                        "SLURM connectivity probe timed out",
+                    )
+                    .with_hint("check SSH routing, host keys, and remote command availability"),
+                ),
+            }
+        }
+    }
+    let healthy = !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
+    Json(DiagnosticsResponse {
+        healthy,
+        generated_at: Utc::now(),
+        diagnostics,
+    })
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OperatorOverviewResponse {
+    pub generated_at: chrono::DateTime<Utc>,
+    #[serde(flatten)]
+    pub counts: OperatorOverviewCounts,
+    pub casda: String,
+    pub daliuge: String,
+    pub scheduler: String,
+}
+
+#[utoipa::path(get, path = "/api/v2/overview", tag = "operators", responses((status = 200, body = OperatorOverviewResponse)))]
+async fn operator_overview(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+) -> Result<Json<OperatorOverviewResponse>, ApiError> {
+    let stale_after = (state.settings.worker_heartbeat_interval_seconds as i64 * 3).max(30);
+    let counts = repo::operator_overview_counts(&state.pool, stale_after).await?;
+    Ok(Json(OperatorOverviewResponse {
+        generated_at: Utc::now(),
+        counts,
+        casda: if state.settings.casda_tap_url.is_some() {
+            "configured"
+        } else {
+            "not_configured"
+        }
+        .into(),
+        daliuge: if state.settings.tm_url.is_some() || state.settings.dim_url.is_some() {
+            "configured"
+        } else {
+            "profile_managed"
+        }
+        .into(),
+        scheduler: if state.settings.slurm_remote_user.is_some() {
+            "configured"
+        } else {
+            "profile_managed"
+        }
+        .into(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkerListQuery {
+    #[serde(default)]
+    pub include_stopped: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WorkerRead {
+    pub id: Uuid,
+    pub instance_name: String,
+    pub host: String,
+    pub process_id: Option<i32>,
+    pub role: String,
+    pub pool: String,
+    pub capabilities: Vec<String>,
+    pub labels: Value,
+    pub version: String,
+    pub concurrency_limit: i32,
+    pub status: String,
+    pub health: String,
+    pub active_leases: i64,
+    pub heartbeat_age_seconds: i64,
+    pub started_at: chrono::DateTime<Utc>,
+    pub last_heartbeat_at: chrono::DateTime<Utc>,
+    pub draining_at: Option<chrono::DateTime<Utc>>,
+    pub stopped_at: Option<chrono::DateTime<Utc>>,
+}
+
+async fn worker_read(
+    pool: &PgPool,
+    worker: WorkerInstanceRow,
+    stale_after_seconds: i64,
+) -> Result<WorkerRead, ApiError> {
+    let active_leases = repo::active_worker_lease_count(pool, worker.uuid).await?;
+    let heartbeat_age_seconds = Utc::now()
+        .signed_duration_since(worker.last_heartbeat_at)
+        .num_seconds()
+        .max(0);
+    let health = if worker.status == "stopped" {
+        "stopped"
+    } else if heartbeat_age_seconds > stale_after_seconds {
+        "stale"
+    } else if worker.status == "draining" {
+        "draining"
+    } else {
+        "healthy"
+    };
+    Ok(WorkerRead {
+        id: worker.uuid,
+        instance_name: worker.instance_name,
+        host: worker.host_name,
+        process_id: worker.process_id,
+        role: worker.role,
+        pool: worker.pool,
+        capabilities: worker.capabilities,
+        labels: worker.labels,
+        version: worker.version,
+        concurrency_limit: worker.concurrency_limit,
+        status: worker.status,
+        health: health.into(),
+        active_leases,
+        heartbeat_age_seconds,
+        started_at: worker.started_at,
+        last_heartbeat_at: worker.last_heartbeat_at,
+        draining_at: worker.draining_at,
+        stopped_at: worker.stopped_at,
+    })
+}
+
+#[utoipa::path(get, path = "/api/v2/workers", tag = "operators", responses((status = 200, body = [WorkerRead])))]
+async fn list_workers(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Query(query): Query<WorkerListQuery>,
+) -> Result<Json<Vec<WorkerRead>>, ApiError> {
+    let stale_after = (state.settings.worker_heartbeat_interval_seconds as i64 * 3).max(30);
+    let workers = repo::list_worker_instances(&state.pool, query.include_stopped).await?;
+    let mut response = Vec::with_capacity(workers.len());
+    for worker in workers {
+        response.push(worker_read(&state.pool, worker, stale_after).await?);
+    }
+    Ok(Json(response))
+}
+
+#[utoipa::path(get, path = "/api/v2/workers/{id}", tag = "operators", responses((status = 200, body = WorkerRead), (status = 404)))]
+async fn get_worker(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WorkerRead>, ApiError> {
+    let worker = repo::get_worker_instance(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let stale_after = (state.settings.worker_heartbeat_interval_seconds as i64 * 3).max(30);
+    Ok(Json(worker_read(&state.pool, worker, stale_after).await?))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct WorkerRegisterRequest {
+    pub id: Option<Uuid>,
+    pub instance_name: String,
+    pub host: String,
+    pub process_id: Option<i32>,
+    #[serde(default = "default_worker_role")]
+    pub role: String,
+    #[serde(default = "default_worker_pool")]
+    pub pool: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default = "empty_object")]
+    pub labels: Value,
+    pub version: String,
+    #[serde(default = "default_worker_concurrency")]
+    pub concurrency_limit: i32,
+}
+
+fn default_worker_role() -> String {
+    "worker".into()
+}
+
+fn default_worker_pool() -> String {
+    "default".into()
+}
+
+fn default_worker_concurrency() -> i32 {
+    1
+}
+
+fn empty_object() -> Value {
+    json!({})
+}
+
+#[utoipa::path(post, path = "/api/v2/workers", tag = "operators", request_body = WorkerRegisterRequest, responses((status = 201, body = WorkerRead)))]
+async fn register_worker(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(request): Json<WorkerRegisterRequest>,
+) -> Result<(StatusCode, Json<WorkerRead>), ApiError> {
+    user.require_superuser()?;
+    if request.instance_name.trim().is_empty()
+        || request.host.trim().is_empty()
+        || request.pool.trim().is_empty()
+        || request.version.trim().is_empty()
+        || request.concurrency_limit < 1
+    {
+        return Err(ApiError::BadRequest(
+            "worker instance_name, host, pool, version, and positive concurrency_limit are required"
+                .into(),
+        ));
+    }
+    if !matches!(request.role.as_str(), "worker" | "scheduler_worker") {
+        return Err(ApiError::BadRequest(
+            "worker role must be worker or scheduler_worker".into(),
+        ));
+    }
+    let worker = repo::register_worker_instance(
+        &state.pool,
+        &WorkerRegistration {
+            uuid: request.id.unwrap_or_else(Uuid::now_v7),
+            instance_name: request.instance_name,
+            host_name: request.host,
+            process_id: request.process_id,
+            role: request.role,
+            pool: request.pool,
+            capabilities: request.capabilities,
+            labels: request.labels,
+            version: request.version,
+            concurrency_limit: request.concurrency_limit,
+        },
+    )
+    .await?;
+    let stale_after = (state.settings.worker_heartbeat_interval_seconds as i64 * 3).max(30);
+    Ok((
+        StatusCode::CREATED,
+        Json(worker_read(&state.pool, worker, stale_after).await?),
+    ))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WorkerHeartbeatResponse {
+    pub worker_id: Uuid,
+    pub accepted: bool,
+    pub recorded_at: chrono::DateTime<Utc>,
+}
+
+#[utoipa::path(post, path = "/api/v2/workers/{id}/heartbeat", tag = "operators", responses((status = 200, body = WorkerHeartbeatResponse), (status = 404)))]
+async fn heartbeat_worker(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WorkerHeartbeatResponse>, ApiError> {
+    let accepted = repo::heartbeat_worker(&state.pool, id).await?;
+    if !accepted {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(WorkerHeartbeatResponse {
+        worker_id: id,
+        accepted,
+        recorded_at: Utc::now(),
+    }))
+}
+
+async fn set_worker_drain_state(
+    state: &AppState,
+    user: &UserRow,
+    id: Uuid,
+    draining: bool,
+) -> Result<WorkerRead, ApiError> {
+    let worker = repo::set_worker_draining(&state.pool, id, draining)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let event_type = if draining {
+        "worker.drained"
+    } else {
+        "worker.resumed"
+    };
+    let actor = format!("user:{}", user.username);
+    let correlation = id.to_string();
+    repo::insert_provenance_event(
+        &state.pool,
+        event_type,
+        "system",
+        None,
+        None,
+        Some(&actor),
+        Some(&correlation),
+        &json!({"worker_id": id, "draining": draining}),
+    )
+    .await?;
+    let stale_after = (state.settings.worker_heartbeat_interval_seconds as i64 * 3).max(30);
+    worker_read(&state.pool, worker, stale_after).await
+}
+
+#[utoipa::path(post, path = "/api/v2/workers/{id}/drain", tag = "operators", responses((status = 200, body = WorkerRead), (status = 404)))]
+async fn drain_worker(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WorkerRead>, ApiError> {
+    user.require_superuser()?;
+    Ok(Json(
+        set_worker_drain_state(&state, &user.0, id, true).await?,
+    ))
+}
+
+#[utoipa::path(post, path = "/api/v2/workers/{id}/resume", tag = "operators", responses((status = 200, body = WorkerRead), (status = 404)))]
+async fn resume_worker(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WorkerRead>, ApiError> {
+    user.require_superuser()?;
+    Ok(Json(
+        set_worker_drain_state(&state, &user.0, id, false).await?,
+    ))
+}
+
+#[utoipa::path(get, path = "/api/v2/workers/pools", tag = "operators", responses((status = 200, body = [WorkerPoolSummary])))]
+async fn list_worker_pools(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+) -> Result<Json<Vec<WorkerPoolSummary>>, ApiError> {
+    Ok(Json(repo::list_worker_pools(&state.pool).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkerLeaseQuery {
+    pub worker_id: Option<Uuid>,
+    #[serde(default)]
+    pub include_expired: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WorkerLeaseRead {
+    pub job_id: Uuid,
+    pub kind: String,
+    pub execution_id: Option<Uuid>,
+    pub worker_id: Option<Uuid>,
+    pub claim_id: Option<Uuid>,
+    pub pool: String,
+    pub required_capability: Option<String>,
+    pub attempts: i32,
+    pub lease_expires_at: Option<chrono::DateTime<Utc>>,
+    pub heartbeat_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[utoipa::path(get, path = "/api/v2/workers/leases", tag = "operators", responses((status = 200, body = [WorkerLeaseRead])))]
+async fn list_worker_leases(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Query(query): Query<WorkerLeaseQuery>,
+) -> Result<Json<Vec<WorkerLeaseRead>>, ApiError> {
+    let leases = repo::list_worker_leases(&state.pool, query.worker_id, query.include_expired)
+        .await?
+        .into_iter()
+        .map(|job| WorkerLeaseRead {
+            job_id: job.uuid,
+            kind: job.kind,
+            execution_id: job.execution_id,
+            worker_id: job.lease_owner,
+            claim_id: job.lease_token,
+            pool: job.pool,
+            required_capability: job.required_capability,
+            attempts: job.attempts,
+            lease_expires_at: job.lease_expires_at,
+            heartbeat_at: job.heartbeat_at,
+        })
+        .collect();
+    Ok(Json(leases))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OperatorProfileQuery {
+    pub profile: Option<String>,
+}
+
+async fn resolve_operator_profile(
+    pool: &PgPool,
+    profile_name: Option<&str>,
+) -> Result<Option<DeploymentProfileRow>, ApiError> {
+    if let Some(name) = profile_name {
+        return repo::get_deployment_profile_by_name(pool, name)
+            .await?
+            .ok_or(ApiError::NotFound)
+            .map(Some);
+    }
+    let profiles = repo::list_deployment_profiles(pool, None, 500, 0).await?;
+    if let Some(profile) = profiles
+        .iter()
+        .find(|profile| profile.is_default && profile.project_module.is_none())
+    {
+        return Ok(Some(profile.clone()));
+    }
+    let mut defaults = profiles.into_iter().filter(|profile| profile.is_default);
+    let first = defaults.next();
+    if first.is_some() && defaults.next().is_none() {
+        Ok(first)
+    } else {
+        Ok(None)
+    }
+}
+
+fn scheduler_client_from_profile(
+    profile: &DeploymentProfileRow,
+) -> Result<SshSlurmClient, ApiError> {
+    let deployment: beampipe_profiles::DeploymentConfig =
+        serde_json::from_value(profile.deployment.clone())
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let beampipe_profiles::DeploymentConfig::SlurmRemote(slurm) = deployment else {
+        return Err(ApiError::BadRequest(format!(
+            "deployment profile '{}' is not slurm_remote",
+            profile.name
+        )));
+    };
+    Ok(SshSlurmClient {
+        login_node: slurm.login_node.clone(),
+        remote_user: slurm.remote_user.clone(),
+        session_dir: slurm.log_dir.clone(),
+        account: Some(slurm.account.clone()),
+        ssh_port: slurm.ssh_port,
+        dlg_root: slurm.dlg_root.clone(),
+        deployment: Some(slurm),
+    })
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SchedulerStatusResponse {
+    pub profile: String,
+    pub connectivity: Value,
+    pub resource_request: Value,
+    pub rendered_resource_request: String,
+}
+
+#[utoipa::path(get, path = "/api/v2/scheduler/status", tag = "scheduler", responses((status = 200, body = SchedulerStatusResponse)))]
+async fn scheduler_status(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Query(query): Query<OperatorProfileQuery>,
+) -> Result<Json<SchedulerStatusResponse>, ApiError> {
+    let profile = resolve_operator_profile(&state.pool, query.profile.as_deref())
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "a SLURM deployment profile is required; pass ?profile=<name>".into(),
+            )
+        })?;
+    let client = scheduler_client_from_profile(&profile)?;
+    let resources = client.resource_request()?;
+    let connectivity = client.test_connectivity().await?;
+    Ok(Json(SchedulerStatusResponse {
+        profile: profile.name,
+        connectivity: serde_json::to_value(connectivity).unwrap_or(Value::Null),
+        rendered_resource_request: resources.render_sbatch_directives(),
+        resource_request: serde_json::to_value(resources).unwrap_or(Value::Null),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OperatorPageQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SchedulerJobRead {
+    pub execution_id: Uuid,
+    pub project_module: String,
+    pub execution_status: String,
+    pub scheduler_job_id: Option<String>,
+    pub scheduler_state: Option<String>,
+    pub scheduler_raw_state: Option<String>,
+    pub scheduler_reason: Option<String>,
+    pub daliuge_session_id: Option<String>,
+    pub remote_session_dir: Option<String>,
+    pub submitted_at: chrono::DateTime<Utc>,
+    pub last_reconciled_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[utoipa::path(get, path = "/api/v2/scheduler/jobs", tag = "scheduler", responses((status = 200, body = [SchedulerJobRead])))]
+async fn scheduler_jobs(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Query(query): Query<OperatorPageQuery>,
+) -> Result<Json<Vec<SchedulerJobRead>>, ApiError> {
+    let jobs = repo::list_scheduler_executions(
+        &state.pool,
+        "slurm",
+        query.limit.unwrap_or(100),
+        query.offset.unwrap_or(0),
+    )
+    .await?
+    .into_iter()
+    .map(|execution| SchedulerJobRead {
+        execution_id: execution.uuid,
+        project_module: execution.project_module,
+        execution_status: execution.status,
+        scheduler_job_id: execution.scheduler_job_id,
+        scheduler_state: execution.scheduler_state,
+        scheduler_raw_state: execution.scheduler_raw_state,
+        scheduler_reason: execution.scheduler_reason,
+        daliuge_session_id: execution.daliuge_session_id,
+        remote_session_dir: execution.remote_session_dir,
+        submitted_at: execution.created_at,
+        last_reconciled_at: execution.last_reconciled_at,
+    })
+    .collect();
+    Ok(Json(jobs))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DaliugeInspectResponse {
+    pub profile: Option<String>,
+    pub translator: Value,
+    pub manager: Option<Value>,
+}
+
+struct ResolvedDaliugeEndpoints {
+    tm_url: String,
+    manager_url: Option<String>,
+    manager_host: Option<String>,
+    manager_port: Option<i32>,
+}
+
+fn daliuge_endpoints(
+    settings: &Settings,
+    profile: Option<&DeploymentProfileRow>,
+) -> Result<ResolvedDaliugeEndpoints, ApiError> {
+    let translation = profile
+        .map(|profile| {
+            serde_json::from_value::<beampipe_profiles::DaliugeTranslationConfig>(
+                profile.translation.clone(),
+            )
+        })
+        .transpose()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let tm_url = translation
+        .and_then(|translation| translation.tm_url)
+        .or_else(|| settings.tm_url.clone())
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "DALiuGE Translator Manager URL is not configured in settings or profile".into(),
+            )
+        })?;
+    let rest = profile
+        .map(|profile| {
+            serde_json::from_value::<beampipe_profiles::DeploymentConfig>(
+                profile.deployment.clone(),
+            )
+        })
+        .transpose()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .and_then(|deployment| match deployment {
+            beampipe_profiles::DeploymentConfig::RestRemote(rest) => Some(rest),
+            beampipe_profiles::DeploymentConfig::SlurmRemote(_) => None,
+        });
+    let manager_url = rest
+        .as_ref()
+        .and_then(beampipe_orchestration::cancel::rest_endpoint)
+        .or_else(|| settings.dim_url.clone());
+    let manager_host = rest.as_ref().and_then(|rest| {
+        rest.dim_host_for_tm
+            .clone()
+            .or_else(|| rest.deploy_host.clone())
+    });
+    let manager_port = rest
+        .as_ref()
+        .and_then(|rest| rest.dim_port_for_tm.or(rest.deploy_port));
+    Ok(ResolvedDaliugeEndpoints {
+        tm_url,
+        manager_url,
+        manager_host,
+        manager_port,
+    })
+}
+
+#[utoipa::path(get, path = "/api/v2/daliuge/inspect", tag = "daliuge", responses((status = 200, body = DaliugeInspectResponse)))]
+async fn daliuge_inspect(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Query(query): Query<OperatorProfileQuery>,
+) -> Result<Json<DaliugeInspectResponse>, ApiError> {
+    let profile = resolve_operator_profile(&state.pool, query.profile.as_deref()).await?;
+    let endpoints = daliuge_endpoints(&state.settings, profile.as_ref())?;
+    let translator = HttpTranslatorClient::new(endpoints.tm_url)
+        .inspect(endpoints.manager_host.as_deref(), endpoints.manager_port)
+        .await?;
+    let manager = match endpoints.manager_url {
+        Some(url) => Some(HttpDimClient::new(url).inspect().await?),
+        None => None,
+    };
+    Ok(Json(DaliugeInspectResponse {
+        profile: profile.map(|profile| profile.name),
+        translator: serde_json::to_value(translator).unwrap_or(Value::Null),
+        manager: manager.map(|manager| serde_json::to_value(manager).unwrap_or(Value::Null)),
+    }))
+}
+
+#[utoipa::path(get, path = "/api/v2/daliuge/sessions", tag = "daliuge", responses((status = 200)))]
+async fn daliuge_sessions(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Query(query): Query<OperatorProfileQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let profile = resolve_operator_profile(&state.pool, query.profile.as_deref()).await?;
+    let endpoints = daliuge_endpoints(&state.settings, profile.as_ref())?;
+    let manager_url = endpoints.manager_url.ok_or_else(|| {
+        ApiError::BadRequest(
+            "DALiuGE Data Island Manager URL is not configured for this profile".into(),
+        )
+    })?;
+    let sessions = HttpDimClient::new(manager_url).sessions().await?;
+    Ok(Json(serde_json::to_value(sessions).unwrap_or(Value::Null)))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TapHealthResponse {
     pub casda: String,
     pub vizier: String,
 }
 
 #[utoipa::path(get, path = "/api/v2/health/tap", tag = "health")]
-async fn health_tap() -> Json<TapHealthResponse> {
-    let casda = std::env::var("BEAMPIPE_CASDA_TAP_URL").unwrap_or_default();
-    let vizier = std::env::var("BEAMPIPE_VIZIER_TAP_URL").unwrap_or_default();
-    let timeout = Duration::from_secs(
-        Settings::from_env()
-            .map(|s| s.discovery_tap_health_timeout_seconds)
-            .unwrap_or(10),
-    );
+async fn health_tap(State(state): State<Arc<AppState>>) -> Json<TapHealthResponse> {
+    let timeout = Duration::from_secs(state.settings.discovery_tap_health_timeout_seconds);
     let report = probe_tap_health(
-        (!casda.is_empty()).then_some(casda.as_str()),
-        (!vizier.is_empty()).then_some(vizier.as_str()),
+        state.settings.casda_tap_url.as_deref(),
+        state.settings.vizier_tap_url.as_deref(),
         timeout,
     )
     .await;
@@ -1247,6 +2221,24 @@ pub struct ExecutionRead {
     pub execution_phase: Option<String>,
     pub scheduler_name: Option<String>,
     pub scheduler_job_id: Option<String>,
+    pub daliuge_session_id: Option<String>,
+    pub remote_session_dir: Option<String>,
+    pub control_phase: Option<String>,
+    pub submission_state: Option<String>,
+    pub scheduler_state: Option<String>,
+    pub scheduler_raw_state: Option<String>,
+    pub scheduler_reason: Option<String>,
+    pub daliuge_state: Option<String>,
+    pub output_state: Option<String>,
+    pub terminal_outcome: Option<String>,
+    pub failure_class: Option<String>,
+    pub discovery_signature: Option<String>,
+    pub manifest_sha256: Option<String>,
+    pub source_graph_sha256: Option<String>,
+    pub patched_graph_sha256: Option<String>,
+    pub physical_graph_sha256: Option<String>,
+    pub phase_timestamps: Value,
+    pub last_reconciled_at: Option<chrono::DateTime<Utc>>,
     pub workflow_manifest: Option<Value>,
     pub beampipe_run_record: Option<Value>,
     pub last_error: Option<String>,
@@ -1256,6 +2248,7 @@ pub struct ExecutionRead {
     pub created_at: chrono::DateTime<Utc>,
     pub created_by_id: Option<i32>,
     pub deployment_profile_id: Option<Uuid>,
+    pub deployment_profile_revision: Option<i32>,
     pub project_config_id: Option<Uuid>,
     pub project_config_version: Option<i32>,
     #[serde(flatten)]
@@ -1296,6 +2289,16 @@ pub struct ExecutionStatusResponse {
     pub execution_phase: Option<String>,
     pub scheduler_name: Option<String>,
     pub scheduler_job_id: Option<String>,
+    pub daliuge_session_id: Option<String>,
+    pub control_phase: Option<String>,
+    pub submission_state: Option<String>,
+    pub scheduler_state: Option<String>,
+    pub scheduler_raw_state: Option<String>,
+    pub scheduler_reason: Option<String>,
+    pub daliuge_state: Option<String>,
+    pub output_state: Option<String>,
+    pub terminal_outcome: Option<String>,
+    pub failure_class: Option<String>,
     pub last_error: Option<String>,
     pub retry_count: i32,
     pub started_at: Option<chrono::DateTime<Utc>>,
@@ -1316,6 +2319,11 @@ pub struct ExecutionSummaryResponse {
     pub requested_source_identifiers: Vec<String>,
     pub scheduler_name: Option<String>,
     pub scheduler_job_id: Option<String>,
+    pub daliuge_session_id: Option<String>,
+    pub control_phase: Option<String>,
+    pub scheduler_state: Option<String>,
+    pub daliuge_state: Option<String>,
+    pub terminal_outcome: Option<String>,
     pub last_error: Option<String>,
 }
 
@@ -1451,6 +2459,24 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
         execution_phase: row.execution_phase,
         scheduler_name: row.scheduler_name.clone(),
         scheduler_job_id: row.scheduler_job_id.clone(),
+        daliuge_session_id: row.daliuge_session_id,
+        remote_session_dir: row.remote_session_dir,
+        control_phase: row.control_phase,
+        submission_state: row.submission_state,
+        scheduler_state: row.scheduler_state,
+        scheduler_raw_state: row.scheduler_raw_state,
+        scheduler_reason: row.scheduler_reason,
+        daliuge_state: row.daliuge_state,
+        output_state: row.output_state,
+        terminal_outcome: row.terminal_outcome,
+        failure_class: row.failure_class,
+        discovery_signature: row.discovery_signature,
+        manifest_sha256: row.manifest_sha256,
+        source_graph_sha256: row.source_graph_sha256,
+        patched_graph_sha256: row.patched_graph_sha256,
+        physical_graph_sha256: row.physical_graph_sha256,
+        phase_timestamps: row.phase_timestamps,
+        last_reconciled_at: row.last_reconciled_at,
         workflow_manifest: row.workflow_manifest.map(|v| redact_value(&v)),
         beampipe_run_record,
         last_error: row.last_error.map(|e| redact_string(&e)),
@@ -1460,6 +2486,7 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
         created_at: row.created_at,
         created_by_id: row.created_by_id,
         deployment_profile_id: row.deployment_profile_id,
+        deployment_profile_revision: row.deployment_profile_revision,
         project_config_id: row.project_config_id,
         project_config_version,
         debug_urls,
@@ -1476,45 +2503,57 @@ async fn execution_debug_urls(
     if scheduler_name != "daliuge" && scheduler_name != "slurm" {
         return Ok(ExecutionDebugUrls::default());
     }
-    let profile = match row.deployment_profile_id {
-        Some(id) => repo::get_deployment_profile(pool, id).await?,
-        None => repo::get_default_deployment_profile(pool, &row.project_module).await?,
-    };
+    let deployment = deployment_for_execution(pool, row).await?;
     if scheduler_name == "daliuge" {
-        if let Some(ref profile) = profile {
-            if let Ok(beampipe_profiles::DeploymentConfig::RestRemote(rest)) =
-                serde_json::from_value(profile.deployment.clone())
-            {
-                if let (Some(host), Some(port)) = (rest.deploy_host, rest.deploy_port) {
-                    let base = beampipe_orchestration::dim::dim_rest_http_base(&host, port);
-                    let sid = row.scheduler_job_id.clone().unwrap_or_default();
-                    let urls =
-                        beampipe_orchestration::dim::dim_operator_urls_from_base(&base, &sid);
-                    return Ok(ExecutionDebugUrls {
-                        dim_session_status_url: urls
-                            .get("dim_session_status_url")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        dim_graph_status_url: urls
-                            .get("dim_graph_status_url")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        ..Default::default()
-                    });
-                }
-            }
+        let manager_url = row
+            .daliuge_manager_url
+            .clone()
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| {
+                deployment.as_ref().and_then(|value| {
+                    serde_json::from_value::<beampipe_profiles::DeploymentConfig>(value.clone())
+                        .ok()
+                        .and_then(|config| match config {
+                            beampipe_profiles::DeploymentConfig::RestRemote(rest) => {
+                                let host = rest.deploy_host?.trim().to_string();
+                                (!host.is_empty()).then(|| {
+                                    beampipe_orchestration::dim::dim_rest_base(
+                                        &host,
+                                        rest.deploy_port.unwrap_or(8001),
+                                        rest.use_https,
+                                    )
+                                })
+                            }
+                            beampipe_profiles::DeploymentConfig::SlurmRemote(_) => None,
+                        })
+                })
+            });
+        if let Some(base) = manager_url {
+            let sid = row.daliuge_session_id.clone().unwrap_or_default();
+            let urls = beampipe_orchestration::dim::dim_operator_urls_from_base(&base, &sid);
+            return Ok(ExecutionDebugUrls {
+                dim_session_status_url: urls
+                    .get("dim_session_status_url")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                dim_graph_status_url: urls
+                    .get("dim_graph_status_url")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                ..Default::default()
+            });
         }
     }
     if scheduler_name == "slurm" {
         let sid = row.scheduler_job_id.clone().unwrap_or_default();
         let parsed = beampipe_domain::slurm::parse_scheduler_job_id(&sid);
         let mut urls = ExecutionDebugUrls {
-            slurm_session_dir: parsed.session_dir,
+            slurm_session_dir: row.remote_session_dir.clone().or(parsed.session_dir),
             ..Default::default()
         };
-        if let Some(ref profile) = profile {
+        if let Some(deployment) = deployment {
             if let Ok(beampipe_profiles::DeploymentConfig::SlurmRemote(slurm)) =
-                serde_json::from_value(profile.deployment.clone())
+                serde_json::from_value(deployment)
             {
                 urls.slurm_login_node = Some(slurm.login_node);
                 urls.slurm_remote_user = slurm.remote_user;
@@ -1523,6 +2562,13 @@ async fn execution_debug_urls(
         return Ok(urls);
     }
     Ok(ExecutionDebugUrls::default())
+}
+
+async fn deployment_for_execution(
+    pool: &PgPool,
+    execution: &ExecutionRow,
+) -> Result<Option<Value>, ApiError> {
+    Ok(repo::resolve_execution_deployment(pool, execution).await?)
 }
 
 #[utoipa::path(get, path = "/api/v2/executions/{id}/status", tag = "executions", responses((status = 200), (status = 404)))]
@@ -1540,6 +2586,16 @@ async fn execution_status(
         execution_phase: row.execution_phase.clone(),
         scheduler_name: row.scheduler_name.clone(),
         scheduler_job_id: row.scheduler_job_id.clone(),
+        daliuge_session_id: row.daliuge_session_id.clone(),
+        control_phase: row.control_phase.clone(),
+        submission_state: row.submission_state.clone(),
+        scheduler_state: row.scheduler_state.clone(),
+        scheduler_raw_state: row.scheduler_raw_state.clone(),
+        scheduler_reason: row.scheduler_reason.clone(),
+        daliuge_state: row.daliuge_state.clone(),
+        output_state: row.output_state.clone(),
+        terminal_outcome: row.terminal_outcome.clone(),
+        failure_class: row.failure_class.clone(),
         last_error: row.last_error.clone().map(|e| redact_string(&e)),
         retry_count: row.retry_count,
         started_at: row.started_at,
@@ -1570,8 +2626,55 @@ async fn execution_summary(
         requested_source_identifiers: source_ids,
         scheduler_name: row.scheduler_name,
         scheduler_job_id: row.scheduler_job_id,
+        daliuge_session_id: row.daliuge_session_id,
+        control_phase: row.control_phase,
+        scheduler_state: row.scheduler_state,
+        daliuge_state: row.daliuge_state,
+        terminal_outcome: row.terminal_outcome,
         last_error: row.last_error.map(|e| redact_string(&e)),
     }))
+}
+
+#[utoipa::path(get, path = "/api/v2/executions/{id}/observations", tag = "executions", responses((status = 200, body = [ExecutionObservationRow]), (status = 404)))]
+async fn execution_observations(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Path(id): Path<Uuid>,
+    Query(query): Query<ListSourcesQuery>,
+) -> Result<Json<Vec<ExecutionObservationRow>>, ApiError> {
+    if repo::get_execution(&state.pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(
+        repo::list_execution_observations(
+            &state.pool,
+            id,
+            query.limit.unwrap_or(100),
+            query.offset.unwrap_or(0),
+        )
+        .await?,
+    ))
+}
+
+#[utoipa::path(get, path = "/api/v2/executions/{id}/artifacts", tag = "executions", responses((status = 200, body = [ExecutionArtifactRow]), (status = 404)))]
+async fn execution_artifacts(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<ExecutionArtifactRow>>, ApiError> {
+    if repo::get_execution(&state.pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    let mut artifacts = repo::list_execution_artifacts(&state.pool, id).await?;
+    for artifact in &mut artifacts {
+        artifact.inline_json = artifact
+            .inline_json
+            .take()
+            .map(|value| redact_value(&value));
+        artifact.uri = artifact.uri.take().map(|value| redact_string(&value));
+        artifact.metadata = redact_value(&artifact.metadata);
+    }
+    Ok(Json(artifacts))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1586,7 +2689,7 @@ pub struct ExecutionPatchRequest {
 #[utoipa::path(patch, path = "/api/v2/executions/{id}", tag = "executions", request_body = ExecutionPatchRequest, responses((status = 200), (status = 404)))]
 async fn patch_execution(
     State(state): State<Arc<AppState>>,
-    AuthUser(_user): AuthUser,
+    AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<ExecutionPatchRequest>,
 ) -> Result<Json<ExecutionRead>, ApiError> {
@@ -1599,6 +2702,20 @@ async fn patch_execution(
             Some(ExecutionStatus::AwaitingScheduler) | Some(ExecutionStatus::Running)
         ) {
             cancel_execution_scheduler(&state.pool, id).await?;
+            repo::insert_provenance_event(
+                &state.pool,
+                "execution.cancelled",
+                &execution.project_module,
+                None,
+                Some(id),
+                Some(&format!("user:{}", user.uuid)),
+                Some(&id.to_string()),
+                &json!({
+                    "scheduler_job_id": execution.scheduler_job_id,
+                    "daliuge_session_id": execution.daliuge_session_id,
+                }),
+            )
+            .await?;
         }
     }
     let patch = LedgerPatch {
@@ -1620,20 +2737,37 @@ async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiEr
     let Some(execution) = repo::get_execution(pool, id).await? else {
         return Ok(());
     };
-    let profile = match execution.deployment_profile_id {
-        Some(pid) => repo::get_deployment_profile(pool, pid).await?,
-        None => repo::get_default_deployment_profile(pool, &execution.project_module).await?,
-    };
-    let deployment = profile
-        .as_ref()
-        .map(|p| p.deployment.clone())
-        .unwrap_or(serde_json::json!({}));
-    let _ = cancel_scheduler_session(CancelParams {
+    let deployment = deployment_for_execution(pool, &execution)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("execution has no pinned deployment profile".into()))?;
+    let deployment_kind = serde_json::from_value::<beampipe_profiles::DeploymentConfig>(
+        deployment.clone(),
+    )
+    .map_err(|error| ApiError::BadRequest(format!("invalid pinned deployment profile: {error}")))?;
+    let result = cancel_scheduler_session(CancelParams {
         scheduler_job_id: execution.scheduler_job_id,
+        daliuge_session_id: execution.daliuge_session_id,
         deployment,
     })
     .await
     .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if !result.cancelled {
+        return Err(ApiError::BadRequest(format!(
+            "external cancellation was not confirmed: {}",
+            result.reason.unwrap_or_else(|| "unknown reason".into())
+        )));
+    }
+    let state_patch = match deployment_kind {
+        beampipe_profiles::DeploymentConfig::RestRemote(_) => ExecutionStatePatch {
+            daliuge_state: Some(DaliugeState::Cancelled),
+            ..Default::default()
+        },
+        beampipe_profiles::DeploymentConfig::SlurmRemote(_) => ExecutionStatePatch {
+            scheduler_state: Some(SchedulerState::Cancelled),
+            ..Default::default()
+        },
+    };
+    repo::apply_execution_state_patch(pool, id, state_patch).await?;
     Ok(())
 }
 
@@ -1642,6 +2776,23 @@ pub struct ExecuteRequest {
     #[serde(default = "default_true")]
     pub do_stage: bool,
     #[serde(default = "default_true")]
+    pub do_submit: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ExecutionRetryRequest {
+    /// Required operator recovery rationale, stored in the provenance stream.
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionRetryResponse {
+    pub status: String,
+    pub execution_id: Uuid,
+    pub job_id: Uuid,
+    pub retry_count: i32,
+    pub stage: beampipe_domain::ExecutionRetryStage,
+    pub do_stage: bool,
     pub do_submit: bool,
 }
 
@@ -1684,6 +2835,119 @@ async fn execute_execution(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions/{id}/retry",
+    tag = "executions",
+    request_body = ExecutionRetryRequest,
+    responses(
+        (status = 202, body = ExecutionRetryResponse),
+        (status = 404),
+        (status = 409, body = ApiErrorResponse)
+    )
+)]
+async fn retry_execution(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExecutionRetryRequest>,
+) -> Result<(StatusCode, Json<ExecutionRetryResponse>), ApiError> {
+    let actor = format!("user:{}", user.uuid);
+    let result = repo::retry_execution(
+        &state.pool,
+        id,
+        &actor,
+        &req.reason,
+        Some(ctx.correlation_id()),
+    )
+    .await
+    .map_err(|error| match error {
+        repo::RetryExecutionError::NotFound => ApiError::NotFound,
+        repo::RetryExecutionError::Unsafe { code, message } => {
+            ApiError::RetryRejected { code, message }
+        }
+        repo::RetryExecutionError::Database(error) => ApiError::Db(error),
+    })?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ExecutionRetryResponse {
+            status: "accepted".into(),
+            execution_id: result.execution.uuid,
+            job_id: result.job.uuid,
+            retry_count: result.execution.retry_count,
+            stage: result.plan.stage,
+            do_stage: result.plan.do_stage,
+            do_submit: result.plan.do_submit,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct GraphPrepareRequest {
+    pub project_module: String,
+    pub source_identifiers: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GraphPrepareResponse {
+    pub project_module: String,
+    pub source_identifiers: Vec<String>,
+    pub project_config_id: Uuid,
+    pub project_config_version: i32,
+    pub project_spec_sha256: String,
+    pub manifest_sha256: String,
+    pub source_graph_sha256: String,
+    pub patched_graph_sha256: String,
+    pub patch_summary: Value,
+    pub manifest: Value,
+    pub source_graph: Value,
+    pub patched_graph: Value,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/graphs/prepare",
+    tag = "graphs",
+    request_body = GraphPrepareRequest,
+    responses((status = 200, body = GraphPrepareResponse), (status = 400))
+)]
+async fn prepare_graph(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
+    Json(req): Json<GraphPrepareRequest>,
+) -> Result<Json<GraphPrepareResponse>, ApiError> {
+    if req.project_module.trim().is_empty() || req.source_identifiers.is_empty() {
+        return Err(ApiError::BadRequest(
+            "project_module and at least one source_identifier are required".into(),
+        ));
+    }
+    let preview = beampipe_jobs::prepare_execution_graph(
+        &state.pool,
+        &req.project_module,
+        &req.source_identifiers,
+    )
+    .await
+    .map_err(|error| match error {
+        beampipe_jobs::GraphPreparationError::Database(error) => ApiError::Db(error),
+        other => ApiError::BadRequest(other.to_string()),
+    })?;
+    Ok(Json(GraphPrepareResponse {
+        project_module: preview.project_module,
+        source_identifiers: preview.source_identifiers,
+        project_config_id: preview.project_config_id,
+        project_config_version: preview.project_config_version,
+        project_spec_sha256: preview.project_spec_sha256,
+        manifest_sha256: preview.manifest_sha256,
+        source_graph_sha256: preview.source_graph_sha256,
+        patched_graph_sha256: preview.patched_graph_sha256,
+        patch_summary: preview.patch_summary,
+        manifest: redact_value(&preview.manifest),
+        source_graph: redact_value(&preview.source_graph),
+        patched_graph: redact_value(&preview.patched_graph),
+    }))
+}
+
 #[utoipa::path(post, path = "/api/v2/project-configs", tag = "project-configs", request_body = String, responses((status = 201, body = ValidationReport), (status = 400)))]
 async fn upload_project_config(
     State(state): State<Arc<AppState>>,
@@ -1691,7 +2955,8 @@ async fn upload_project_config(
     body: String,
 ) -> Result<(StatusCode, Json<ValidationReport>), ApiError> {
     user.require_superuser()?;
-    let config = ProjectConfig::from_slice(body.as_bytes())?;
+    let config = ProjectConfig::from_slice(body.as_bytes())
+        .map_err(|error| ApiError::Validation(error.validation_report(body.as_bytes())))?;
     let previous = repo::get_active_project_config(&state.pool, &config.metadata.id)
         .await?
         .and_then(|row| serde_json::from_value::<ProjectConfig>(row.spec).ok());
@@ -1883,6 +3148,9 @@ pub struct DeploymentProfileResponse {
     pub description: Option<String>,
     pub project_module: Option<String>,
     pub is_default: bool,
+    pub max_concurrent_executions: Option<i32>,
+    pub revision: i32,
+    pub spec_sha256: Option<String>,
     pub translation: Value,
     pub deployment: Value,
     pub created_at: chrono::DateTime<Utc>,
@@ -1897,6 +3165,9 @@ impl From<DeploymentProfileRow> for DeploymentProfileResponse {
             description: row.description,
             project_module: row.project_module,
             is_default: row.is_default,
+            max_concurrent_executions: row.max_concurrent_executions,
+            revision: row.revision,
+            spec_sha256: row.spec_sha256,
             translation: redact_value(&row.translation),
             deployment: redact_value(&row.deployment),
             created_at: row.created_at,
@@ -1947,22 +3218,16 @@ async fn create_deployment_profile(
         "deployment_profile.deployment",
         &serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )?;
-    let row = sqlx::query_as::<_, DeploymentProfileRow>(
-        r#"
-        INSERT INTO daliuge_deployment_profile
-            (uuid, name, description, project_module, is_default, translation, deployment)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING *
-        "#,
+    let row = repo::create_deployment_profile(
+        &state.pool,
+        &profile.name,
+        profile.description.as_deref(),
+        profile.project_module.as_deref(),
+        profile.is_default,
+        profile.max_concurrent_executions,
+        serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
+        serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )
-    .bind(Uuid::now_v7())
-    .bind(&profile.name)
-    .bind(&profile.description)
-    .bind(&profile.project_module)
-    .bind(profile.is_default)
-    .bind(serde_json::to_value(&profile.translation).unwrap_or(Value::Null))
-    .bind(serde_json::to_value(&profile.deployment).unwrap_or(Value::Null))
-    .fetch_one(&state.pool)
     .await?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
@@ -2018,28 +3283,17 @@ async fn update_deployment_profile(
         "deployment_profile.deployment",
         &serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )?;
-    let row = sqlx::query_as::<_, DeploymentProfileRow>(
-        r#"
-        UPDATE daliuge_deployment_profile
-        SET name = $2,
-            description = $3,
-            project_module = $4,
-            is_default = $5,
-            translation = $6,
-            deployment = $7,
-            updated_at = now()
-        WHERE uuid = $1
-        RETURNING *
-        "#,
+    let row = repo::update_deployment_profile(
+        &state.pool,
+        id,
+        &profile.name,
+        profile.description.as_deref(),
+        profile.project_module.as_deref(),
+        profile.is_default,
+        profile.max_concurrent_executions,
+        serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
+        serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )
-    .bind(id)
-    .bind(&profile.name)
-    .bind(&profile.description)
-    .bind(&profile.project_module)
-    .bind(profile.is_default)
-    .bind(serde_json::to_value(&profile.translation).unwrap_or(Value::Null))
-    .bind(serde_json::to_value(&profile.deployment).unwrap_or(Value::Null))
-    .fetch_optional(&state.pool)
     .await?;
     row.map(DeploymentProfileResponse::from)
         .map(Json)
@@ -2156,5 +3410,43 @@ mod security_tests {
         assert!(value.get("hashed_password").is_none());
         assert!(value.get("id").is_none());
         assert!(value.get("deleted_at").is_none());
+    }
+
+    #[test]
+    fn database_failure_is_structured_and_redacted() {
+        let error = ApiError::Db(sqlx::Error::Protocol(
+            "password=should-not-reach-the-client".into(),
+        ));
+        let failure = api_failure(&error);
+        assert_eq!(failure.code, "database_error");
+        assert_eq!(failure.class, FailureClass::DependencyUnavailable);
+        assert!(!failure.message.contains("password"));
+        assert_eq!(failure.retry, RetryDisposition::Safe);
+    }
+
+    #[test]
+    fn legacy_project_upload_failure_contains_conversion_diagnostic() {
+        let config = ProjectConfig::from_slice(
+            br#"
+apiVersion: beampipe.dev/v1
+kind: ProjectConfig
+metadata:
+  id: legacy
+adapters:
+  required: [casda]
+"#,
+        )
+        .unwrap();
+        let report = config.validate_report();
+        let failure = api_failure(&ApiError::Validation(report));
+
+        assert_eq!(failure.code, "project_config_validation_failed");
+        let diagnostic = failure
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "legacy_api_version")
+            .expect("legacy diagnostic");
+        assert_eq!(diagnostic.path, "apiVersion");
+        assert!(diagnostic.hint.as_deref().unwrap().contains("convert"));
     }
 }

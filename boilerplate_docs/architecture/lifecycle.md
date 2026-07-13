@@ -1,42 +1,72 @@
-# Discovery and execution lifecycle
+# Discovery and execution
 
-The lifecycle starts with an operator registering a source and ends with an execution record containing manifest, backend status, and provenance.
+The lifecycle begins with a stable project/source identity and ends only when control state, external observations, artifacts, and provenance explain the outcome.
 
-![Terminal-style Beampipe execution lifecycle diagram](../assets/readme/execution-lifecycle-terminal-dark.png)
+## End-to-end flow
+
+<div class="bp-flow-diagram bp-flow-diagram--wrap" role="img" aria-label="Source discovery and execution lifecycle">
+  <div class="bp-flow-node" data-tone="cyan"><span>01</span><strong>register</strong><small>source identity</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>02</span><strong>discover</strong><small>archive metadata</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>03</span><strong>prepare</strong><small>manifest + graph</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>04</span><strong>submit</strong><small>scheduler intent</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>05</span><strong>reconcile</strong><small>Slurm + DALiuGE</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>06</span><strong>verify</strong><small>outputs + outcome</small></div>
+</div>
 
 ## Discovery
 
-| Control | Source |
-|---------|--------|
-| Query templates | `project_config.discovery.queries` |
-| Enrichment queries | `project_config.discovery.enrichments` |
-| Field mapping | `project_config.discovery.prepare_metadata.field_map` |
-| Signature fields | `project_config.discovery.prepare_metadata.signature` |
-| Batch limits | `automation.discovery` and `BEAMPIPE_SHAPING_*` |
+Discovery is a repeatable metadata preparation pipeline, not an execution side effect.
 
-Discovery signatures determine whether prepared metadata changed enough to trigger future work. Exclude volatile archive fields such as access URLs, file sizes, and timestamps when they should not cause reruns.
+| Step | Project control | Durable result |
+|---|---|---|
+| Build query | `discovery.queries` and source template variables | Rendered archive request context |
+| Enrich | `discovery.enrichments` | Additional archive rows |
+| Prepare fields | `prepare_metadata.field_map` and typed transforms | Normalized metadata |
+| Derive flags | `prepare_metadata.discovery_flags` | Admission-relevant facts |
+| Sign | `prepare_metadata.signature` | Stable change digest |
 
-## Execution
+Exclude volatile archive fields such as access URLs, sizes, and timestamps from the signature when they should not trigger new scientific work.
 
-| Control | Source |
-|---------|--------|
-| Grouping | `manifest.group_by` |
-| Manifest shape | `manifest.source_template`, `dataset_template`, `path` |
-| Graph mutation | `graph_patches` YAML, documented as DALiuGE Graphs |
-| Backend selection | `deployment_profile_name` or project default |
-| Admission | `automation.execution` and execution shaping variables |
+## Admission and preparation
 
-## Operator model
+Admission checks automation policy, source readiness, queue pressure, and per-profile concurrency before creating runnable work. Preparation then pins the project revision and deployment-profile snapshot, renders the manifest, applies graph patches, and records checksums.
 
-Beampipe separates authoritative state, backend detail, and audit narrative:
+<div class="bp-artifact-strip" aria-label="Immutable preparation artifacts">
+  <span><b>config</b><code>revision</code></span>
+  <i aria-hidden="true">+</i>
+  <span><b>profile</b><code>snapshot</code></span>
+  <i aria-hidden="true">+</i>
+  <span><b>manifest</b><code>sha256</code></span>
+  <i aria-hidden="true">+</i>
+  <span><b>graph</b><code>sha256</code></span>
+</div>
 
-| Layer | Storage | Use when |
-|-------|---------|----------|
-| Execution ledger | `batch_execution_record` | FSM truth, list/filter runs, cancel |
-| Run record | `workflow_manifest.beampipe_run_record` | Backend integration detail, poll counters, raw excerpts |
-| Provenance | `provenance_events` | Operator timeline: discovery changes, execution transitions, alerts |
-| Metrics | `beampipe_*` on `:9090` | Dashboards and alert thresholds |
+## Submission and reconciliation
 
-Recommended debug order for a stuck run: readiness, metrics, provenance events, then `beampipe_run_record` in the execution response.
+Submission intent is durable before I/O. Slurm job identity and DALiuGE session identity are persisted as soon as they are known. Pollers then update scheduler and DALiuGE axes independently; the reducer derives the next safe control action.
 
-Next: choose backend behavior in [Deployment profiles](deployment-profiles.md).
+| Observation | Meaning |
+|---|---|
+| Scheduler running, DALiuGE building | Normal startup progression |
+| Scheduler succeeded, DALiuGE running | Inconsistent; investigate rather than complete |
+| SSH disconnected after `sbatch` | Submission uncertain; search before retry |
+| DALiuGE finished, outputs unverified | Continue output verification |
+| Outputs verified | Eligible for successful terminal outcome |
+
+## Operator reading order
+
+For a stalled execution, inspect:
+
+1. Readiness and admission diagnostics.
+2. Execution control phase and external axes.
+3. Worker claim and heartbeat.
+4. Scheduler job and DALiuGE session identifiers.
+5. Immutable artifacts and run record.
+6. Provenance timeline and metrics around the transition.
+
+The [execution state model](state-machine.md) defines exact values and retry gates. [Deployment profiles](deployment-profiles.md) define the backend behavior pinned to each execution.

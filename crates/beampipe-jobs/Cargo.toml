@@ -15,9 +15,12 @@ beampipe-orchestration = { path = "../beampipe-orchestration" }
 beampipe-profiles = { path = "../beampipe-profiles" }
 beampipe-metrics = { path = "../beampipe-metrics" }
 beampipe-project = { path = "../beampipe-project" }
+beampipe-security = { path = "../beampipe-security" }
 async-trait.workspace = true
 chrono.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -22,12 +22,20 @@ beampipe-orchestration = { path = "../beampipe-orchestration" }
 beampipe-adapters = { path = "../beampipe-adapters" }
 beampipe-domain = { path = "../beampipe-domain" }
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
+crossterm = "0.28"
+ratatui = "0.28"
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 redis.workspace = true
+rpassword = "7"
+
+[dev-dependencies]
+tempfile = "3"

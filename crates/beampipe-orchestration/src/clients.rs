@@ -1,3 +1,8 @@
+use crate::daliuge::{
+    checked_empty, checked_json, DaliugeCapabilities, DaliugeClientError, DaliugeComponent,
+    DaliugeManager, DaliugeManagerInfo, DaliugeSessionObservation, DaliugeSessionSummary,
+    DaliugeTranslator, DaliugeTranslatorInfo,
+};
 use crate::dim::get_roots;
 use crate::http_client::{build_http_client, HttpClientOptions};
 use crate::slurm_deploy::{resolve_remote_user, submit_slurm_session, SlurmSubmitParams};
@@ -7,6 +12,7 @@ use crate::{BackendPoll, DimClient, OrchestrationError, SlurmClient, TranslatorC
 use async_trait::async_trait;
 use beampipe_domain::{slurm, ExecutionStatus};
 use beampipe_profiles::{DaliugeTranslationConfig, SlurmRemoteDeploymentConfig};
+use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -63,81 +69,103 @@ impl TranslatorClient for HttpTranslatorClient {
 }
 
 impl HttpTranslatorClient {
+    async fn unroll_and_partition(
+        &self,
+        graph: Value,
+        config: &TranslateConfig,
+    ) -> Result<Value, OrchestrationError> {
+        let endpoint = format!("{}/unroll_and_partition", self.base_url);
+        let lg_content = graph.to_string();
+        let num_partitions = config.num_par.max(1).to_string();
+        let num_islands = config.num_islands.max(1).to_string();
+        let form = [
+            ("lg_content", lg_content.as_str()),
+            ("num_partitions", num_partitions.as_str()),
+            ("num_islands", num_islands.as_str()),
+            ("algorithm", config.algo.as_str()),
+        ];
+        let response = self
+            .client
+            .post(&endpoint)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .form(&form)
+            .send()
+            .await
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::Translator,
+                    "unroll_and_partition",
+                    &endpoint,
+                    error,
+                )
+            })?;
+        Ok(checked_json(
+            response,
+            DaliugeComponent::Translator,
+            "unroll_and_partition",
+            &endpoint,
+        )
+        .await?)
+    }
+
     async fn translate_rest(
         &self,
         graph: Value,
         config: &TranslateConfig,
     ) -> Result<TranslatedGraph, OrchestrationError> {
-        let lg_name = "beampipe.graph";
+        if config.dim_host.trim().is_empty() || !(1..=65535).contains(&config.dim_port) {
+            return Err(DaliugeClientError::compatibility(
+                DaliugeComponent::Translator,
+                "map",
+                &self.base_url,
+                "updated DALiuGE mapping requires a valid DIM host and port",
+            )
+            .into());
+        }
+        let pgt = self.unroll_and_partition(graph, config).await?;
+        if !pgt.is_array() {
+            return Err(DaliugeClientError::invalid_response(
+                DaliugeComponent::Translator,
+                "unroll_and_partition",
+                &self.base_url,
+                "expected a physical graph template array",
+            )
+            .into());
+        }
+        let endpoint = format!("{}/map", self.base_url);
+        let pgt_content = pgt.to_string();
+        let dim_port = config.dim_port.to_string();
+        let num_islands = config.num_islands.max(1).to_string();
         let form = [
-            ("lg_name", lg_name),
-            ("json_data", &graph.to_string()),
-            ("algo", config.algo.as_str()),
-            ("num_par", &config.num_par.to_string()),
-            ("num_islands", &config.num_islands.to_string()),
+            ("pgt_content", pgt_content.as_str()),
+            ("host", config.dim_host.as_str()),
+            ("port", dim_port.as_str()),
+            ("num_islands", num_islands.as_str()),
+            ("co_host_dim", "true"),
         ];
-        let resp = self
+        let response = self
             .client
-            .post(format!("{}/gen_pgt", self.base_url))
+            .post(&endpoint)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&form)
             .send()
             .await
-            .map_err(|e| {
-                OrchestrationError::Backend(crate::format_service_request_error(
-                    "TM",
-                    &self.base_url,
-                    "/gen_pgt",
-                    e,
-                ))
+            .map_err(|error| {
+                DaliugeClientError::request(DaliugeComponent::Translator, "map", &endpoint, error)
             })?;
-        if !resp.status().is_success() {
-            return Err(OrchestrationError::Backend(format!(
-                "TM gen_pgt failed: HTTP {}",
-                resp.status()
-            )));
-        }
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
-        let pgt_id = body
-            .split("pgtName = \"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .unwrap_or("beampipe1_pgt.graph")
-            .to_string();
-        let resp = self
-            .client
-            .get(format!("{}/gen_pg", self.base_url))
-            .query(&[
-                ("pgt_id", pgt_id.as_str()),
-                ("dlg_mgr_host", config.dim_host.as_str()),
-                ("dlg_mgr_port", &config.dim_port.to_string()),
-            ])
-            .send()
-            .await
-            .map_err(|e| {
-                OrchestrationError::Backend(crate::format_service_request_error(
-                    "TM",
-                    &self.base_url,
-                    "/gen_pg",
-                    e,
-                ))
-            })?;
-        if !resp.status().is_success() {
-            return Err(OrchestrationError::Backend(format!(
-                "TM gen_pg failed: HTTP {}",
-                resp.status()
-            )));
-        }
-        let pg_spec: Value = resp
-            .json()
-            .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
+        let pg_spec: Value =
+            checked_json(response, DaliugeComponent::Translator, "map", &endpoint).await?;
         let spec_vec = match pg_spec {
-            Value::Array(arr) => arr,
-            other => vec![other],
+            Value::Array(items) => items,
+            _ => {
+                return Err(DaliugeClientError::invalid_response(
+                    DaliugeComponent::Translator,
+                    "map",
+                    &endpoint,
+                    "expected a mapped physical graph array",
+                )
+                .into())
+            }
         };
         let roots = get_roots(&spec_vec);
         Ok(TranslatedGraph {
@@ -152,53 +180,66 @@ impl HttpTranslatorClient {
         graph: Value,
         config: &TranslateConfig,
     ) -> Result<TranslatedGraph, OrchestrationError> {
-        let lg_name = default_lg_name();
-        let num_partitions = config.num_par.max(1);
-        let num_islands = if config.num_islands < 1 {
-            1
-        } else {
-            config.num_islands
-        };
-        let lg_content = graph.to_string();
-        let num_partitions_s = num_partitions.to_string();
-        let num_islands_s = num_islands.to_string();
-        let form = [
-            ("lg_content", lg_content.as_str()),
-            ("num_partitions", num_partitions_s.as_str()),
-            ("num_islands", num_islands_s.as_str()),
-            ("algorithm", config.algo.as_str()),
-        ];
-        let resp = self
-            .client
-            .post(format!("{}/unroll_and_partition", self.base_url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| {
-                OrchestrationError::Backend(crate::format_service_request_error(
-                    "TM",
-                    &self.base_url,
-                    "/unroll_and_partition",
-                    e,
-                ))
-            })?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(OrchestrationError::Backend(format!(
-                "TM unroll_and_partition failed: HTTP {status} — {body}"
-            )));
-        }
-        let raw: Value = resp
-            .json()
-            .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
-        let pgt_json = partitioned_pgt_for_dlg_deploy(raw, lg_name);
+        let raw = self.unroll_and_partition(graph, config).await?;
+        let pgt_json = partitioned_pgt_for_dlg_deploy(raw, default_lg_name());
         Ok(TranslatedGraph {
             pg_spec: Vec::new(),
             roots: Vec::new(),
             pgt_json: Some(pgt_json),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmissionMethodsResponse {
+    #[serde(default)]
+    methods: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ManagerRootResponse {
+    #[serde(default)]
+    hosts: Vec<String>,
+    #[serde(default, rename = "sessionIds")]
+    _session_ids: Vec<String>,
+}
+
+#[async_trait]
+impl DaliugeTranslator for HttpTranslatorClient {
+    async fn inspect(
+        &self,
+        manager_host: Option<&str>,
+        manager_port: Option<i32>,
+    ) -> Result<DaliugeTranslatorInfo, DaliugeClientError> {
+        let endpoint = format!("{}/api/submission_method", self.base_url);
+        let mut request = self.client.get(&endpoint);
+        if let (Some(host), Some(port)) = (manager_host, manager_port) {
+            request = request.query(&[
+                ("dlg_mgr_host", host.to_string()),
+                ("dlg_mgr_port", port.to_string()),
+            ]);
+        }
+        let response = request.send().await.map_err(|error| {
+            DaliugeClientError::request(DaliugeComponent::Translator, "inspect", &endpoint, error)
+        })?;
+        let methods: SubmissionMethodsResponse =
+            checked_json(response, DaliugeComponent::Translator, "inspect", &endpoint).await?;
+        Ok(DaliugeTranslatorInfo {
+            endpoint: self.base_url.clone(),
+            version: None,
+            capabilities: DaliugeCapabilities {
+                updated_translation_api: true,
+                submission_methods: methods.methods,
+                ..Default::default()
+            },
+            diagnostics: vec![beampipe_domain::Diagnostic::warning(
+                "version",
+                "daliuge.version_unreported",
+                "the Translator Manager capability response does not report a version",
+            )
+            .with_hint(
+                "record the deployed DALiuGE package/image version in the deployment profile",
+            )],
         })
     }
 }
@@ -238,74 +279,125 @@ impl DimClient for HttpDimClient {
         roots: &[String],
     ) -> Result<Value, OrchestrationError> {
         let sid = urlencoding_path(session_id);
-        self.client
-            .post(format!("{}/api/sessions", self.base_url))
+        let create_endpoint = format!("{}/api/sessions", self.base_url);
+        let response = self
+            .client
+            .post(&create_endpoint)
             .json(&serde_json::json!({"sessionId": session_id}))
             .timeout(Duration::from_secs(DIM_TIMEOUT_CREATE_SECS))
             .send()
             .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
-        self.client
-            .post(format!("{}/api/sessions/{sid}/graph/append", self.base_url))
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "create_session",
+                    &create_endpoint,
+                    error,
+                )
+            })?;
+        checked_empty(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "create_session",
+            &create_endpoint,
+        )
+        .await?;
+
+        let append_endpoint = format!("{}/api/sessions/{sid}/graph/append", self.base_url);
+        let response = self
+            .client
+            .post(&append_endpoint)
             .json(pg_spec)
             .timeout(Duration::from_secs(DIM_TIMEOUT_APPEND_SECS))
             .send()
             .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "append_graph",
+                    &append_endpoint,
+                    error,
+                )
+            })?;
+        checked_empty(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "append_graph",
+            &append_endpoint,
+        )
+        .await?;
+
         let deploy_body = if roots.is_empty() {
             String::new()
         } else {
             format!("completed={}", roots.join(","))
         };
-        self.client
-            .post(format!("{}/api/sessions/{sid}/deploy", self.base_url))
+        let deploy_endpoint = format!("{}/api/sessions/{sid}/deploy", self.base_url);
+        let response = self
+            .client
+            .post(&deploy_endpoint)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(deploy_body)
             .timeout(Duration::from_secs(DIM_TIMEOUT_DEPLOY_SECS))
             .send()
             .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "deploy_session",
+                    &deploy_endpoint,
+                    error,
+                )
+            })?;
+        checked_empty(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "deploy_session",
+            &deploy_endpoint,
+        )
+        .await?;
         Ok(serde_json::json!({"session_id": session_id, "deployed": true}))
     }
 
     async fn poll(&self, session_id: &str) -> Result<BackendPoll, OrchestrationError> {
         let sid = urlencoding_path(session_id);
-        let status: Value = self
+        let observation = self.session_observation(session_id).await?;
+        let mut status = observation.state.execution_status();
+
+        let graph_endpoint = format!("{}/api/sessions/{sid}/graph/status", self.base_url);
+        let response = self
             .client
-            .get(format!("{}/api/sessions/{sid}/status", self.base_url))
+            .get(&graph_endpoint)
             .timeout(Duration::from_secs(DIM_TIMEOUT_POLL_SECS))
             .send()
             .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
-        let mut st = crate::classify_dim_session_status(&status);
-        let graph_status: Value = self
-            .client
-            .get(format!("{}/api/sessions/{sid}/graph/status", self.base_url))
-            .timeout(Duration::from_secs(DIM_TIMEOUT_POLL_SECS))
-            .send()
-            .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?
-            .json()
-            .await
-            .unwrap_or(Value::Null);
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "graph_status",
+                    &graph_endpoint,
+                    error,
+                )
+            })?;
+        let graph_status: Value = checked_json(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "graph_status",
+            &graph_endpoint,
+        )
+        .await?;
         let error_uids = crate::dim_graph_status_error_uids(&graph_status);
-        if st == ExecutionStatus::Completed && !error_uids.is_empty() {
-            st = ExecutionStatus::Failed;
+        if status == ExecutionStatus::Completed && !error_uids.is_empty() {
+            status = ExecutionStatus::Failed;
         }
         Ok(BackendPoll {
-            status: st,
+            status,
             poll_summary: serde_json::json!({
                 "session_id": session_id,
-                "status": status,
+                "status": observation.raw,
+                "normalized_session_state": observation.state,
+                "per_node": observation.per_node,
+                "observed_at": observation.observed_at,
                 "graph_status": graph_status,
                 "error_drop_uids": error_uids,
             }),
@@ -314,26 +406,170 @@ impl DimClient for HttpDimClient {
 
     async fn cancel(&self, session_id: &str) -> Result<(), OrchestrationError> {
         let sid = urlencoding_path(session_id);
-        self.client
-            .post(format!("{}/api/sessions/{sid}/cancel", self.base_url))
-            .send()
-            .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
+        let endpoint = format!("{}/api/sessions/{sid}/cancel", self.base_url);
+        let response = self.client.post(&endpoint).send().await.map_err(|error| {
+            DaliugeClientError::request(
+                DaliugeComponent::DataIslandManager,
+                "cancel_session",
+                &endpoint,
+                error,
+            )
+        })?;
+        checked_empty(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "cancel_session",
+            &endpoint,
+        )
+        .await?;
         Ok(())
     }
 
     async fn destroy_session(&self, session_id: &str) -> Result<(), OrchestrationError> {
         let sid = urlencoding_path(session_id);
-        self.client
-            .delete(format!("{}/api/sessions/{sid}", self.base_url))
+        let endpoint = format!("{}/api/sessions/{sid}", self.base_url);
+        let response = self
+            .client
+            .delete(&endpoint)
             .send()
             .await
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "delete_session",
+                    &endpoint,
+                    error,
+                )
+            })?;
+        checked_empty(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "delete_session",
+            &endpoint,
+        )
+        .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl DaliugeManager for HttpDimClient {
+    async fn inspect(&self) -> Result<DaliugeManagerInfo, DaliugeClientError> {
+        let root_endpoint = format!("{}/api", self.base_url);
+        let response = self
+            .client
+            .get(&root_endpoint)
+            .send()
+            .await
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "inspect",
+                    &root_endpoint,
+                    error,
+                )
+            })?;
+        let root: ManagerRootResponse = checked_json(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "inspect",
+            &root_endpoint,
+        )
+        .await?;
+
+        let nodes_endpoint = format!("{}/api/nodes", self.base_url);
+        let response = self
+            .client
+            .get(&nodes_endpoint)
+            .send()
+            .await
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "list_nodes",
+                    &nodes_endpoint,
+                    error,
+                )
+            })?;
+        let nodes: Vec<String> = checked_json(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "list_nodes",
+            &nodes_endpoint,
+        )
+        .await?;
+        let sessions = self.sessions().await?;
+
+        Ok(DaliugeManagerInfo {
+            endpoint: self.base_url.clone(),
+            version: None,
+            hosts: root.hosts,
+            nodes,
+            sessions,
+            capabilities: DaliugeCapabilities {
+                session_api: true,
+                manager_topology: true,
+                session_logs: true,
+                ..Default::default()
+            },
+            diagnostics: vec![beampipe_domain::Diagnostic::warning(
+                "version",
+                "daliuge.version_unreported",
+                "the Data Island Manager API does not report a version",
+            )
+            .with_hint(
+                "record the deployed DALiuGE package/image version in the deployment profile",
+            )],
+        })
+    }
+
+    async fn sessions(&self) -> Result<Vec<DaliugeSessionSummary>, DaliugeClientError> {
+        let endpoint = format!("{}/api/sessions", self.base_url);
+        let response = self.client.get(&endpoint).send().await.map_err(|error| {
+            DaliugeClientError::request(
+                DaliugeComponent::DataIslandManager,
+                "list_sessions",
+                &endpoint,
+                error,
+            )
+        })?;
+        checked_json(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "list_sessions",
+            &endpoint,
+        )
+        .await
+    }
+
+    async fn session_observation(
+        &self,
+        session_id: &str,
+    ) -> Result<DaliugeSessionObservation, DaliugeClientError> {
+        let sid = urlencoding_path(session_id);
+        let endpoint = format!("{}/api/sessions/{sid}/status", self.base_url);
+        let response = self
+            .client
+            .get(&endpoint)
+            .timeout(Duration::from_secs(DIM_TIMEOUT_POLL_SECS))
+            .send()
+            .await
+            .map_err(|error| {
+                DaliugeClientError::request(
+                    DaliugeComponent::DataIslandManager,
+                    "session_status",
+                    &endpoint,
+                    error,
+                )
+            })?;
+        let raw: Value = checked_json(
+            response,
+            DaliugeComponent::DataIslandManager,
+            "session_status",
+            &endpoint,
+        )
+        .await?;
+        Ok(DaliugeSessionObservation::from_raw(raw))
     }
 }
 

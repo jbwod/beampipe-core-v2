@@ -6,10 +6,12 @@ use thiserror::Error;
 
 pub mod cancel;
 pub mod clients;
+pub mod daliuge;
 pub mod dim;
 pub mod graph;
 pub mod http_client;
 pub mod manifest;
+pub mod scheduler;
 pub mod security;
 pub mod slurm_batch;
 pub mod slurm_credentials;
@@ -24,11 +26,21 @@ pub use clients::{
     translate_config_from_profile, HttpDimClient, HttpTranslatorClient, SshSlurmClient,
     TranslateConfig, TranslatedGraph,
 };
+pub use daliuge::{
+    DaliugeCapabilities, DaliugeClientError, DaliugeComponent, DaliugeErrorKind, DaliugeManager,
+    DaliugeManagerInfo, DaliugeSessionObservation, DaliugeSessionState, DaliugeSessionSummary,
+    DaliugeTranslator, DaliugeTranslatorInfo,
+};
 pub use graph::resolve_graph;
 pub use http_client::{build_http_client, HttpClientOptions};
 pub use manifest::{
     apply_project_graph_patches, build_manifest_from_config,
     build_manifest_from_config_with_staging,
+};
+pub use scheduler::{
+    SchedulerAdapter, SchedulerAdapterError, SchedulerCapacity, SchedulerConnectivity,
+    SchedulerErrorKind, SchedulerJobObservation, SchedulerKind, SchedulerLogLocations,
+    SchedulerQueueInfo, SchedulerResourceRequest, SchedulerSubmission, SchedulerSubmissionRequest,
 };
 pub use security::{collect_security_issues, validate_security};
 pub use slurm_batch::SlurmJobPollResult;
@@ -55,8 +67,14 @@ pub enum OrchestrationError {
     GraphNotObject,
     #[error("manifest has no usable datasets")]
     NoUsableDatasets,
+    #[error("graph patch target node not found: {0}")]
+    GraphPatchNodeNotFound(String),
+    #[error("graph patch field not found on node {node}: {field}")]
+    GraphPatchFieldNotFound { node: String, field: String },
     #[error("backend error: {0}")]
     Backend(String),
+    #[error(transparent)]
+    Daliuge(#[from] DaliugeClientError),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -123,6 +141,8 @@ pub struct BackendSubmit {
     pub scheduler_name: String,
     pub scheduler_job_id: Option<String>,
     pub session_id: Option<String>,
+    pub remote_session_dir: Option<String>,
+    pub physical_graph: Option<Value>,
     pub workflow_manifest: Value,
     pub next_status: ExecutionStatus,
 }
@@ -330,6 +350,8 @@ where
             scheduler_name: "daliuge".into(),
             scheduler_job_id: Some(session_id.clone()),
             session_id: Some(session_id),
+            remote_session_dir: None,
+            physical_graph: Some(Value::Array(translated.pg_spec)),
             workflow_manifest,
             next_status: ExecutionStatus::Running,
         })
@@ -388,6 +410,7 @@ where
         let pgt_json = translated.pgt_json.ok_or_else(|| {
             OrchestrationError::Backend("slurm translate missing pgt_json".into())
         })?;
+        let physical_graph = pgt_json.clone();
         let scheduler_job_id = self
             .slurm
             .submit(execution_id, &session_id, pgt_json)
@@ -408,10 +431,13 @@ where
             self.login_node.as_deref(),
             self.remote_user.as_deref(),
         );
+        let remote_session_dir = slurm::parse_scheduler_job_id(&scheduler_job_id).session_dir;
         Ok(BackendSubmit {
             scheduler_name: "slurm".into(),
             scheduler_job_id: Some(scheduler_job_id),
             session_id: Some(session_id),
+            remote_session_dir,
+            physical_graph: Some(physical_graph),
             workflow_manifest,
             next_status: ExecutionStatus::AwaitingScheduler,
         })
@@ -627,6 +653,8 @@ pub fn apply_manifest_graph_overrides(
         };
         let expected_name = match_spec.get("equals").and_then(Value::as_str);
         let match_kind = match_spec.get("kind").and_then(Value::as_str);
+        let mut matched_nodes = 0usize;
+        let mut matched_fields = std::collections::HashSet::new();
         for node in nodes.iter_mut().filter_map(Value::as_object_mut) {
             let node_name = node.get("name").and_then(Value::as_str);
             let matches = match (match_kind, expected_name) {
@@ -637,6 +665,7 @@ pub fn apply_manifest_graph_overrides(
             if !matches {
                 continue;
             }
+            matched_nodes += 1;
             let Some(node_fields) = node.get_mut(GRAPH_FIELDS).and_then(Value::as_array_mut) else {
                 continue;
             };
@@ -647,6 +676,7 @@ pub fn apply_manifest_graph_overrides(
                 let value = fd.get("value").cloned().unwrap_or(Value::Null);
                 for node_field in node_fields.iter_mut().filter_map(Value::as_object_mut) {
                     if node_field.get("name").and_then(Value::as_str) == Some(name) {
+                        matched_fields.insert(name.to_string());
                         node_field.insert("value".into(), value.clone());
                         if node_field.get("type").and_then(Value::as_str) == Some("Integer") {
                             node_field
@@ -656,21 +686,28 @@ pub fn apply_manifest_graph_overrides(
                 }
             }
         }
+        if matched_nodes == 0 {
+            if let Some(node) = expected_name {
+                return Err(OrchestrationError::GraphPatchNodeNotFound(node.into()));
+            }
+        }
+        if let Some(node) = expected_name {
+            for field in fields.iter().filter_map(|field| {
+                field
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }) {
+                if !matched_fields.contains(&field) {
+                    return Err(OrchestrationError::GraphPatchFieldNotFound {
+                        node: node.into(),
+                        field,
+                    });
+                }
+            }
+        }
     }
     Ok(())
-}
-
-/// SessionStates: PRISTINE=0, BUILDING=1, DEPLOYING=2, RUNNING=3, FINISHED=4, CANCELLED=5, FAILED=6.
-fn classify_dim_session_status_scalar(raw: &str) -> ExecutionStatus {
-    match raw {
-        "4" | "FINISHED" | "COMPLETED" => ExecutionStatus::Completed,
-        "5" | "CANCELLED" | "CANCELED" => ExecutionStatus::Cancelled,
-        "6" | "ERROR" | "FAILED" | "FAIL" => ExecutionStatus::Failed,
-        "3" | "RUNNING" | "DEPLOYING" | "BUILDING" | "PRISTINE" | "0" | "1" | "2" => {
-            ExecutionStatus::Running
-        }
-        _ => ExecutionStatus::Running,
-    }
 }
 
 /// DROPStates.ERROR = 3 (distinct from session RUNNING = 3).
@@ -695,45 +732,9 @@ fn drop_status_is_error(status: &Value) -> bool {
     raw.contains("ERROR") || raw.contains("FAILED")
 }
 
-fn classify_dim_status_value(value: &Value) -> ExecutionStatus {
-    if let Some(n) = value.as_i64() {
-        return classify_dim_session_status_scalar(&n.to_string());
-    }
-    if let Some(s) = value.as_str() {
-        return classify_dim_session_status_scalar(&s.to_ascii_uppercase());
-    }
-    if let Some(obj) = value.as_object() {
-        if let Some(status) = obj.get("status") {
-            return classify_dim_status_value(status);
-        }
-        let states: Vec<ExecutionStatus> = obj
-            .values()
-            .filter(|v| v.is_i64() || v.is_string())
-            .map(classify_dim_status_value)
-            .collect();
-        return aggregate_dim_node_states(&states);
-    }
-    ExecutionStatus::Running
-}
-
-fn aggregate_dim_node_states(states: &[ExecutionStatus]) -> ExecutionStatus {
-    if states.is_empty() {
-        return ExecutionStatus::Running;
-    }
-    if states.contains(&ExecutionStatus::Failed) {
-        return ExecutionStatus::Failed;
-    }
-    if states.iter().all(|s| *s == ExecutionStatus::Completed) {
-        return ExecutionStatus::Completed;
-    }
-    if states.iter().all(|s| *s == ExecutionStatus::Cancelled) {
-        return ExecutionStatus::Cancelled;
-    }
-    ExecutionStatus::Running
-}
-
+/// Preserve the compatibility helper while using the exact DALiuGE session model.
 pub fn classify_dim_session_status(status: &Value) -> ExecutionStatus {
-    classify_dim_status_value(status)
+    DaliugeSessionState::from_raw(status).execution_status()
 }
 
 pub fn dim_graph_status_error_uids(graph: &Value) -> Vec<String> {
@@ -769,6 +770,29 @@ mod tests {
         let manifest = json!({"graph_overrides": {"patches": [{"match": {"equals": "Scatter/GenericScatterApp/Beam"}, "fields": [{"name": "num_of_copies", "value": 3}]}]}});
         apply_manifest_graph_overrides(&mut graph, &manifest).unwrap();
         assert_eq!(graph["nodeDataArray"][0]["fields"][0]["value"], 3);
+    }
+
+    #[test]
+    fn graph_override_rejects_missing_target_node() {
+        let mut graph = json!({"nodeDataArray": [{"name": "other", "fields": []}]});
+        let manifest = json!({"graph_overrides": {"patches": [{"match": {"kind": "node_name", "equals": "missing"}, "fields": [{"name": "copies", "value": 3}]}]}});
+        let error = apply_manifest_graph_overrides(&mut graph, &manifest).unwrap_err();
+        assert!(matches!(
+            error,
+            OrchestrationError::GraphPatchNodeNotFound(ref node) if node == "missing"
+        ));
+    }
+
+    #[test]
+    fn graph_override_rejects_missing_target_field() {
+        let mut graph = json!({"nodeDataArray": [{"name": "target", "fields": []}]});
+        let manifest = json!({"graph_overrides": {"patches": [{"match": {"kind": "node_name", "equals": "target"}, "fields": [{"name": "copies", "value": 3}]}]}});
+        let error = apply_manifest_graph_overrides(&mut graph, &manifest).unwrap_err();
+        assert!(matches!(
+            error,
+            OrchestrationError::GraphPatchFieldNotFound { ref node, ref field }
+                if node == "target" && field == "copies"
+        ));
     }
 
     #[test]

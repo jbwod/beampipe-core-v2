@@ -1,4 +1,6 @@
+pub use beampipe_domain::{Diagnostic as ValidationDiagnostic, DiagnosticSeverity};
 use schemars::JsonSchema;
+use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,12 +20,14 @@ pub use transforms::{
 pub use wasm::{shared_host, HookKind, WasmHost, WasmHostError};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DefinitionsConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub transforms: BTreeMap<String, TransformSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SourceIdentityConfig {
     #[serde(default = "default_canonical_field")]
     pub canonical: String,
@@ -36,6 +40,7 @@ fn default_canonical_field() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateVarSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -118,6 +123,7 @@ impl From<String> for TransformKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransformSpec {
     pub kind: TransformKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +175,7 @@ fn default_include_discovery_flags() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(rename = "apiVersion")]
     pub api_version: String,
@@ -217,6 +224,7 @@ impl Default for ProjectConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectMetadata {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,6 +232,7 @@ pub struct ProjectMetadata {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AdapterConfig {
     #[serde(default)]
     pub required: Vec<String>,
@@ -236,6 +245,7 @@ pub struct AdapterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TapConfig {
     #[serde(default = "default_tap_timeout_seconds")]
     pub timeout_seconds: u64,
@@ -256,6 +266,7 @@ impl Default for TapConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GraphConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -264,6 +275,7 @@ pub struct GraphConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiscoveryConfig {
     #[serde(default)]
     pub queries: Vec<DiscoveryQuery>,
@@ -274,6 +286,7 @@ pub struct DiscoveryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiscoveryQuery {
     pub name: String,
     pub adapter: String,
@@ -283,6 +296,7 @@ pub struct DiscoveryQuery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PrepareMetadataConfig {
     #[serde(default)]
     pub field_map: BTreeMap<String, MappingSpec>,
@@ -293,6 +307,7 @@ pub struct PrepareMetadataConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MappingSpec {
     #[serde(default)]
     pub from: String,
@@ -300,14 +315,25 @@ pub struct MappingSpec {
     pub transform: Option<TransformRef>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(transparent)]
+pub struct ManifestTemplate(pub BTreeMap<String, Value>);
+
+impl ManifestTemplate {
+    pub fn fields(&self) -> &BTreeMap<String, Value> {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestConfig {
     #[serde(default)]
     pub group_by: Vec<String>,
     #[serde(default)]
-    pub source_template: serde_json::Value,
+    pub source_template: ManifestTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dataset_template: Option<serde_json::Value>,
+    pub dataset_template: Option<ManifestTemplate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand_from: Option<String>,
     #[serde(default = "default_manifest_path")]
@@ -315,14 +341,30 @@ pub struct ManifestConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(transparent)]
+pub struct GraphPatchValue(pub Value);
+
+impl GraphPatchValue {
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GraphPatch {
     #[serde(default)]
     pub r#match: GraphPatchMatch,
     #[serde(default)]
-    pub set: BTreeMap<String, Value>,
+    pub set: BTreeMap<String, GraphPatchValue>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GraphPatchMatch {
     #[serde(default = "default_graph_patch_match_kind")]
     pub kind: GraphPatchMatchKind,
@@ -345,6 +387,7 @@ fn default_graph_patch_match_kind() -> GraphPatchMatchKind {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AutomationConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionAutomationConfig>,
@@ -353,6 +396,7 @@ pub struct AutomationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiscoveryAutomationConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -388,6 +432,7 @@ impl Default for DiscoveryAutomationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionAutomationConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -441,6 +486,7 @@ impl Default for ExecutionAutomationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_sha256: Option<String>,
@@ -479,75 +525,82 @@ pub struct ValidationReport {
     pub spec_sha256: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
-pub struct ValidationDiagnostic {
-    pub path: String,
-    pub severity: DiagnosticSeverity,
-    pub code: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-}
-
-impl ValidationDiagnostic {
-    pub fn error(
-        path: impl Into<String>,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            path: path.into(),
-            severity: DiagnosticSeverity::Error,
-            code: code.into(),
-            message: message.into(),
-            hint: None,
-        }
-    }
-
-    pub fn warning(
-        path: impl Into<String>,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            path: path.into(),
-            severity: DiagnosticSeverity::Warning,
-            code: code.into(),
-            message: message.into(),
-            hint: None,
-        }
-    }
-
-    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
-        self
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum ProjectConfigError {
     #[error("invalid YAML: {0}")]
     Yaml(#[from] serde_yaml::Error),
     #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid project config at {path}: {message}")]
+    Structure { path: String, message: String },
+}
+
+impl ProjectConfigError {
+    pub fn diagnostic(&self) -> ValidationDiagnostic {
+        match self {
+            Self::Yaml(error) => {
+                let path = error
+                    .location()
+                    .map(|location| {
+                        format!("line {}, column {}", location.line(), location.column())
+                    })
+                    .unwrap_or_else(|| "$".into());
+                ValidationDiagnostic::error(path, "invalid_yaml", error.to_string())
+                    .with_hint("correct the YAML syntax and validate the document again")
+            }
+            Self::Json(error) => {
+                ValidationDiagnostic::error("$", "invalid_config_value", error.to_string())
+                    .with_hint("use string keys and values supported by the v2 project schema")
+            }
+            Self::Structure { path, message } => ValidationDiagnostic::error(
+                if path.is_empty() { "$" } else { path },
+                "invalid_config_structure",
+                message,
+            )
+            .with_hint("remove unknown fields or correct the value to match the v2 schema"),
+        }
+    }
+
+    pub fn validation_report(&self, bytes: &[u8]) -> ValidationReport {
+        let project_id = serde_yaml::from_slice::<serde_yaml::Value>(bytes)
+            .ok()
+            .and_then(|value| serde_json::to_value(value).ok())
+            .and_then(|value| {
+                value
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        ValidationReport {
+            project_id,
+            valid: false,
+            errors: vec![self.diagnostic()],
+            warnings: Vec::new(),
+            spec_sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
 }
 
 impl ProjectConfig {
     pub fn from_slice(bytes: &[u8]) -> Result<Self, ProjectConfigError> {
-        match serde_yaml::from_slice(bytes) {
-            Ok(v) => Ok(v),
-            Err(yaml_err) => match serde_json::from_slice(bytes) {
-                Ok(v) => Ok(v),
-                Err(_) => Err(ProjectConfigError::Yaml(yaml_err)),
-            },
+        let yaml_value: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
+        let value = serde_json::to_value(yaml_value)?;
+        match value.get("apiVersion").and_then(Value::as_str) {
+            Some("beampipe.dev/v2") => Self::from_v2_value(value),
+            Some("beampipe.dev/v1") => Self::from_v1_compat_value(value),
+            _ => Self::from_v2_value(value),
         }
+    }
+
+    fn from_v2_value(value: Value) -> Result<Self, ProjectConfigError> {
+        deserialize_config_value(value)
+    }
+
+    fn from_v1_compat_value(value: Value) -> Result<Self, ProjectConfigError> {
+        // v1 remains parse-only compatibility input; validation always reports it as legacy.
+        deserialize_config_value(value)
     }
 
     pub fn validate_report(&self) -> ValidationReport {
@@ -591,6 +644,15 @@ impl ProjectConfig {
                 "adapters.required must include at least one adapter",
             ));
         }
+        for (index, adapter) in self.adapters.required.iter().enumerate() {
+            if adapter.trim().is_empty() {
+                errors.push(ValidationDiagnostic::error(
+                    format!("adapters.required[{index}]"),
+                    "required",
+                    "adapter identifiers must be non-empty",
+                ));
+            }
+        }
         if self.adapters.tap.timeout_seconds == 0 {
             errors.push(ValidationDiagnostic::error(
                 "adapters.tap.timeout_seconds",
@@ -613,6 +675,37 @@ impl ProjectConfig {
                     "automation.discovery.tick_discovery_source_limit must be > 0",
                 ));
             }
+            for (path, value) in [
+                ("stale_after_hours", i64::from(discovery.stale_after_hours)),
+                ("claim_ttl_minutes", discovery.claim_ttl_minutes),
+            ] {
+                if value <= 0 {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("automation.discovery.{path}"),
+                        "invalid_limit",
+                        format!("automation.discovery.{path} must be > 0"),
+                    ));
+                }
+            }
+            for (path, value) in [
+                ("queue_max_depth", discovery.queue_max_depth),
+                (
+                    "tick_discovery_batch_limit",
+                    discovery.tick_discovery_batch_limit,
+                ),
+                (
+                    "concurrent_discovery_batch_limit",
+                    discovery.concurrent_discovery_batch_limit,
+                ),
+            ] {
+                if value.is_some_and(|value| value <= 0) {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("automation.discovery.{path}"),
+                        "invalid_limit",
+                        format!("automation.discovery.{path} must be > 0 when set"),
+                    ));
+                }
+            }
         }
         if let Some(execution) = &self.automation.execution {
             if execution.max_sources_per_execution <= 0 {
@@ -629,6 +722,63 @@ impl ProjectConfig {
                     "automation.execution.tick_execution_run_limit must be > 0",
                 ));
             }
+            for (path, value) in [
+                (
+                    "tick_execution_source_limit",
+                    execution.tick_execution_source_limit,
+                ),
+                ("min_sources_to_trigger", execution.min_sources_to_trigger),
+                ("max_wait_minutes", execution.max_wait_minutes),
+                ("claim_ttl_minutes", execution.claim_ttl_minutes),
+            ] {
+                if value <= 0 {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("automation.execution.{path}"),
+                        "invalid_limit",
+                        format!("automation.execution.{path} must be > 0"),
+                    ));
+                }
+            }
+            for (path, value) in [
+                (
+                    "concurrent_execution_run_limit",
+                    execution.concurrent_execution_run_limit,
+                ),
+                (
+                    "execution_slurm_remote_poll_max_rounds",
+                    execution.execution_slurm_remote_poll_max_rounds,
+                ),
+                (
+                    "execution_rest_remote_poll_max_rounds",
+                    execution.execution_rest_remote_poll_max_rounds,
+                ),
+            ] {
+                if value.is_some_and(|value| value <= 0) {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("automation.execution.{path}"),
+                        "invalid_limit",
+                        format!("automation.execution.{path} must be > 0 when set"),
+                    ));
+                }
+            }
+            for (path, value) in [
+                (
+                    "execution_rest_remote_poll_interval_seconds",
+                    execution.execution_rest_remote_poll_interval_seconds,
+                ),
+                (
+                    "execution_slurm_remote_poll_interval_seconds",
+                    execution.execution_slurm_remote_poll_interval_seconds,
+                ),
+            ] {
+                if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("automation.execution.{path}"),
+                        "invalid_limit",
+                        format!("automation.execution.{path} must be finite and > 0 when set"),
+                    ));
+                }
+            }
         }
         if let Some(graph) = &self.graph {
             if graph.url.is_some() && graph.path.is_some() {
@@ -637,6 +787,66 @@ impl ProjectConfig {
                     "mutually_exclusive",
                     "graph must use only one of url or path",
                 ));
+            }
+            if graph
+                .url
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                errors.push(ValidationDiagnostic::error(
+                    "graph.url",
+                    "required",
+                    "graph.url must be non-empty when set",
+                ));
+            }
+            if graph
+                .path
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                errors.push(ValidationDiagnostic::error(
+                    "graph.path",
+                    "required",
+                    "graph.path must be non-empty when set",
+                ));
+            }
+        }
+        for (collection, queries) in [
+            ("queries", self.discovery.queries.as_slice()),
+            ("enrichments", self.discovery.enrichments.as_slice()),
+        ] {
+            for (index, query) in queries.iter().enumerate() {
+                for (field, value) in [
+                    ("name", query.name.as_str()),
+                    ("adapter", query.adapter.as_str()),
+                    ("template", query.template.as_str()),
+                ] {
+                    if value.trim().is_empty() {
+                        errors.push(ValidationDiagnostic::error(
+                            format!("discovery.{collection}[{index}].{field}"),
+                            "required",
+                            format!("discovery {collection} {field} must be non-empty"),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(identity) = &self.source_identity {
+            if identity.canonical.trim().is_empty() {
+                errors.push(ValidationDiagnostic::error(
+                    "source_identity.canonical",
+                    "required",
+                    "source_identity.canonical must be non-empty",
+                ));
+            }
+            for name in identity.template_vars.keys() {
+                if name.trim().is_empty() {
+                    errors.push(ValidationDiagnostic::error(
+                        "source_identity.template_vars",
+                        "required",
+                        "template variable names must be non-empty",
+                    ));
+                }
             }
         }
         if let Some(ext) = &self.extension {
@@ -684,6 +894,15 @@ impl ProjectConfig {
         let bytes = serde_json::to_vec(self).unwrap_or_default();
         format!("{:x}", Sha256::digest(bytes))
     }
+}
+
+fn deserialize_config_value(value: Value) -> Result<ProjectConfig, ProjectConfigError> {
+    serde_path_to_error::deserialize(value.into_deserializer()).map_err(|error| {
+        ProjectConfigError::Structure {
+            path: error.path().to_string(),
+            message: error.into_inner().to_string(),
+        }
+    })
 }
 
 fn collect_config_warnings(
@@ -948,5 +1167,72 @@ discovery:
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         assert!(config.validate_report().valid);
+    }
+
+    #[test]
+    fn v2_rejects_unknown_fields_during_parse() {
+        let yaml = r#"
+apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata:
+  id: strict-test
+  typo: rejected
+adapters:
+  required: [casda]
+"#;
+        let error = ProjectConfig::from_slice(yaml.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("unknown field `typo`"));
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.path, "metadata.typo");
+        assert_eq!(diagnostic.code, "invalid_config_structure");
+    }
+
+    #[test]
+    fn invalid_automation_limits_have_precise_paths() {
+        let yaml = r#"
+apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata:
+  id: limits-test
+adapters:
+  required: [casda]
+automation:
+  discovery:
+    claim_ttl_minutes: 0
+  execution:
+    execution_rest_remote_poll_interval_seconds: 0
+"#;
+        let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
+        let report = config.validate_report();
+        assert!(report
+            .errors
+            .iter()
+            .any(|diagnostic| { diagnostic.path == "automation.discovery.claim_ttl_minutes" }));
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "automation.execution.execution_rest_remote_poll_interval_seconds"
+        }));
+    }
+
+    #[test]
+    fn enrichment_validation_uses_the_enrichment_path() {
+        let yaml = r#"
+apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata:
+  id: enrichment-path-test
+adapters:
+  required: [casda]
+discovery:
+  enrichments:
+    - name: ""
+      adapter: casda
+      template: SELECT 1
+"#;
+        let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
+        let report = config.validate_report();
+        assert!(report
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.path == "discovery.enrichments[0].name"));
     }
 }

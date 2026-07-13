@@ -26,6 +26,7 @@ impl TransformRegistry {
         None
     }
 
+    #[cfg(test)]
     pub fn resolve_spec_with_legacy(&self, name: &str) -> Option<TransformSpec> {
         self.resolve_spec(name)
             .or_else(|| legacy_transform_spec(name))
@@ -39,6 +40,7 @@ impl TransformRegistry {
         apply_transform_spec(&spec, input)
     }
 
+    #[cfg(test)]
     pub fn apply_named_with_legacy(&self, name: &str, input: &Value) -> Option<Value> {
         let spec = self.resolve_spec_with_legacy(name)?;
         if spec.kind == TransformKind::Chain {
@@ -61,6 +63,7 @@ fn apply_chain(registry: &TransformRegistry, spec: &TransformSpec, input: &Value
     registry.apply_steps(steps, input)
 }
 
+#[cfg(test)]
 fn legacy_transform_spec(name: &str) -> Option<TransformSpec> {
     let mut spec = TransformSpec {
         kind: TransformKind::Unknown,
@@ -197,7 +200,7 @@ pub fn build_template_context(
         .first()
         .and_then(|q| q.source_id_transform.as_deref());
     let source_name = legacy_transform
-        .and_then(|name| registry.apply_named_with_legacy(name, &json!(source_identifier)))
+        .and_then(|name| registry.apply_named(name, &json!(source_identifier)))
         .and_then(|v| value_string(Some(&v)))
         .unwrap_or_else(|| source_identifier.to_string());
     context.insert("source_name".into(), json!(source_name));
@@ -368,6 +371,38 @@ pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<ValidationDiagnost
                     "required",
                     "replace requires from",
                 ));
+            }
+            if spec.kind == TransformKind::DefaultIfEmpty
+                && spec.default.as_deref().unwrap_or("").is_empty()
+            {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.default"),
+                    "required",
+                    "default_if_empty requires default",
+                ));
+            }
+            if spec.kind == TransformKind::SplitLast
+                && spec
+                    .separators
+                    .as_ref()
+                    .is_none_or(|separators| separators.is_empty())
+            {
+                errors.push(ValidationDiagnostic::error(
+                    format!("definitions.transforms.{name}.separators"),
+                    "required",
+                    "split_last requires at least one separator",
+                ));
+            }
+            if let Some(separators) = spec.separators.as_ref() {
+                for (index, separator) in separators.iter().enumerate() {
+                    if separator.is_empty() {
+                        errors.push(ValidationDiagnostic::error(
+                            format!("definitions.transforms.{name}.separators[{index}]"),
+                            "required",
+                            "transform separators must be non-empty",
+                        ));
+                    }
+                }
             }
             if spec.kind == TransformKind::RegexExtract
                 && spec.pattern.as_deref().unwrap_or("").is_empty()
@@ -590,6 +625,147 @@ mod tests {
                 .unwrap(),
             json!("a-b")
         );
+    }
+
+    #[test]
+    fn every_leaf_transform_kind_executes() {
+        fn spec(kind: TransformKind) -> TransformSpec {
+            TransformSpec {
+                kind,
+                prefix: None,
+                suffix: None,
+                separators: None,
+                pattern: None,
+                group: None,
+                from: None,
+                to: None,
+                default: None,
+                steps: None,
+            }
+        }
+        let mut identity = spec(TransformKind::Identity);
+        assert_eq!(
+            apply_transform_spec(&identity, &json!(" X ")),
+            Some(json!(" X "))
+        );
+        identity.kind = TransformKind::Trim;
+        assert_eq!(
+            apply_transform_spec(&identity, &json!(" X ")),
+            Some(json!("X"))
+        );
+        identity.kind = TransformKind::Lowercase;
+        assert_eq!(
+            apply_transform_spec(&identity, &json!("Ab")),
+            Some(json!("ab"))
+        );
+        identity.kind = TransformKind::Uppercase;
+        assert_eq!(
+            apply_transform_spec(&identity, &json!("Ab")),
+            Some(json!("AB"))
+        );
+        let mut replace = spec(TransformKind::Replace);
+        replace.from = Some("a".into());
+        replace.to = Some("b".into());
+        assert_eq!(
+            apply_transform_spec(&replace, &json!("a1")),
+            Some(json!("b1"))
+        );
+        let mut prefix = spec(TransformKind::AddPrefix);
+        prefix.prefix = Some("pre-".into());
+        assert_eq!(
+            apply_transform_spec(&prefix, &json!("x")),
+            Some(json!("pre-x"))
+        );
+        let mut suffix = spec(TransformKind::AddSuffix);
+        suffix.suffix = Some("-post".into());
+        assert_eq!(
+            apply_transform_spec(&suffix, &json!("x")),
+            Some(json!("x-post"))
+        );
+        let mut defaulted = spec(TransformKind::DefaultIfEmpty);
+        defaulted.default = Some("fallback".into());
+        assert_eq!(
+            apply_transform_spec(&defaulted, &json!("")),
+            Some(json!("fallback"))
+        );
+        let mut stripped = spec(TransformKind::StripPrefix);
+        stripped.prefix = Some("HIPASS".into());
+        assert_eq!(
+            apply_transform_spec(&stripped, &json!("HIPASSJ1")),
+            Some(json!("J1"))
+        );
+        assert_eq!(
+            apply_transform_spec(&spec(TransformKind::ExtractDigits), &json!("SB123")),
+            Some(json!("123"))
+        );
+        let mut split = spec(TransformKind::SplitLast);
+        split.separators = Some(vec!["/".into()]);
+        assert_eq!(
+            apply_transform_spec(&split, &json!("a/b")),
+            Some(json!("b"))
+        );
+        assert_eq!(
+            apply_transform_spec(&spec(TransformKind::IsPresent), &json!("x")),
+            Some(json!(true))
+        );
+        assert_eq!(
+            apply_transform_spec(
+                &spec(TransformKind::SelectEvalFileBySize),
+                &json!([{"filename": "small", "filesize": 1}, {"filename": "large", "filesize": 2}])
+            ),
+            Some(json!("large"))
+        );
+        let mut regex = spec(TransformKind::RegexExtract);
+        regex.pattern = Some("SB([0-9]+)".into());
+        regex.group = Some(1);
+        assert_eq!(
+            apply_transform_spec(&regex, &json!("SB42")),
+            Some(json!("42"))
+        );
+    }
+
+    #[test]
+    fn required_fields_are_validated_for_parameterized_transform_kinds() {
+        let cases = [
+            (TransformKind::StripPrefix, "prefix"),
+            (TransformKind::AddPrefix, "prefix"),
+            (TransformKind::AddSuffix, "suffix"),
+            (TransformKind::Replace, "from"),
+            (TransformKind::DefaultIfEmpty, "default"),
+            (TransformKind::SplitLast, "separators"),
+            (TransformKind::RegexExtract, "pattern"),
+            (TransformKind::Chain, "steps"),
+        ];
+        for (index, (kind, field)) in cases.into_iter().enumerate() {
+            let mut config = ProjectConfig::default();
+            config.metadata.id = format!("transform-{index}");
+            config.adapters.required.push("casda".into());
+            config.definitions = Some(crate::DefinitionsConfig {
+                transforms: BTreeMap::from([(
+                    "invalid".into(),
+                    TransformSpec {
+                        kind,
+                        prefix: None,
+                        suffix: None,
+                        separators: None,
+                        pattern: None,
+                        group: None,
+                        from: None,
+                        to: None,
+                        default: None,
+                        steps: None,
+                    },
+                )]),
+            });
+            let report = config.validate_report();
+            assert!(
+                report.errors.iter().any(|diagnostic| {
+                    diagnostic.path == format!("definitions.transforms.invalid.{field}")
+                }),
+                "missing required-field diagnostic for {field}: {:?}",
+                report.errors
+            );
+        }
     }
 
     #[test]

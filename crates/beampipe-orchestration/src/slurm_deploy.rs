@@ -159,14 +159,14 @@ pub async fn submit_slurm_session(
         .run_command(&format!("mkdir -p {staging_dir}"))
         .await?;
     session
-        .upload_text(
+        .upload_text_atomic(
             &pgt_remote_path,
             &serde_json::to_string(&pgt_json)
                 .map_err(|e| OrchestrationError::Backend(e.to_string()))?,
         )
         .await?;
     session
-        .upload_text(
+        .upload_text_atomic(
             &config_file_remote_path,
             &render_generated_ini(&deployment, &username, &pgt_remote_path, &dlg_root),
         )
@@ -175,7 +175,9 @@ pub async fn submit_slurm_session(
         deployment.slurm_template.as_deref(),
         slurm_template_remote_path.as_deref(),
     ) {
-        session.upload_text(template_path, template_body).await?;
+        session
+            .upload_text_atomic(template_path, template_body)
+            .await?;
     }
 
     let argv = create_dlg_job_argv(
@@ -198,7 +200,11 @@ pub async fn submit_slurm_session(
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
     let sbatch_out = session
-        .run_command(&format!("sbatch --parsable {}", shell_quote(&jobsub_path)))
+        .run_command(&format!(
+            "sbatch --parsable --job-name={} {}",
+            shell_quote(&session_id),
+            shell_quote(&jobsub_path)
+        ))
         .await?;
     let _ = session.close().await;
 
@@ -298,6 +304,10 @@ mod tests {
             check_with_session: false,
             verify_ssl: None,
             slurm_template: None,
+            resources: Default::default(),
+            manager_topology: Default::default(),
+            container_runtime: None,
+            environment_setup: None,
         };
         let ini = render_generated_ini(&dep, "user", "/path.pgt", "/dlg");
         assert!(ini.contains("ACCOUNT = myacct"));

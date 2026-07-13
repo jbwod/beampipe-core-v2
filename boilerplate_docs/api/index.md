@@ -8,7 +8,7 @@ The Rust API is mounted at `/api/v2`. Use this page for workflow order and copya
 BASE=http://127.0.0.1:8080
 TOKEN=$(curl -s -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"change-me"}' | jq -r .access_token)
+  -d '{"username":"admin","password":"replace-this-local-password"}' | jq -r .access_token)
 AUTH="Authorization: Bearer $TOKEN"
 ```
 

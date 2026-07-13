@@ -1,25 +1,62 @@
 # Production overlay: use with
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up
 #
-# Requires BEAMPIPE_JWT_SECRET (≥32 chars) and strong DATABASE_URL in the environment.
+# Requires BEAMPIPE_JWT_SECRET, DATABASE_URL, PostgreSQL credentials, an SSH key,
+# and a verified known-hosts file. The local Compose file remains secret-free.
+
+x-beampipe-slurm-production: &beampipe-slurm-production
+  secrets:
+    - slurm_ssh_key
+  volumes:
+    - type: bind
+      source: ${SLURM_SSH_KNOWN_HOSTS_SOURCE:?set SLURM_SSH_KNOWN_HOSTS_SOURCE}
+      target: /run/slurm-ssh/known_hosts
+      read_only: true
+  security_opt:
+    - no-new-privileges:true
 
 services:
   postgres:
-    ports: []
+    ports: !reset []
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER for production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for production}
+      POSTGRES_DB: ${POSTGRES_DB:-beampipe}
+    restart: always
 
   api:
     environment:
       BEAMPIPE_ENV: production
       BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL for production}
+    security_opt:
+      - no-new-privileges:true
+    restart: always
 
   scheduler:
+    <<: *beampipe-slurm-production
     environment:
       BEAMPIPE_ENV: production
       BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL for production}
       BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-true}
+      SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+      SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: "true"
+    restart: always
 
   worker:
+    <<: *beampipe-slurm-production
     environment:
       BEAMPIPE_ENV: production
       BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL for production}
       BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-true}
+      SLURM_SSH_PRIVATE_KEY_PATH: /run/secrets/slurm_ssh_key
+      SLURM_SSH_KNOWN_HOSTS: /run/slurm-ssh/known_hosts
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: "true"
+    restart: always
+
+secrets:
+  slurm_ssh_key:
+    file: ${SLURM_SSH_PRIVATE_KEY_FILE:?set SLURM_SSH_PRIVATE_KEY_FILE}

@@ -10,7 +10,7 @@ Workers claim jobs from PostgreSQL. Schedulers enqueue recurring work. This page
      v
 +------------------+      +----------------------+      +------------------+
 | enqueue job      | ---> | worker claims row    | ---> | job handler      |
-| discovery/exec   |      | lock + lease         |      | TAP/流 TM/流 DIM/Slurm |
+| discovery/exec   |      | lock + lease         |      | TAP/DALiuGE/Slurm |
 +------------------+      +----------+-----------+      +--------+---------+
                                       |                           |
                                       v                           v
@@ -28,7 +28,7 @@ If a worker exits mid-job, the lease expires after `BEAMPIPE_WORKER_LOCK_SECONDS
 | `execution_tick` | Scheduler tick | Worker | Admit eligible sources into execution runs |
 | `execute` | API or execution tick | Worker | Stage, translate, submit, and record a run |
 | `slurm_poll_tick` | Scheduler tick | Worker | Batch Slurm state polling over SSH |
-| `dim_poll_tick` | Scheduler tick | Worker | Poll 流 DIM/REST deployment state |
+| `dim_poll_tick` | Scheduler tick | Worker | Poll DALiuGE DIM/REST deployment state |
 
 ## Process layouts
 

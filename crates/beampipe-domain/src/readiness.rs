@@ -118,6 +118,7 @@ pub struct SourceExecutionStatus {
     pub pending_age_seconds: Option<i64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn source_execution_status(
     sid: &str,
     enabled: bool,

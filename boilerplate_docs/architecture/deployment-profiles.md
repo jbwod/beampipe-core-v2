@@ -6,16 +6,16 @@ A deployment profile tells beampipe how to translate and deploy a prepared graph
 
 | Backend | Use when | Operator concern |
 |---------|----------|------------------|
-| REST remote | A 流 DIM is already running and reachable over HTTP | 流 DIM URL, deploy/poll host, TLS policy |
+| REST remote | A DALiuGE DIM is already running and reachable over HTTP | DIM URL, deploy/poll host, TLS policy |
 | Slurm remote | The graph should run on an HPC cluster through SSH and `sbatch` | SSH trust, Slurm account, DALiuGE paths, poll cadence |
 
 <div class="terminal-diagram terminal-diagram--center">
 <pre>manifest + graph
       |
       v
-流 Translator Manager
+DALiuGE Translator Manager
       |
-      +--> REST remote 流 DIM
+      +--> REST remote DIM
       |
       +--> Slurm remote SSH + sbatch</pre>
 </div>
@@ -46,7 +46,7 @@ A deployment profile tells beampipe how to translate and deploy a prepared graph
 | `description` | no | Operator notes |
 | `project_module` | no | `null` means global profile |
 | `is_default` | no | Default profile when an execution omits a name |
-| `translation` | yes | DALiuGE 流 Translator Manager settings |
+| `translation` | yes | DALiuGE Translator Manager settings |
 | `deployment` | yes | `rest_remote` or `slurm_remote` |
 
 Profile changes apply to future executions. In-flight runs keep the config/profile already recorded on the execution.
@@ -58,13 +58,13 @@ Profile changes apply to future executions. In-flight runs keep the config/profi
 | `algo` | `metis` | `metis` or `mysarkar` | DALiuGE partition algorithm |
 | `num_par` | `1` | `>= 1` | Partition count |
 | `num_islands` | `0` | `>= 0` | Island count |
-| `tm_url` | unset | URL string | 流 Translator Manager base URL |
+| `tm_url` | unset | URL string | Translator Manager base URL |
 
 `tm_url` must be reachable from the worker that performs translation, not just from the operator laptop.
 
 ## REST remote
 
-Use REST remote when a 流 DIM is already running and reachable over HTTP.
+Use REST remote when a DALiuGE DIM is already running and reachable over HTTP.
 
 ```json
 {
@@ -73,24 +73,26 @@ Use REST remote when a 流 DIM is already running and reachable over HTTP.
   "dim_port_for_tm": 8001,
   "deploy_host": "dlg-dim.example",
   "deploy_port": 8001,
-  "verify_ssl": false
+  "use_https": true,
+  "verify_ssl": true
 }
 ```
 
 | Field | Required | Default | Purpose |
 |-------|----------|---------|---------|
 | `kind` | yes | none | Must be `rest_remote` |
-| `dim_host_for_tm` | no | unset | 流 DIM hostname as seen by 流 Translator Manager |
-| `dim_port_for_tm` | no | `8001` | 流 DIM port as seen by 流 Translator Manager |
-| `deploy_host` | no | unset | 流 DIM host used by beampipe for deploy and polling |
-| `deploy_port` | no | `8001` | 流 DIM deploy/polling port |
-| `verify_ssl` | no | `false` | Verify TLS certificates |
+| `dim_host_for_tm` | no | unset | DIM hostname as seen by Translator Manager |
+| `dim_port_for_tm` | no | `8001` | DIM port as seen by Translator Manager |
+| `deploy_host` | yes | none | Data Island Manager host used by Beampipe for deploy and polling |
+| `deploy_port` | no | `8001` | DIM deploy/polling port |
+| `use_https` | no | `false` | Use HTTPS for manager requests |
+| `verify_ssl` | no | `true` | Verify TLS certificates; disabling this is never the default |
 
-Best for local 流 DIM stacks, staging systems, and integration tests where a long-running 流 DIM service already exists.
+Best for local DALiuGE DIM stacks, staging systems, and integration tests where a long-running DIM service already exists.
 
 ## Slurm remote
 
-Use Slurm remote for HPC clusters. The worker translates through 流 Translator Manager, uploads artifacts over SSH, submits with `sbatch`, and polls with batched `squeue`/`sacct`.
+Use Slurm remote for HPC clusters. The worker translates through DALiuGE Translator Manager, uploads artifacts over SSH, submits with `sbatch`, and polls with batched `squeue`/`sacct`.
 
 ```json
 {

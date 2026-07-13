@@ -1,7 +1,7 @@
 docs_dir: boilerplate_docs
 
-site_name: ~ beampipe-core
-site_description: Event-driven control plane for scheduler-aware radio astronomy workflows (Rust v2).
+site_name: beampipe operator docs
+site_description: Operate and extend Beampipe, the Rust control plane for archive-driven radio astronomy workflows.
 site_author: Jack Blackwood
 site_url: https://beampipe-core.readthedocs.io/
 
@@ -13,14 +13,17 @@ theme:
   favicon: assets/brand/beampipe-terminal-icon.png
   features:
     - navigation.instant
-    - navigation.expand
+    - navigation.instant.progress
+    - navigation.tracking
     - navigation.top
     - navigation.footer
     - search.suggest
     - search.highlight
+    - search.share
     - content.code.copy
     - content.code.annotate
     - content.tabs.link
+    - content.tooltips
     - toc.follow
   palette:
     - scheme: slate
@@ -32,33 +35,48 @@ plugins:
 
 nav:
   - Home: index.md
-  - Getting started:
+  - Start:
+      - Choose a path: getting-started/index.md
+      - Five-minute local: getting-started/five-minute-start.md
       - Installation: getting-started/installation.md
-      - First run: getting-started/first-run.md
-      - Configuration: getting-started/configuration.md
-  - Operations:
-      - Operator guide: operations/operator-guide.md
+      - First workflow: getting-started/first-run.md
+      - Application configuration: getting-started/configuration.md
+  - Operate:
+      - Operator handbook: operations/index.md
+      - Daily workflow: operations/operator-guide.md
+      - Live console: operations/console.md
       - Workers and scheduling: operations/workers-scheduling.md
+      - DALiuGE and Setonix: operations/daliuge-setonix.md
       - Observability: operations/observability.md
+      - Recovery and cancellation: operations/recovery.md
       - Production runbook: operations/production-runbook.md
-  - Architecture:
-      - Control plane: architecture/control-plane.md
-      - Discovery and execution: architecture/lifecycle.md
-      - Deployment profiles: architecture/deployment-profiles.md
-  - Project configs:
+      - Upgrades, backups, and secrets: operations/upgrades-backups.md
+  - Configure projects:
       - YAML model: project-configs/index.md
       - Transforms: project-configs/transforms.md
-      - WASM hooks: project-configs/wasm-hooks.md
-      - DALiuGE Graphs: project-configs/graph-patches.md
-  - API:
-      - Workflow guide: api/index.md
-      - Redoc reference: api/reference.md
-  - Tools:
+      - DALiuGE graph patches: project-configs/graph-patches.md
+      - WASM extensions: project-configs/wasm-hooks.md
+  - Understand:
+      - Architecture map: architecture/index.md
+      - Control-plane boundaries: architecture/control-plane.md
+      - Discovery and execution: architecture/lifecycle.md
+      - Execution state model: architecture/state-machine.md
+      - Integration adapters: architecture/adapters.md
+      - Deployment profiles: architecture/deployment-profiles.md
+  - Reference:
+      - CLI commands: reference/cli.md
+      - Glossary: reference/glossary.md
+      - API workflow: api/index.md
+      - API schema: api/reference.md
       - Bruno collection: tools/bruno.md
       - OpenAPI export: tools/openapi.md
-  - Contributing: contributing.md
+  - Engineering:
+      - Contributing: contributing.md
+      - Documentation map: about/documentation-map.md
+      - Overhaul design record: architecture/operator-overhaul-assessment.md
 
-exclude_docs: ""
+exclude_docs: |
+  overrides/
 
 markdown_extensions:
   - admonition

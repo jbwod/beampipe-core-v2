@@ -158,6 +158,50 @@ pub fn set_executions_inflight_by_scheduler(scheduler_name: &str, count: i64) {
     .set(count as f64);
 }
 
+pub fn set_execution_axis_count(axis: &str, state: &str, count: i64) {
+    gauge!(
+        "beampipe_executions_by_external_state",
+        "axis" => axis.to_string(),
+        "state" => state.to_string()
+    )
+    .set(count as f64);
+}
+
+pub fn set_worker_heartbeat_age(worker_id: &str, pool: &str, seconds: i64) {
+    gauge!(
+        "beampipe_worker_heartbeat_age_seconds",
+        "worker_id" => worker_id.to_string(),
+        "pool" => pool.to_string()
+    )
+    .set(seconds.max(0) as f64);
+}
+
+pub fn set_worker_active_leases(worker_id: &str, pool: &str, count: i64) {
+    gauge!(
+        "beampipe_worker_active_leases",
+        "worker_id" => worker_id.to_string(),
+        "pool" => pool.to_string()
+    )
+    .set(count.max(0) as f64);
+}
+
+pub fn set_reconciliation_risk_count(count: i64) {
+    gauge!("beampipe_reconciliation_risk_executions").set(count.max(0) as f64);
+}
+
+pub fn set_execution_retry_total(count: i64) {
+    gauge!("beampipe_execution_retries_total").set(count.max(0) as f64);
+}
+
+pub fn record_reconciliation_result(component: &str, result: &str) {
+    counter!(
+        "beampipe_reconciliation_total",
+        "component" => component.to_string(),
+        "result" => result.to_string()
+    )
+    .increment(1);
+}
+
 pub fn record_slurm_poll_error(reason: &str) {
     counter!(
         "beampipe_slurm_poll_errors_total",

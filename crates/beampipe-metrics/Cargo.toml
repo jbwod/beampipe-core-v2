@@ -12,6 +12,7 @@ beampipe-domain = { path = "../beampipe-domain" }
 beampipe-orchestration = { path = "../beampipe-orchestration" }
 redis.workspace = true
 axum.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 metrics = "0.24"

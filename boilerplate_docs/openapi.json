@@ -2,6 +2,7 @@
   "components": {
     "schemas": {
       "AdapterConfig": {
+        "additionalProperties": false,
         "properties": {
           "casda_tap_url": {
             "nullable": true,
@@ -220,6 +221,32 @@
         },
         "type": "object"
       },
+      "ApiErrorResponse": {
+        "properties": {
+          "code": {
+            "examples": [
+              "not_found"
+            ],
+            "type": "string"
+          },
+          "error": {
+            "description": "Human-readable error message",
+            "examples": [
+              "Resource not found"
+            ],
+            "type": "string"
+          },
+          "failure": {
+            "$ref": "#/components/schemas/Failure"
+          }
+        },
+        "required": [
+          "error",
+          "code",
+          "failure"
+        ],
+        "type": "object"
+      },
       "ArchiveMetadataResponse": {
         "properties": {
           "created_at": {
@@ -258,6 +285,7 @@
         "type": "object"
       },
       "AutomationConfig": {
+        "additionalProperties": false,
         "properties": {
           "discovery": {
             "allOf": [
@@ -327,7 +355,43 @@
         ],
         "type": "string"
       },
+      "DaliugeInspectResponse": {
+        "properties": {
+          "manager": {
+            "nullable": true
+          },
+          "profile": {
+            "nullable": true,
+            "type": "string"
+          },
+          "translator": {}
+        },
+        "required": [
+          "translator"
+        ],
+        "type": "object"
+      },
+      "DaliugeManagerTopologyConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "co_host_dim": {
+            "type": "boolean"
+          },
+          "islands": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "nodes": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "DaliugeTranslationConfig": {
+        "additionalProperties": false,
         "properties": {
           "algo": {
             "$ref": "#/components/schemas/DaliugeAlgo"
@@ -348,6 +412,7 @@
         "type": "object"
       },
       "DefinitionsConfig": {
+        "additionalProperties": false,
         "properties": {
           "transforms": {
             "additionalProperties": {
@@ -408,6 +473,7 @@
         ]
       },
       "DeploymentProfile": {
+        "additionalProperties": false,
         "properties": {
           "deployment": {
             "$ref": "#/components/schemas/DeploymentConfig"
@@ -418,6 +484,11 @@
           },
           "is_default": {
             "type": "boolean"
+          },
+          "max_concurrent_executions": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
           },
           "name": {
             "type": "string"
@@ -451,10 +522,23 @@
           "is_default": {
             "type": "boolean"
           },
+          "max_concurrent_executions": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
           "name": {
             "type": "string"
           },
           "project_module": {
+            "nullable": true,
+            "type": "string"
+          },
+          "revision": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "spec_sha256": {
             "nullable": true,
             "type": "string"
           },
@@ -473,9 +557,67 @@
           "uuid",
           "name",
           "is_default",
+          "revision",
           "translation",
           "deployment",
           "created_at"
+        ],
+        "type": "object"
+      },
+      "Diagnostic": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "hint": {
+            "nullable": true,
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/DiagnosticSeverity"
+          }
+        },
+        "required": [
+          "path",
+          "severity",
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "DiagnosticSeverity": {
+        "enum": [
+          "error",
+          "warning"
+        ],
+        "type": "string"
+      },
+      "DiagnosticsResponse": {
+        "properties": {
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/beampipe_domain.Diagnostic"
+            },
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "healthy": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "healthy",
+          "generated_at",
+          "diagnostics"
         ],
         "type": "object"
       },
@@ -529,6 +671,7 @@
         "type": "object"
       },
       "DiscoveryAutomationConfig": {
+        "additionalProperties": false,
         "properties": {
           "batch_size": {
             "format": "int64",
@@ -568,6 +711,7 @@
         "type": "object"
       },
       "DiscoveryConfig": {
+        "additionalProperties": false,
         "properties": {
           "enrichments": {
             "items": {
@@ -593,6 +737,7 @@
         "type": "object"
       },
       "DiscoveryQuery": {
+        "additionalProperties": false,
         "properties": {
           "adapter": {
             "type": "string"
@@ -615,21 +760,6 @@
         ],
         "type": "object"
       },
-      "ErrorDetail": {
-        "properties": {
-          "detail": {
-            "description": "Human-readable error message",
-            "examples": [
-              "Resource not found"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "detail"
-        ],
-        "type": "object"
-      },
       "ExecuteRequest": {
         "properties": {
           "do_stage": {
@@ -641,7 +771,64 @@
         },
         "type": "object"
       },
+      "ExecutionArtifactRow": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "execution_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "inline_json": {
+            "nullable": true
+          },
+          "kind": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "metadata": {},
+          "producer_phase": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "storage_kind": {
+            "type": "string"
+          },
+          "uri": {
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "execution_id",
+          "kind",
+          "storage_kind",
+          "media_type",
+          "sha256",
+          "producer_phase",
+          "metadata",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "ExecutionAutomationConfig": {
+        "additionalProperties": false,
         "properties": {
           "archive_name": {
             "type": "string"
@@ -734,6 +921,75 @@
         ],
         "type": "object"
       },
+      "ExecutionDebugUrls": {
+        "properties": {
+          "dim_graph_status_url": {
+            "nullable": true,
+            "type": "string"
+          },
+          "dim_session_status_url": {
+            "nullable": true,
+            "type": "string"
+          },
+          "slurm_login_node": {
+            "nullable": true,
+            "type": "string"
+          },
+          "slurm_remote_user": {
+            "nullable": true,
+            "type": "string"
+          },
+          "slurm_session_dir": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ExecutionObservationRow": {
+        "properties": {
+          "execution_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "normalized_state": {
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "payload": {},
+          "raw_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "reason": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source_version": {
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "execution_id",
+          "kind",
+          "normalized_state",
+          "payload",
+          "observed_at"
+        ],
+        "type": "object"
+      },
       "ExecutionPatchRequest": {
         "properties": {
           "last_error": {
@@ -762,6 +1018,234 @@
         },
         "type": "object"
       },
+      "ExecutionRead": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ExecutionDebugUrls"
+          },
+          {
+            "properties": {
+              "archive_name": {
+                "type": "string"
+              },
+              "beampipe_run_record": {
+                "nullable": true
+              },
+              "completed_at": {
+                "format": "date-time",
+                "nullable": true,
+                "type": "string"
+              },
+              "control_phase": {
+                "nullable": true,
+                "type": "string"
+              },
+              "created_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "created_by_id": {
+                "format": "int32",
+                "nullable": true,
+                "type": "integer"
+              },
+              "daliuge_session_id": {
+                "nullable": true,
+                "type": "string"
+              },
+              "daliuge_state": {
+                "nullable": true,
+                "type": "string"
+              },
+              "deployment_profile_id": {
+                "format": "uuid",
+                "nullable": true,
+                "type": "string"
+              },
+              "deployment_profile_revision": {
+                "format": "int32",
+                "nullable": true,
+                "type": "integer"
+              },
+              "discovery_signature": {
+                "nullable": true,
+                "type": "string"
+              },
+              "execution_phase": {
+                "nullable": true,
+                "type": "string"
+              },
+              "failure_class": {
+                "nullable": true,
+                "type": "string"
+              },
+              "last_error": {
+                "nullable": true,
+                "type": "string"
+              },
+              "last_reconciled_at": {
+                "format": "date-time",
+                "nullable": true,
+                "type": "string"
+              },
+              "manifest_sha256": {
+                "nullable": true,
+                "type": "string"
+              },
+              "output_state": {
+                "nullable": true,
+                "type": "string"
+              },
+              "patched_graph_sha256": {
+                "nullable": true,
+                "type": "string"
+              },
+              "phase_timestamps": {},
+              "physical_graph_sha256": {
+                "nullable": true,
+                "type": "string"
+              },
+              "project_config_id": {
+                "format": "uuid",
+                "nullable": true,
+                "type": "string"
+              },
+              "project_config_version": {
+                "format": "int32",
+                "nullable": true,
+                "type": "integer"
+              },
+              "project_module": {
+                "type": "string"
+              },
+              "remote_session_dir": {
+                "nullable": true,
+                "type": "string"
+              },
+              "retry_count": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "scheduler_job_id": {
+                "nullable": true,
+                "type": "string"
+              },
+              "scheduler_name": {
+                "nullable": true,
+                "type": "string"
+              },
+              "scheduler_raw_state": {
+                "nullable": true,
+                "type": "string"
+              },
+              "scheduler_reason": {
+                "nullable": true,
+                "type": "string"
+              },
+              "scheduler_state": {
+                "nullable": true,
+                "type": "string"
+              },
+              "source_graph_sha256": {
+                "nullable": true,
+                "type": "string"
+              },
+              "sources": {},
+              "started_at": {
+                "format": "date-time",
+                "nullable": true,
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "submission_state": {
+                "nullable": true,
+                "type": "string"
+              },
+              "terminal_outcome": {
+                "nullable": true,
+                "type": "string"
+              },
+              "uuid": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "workflow_manifest": {
+                "nullable": true
+              }
+            },
+            "required": [
+              "uuid",
+              "project_module",
+              "archive_name",
+              "sources",
+              "status",
+              "phase_timestamps",
+              "retry_count",
+              "created_at"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ExecutionRetryRequest": {
+        "properties": {
+          "reason": {
+            "description": "Required operator recovery rationale, stored in the provenance stream.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ExecutionRetryResponse": {
+        "properties": {
+          "do_stage": {
+            "type": "boolean"
+          },
+          "do_submit": {
+            "type": "boolean"
+          },
+          "execution_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "job_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "retry_count": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/beampipe_domain.ExecutionRetryStage"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "execution_id",
+          "job_id",
+          "retry_count",
+          "stage",
+          "do_stage",
+          "do_submit"
+        ],
+        "type": "object"
+      },
+      "ExecutionRetryStage": {
+        "enum": [
+          "stage_and_manifest",
+          "submit"
+        ],
+        "type": "string"
+      },
       "ExecutionStatus": {
         "enum": [
           "pending",
@@ -775,7 +1259,181 @@
         ],
         "type": "string"
       },
+      "ExecutionStatusResponse": {
+        "properties": {
+          "completed_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "control_phase": {
+            "nullable": true,
+            "type": "string"
+          },
+          "daliuge_session_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "daliuge_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "dim_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "duration_seconds": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "execution_phase": {
+            "nullable": true,
+            "type": "string"
+          },
+          "failure_class": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_observation_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "output_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "retry_count": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "scheduler_job_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_raw_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_reason": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "slurm_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "submission_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "terminal_outcome": {
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "status",
+          "retry_count"
+        ],
+        "type": "object"
+      },
+      "ExecutionSummaryResponse": {
+        "properties": {
+          "archive_name": {
+            "type": "string"
+          },
+          "control_phase": {
+            "nullable": true,
+            "type": "string"
+          },
+          "daliuge_session_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "daliuge_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "requested_source_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requested_source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "scheduler_job_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "terminal_outcome": {
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "project_module",
+          "archive_name",
+          "status",
+          "requested_source_count",
+          "requested_source_identifiers"
+        ],
+        "type": "object"
+      },
       "ExtensionConfig": {
+        "additionalProperties": false,
         "properties": {
           "hooks": {
             "items": {
@@ -790,7 +1448,81 @@
         },
         "type": "object"
       },
+      "ExtensionHook": {
+        "enum": [
+          "prepare_metadata",
+          "manifest",
+          "graph_patches",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "Failure": {
+        "properties": {
+          "class": {
+            "$ref": "#/components/schemas/FailureClass"
+          },
+          "code": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "type": "array"
+          },
+          "log_reference": {
+            "nullable": true,
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "operator_action": {
+            "nullable": true,
+            "type": "string"
+          },
+          "retry": {
+            "$ref": "#/components/schemas/RetryDisposition"
+          },
+          "system_action": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "component",
+          "class",
+          "message",
+          "retry",
+          "system_action"
+        ],
+        "type": "object"
+      },
+      "FailureClass": {
+        "enum": [
+          "validation",
+          "configuration",
+          "authentication",
+          "authorization",
+          "not_found",
+          "conflict",
+          "dependency_unavailable",
+          "connectivity",
+          "timeout",
+          "rate_limited",
+          "unsupported",
+          "cancelled",
+          "inconsistent_state",
+          "internal"
+        ],
+        "type": "string"
+      },
       "GraphConfig": {
+        "additionalProperties": false,
         "properties": {
           "path": {
             "nullable": true,
@@ -804,15 +1536,108 @@
         "type": "object"
       },
       "GraphPatch": {
+        "additionalProperties": false,
         "properties": {
           "match": {
             "$ref": "#/components/schemas/GraphPatchMatch"
           },
           "set": {
-            "additionalProperties": {},
+            "additionalProperties": {
+              "$ref": "#/components/schemas/GraphPatchValue"
+            },
             "type": "object"
           }
         },
+        "type": "object"
+      },
+      "GraphPatchMatch": {
+        "additionalProperties": false,
+        "properties": {
+          "equals": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/GraphPatchMatchKind"
+          }
+        },
+        "type": "object"
+      },
+      "GraphPatchMatchKind": {
+        "enum": [
+          "node_name",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "GraphPatchValue": {},
+      "GraphPrepareRequest": {
+        "properties": {
+          "project_module": {
+            "type": "string"
+          },
+          "source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_module",
+          "source_identifiers"
+        ],
+        "type": "object"
+      },
+      "GraphPrepareResponse": {
+        "properties": {
+          "manifest": {},
+          "manifest_sha256": {
+            "type": "string"
+          },
+          "patch_summary": {},
+          "patched_graph": {},
+          "patched_graph_sha256": {
+            "type": "string"
+          },
+          "project_config_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "project_config_version": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "project_spec_sha256": {
+            "type": "string"
+          },
+          "source_graph": {},
+          "source_graph_sha256": {
+            "type": "string"
+          },
+          "source_identifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_module",
+          "source_identifiers",
+          "project_config_id",
+          "project_config_version",
+          "project_spec_sha256",
+          "manifest_sha256",
+          "source_graph_sha256",
+          "patched_graph_sha256",
+          "patch_summary",
+          "manifest",
+          "source_graph",
+          "patched_graph"
+        ],
         "type": "object"
       },
       "HealthResponse": {
@@ -949,8 +1774,14 @@
         "type": "object"
       },
       "ManifestConfig": {
+        "additionalProperties": false,
         "properties": {
           "dataset_template": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ManifestTemplate"
+              }
+            ],
             "nullable": true
           },
           "expand_from": {
@@ -966,7 +1797,30 @@
           "path": {
             "type": "string"
           },
-          "source_template": {}
+          "source_template": {
+            "$ref": "#/components/schemas/ManifestTemplate"
+          }
+        },
+        "type": "object"
+      },
+      "ManifestTemplate": {
+        "additionalProperties": {},
+        "type": "object"
+      },
+      "MappingSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "transform": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TransformRef"
+              }
+            ],
+            "nullable": true
+          }
         },
         "type": "object"
       },
@@ -1092,7 +1946,86 @@
         },
         "type": "object"
       },
+      "OperatorOverviewCounts": {
+        "properties": {
+          "active_workers": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "failed_executions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "pending_admissions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "queue_depth": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "recent_alerts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "registered_sources": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "running_executions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "stale_workers": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "registered_sources",
+          "pending_admissions",
+          "running_executions",
+          "failed_executions",
+          "queue_depth",
+          "active_workers",
+          "stale_workers",
+          "recent_alerts"
+        ],
+        "type": "object"
+      },
+      "OperatorOverviewResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/OperatorOverviewCounts"
+          },
+          {
+            "properties": {
+              "casda": {
+                "type": "string"
+              },
+              "daliuge": {
+                "type": "string"
+              },
+              "generated_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "scheduler": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "generated_at",
+              "casda",
+              "daliuge",
+              "scheduler"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "PrepareMetadataConfig": {
+        "additionalProperties": false,
         "properties": {
           "discovery_flags": {
             "additionalProperties": {
@@ -1118,6 +2051,7 @@
         "type": "object"
       },
       "ProjectConfig": {
+        "additionalProperties": false,
         "properties": {
           "adapters": {
             "$ref": "#/components/schemas/AdapterConfig"
@@ -1192,6 +2126,7 @@
         "type": "object"
       },
       "ProjectMetadata": {
+        "additionalProperties": false,
         "properties": {
           "description": {
             "nullable": true,
@@ -1368,6 +2303,7 @@
         "type": "object"
       },
       "RestRemoteDeploymentConfig": {
+        "additionalProperties": false,
         "properties": {
           "deploy_host": {
             "nullable": true,
@@ -1387,10 +2323,95 @@
             "nullable": true,
             "type": "integer"
           },
+          "use_https": {
+            "type": "boolean"
+          },
           "verify_ssl": {
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "RetryDisposition": {
+        "enum": [
+          "automatic",
+          "safe",
+          "after_remediation",
+          "unsafe"
+        ],
+        "type": "string"
+      },
+      "SchedulerJobRead": {
+        "properties": {
+          "daliuge_session_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "execution_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "execution_status": {
+            "type": "string"
+          },
+          "last_reconciled_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "remote_session_dir": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_job_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_raw_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_reason": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "submitted_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "execution_id",
+          "project_module",
+          "execution_status",
+          "submitted_at"
+        ],
+        "type": "object"
+      },
+      "SchedulerStatusResponse": {
+        "properties": {
+          "connectivity": {},
+          "profile": {
+            "type": "string"
+          },
+          "rendered_resource_request": {
+            "type": "string"
+          },
+          "resource_request": {}
+        },
+        "required": [
+          "profile",
+          "connectivity",
+          "resource_request",
+          "rendered_resource_request"
+        ],
         "type": "object"
       },
       "SecretRef": {
@@ -1445,6 +2466,7 @@
         "type": "object"
       },
       "SlurmRemoteDeploymentConfig": {
+        "additionalProperties": false,
         "properties": {
           "account": {
             "type": "string"
@@ -1455,7 +2477,15 @@
           "check_with_session": {
             "type": "boolean"
           },
+          "container_runtime": {
+            "nullable": true,
+            "type": "string"
+          },
           "dlg_root": {
+            "type": "string"
+          },
+          "environment_setup": {
+            "nullable": true,
             "type": "string"
           },
           "exec_prefix": {
@@ -1477,6 +2507,9 @@
           "login_node": {
             "type": "string"
           },
+          "manager_topology": {
+            "$ref": "#/components/schemas/DaliugeManagerTopologyConfig"
+          },
           "max_threads": {
             "format": "int32",
             "type": "integer"
@@ -1496,6 +2529,9 @@
           "remote_user": {
             "nullable": true,
             "type": "string"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/SlurmResourceConfig"
           },
           "sleepncopy": {
             "type": "boolean"
@@ -1531,6 +2567,48 @@
           "log_dir",
           "dlg_root"
         ],
+        "type": "object"
+      },
+      "SlurmResourceConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "constraint": {
+            "nullable": true,
+            "type": "string"
+          },
+          "cpus_per_task": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "memory": {
+            "nullable": true,
+            "type": "string"
+          },
+          "nodes": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "partition": {
+            "nullable": true,
+            "type": "string"
+          },
+          "quality_of_service": {
+            "nullable": true,
+            "type": "string"
+          },
+          "tasks": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "wall_time_minutes": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "SourceBulkCreate": {
@@ -1628,6 +2706,7 @@
         "type": "object"
       },
       "SourceIdentityConfig": {
+        "additionalProperties": false,
         "properties": {
           "canonical": {
             "type": "string"
@@ -1740,6 +2819,7 @@
         "type": "object"
       },
       "TapConfig": {
+        "additionalProperties": false,
         "properties": {
           "fail_open": {
             "type": "boolean"
@@ -1758,6 +2838,7 @@
         "type": "object"
       },
       "TemplateVarSpec": {
+        "additionalProperties": false,
         "properties": {
           "from": {
             "nullable": true,
@@ -1789,7 +2870,42 @@
         ],
         "type": "object"
       },
+      "TransformKind": {
+        "enum": [
+          "identity",
+          "trim",
+          "lowercase",
+          "uppercase",
+          "replace",
+          "add_prefix",
+          "add_suffix",
+          "default_if_empty",
+          "chain",
+          "strip_prefix",
+          "extract_digits",
+          "split_last",
+          "is_present",
+          "select_eval_file_by_size",
+          "regex_extract",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "TransformRef": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
       "TransformSpec": {
+        "additionalProperties": false,
         "properties": {
           "default": {
             "nullable": true,
@@ -1844,6 +2960,33 @@
         ],
         "type": "object"
       },
+      "ValidationDiagnostic": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "hint": {
+            "nullable": true,
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/DiagnosticSeverity"
+          }
+        },
+        "required": [
+          "path",
+          "severity",
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
       "ValidationReport": {
         "properties": {
           "errors": {
@@ -1891,6 +3034,366 @@
           "project_config_id"
         ],
         "type": "object"
+      },
+      "WorkerHeartbeatResponse": {
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "worker_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id",
+          "accepted",
+          "recorded_at"
+        ],
+        "type": "object"
+      },
+      "WorkerInstanceRow": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "concurrency_limit": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "draining_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "host_name": {
+            "type": "string"
+          },
+          "instance_name": {
+            "type": "string"
+          },
+          "labels": {},
+          "last_heartbeat_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "pool": {
+            "type": "string"
+          },
+          "process_id": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "role": {
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stopped_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "instance_name",
+          "host_name",
+          "role",
+          "pool",
+          "capabilities",
+          "labels",
+          "version",
+          "concurrency_limit",
+          "status",
+          "started_at",
+          "last_heartbeat_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkerLeaseRead": {
+        "properties": {
+          "attempts": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "claim_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "execution_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "heartbeat_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "job_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "pool": {
+            "type": "string"
+          },
+          "required_capability": {
+            "nullable": true,
+            "type": "string"
+          },
+          "worker_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "kind",
+          "pool",
+          "attempts"
+        ],
+        "type": "object"
+      },
+      "WorkerPoolSummary": {
+        "properties": {
+          "active_leases": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "active_workers": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "concurrency_limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "draining_workers": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "pool": {
+            "type": "string"
+          },
+          "unhealthy_workers": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pool",
+          "active_workers",
+          "draining_workers",
+          "unhealthy_workers",
+          "concurrency_limit",
+          "active_leases"
+        ],
+        "type": "object"
+      },
+      "WorkerRead": {
+        "properties": {
+          "active_leases": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "concurrency_limit": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "draining_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "health": {
+            "type": "string"
+          },
+          "heartbeat_age_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "instance_name": {
+            "type": "string"
+          },
+          "labels": {},
+          "last_heartbeat_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "pool": {
+            "type": "string"
+          },
+          "process_id": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "role": {
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stopped_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "instance_name",
+          "host",
+          "role",
+          "pool",
+          "capabilities",
+          "labels",
+          "version",
+          "concurrency_limit",
+          "status",
+          "health",
+          "active_leases",
+          "heartbeat_age_seconds",
+          "started_at",
+          "last_heartbeat_at"
+        ],
+        "type": "object"
+      },
+      "WorkerRegisterRequest": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "concurrency_limit": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "instance_name": {
+            "type": "string"
+          },
+          "labels": {},
+          "pool": {
+            "type": "string"
+          },
+          "process_id": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "role": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_name",
+          "host",
+          "version"
+        ],
+        "type": "object"
+      },
+      "beampipe_domain.Diagnostic": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "hint": {
+            "nullable": true,
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/DiagnosticSeverity"
+          }
+        },
+        "required": [
+          "path",
+          "severity",
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "beampipe_domain.ExecutionRetryStage": {
+        "enum": [
+          "stage_and_manifest",
+          "submit"
+        ],
+        "type": "string"
       },
       "observability.AlertDeliveryResponse": {
         "properties": {
@@ -2072,7 +3575,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2082,7 +3585,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2122,7 +3625,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2132,7 +3635,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2177,7 +3680,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2187,7 +3690,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2197,7 +3700,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2239,7 +3742,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2249,7 +3752,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2309,7 +3812,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2319,7 +3822,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2329,7 +3832,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2350,6 +3853,89 @@
         ]
       }
     },
+    "/api/v2/daliuge/inspect": {
+      "get": {
+        "operationId": "daliuge_inspect",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DaliugeInspectResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "daliuge"
+        ]
+      }
+    },
+    "/api/v2/daliuge/sessions": {
+      "get": {
+        "operationId": "daliuge_sessions",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "daliuge"
+        ]
+      }
+    },
     "/api/v2/deployment-profiles": {
       "get": {
         "description": "DALiuGE deployment profiles for a project module.",
@@ -2362,7 +3948,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2372,7 +3958,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2410,7 +3996,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2420,7 +4006,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2430,7 +4016,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2471,7 +4057,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2481,7 +4067,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2523,7 +4109,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2533,7 +4119,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2585,7 +4171,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2595,7 +4181,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2605,7 +4191,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2626,16 +4212,25 @@
         ]
       }
     },
-    "/api/v2/executions": {
+    "/api/v2/diagnostics": {
       "get": {
-        "description": "Filter executions by project module and status.",
-        "operationId": "list_executions",
+        "operationId": "diagnostics",
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "401": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2645,7 +4240,43 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v2/executions": {
+      "get": {
+        "description": "Filter executions by project module and status.",
+        "operationId": "list_executions",
+        "responses": {
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2683,7 +4314,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2693,7 +4324,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2703,7 +4334,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2743,7 +4374,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2753,7 +4384,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2763,7 +4394,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2804,7 +4435,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2814,7 +4445,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2866,7 +4497,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2876,7 +4507,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2886,7 +4517,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2902,6 +4533,68 @@
           }
         ],
         "summary": "Update execution",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/artifacts": {
+      "get": {
+        "operationId": "execution_artifacts",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ExecutionArtifactRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "tags": [
           "executions"
         ]
@@ -2941,7 +4634,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -2951,7 +4644,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3003,7 +4696,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3013,7 +4706,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3023,7 +4716,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3061,7 +4754,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3071,7 +4764,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3084,6 +4777,157 @@
           }
         ],
         "summary": "Get ledger snapshot",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/observations": {
+      "get": {
+        "operationId": "execution_observations",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ExecutionObservationRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/retry": {
+      "post": {
+        "operationId": "retry_execution",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionRetryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionRetryResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "tags": [
           "executions"
         ]
@@ -3112,7 +4956,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3122,7 +4966,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3166,7 +5010,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3176,7 +5020,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3194,6 +5038,64 @@
         "summary": "Get execution summary",
         "tags": [
           "executions"
+        ]
+      }
+    },
+    "/api/v2/graphs/prepare": {
+      "post": {
+        "operationId": "prepare_graph",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphPrepareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphPrepareResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "graphs"
         ]
       }
     },
@@ -3233,7 +5135,7 @@
     "/api/v2/jobs": {
       "post": {
         "description": "Enqueue a Postgres-backed background job (operator/debug).",
-        "operationId": "enqueue_job",
+        "operationId": "enqueue_job_handler",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3252,7 +5154,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3262,7 +5164,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3272,7 +5174,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3319,7 +5221,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3355,7 +5257,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3365,7 +5267,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3375,7 +5277,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3408,7 +5310,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3448,7 +5350,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3458,7 +5360,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3503,7 +5405,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3513,7 +5415,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3523,7 +5425,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3565,7 +5467,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3575,7 +5477,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3635,7 +5537,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3645,7 +5547,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3655,7 +5557,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3700,7 +5602,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3710,7 +5612,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3725,6 +5627,51 @@
         "summary": "Test notification channel",
         "tags": [
           "alerts"
+        ]
+      }
+    },
+    "/api/v2/overview": {
+      "get": {
+        "operationId": "operator_overview",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorOverviewResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
         ]
       }
     },
@@ -3760,7 +5707,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3770,7 +5717,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3810,7 +5757,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3820,7 +5767,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3863,7 +5810,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3873,7 +5820,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3932,7 +5879,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3942,7 +5889,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3952,7 +5899,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -3996,7 +5943,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4006,7 +5953,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4032,7 +5979,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4042,7 +5989,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4069,7 +6016,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4079,7 +6026,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4116,7 +6063,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4126,7 +6073,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4177,7 +6124,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4187,7 +6134,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4224,7 +6171,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4234,7 +6181,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4275,7 +6222,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4285,7 +6232,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4295,7 +6242,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4313,6 +6260,99 @@
         ]
       }
     },
+    "/api/v2/scheduler/jobs": {
+      "get": {
+        "operationId": "scheduler_jobs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SchedulerJobRead"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "scheduler"
+        ]
+      }
+    },
+    "/api/v2/scheduler/status": {
+      "get": {
+        "operationId": "scheduler_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerStatusResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "scheduler"
+        ]
+      }
+    },
     "/api/v2/sources": {
       "get": {
         "description": "Paginated source registry for a project module.",
@@ -4325,7 +6365,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4335,7 +6375,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4373,7 +6413,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4383,7 +6423,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4393,7 +6433,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4433,7 +6473,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4443,7 +6483,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4453,7 +6493,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4496,7 +6536,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4506,7 +6546,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4547,7 +6587,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4557,7 +6597,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4599,7 +6639,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4609,7 +6649,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4661,7 +6701,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4671,7 +6711,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4681,7 +6721,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4736,7 +6776,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4746,7 +6786,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4787,7 +6827,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4797,7 +6837,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4841,7 +6881,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4851,7 +6891,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4902,7 +6942,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4912,7 +6952,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4955,7 +6995,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorDetail"
+                  "$ref": "#/components/schemas/ApiErrorResponse"
                 }
               }
             },
@@ -4970,6 +7010,449 @@
         "summary": "Read current user",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/api/v2/workers": {
+      "get": {
+        "operationId": "list_workers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkerRead"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
+        ]
+      },
+      "post": {
+        "operationId": "register_worker",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerRead"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request (e.g. unknown project module)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
+        ]
+      }
+    },
+    "/api/v2/workers/leases": {
+      "get": {
+        "operationId": "list_worker_leases",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkerLeaseRead"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
+        ]
+      }
+    },
+    "/api/v2/workers/pools": {
+      "get": {
+        "operationId": "list_worker_pools",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkerPoolSummary"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
+        ]
+      }
+    },
+    "/api/v2/workers/{id}": {
+      "get": {
+        "operationId": "get_worker",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerRead"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
+        ]
+      }
+    },
+    "/api/v2/workers/{id}/drain": {
+      "post": {
+        "operationId": "drain_worker",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerRead"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
+        ]
+      }
+    },
+    "/api/v2/workers/{id}/heartbeat": {
+      "post": {
+        "operationId": "heartbeat_worker",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerHeartbeatResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
+        ]
+      }
+    },
+    "/api/v2/workers/{id}/resume": {
+      "post": {
+        "operationId": "resume_worker",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerRead"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "tags": [
+          "operators"
         ]
       }
     }
@@ -5016,6 +7499,22 @@
     {
       "description": "Audit event stream.",
       "name": "provenance"
+    },
+    {
+      "description": "System overview and Beampipe control-plane workers.",
+      "name": "operators"
+    },
+    {
+      "description": "Scheduler connectivity, resources, and persisted jobs.",
+      "name": "scheduler"
+    },
+    {
+      "description": "DALiuGE translator, manager, and session inspection.",
+      "name": "daliuge"
+    },
+    {
+      "description": "Deterministic graph preparation and patch diagnostics.",
+      "name": "graphs"
     }
   ],
   "x-tagGroups": [
@@ -5038,6 +7537,9 @@
     {
       "name": "Operations",
       "tags": [
+        "operators",
+        "scheduler",
+        "daliuge",
         "health",
         "provenance",
         "alerts"

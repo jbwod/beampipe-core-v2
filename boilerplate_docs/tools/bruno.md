@@ -10,7 +10,7 @@ Recommended environment variables:
 |------|---------|
 | `BASE` | `http://127.0.0.1:8080` |
 | `USERNAME` | `admin` |
-| `PASSWORD` | `change-me` |
+| `PASSWORD` | `replace-this-local-password` |
 | `TOKEN` | set after login |
 
 ## Recommended order
@@ -31,7 +31,7 @@ Recommended environment variables:
 BASE=http://127.0.0.1:8080
 TOKEN=$(curl -s -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"change-me"}' | jq -r .access_token)
+  -d '{"username":"admin","password":"replace-this-local-password"}' | jq -r .access_token)
 AUTH="Authorization: Bearer $TOKEN"
 ```
 

@@ -344,6 +344,32 @@ impl SlurmSshSession {
         Ok(())
     }
 
+    /// Upload through a same-directory temporary file and atomically rename it.
+    pub async fn upload_text_atomic(
+        &mut self,
+        remote_path: &str,
+        content: &str,
+    ) -> Result<(), OrchestrationError> {
+        let temporary_path = format!("{remote_path}.tmp-{}", uuid::Uuid::now_v7().simple());
+        self.upload_text(&temporary_path, content).await?;
+        let result = self
+            .run_command(&format!(
+                "mv -- {} {}",
+                shell_escape_single(&temporary_path),
+                shell_escape_single(remote_path)
+            ))
+            .await;
+        if result.is_err() {
+            let _ = self
+                .run_command(&format!(
+                    "rm -f -- {}",
+                    shell_escape_single(&temporary_path)
+                ))
+                .await;
+        }
+        result.map(|_| ())
+    }
+
     pub async fn close(self) -> Result<(), OrchestrationError> {
         let _ = self
             .handle

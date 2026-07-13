@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use tracing::warn;
 use uuid::Uuid;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn record_provenance_event(
     pool: &PgPool,
     event_type: &str,

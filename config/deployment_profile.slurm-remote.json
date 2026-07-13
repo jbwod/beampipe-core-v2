@@ -25,12 +25,24 @@
     "job_duration_minutes": 50,
     "num_nodes": 1,
     "num_islands": 1,
+    "resources": {
+      "partition": "work",
+      "nodes": 1,
+      "tasks": 1,
+      "cpus_per_task": 1,
+      "wall_time_minutes": 50
+    },
+    "manager_topology": {
+      "nodes": 1,
+      "islands": 1,
+      "co_host_dim": false
+    },
     "max_threads": 0,
     "verbose_level": 1,
     "all_nics": false,
     "zerorun": false,
     "sleepncopy": false,
     "check_with_session": false,
-    "verify_ssl": false
+    "verify_ssl": true
   }
 }

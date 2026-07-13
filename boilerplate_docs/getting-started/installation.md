@@ -8,7 +8,10 @@ The CLI is defined as `beampipe` in `crates/beampipe-cli/Cargo.toml`. The Docker
 
 | Command | Purpose |
 |---------|---------|
-| `beampipe setup` | Print setup guidance and environment checks |
+| `beampipe init` | Generate local/production config and a secret-free `.env.example` |
+| `beampipe setup` | Guided PostgreSQL, admin, CASDA, DALiuGE, SLURM, profile, and worker setup |
+| `beampipe doctor` | Run configuration and live dependency diagnostics |
+| `beampipe console` | Open the live terminal operator interface |
 | `beampipe migrate` | Apply database migrations |
 | `beampipe admin create-user` | Create an operator account |
 | `beampipe serve` | Run the HTTP API, optionally with embedded scheduler/worker ticks |
@@ -21,18 +24,13 @@ The CLI is defined as `beampipe` in `crates/beampipe-cli/Cargo.toml`. The Docker
 
 ## Preferred: binary on PATH
 
-Download or build a release binary, put it on `PATH`, then bootstrap the database and API:
+Download a release archive, verify it against `SHA256SUMS`, put `beampipe` on `PATH`,
+then bootstrap the database and API:
 
 ```bash
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-export BEAMPIPE_JWT_SECRET=change-me
-
+beampipe init
 beampipe setup
-beampipe migrate
-beampipe admin create-user \
-  --username admin \
-  --password change-me \
-  --email admin@example.test
+beampipe doctor
 beampipe serve --worker false
 ```
 
@@ -40,7 +38,6 @@ Run worker capacity from another shell:
 
 ```bash
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-export BEAMPIPE_JWT_SECRET=change-me
 BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
 ```
 
@@ -65,9 +62,11 @@ cargo build --release -p beampipe-cli --bin beampipe
 Run the built binary directly:
 
 ```bash
-target/release/beampipe setup
-target/release/beampipe migrate
-target/release/beampipe serve --worker false
+target/release/beampipe init --directory operator-local
+cd operator-local
+../target/release/beampipe setup
+../target/release/beampipe doctor
+../target/release/beampipe serve --worker false
 ```
 
 Or install it into Cargo's binary directory:
@@ -79,16 +78,20 @@ beampipe setup
 
 ## Docker Compose
 
-Docker Compose starts PostgreSQL, an API process, a scheduler process, and worker replicas. It does not run migrations or create the first admin user for you.
+Docker Compose starts PostgreSQL, an API process, a scheduler process, and worker replicas.
+The base file uses mock external backends and requires no SSH secret. Setup still owns
+migrations and initial administrator creation.
 
 ```bash
 docker compose build api
-docker compose up -d
+cp .env.example .env
+docker compose up -d postgres
 docker compose run --rm api migrate
 docker compose run --rm api admin create-user \
   --username admin \
-  --password change-me \
+  --password 'replace-this-local-password' \
   --email admin@example.test
+docker compose up -d api scheduler worker
 ```
 
 Compose services:
@@ -115,12 +118,12 @@ Use `cargo run` only when hacking Rust on the host. It is the same command surfa
 ```bash
 docker compose up -d postgres
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-export BEAMPIPE_JWT_SECRET=change-me
+export BEAMPIPE_JWT_SECRET=replace-with-at-least-32-random-characters
 
 cargo run -p beampipe-cli --bin beampipe -- migrate
 cargo run -p beampipe-cli --bin beampipe -- admin create-user \
   --username admin \
-  --password change-me \
+  --password 'replace-this-local-password' \
   --email admin@example.test
 cargo run -p beampipe-cli --bin beampipe -- serve
 ```

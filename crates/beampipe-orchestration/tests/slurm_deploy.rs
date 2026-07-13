@@ -25,6 +25,10 @@ fn sample_slurm_config() -> SlurmRemoteDeploymentConfig {
         check_with_session: false,
         verify_ssl: None,
         slurm_template: None,
+        resources: Default::default(),
+        manager_topology: Default::default(),
+        container_runtime: None,
+        environment_setup: None,
     }
 }
 

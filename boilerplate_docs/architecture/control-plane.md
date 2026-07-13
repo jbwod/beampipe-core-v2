@@ -1,27 +1,59 @@
-# Control plane architecture
+# Control-plane boundaries
 
-beampipe-core coordinates archive discovery and execution state. It prepares manifests, calls translation/deployment services, and records what happened; it does not run the science graph itself.
+Beampipe coordinates archive discovery and workflow execution without becoming the archive, scheduler, or science runtime. Its authority is durable intent: what was requested, which immutable inputs were used, what side effect was attempted, and what each external system later reported.
 
-## System shape
+## Ownership map
 
-![Terminal-style Beampipe control plane diagram](../assets/readme/control-plane-terminal-dark.png)
+<div class="bp-lane-diagram" aria-label="Ownership boundaries across external systems and Beampipe">
+  <div class="bp-lane-diagram__label" data-tone="cyan">OBSERVE</div>
+  <div class="bp-lane-diagram__content"><strong>CASDA</strong><span>archive metadata, products, access facts</span></div>
+  <div class="bp-lane-diagram__label" data-tone="amber">OWN</div>
+  <div class="bp-lane-diagram__content"><strong>Beampipe</strong><span>source identity, config/profile revisions, admission, jobs, claims, artifacts, provenance</span></div>
+  <div class="bp-lane-diagram__label" data-tone="green">EFFECT</div>
+  <div class="bp-lane-diagram__content"><strong>workers</strong><span>discovery, graph preparation, submission, polling, verification</span></div>
+  <div class="bp-lane-diagram__label" data-tone="cyan">RECONCILE</div>
+  <div class="bp-lane-diagram__content"><strong>Slurm + DALiuGE</strong><span>allocations, sessions, runtime state, scientific outputs</span></div>
+</div>
+
+The [interactive architecture map](index.md) expands each boundary.
+
+## Durable records
+
+| Record | Why it exists | Stability |
+|---|---|---|
+| Project config revision | Reproduce discovery and manifest policy | Immutable after upload |
+| Deployment profile snapshot | Reproduce backend and resource intent | Pinned by execution |
+| Execution ledger | Hold current control and external state axes | Updated through validated transitions |
+| Job and claim history | Prove worker ownership and recovery | Append-oriented audit |
+| Manifest and graph artifacts | Reproduce translated inputs and mutations | Content-addressed / checksummed |
+| Run record | Preserve backend identifiers and poll detail | Execution-scoped |
+| Provenance event | Explain meaningful state and operator actions | Append-only narrative |
+
+## Side-effect contract
+
+Before a worker contacts a scheduler or DALiuGE manager, Beampipe persists intent and deterministic external identity. The worker then performs the effect under a leased claim and records the observation. This ordering makes three difficult cases recoverable:
+
+1. The process stops before making the external call: persisted intent remains safe to resume.
+2. The process stops after the call but before recording its result: submission becomes uncertain and must be reconciled.
+3. A stale worker returns after another worker recovered the claim: the fencing token prevents stale state from being committed.
 
 ## Responsibilities
 
-| Area | Responsibility |
-|------|----------------|
-| API | Auth, source registry, executions, project configs, profiles, alerts |
-| Database | Active configs, source state, archive metadata, jobs, execution ledger, provenance |
-| Worker | Scheduler ticks, TAP discovery, manifest build, staging, submit, polling |
-| Project config | Survey queries, transforms, manifest shape, DALiuGE Graphs, automation |
-| Deployment profile | DALiuGE translation and REST/Slurm deployment settings |
+| Component | Responsibility |
+|---|---|
+| API | Authentication, source registry, operator intent, project/profile lifecycle, read models |
+| PostgreSQL | Authoritative control state, queues, artifacts, claims, history, provenance |
+| Worker | Typed adapter calls, deterministic preparation, bounded external effects, polling |
+| Project config | Survey identity, archive queries, transforms, manifest shape, graph patches, automation |
+| Deployment profile | Translator, manager, scheduler, resource, TLS, and facility configuration |
+| Console | Live projection of durable and probed state; never an alternate source of truth |
 
-## State boundaries
+## Explicit non-responsibilities
 
-Project configs are versioned. Active executions pin the config version used to build their run. Execution records keep manifest and run-record state so operators can inspect exact inputs and backend transitions after completion.
+Beampipe does not evaluate the science graph, emulate Slurm, infer success from one backend response, store SSH private keys in project YAML, or reconstruct an execution from mutable active configuration.
 
-## API contract
+## API boundary
 
-The Rust API exposes `/api/v2` and exports OpenAPI from `utoipa`. Use [Redoc reference](../api/reference.md) for schema details and [API workflow guide](../api/index.md) for operational request order.
+The Rust API exposes `/api/v2` and generates OpenAPI from `utoipa`. Use the [API workflow](../api/index.md) for request order and the [API schema](../api/reference.md) for exact objects.
 
-Next: follow [Discovery and execution lifecycle](lifecycle.md).
+Next: follow data through [discovery and execution](lifecycle.md).

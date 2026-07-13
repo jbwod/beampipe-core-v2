@@ -1,12 +1,22 @@
-# DALiuGE Graphs
+# DALiuGE graph patches
 
-DALiuGE Graph support covers the final graph-shaping step before translation and deployment. The YAML key is `graph_patches`; the operator-facing goal is to make graph changes deterministic, reviewable, and tied to the generated manifest.
+Graph patches are the final deterministic graph-shaping step before translation and deployment. The v2 YAML key is `graph_patches`; every match, expression result, changed field, and artifact checksum remains inspectable.
 
-## Flow
+## Preparation flow
 
-![Terminal-style Beampipe graph patch flow diagram](../assets/readme/graph-patch-flow-terminal-dark.png)
+<div class="bp-flow-diagram bp-flow-diagram--wide" role="img" aria-label="Logical graph and manifest are validated, patched, checksummed, translated, and deployed">
+  <div class="bp-flow-node" data-tone="cyan"><span>INPUT</span><strong>logical graph</strong><small>URL or path</small></div>
+  <span class="bp-flow-link" aria-hidden="true">+</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>CONTEXT</span><strong>manifest</strong><small>pinned artifact</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>VALIDATE</span><strong>patch reducer</strong><small>match + evaluate + set</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>ARTIFACT</span><strong>patched graph</strong><small>diff + sha256</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>EXTERNAL</span><strong>translator</strong><small>then deployment</small></div>
+</div>
 
-## Example
+## Typed shape
 
 Set the scatter count from manifest data:
 
@@ -19,47 +29,49 @@ graph_patches:
       num_of_copies: "$count(sbids[].datasets[])"
 ```
 
-The expression runs against the manifest context. In this example, the graph receives one copy per discovered dataset across SBID groups.
-
-## Matching
-
-| Match kind | Purpose |
-|------------|---------|
-| `node_name` | Match a graph node by full DALiuGE node name |
-| Additional kinds | Add only when the graph format and validation rules support them |
-
-Keep matches precise. A patch that silently matches multiple nodes can make execution hard to audit.
+`match.kind` is the closed enum `node_name`. `match.equals` identifies the full DALiuGE node name. Each `set` value is either a literal or one of the supported manifest expressions.
 
 ## Expressions
 
-Values beginning with `$` are evaluated against the manifest context. Use expressions for counts and manifest-derived scatter settings; keep complex survey logic in transforms or WASM hooks.
+| Expression | Result | Typical use |
+|---|---|---|
+| `$count(path)` | Number of selected manifest elements | Scatter copies |
+| `$sum(path)` | Numeric sum across selected values | Aggregate resource or workload field |
 
-| Expression | Use |
-|------------|-----|
-| `$count(path)` | Count manifest elements |
-| `$sum(path)` | Sum numeric manifest values |
+Expressions run against the immutable manifest context. Put archive normalization in typed transforms and reserve WASM for survey logic that cannot be expressed safely in the built-in model.
 
-## beampipe-ingest palette
+## Patch diagnostics
 
-Existing DALiuGE graphs can include the `beampipe-ingest` palette. At submit time, beampipe looks for a node named `beampipe-ingest` with a `manifest_path` field, creates a readonly graph configuration, and embeds the generated manifest JSON before translation.
+Graph preparation reports:
 
-Typical graph contract:
+- the patch index and target node;
+- whether zero, one, or multiple nodes matched;
+- each field before and after mutation;
+- expression input path and evaluated value;
+- graph checksum before and after mutation;
+- validation errors with a structured path and hint.
 
-| Field | Meaning |
-|-------|---------|
-| `beampipe-ingest` node | Marker that the graph expects beampipe manifest injection |
-| `manifest_path` | Path or graph parameter where the manifest JSON should be placed |
-| Generated manifest | Source/SBID/dataset grouping from project config discovery |
+Precise matches are deliberate. A missing node is an error rather than a silent no-op; an ambiguous match is rejected rather than applied to multiple nodes.
 
-Use the palette when the science graph should consume beampipe-generated manifest data directly. Use plain patches when the graph only needs structural changes such as scatter counts.
+## Manifest injection
 
-## Operator checks
+Existing graphs can use the `beampipe-ingest` palette. During preparation, Beampipe locates the named node, validates its `manifest_path` field, creates readonly graph configuration, and embeds the generated manifest JSON before translation.
 
-| Check | Why |
-|-------|-----|
-| Patch target exists | Prevents silent no-op graph mutation |
-| Expression output is expected | Avoids wrong scatter size or missing parameters |
-| Manifest injection path is readable | Ensures graph apps can load the manifest |
-| Dry execution passes | Confirms graph preparation before real staging/submission |
+| Contract element | Meaning |
+|---|---|
+| `beampipe-ingest` node | Marker that the graph accepts a Beampipe manifest |
+| `manifest_path` | Graph field or path where manifest JSON is exposed |
+| Generated manifest | Project-shaped source, SBID, and dataset grouping |
 
-Next: use [Deployment profiles](../architecture/deployment-profiles.md) to select the backend that receives the prepared graph through 流 Translator Manager.
+Use injection when graph applications consume the manifest directly. Use ordinary patches for structural settings such as scatter counts.
+
+## Operator preview
+
+```bash
+beampipe graph prepare \
+  --project wallaby_hires \
+  --source WALLABY_J123456-123456
+beampipe graph diff --execution "$EXECUTION_ID"
+```
+
+Before live submission, confirm the target count, expression values, node/field diff, manifest injection path, and output checksums. Then use [deployment profiles](../architecture/deployment-profiles.md) to select the translator and deployment boundary.

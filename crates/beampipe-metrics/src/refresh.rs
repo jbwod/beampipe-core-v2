@@ -144,6 +144,31 @@ pub async fn refresh_gauges_from_pool(pool: &PgPool) {
             crate::set_executions_inflight_by_scheduler(&scheduler_name, count);
         }
     }
+    if let Ok(by_axis) = beampipe_db::repo::execution_counts_by_external_axis(pool).await {
+        for (axis, state, count) in by_axis {
+            crate::set_execution_axis_count(&axis, &state, count);
+        }
+    }
+    if let Ok(count) = beampipe_db::repo::reconciliation_risk_count(pool).await {
+        crate::set_reconciliation_risk_count(count);
+    }
+    if let Ok(count) = beampipe_db::repo::execution_retry_total(pool).await {
+        crate::set_execution_retry_total(count);
+    }
+    if let Ok(workers) = beampipe_db::repo::list_worker_instances(pool, false).await {
+        for worker in workers {
+            let worker_id = worker.uuid.to_string();
+            let heartbeat_age = chrono::Utc::now()
+                .signed_duration_since(worker.last_heartbeat_at)
+                .num_seconds();
+            crate::set_worker_heartbeat_age(&worker_id, &worker.pool, heartbeat_age);
+            if let Ok(leases) =
+                beampipe_db::repo::active_worker_lease_count(pool, worker.uuid).await
+            {
+                crate::set_worker_active_leases(&worker_id, &worker.pool, leases);
+            }
+        }
+    }
 
     let mut pending_by_module: HashMap<String, i64> = HashMap::new();
     if let Ok(pending) = beampipe_db::repo::workflow_pending_counts_by_module(pool).await {

@@ -1,6 +1,6 @@
 use crate::OrchestrationError;
 use beampipe_project::expressions::evaluate_expression;
-use beampipe_project::{ManifestConfig, ProjectConfig};
+use beampipe_project::{ManifestConfig, ManifestTemplate, ProjectConfig};
 use serde_json::{json, Map, Value};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -83,7 +83,7 @@ fn build_from_manifest_config(
                     .iter()
                     .map(|record| {
                         if let Some(template) = cfg.dataset_template.as_ref() {
-                            render_template_object(template, record, staging)
+                            render_manifest_template(template, record, staging)
                         } else {
                             record.clone()
                         }
@@ -94,7 +94,7 @@ fn build_from_manifest_config(
             };
             sbids.push(json!({"sbid": sbid, "datasets": rendered}));
         }
-        let mut source_obj = render_template_object(&cfg.source_template, &first, staging);
+        let mut source_obj = render_manifest_template(&cfg.source_template, &first, staging);
         if let Some(obj) = source_obj.as_object_mut() {
             obj.insert("source_identifier".into(), json!(source_id));
             obj.insert("sbids".into(), json!(sbids));
@@ -134,9 +134,10 @@ pub fn apply_project_graph_patches(manifest: &mut Value, config: &ProjectConfig)
             let mut fields = Vec::new();
             for (name, raw_value) in &patch.set {
                 let value = if let Some(s) = raw_value.as_str() {
-                    evaluate_expression(s, &expr_ctx).unwrap_or_else(|| raw_value.clone())
+                    evaluate_expression(s, &expr_ctx)
+                        .unwrap_or_else(|| raw_value.as_value().clone())
                 } else {
-                    raw_value.clone()
+                    raw_value.as_value().clone()
                 };
                 fields.push(json!({"name": name, "value": value}));
             }
@@ -169,6 +170,14 @@ fn render_template_object(template: &Value, record: &Value, context: &Value) -> 
         }
         other => render_template_value(other, record, context),
     }
+}
+
+fn render_manifest_template(template: &ManifestTemplate, record: &Value, context: &Value) -> Value {
+    let mut out = Map::new();
+    for (key, value) in template.fields() {
+        out.insert(key.clone(), render_template_value(value, record, context));
+    }
+    Value::Object(out)
 }
 
 fn render_template_value(template: &Value, record: &Value, context: &Value) -> Value {

@@ -6,7 +6,17 @@ This is the daily operating map for beampipe-core v2. Use it after installation 
 
 beampipe-core is one binary with multiple roles. All roles share PostgreSQL as the durable state store.
 
-![Terminal-style Beampipe operations and observability diagram](../assets/readme/operations-observability-terminal-dark.png)
+<div class="bp-flow-diagram bp-flow-diagram--wide" role="img" aria-label="API, scheduler, and workers coordinate through PostgreSQL and external adapters">
+  <div class="bp-flow-node" data-tone="cyan"><span>HTTP</span><strong>API</strong><small>operator intent</small></div>
+  <span class="bp-flow-link" aria-hidden="true">&lt;--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>TRUTH</span><strong>PostgreSQL</strong><small>jobs + ledger</small></div>
+  <span class="bp-flow-link" aria-hidden="true">&lt;--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>TICKS</span><strong>scheduler</strong><small>recurring intent</small></div>
+  <span class="bp-flow-link" aria-hidden="true">+</span>
+  <div class="bp-flow-node" data-tone="green"><span>CLAIMS</span><strong>workers</strong><small>leased effects</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>PROBE</span><strong>external</strong><small>archive + runtime</small></div>
+</div>
 
 Run exactly one scheduler-enabled process per environment. Scale API processes for HTTP traffic and worker-only processes for queue throughput.
 
@@ -15,7 +25,7 @@ Run exactly one scheduler-enabled process per environment. Scale API processes f
 | Role | Starts with | Owns | Scale rule |
 |------|-------------|------|------------|
 | API | `beampipe serve --worker false` | HTTP API, auth, uploads, readiness, metrics | Scale for request volume |
-| Scheduler | `beampipe serve --worker true` or scheduler-enabled `beampipe worker` | Recurring discovery, execution, 流 DIM, and Slurm poll ticks | Run exactly one |
+| Scheduler | `beampipe serve --worker true` or scheduler-enabled `beampipe worker` | Recurring discovery, execution, DALiuGE, and Slurm poll ticks | Run exactly one |
 | Worker | `BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker` | Queue claims, TAP calls, manifests, staging, translation, deployment, polling | Scale horizontally |
 | Database | PostgreSQL | Configs, source metadata, jobs, executions, provenance | One logical primary |
 
@@ -35,11 +45,23 @@ Run exactly one scheduler-enabled process per environment. Scale API processes f
 | Monitoring | Check readiness | `GET /api/v2/ready` |
 | Monitoring | Inspect provenance | `GET /api/v2/executions/{id}/events` |
 
+For first-time setup, the supported path is:
+
+```bash
+beampipe init
+beampipe setup
+beampipe doctor
+beampipe project add -f config/wallaby_hires.v2.yaml
+beampipe start
+```
+
+Use `beampipe console` for the same durable system state without requiring a browser.
+
 Use [API workflow guide](../api/index.md) for concrete request examples.
 
 ## Mock to real backend path
 
-Start with mock backends to validate project config, discovery, manifest construction, and dry execution. Move to real backends only after the environment has credentials, TAP reachability, 流 Translator Manager access, and a tested 流 DIM or Slurm deployment profile.
+Start with mock backends to validate project config, discovery, manifest construction, and dry execution. Move to real backends only after the environment has credentials, TAP reachability, DALiuGE Translator Manager access, and a tested DALiuGE DIM or Slurm deployment profile.
 
 ```bash
 export BEAMPIPE_USE_REAL_BACKENDS=true
@@ -61,7 +83,7 @@ Run `beampipe security check` before production startup and `beampipe slurm ping
 | Oldest queued job | Stays near expected job time | metrics |
 | Discovery metadata | Sources receive metadata and discovery flags | source events |
 | Execution ledger | Runs move through stage, translate, submit, poll, terminal state | execution events |
-| Backend debug fields | 流 DIM or Slurm fields appear on execution responses | execution response |
+| Backend debug fields | DALiuGE DIM or Slurm fields appear on execution responses | execution response |
 
 ## First triage
 

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::{DaliugeState, SchedulerState, SubmissionState, TerminalOutcome};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStatus {
@@ -64,6 +66,110 @@ impl ExecutionStatus {
 pub enum ExecutionPhase {
     StageAndManifest,
     Submit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionRetryStage {
+    StageAndManifest,
+    Submit,
+}
+
+impl ExecutionRetryStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StageAndManifest => "stage_and_manifest",
+            Self::Submit => "submit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionRetryContext {
+    pub status: ExecutionStatus,
+    pub phase: Option<ExecutionPhase>,
+    pub submission: SubmissionState,
+    pub scheduler: SchedulerState,
+    pub daliuge: DaliugeState,
+    pub terminal_outcome: Option<TerminalOutcome>,
+    pub has_manifest: bool,
+    pub has_scheduler_job_id: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+pub struct ExecutionRetryPlan {
+    pub stage: ExecutionRetryStage,
+    pub do_stage: bool,
+    pub do_submit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+pub struct ExecutionRetryRejection {
+    pub code: String,
+    pub message: String,
+}
+
+pub fn plan_execution_retry(
+    context: ExecutionRetryContext,
+) -> Result<ExecutionRetryPlan, ExecutionRetryRejection> {
+    let reject = |code: &str, message: &str| ExecutionRetryRejection {
+        code: code.into(),
+        message: message.into(),
+    };
+    if context.status != ExecutionStatus::Failed {
+        return Err(reject(
+            "execution_not_failed",
+            "only a failed execution can be retried in place",
+        ));
+    }
+    if context.terminal_outcome == Some(TerminalOutcome::Inconsistent) {
+        return Err(reject(
+            "external_state_inconsistent",
+            "the external state is inconsistent; reconcile or create a new execution instead of replaying work",
+        ));
+    }
+    if matches!(
+        context.submission,
+        SubmissionState::Preparing
+            | SubmissionState::InFlight
+            | SubmissionState::Submitted
+            | SubmissionState::Uncertain
+    ) {
+        return Err(reject(
+            "submission_may_exist",
+            "submission may have reached an external system; retry is blocked to prevent duplicate work",
+        ));
+    }
+    if context.has_scheduler_job_id || context.scheduler != SchedulerState::NotSubmitted {
+        return Err(reject(
+            "scheduler_work_exists",
+            "a scheduler job or scheduler observation exists; create a new execution after reconciliation",
+        ));
+    }
+    if context.daliuge != DaliugeState::NotCreated {
+        return Err(reject(
+            "daliuge_session_may_exist",
+            "DALiuGE is not definitively in the not-created state; retry is blocked to prevent duplicate sessions",
+        ));
+    }
+    let stage = if context.phase == Some(ExecutionPhase::Submit)
+        || (context.submission == SubmissionState::Failed && context.has_manifest)
+    {
+        if !context.has_manifest {
+            return Err(reject(
+                "retry_manifest_missing",
+                "the submit stage cannot be retried because its pinned manifest is missing",
+            ));
+        }
+        ExecutionRetryStage::Submit
+    } else {
+        ExecutionRetryStage::StageAndManifest
+    };
+    Ok(ExecutionRetryPlan {
+        stage,
+        do_stage: stage == ExecutionRetryStage::StageAndManifest,
+        do_submit: true,
+    })
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -131,7 +237,6 @@ impl LedgerState {
             if matches!(
                 (current, next),
                 (ExecutionStatus::Failed, ExecutionStatus::Retrying)
-                    | (ExecutionStatus::Retrying, ExecutionStatus::Running)
             ) {
                 self.retry_count += 1;
             }
@@ -228,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_count_increments_on_recovery_edges() {
+    fn retry_count_increments_once_per_retry_attempt() {
         let now = Utc::now();
         let mut st = state(ExecutionStatus::Failed);
         st.last_error = Some("boom".into());
@@ -250,6 +355,57 @@ mod tests {
             now,
         )
         .unwrap();
-        assert_eq!(st.retry_count, 2);
+        assert_eq!(st.retry_count, 1);
+    }
+
+    #[test]
+    fn retry_plan_resumes_known_pre_submission_failure() {
+        let plan = plan_execution_retry(ExecutionRetryContext {
+            status: ExecutionStatus::Failed,
+            phase: Some(ExecutionPhase::Submit),
+            submission: SubmissionState::Failed,
+            scheduler: SchedulerState::NotSubmitted,
+            daliuge: DaliugeState::NotCreated,
+            terminal_outcome: Some(TerminalOutcome::Failed),
+            has_manifest: true,
+            has_scheduler_job_id: false,
+        })
+        .unwrap();
+        assert_eq!(plan.stage, ExecutionRetryStage::Submit);
+        assert!(!plan.do_stage);
+        assert!(plan.do_submit);
+    }
+
+    #[test]
+    fn retry_plan_blocks_uncertain_submission() {
+        let rejection = plan_execution_retry(ExecutionRetryContext {
+            status: ExecutionStatus::Failed,
+            phase: Some(ExecutionPhase::Submit),
+            submission: SubmissionState::Uncertain,
+            scheduler: SchedulerState::Unknown,
+            daliuge: DaliugeState::Unknown,
+            terminal_outcome: Some(TerminalOutcome::Inconsistent),
+            has_manifest: true,
+            has_scheduler_job_id: false,
+        })
+        .unwrap_err();
+        assert_eq!(rejection.code, "external_state_inconsistent");
+    }
+
+    #[test]
+    fn retry_plan_restarts_manifest_stage_before_submission() {
+        let plan = plan_execution_retry(ExecutionRetryContext {
+            status: ExecutionStatus::Failed,
+            phase: Some(ExecutionPhase::StageAndManifest),
+            submission: SubmissionState::NotStarted,
+            scheduler: SchedulerState::NotSubmitted,
+            daliuge: DaliugeState::NotCreated,
+            terminal_outcome: Some(TerminalOutcome::Failed),
+            has_manifest: false,
+            has_scheduler_job_id: false,
+        })
+        .unwrap();
+        assert_eq!(plan.stage, ExecutionRetryStage::StageAndManifest);
+        assert!(plan.do_stage);
     }
 }

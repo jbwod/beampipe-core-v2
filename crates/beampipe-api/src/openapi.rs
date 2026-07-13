@@ -87,7 +87,7 @@ fn polish_json(spec: &mut Value) {
         .expect("openapi root object")
         .insert("x-tagGroups".into(), tag_groups());
 
-    inject_error_detail_schema(spec);
+    inject_error_response_schema(spec);
     alias_observability_schemas(spec);
     apply_operation_docs(spec);
     apply_security(spec);
@@ -102,11 +102,14 @@ fn tag_groups() -> Value {
             "name": "Core workflow",
             "tags": ["sources", "executions", "project-configs", "deployment-profiles", "jobs"]
         },
-        {"name": "Operations", "tags": ["health", "provenance", "alerts"]}
+        {
+            "name": "Operations",
+            "tags": ["operators", "scheduler", "daliuge", "health", "provenance", "alerts"]
+        }
     ])
 }
 
-fn inject_error_detail_schema(spec: &mut Value) {
+fn inject_error_response_schema(spec: &mut Value) {
     let components = spec
         .as_object_mut()
         .and_then(|o| o.entry("components").or_insert(json!({})).as_object_mut());
@@ -119,16 +122,18 @@ fn inject_error_detail_schema(spec: &mut Value) {
         .as_object_mut()
         .expect("components.schemas object");
     schemas.insert(
-        "ErrorDetail".into(),
+        "ApiErrorResponse".into(),
         json!({
             "type": "object",
-            "required": ["detail"],
+            "required": ["error", "code", "failure"],
             "properties": {
-                "detail": {
+                "error": {
                     "type": "string",
                     "description": "Human-readable error message",
                     "examples": ["Resource not found"]
-                }
+                },
+                "code": {"type": "string", "examples": ["not_found"]},
+                "failure": {"$ref": "#/components/schemas/Failure"}
             }
         }),
     );
@@ -139,7 +144,7 @@ fn error_ref() -> Value {
         "description": "Error response",
         "content": {
             "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorDetail" }
+                "schema": { "$ref": "#/components/schemas/ApiErrorResponse" }
             }
         }
     })
@@ -172,6 +177,21 @@ fn alias_observability_schemas(spec: &mut Value) {
     else {
         return;
     };
+    if !schemas.contains_key("ValidationDiagnostic") {
+        if let Some(schema) = schemas.get("Diagnostic").cloned() {
+            schemas.insert("ValidationDiagnostic".into(), schema);
+        }
+    }
+    if !schemas.contains_key("beampipe_domain.ExecutionRetryStage") {
+        if let Some(schema) = schemas.get("ExecutionRetryStage").cloned() {
+            schemas.insert("beampipe_domain.ExecutionRetryStage".into(), schema);
+        }
+    }
+    if !schemas.contains_key("beampipe_domain.Diagnostic") {
+        if let Some(schema) = schemas.get("Diagnostic").cloned() {
+            schemas.insert("beampipe_domain.Diagnostic".into(), schema);
+        }
+    }
     for name in [
         "NotificationChannelResponse",
         "AlertDeliveryResponse",

@@ -1,5 +1,8 @@
 mod bench_tap;
+mod console;
 mod doctor;
+mod init;
+mod operator;
 mod setup;
 mod timeline;
 
@@ -17,15 +20,33 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum CliCommand {
+    /// Create safe local configuration and production templates.
+    Init {
+        #[arg(long, default_value = ".")]
+        directory: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        production: bool,
+    },
+    /// Start the API and embedded worker.
+    Start {
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        worker: bool,
+    },
     /// Run API, optionally with the embedded Postgres job worker.
     Serve {
         /// Run the embedded Postgres job worker in the API process (`false` for API-only).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         worker: bool,
     },
-    /// Run worker-only mode.
-    Worker,
+    /// Run worker-only mode or inspect Beampipe control-plane workers.
+    Worker {
+        #[command(subcommand)]
+        command: Option<WorkerCommand>,
+    },
     /// Apply SQLx migrations.
     Migrate,
     /// Delete provenance events older than retention window.
@@ -68,14 +89,86 @@ enum CliCommand {
         #[arg(long)]
         project_config: Option<PathBuf>,
         #[arg(long)]
+        casda_tap_url: Option<String>,
+        #[arg(long)]
+        tm_url: Option<String>,
+        #[arg(long)]
+        dim_url: Option<String>,
+        #[arg(long)]
+        worker_pool: Option<String>,
+        #[arg(long, value_parser = ["rest_remote", "slurm_remote"])]
+        deployment: Option<String>,
+        #[arg(long)]
+        profile_name: Option<String>,
+        #[arg(long)]
+        facility: Option<String>,
+        #[arg(long)]
+        ssh_host: Option<String>,
+        #[arg(long)]
+        ssh_user: Option<String>,
+        #[arg(long)]
+        slurm_account: Option<String>,
+        #[arg(long)]
+        slurm_partition: Option<String>,
+        #[arg(long)]
+        dlg_root: Option<String>,
+        #[arg(long)]
+        remote_home: Option<String>,
+        #[arg(long)]
+        remote_logs: Option<String>,
+        #[arg(long)]
+        use_real_backends: bool,
+        #[arg(long)]
         skip_admin: bool,
         #[arg(long)]
         skip_upload: bool,
     },
     /// Health and configuration preflight checks.
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Explain layered application configuration.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Validate and operate deployment profiles.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
+    /// Inspect scheduler connectivity and persisted jobs.
+    Scheduler {
+        #[command(subcommand)]
+        command: SchedulerCommand,
+    },
+    /// Inspect DALiuGE translator, managers, and sessions.
+    Daliuge {
+        #[command(subcommand)]
+        command: DaliugeCommand,
+    },
+    /// Inspect, retry, or cancel durable executions.
+    Execution {
+        #[command(subcommand)]
+        command: ExecutionCommand,
+    },
+    /// Prepare and compare immutable DALiuGE graph artifacts.
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommand,
+    },
     /// Queue and backlog summary.
     Status,
+    /// Open the live terminal operator console.
+    Console {
+        #[arg(long, default_value_t = 2_000)]
+        refresh_ms: u64,
+    },
     /// Operator timelines for executions, sources, and projects.
     Timeline {
         #[command(subcommand)]
@@ -109,6 +202,130 @@ enum CliCommand {
 enum SecurityCommand {
     /// Print pass/fail for security configuration (no live SSH).
     Check,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Show each resolved setting, its source, and redacted value.
+    Explain,
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkerCommand {
+    List {
+        #[arg(long)]
+        include_stopped: bool,
+    },
+    Inspect {
+        id: Uuid,
+    },
+    Drain {
+        id: Uuid,
+    },
+    Resume {
+        id: Uuid,
+    },
+    Pools,
+    Leases {
+        #[arg(long)]
+        worker: Option<Uuid>,
+        #[arg(long)]
+        include_expired: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCommand {
+    Add {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    List,
+    Validate {
+        profile: String,
+    },
+    Test {
+        profile: String,
+    },
+    Render {
+        profile: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SchedulerCommand {
+    Status {
+        #[arg(long)]
+        profile: String,
+    },
+    Jobs {
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+    Cancel {
+        execution: Uuid,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DaliugeCommand {
+    Ping {
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    Inspect {
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    Sessions {
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    SessionInspect {
+        id: String,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    SessionCancel {
+        id: String,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Translate a persisted patched graph without creating a DALiuGE session.
+    Translate {
+        #[arg(long)]
+        execution: Uuid,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExecutionCommand {
+    /// Retry only the last safe failed stage; uncertain submissions are refused.
+    Retry {
+        id: Uuid,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Cancel confirmed external work and record the operator action.
+    Cancel { id: Uuid },
+}
+
+#[derive(Debug, Subcommand)]
+enum GraphCommand {
+    /// Build a manifest and patched graph without submitting external work.
+    Prepare {
+        #[arg(long, default_value = "wallaby_hires")]
+        project: String,
+        #[arg(long, required = true, num_args = 1..)]
+        source: Vec<String>,
+    },
+    /// Summarize source and patched graph artifacts for an execution.
+    Diff {
+        #[arg(long)]
+        execution: Uuid,
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -154,6 +371,18 @@ enum ProjectCommand {
         file: PathBuf,
     },
     Upload {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    Add {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    Explain {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    Render {
         #[arg(short, long)]
         file: PathBuf,
     },
@@ -223,7 +452,19 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        CliCommand::Serve { worker } => {
+        CliCommand::Init {
+            directory,
+            force,
+            production,
+        } => {
+            let report = init::run(init::InitOptions {
+                directory,
+                force,
+                production,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        CliCommand::Serve { worker } | CliCommand::Start { worker } => {
             std::env::set_var(
                 "BEAMPIPE_PROCESS_ROLE",
                 if worker { "scheduler" } else { "api" },
@@ -235,7 +476,7 @@ async fn main() -> anyhow::Result<()> {
             }
             beampipe_api::serve(settings, pool, worker).await?;
         }
-        CliCommand::Worker => {
+        CliCommand::Worker { command: None } => {
             std::env::set_var("BEAMPIPE_PROCESS_ROLE", "worker");
             let settings = Settings::from_env()?;
             if let Err(errors) = beampipe_orchestration::validate_security(&settings) {
@@ -262,6 +503,9 @@ async fn main() -> anyhow::Result<()> {
             shutdown_signal().await;
             workers.shutdown().await;
         }
+        CliCommand::Worker {
+            command: Some(command),
+        } => operator::run_worker_command(command).await?,
         CliCommand::Migrate => {
             let settings = Settings::from_env()?;
             let pool = beampipe_db::connect(&settings.database_url).await?;
@@ -288,7 +532,16 @@ async fn main() -> anyhow::Result<()> {
             ProjectCommand::Validate { file } => {
                 let bytes =
                     std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
-                let config = beampipe_project::ProjectConfig::from_slice(&bytes)?;
+                let config = match beampipe_project::ProjectConfig::from_slice(&bytes) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&error.validation_report(&bytes))?
+                        );
+                        std::process::exit(1);
+                    }
+                };
                 let report = config.validate_report();
                 if !report.warnings.is_empty() {
                     for warning in &report.warnings {
@@ -303,11 +556,13 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
-            ProjectCommand::Upload { file } => {
+            ProjectCommand::Upload { file } | ProjectCommand::Add { file } => {
                 let settings = Settings::from_env()?;
                 let pool = beampipe_db::connect(&settings.database_url).await?;
                 setup::upload_project_config_file(&pool, &file).await?;
             }
+            ProjectCommand::Explain { file } => operator::explain_project(&file)?,
+            ProjectCommand::Render { file } => operator::render_project(&file)?,
         },
         CliCommand::Wasm {
             command: WasmCommand::Upload { config_id, file },
@@ -345,11 +600,26 @@ async fn main() -> anyhow::Result<()> {
             admin_password,
             admin_email,
             project_config,
+            casda_tap_url,
+            tm_url,
+            dim_url,
+            worker_pool,
+            deployment,
+            profile_name,
+            facility,
+            ssh_host,
+            ssh_user,
+            slurm_account,
+            slurm_partition,
+            dlg_root,
+            remote_home,
+            remote_logs,
+            use_real_backends,
             skip_admin,
             skip_upload,
         } => {
             if matches!(command, Some(SetupCommand::Check)) {
-                setup::run_setup_check().await?;
+                setup::run_setup_check(false, None, false).await?;
             } else {
                 setup::run_setup(setup::SetupOptions {
                     yes,
@@ -359,21 +629,45 @@ async fn main() -> anyhow::Result<()> {
                     admin_password,
                     admin_email,
                     project_config,
+                    casda_tap_url,
+                    tm_url,
+                    dim_url,
+                    worker_pool,
+                    deployment,
+                    profile_name,
+                    facility,
+                    ssh_host,
+                    ssh_user,
+                    slurm_account,
+                    slurm_partition,
+                    dlg_root,
+                    remote_home,
+                    remote_logs,
+                    use_real_backends,
                     skip_admin,
                     skip_upload,
                 })
                 .await?;
             }
         }
-        CliCommand::Doctor => {
-            setup::run_setup_check().await?;
+        CliCommand::Doctor { json, profile, fix } => {
+            setup::run_setup_check(json, profile.as_deref(), fix).await?;
         }
+        CliCommand::Config { command } => match command {
+            ConfigCommand::Explain => operator::explain_config()?,
+        },
+        CliCommand::Profile { command } => operator::run_profile_command(command).await?,
+        CliCommand::Scheduler { command } => operator::run_scheduler_command(command).await?,
+        CliCommand::Daliuge { command } => operator::run_daliuge_command(command).await?,
+        CliCommand::Execution { command } => operator::run_execution_command(command).await?,
+        CliCommand::Graph { command } => operator::run_graph_command(command).await?,
         CliCommand::Status => {
             let settings = Settings::from_env()?;
             let pool = beampipe_db::connect(&settings.database_url).await?;
             let summary = doctor::run_status(&pool).await;
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
+        CliCommand::Console { refresh_ms } => console::run(refresh_ms).await?,
         CliCommand::Timeline { command } => {
             let settings = Settings::from_env()?;
             let pool = beampipe_db::connect(&settings.database_url).await?;
@@ -499,6 +793,10 @@ async fn main() -> anyhow::Result<()> {
                 check_with_session: false,
                 verify_ssl: None,
                 slurm_template: None,
+                resources: Default::default(),
+                manager_topology: Default::default(),
+                container_runtime: None,
+                environment_setup: None,
             };
             let target =
                 beampipe_orchestration::SlurmTarget::from_deployment(&deployment, &remote_user);
