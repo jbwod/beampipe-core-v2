@@ -5,75 +5,79 @@ hide:
 
 # Operator handbook
 
-<p class="bp-lede">Operate from durable state outward: check the control plane, inspect its external axes, and act only when Beampipe can prove what the scheduler and DALiuGE have done.</p>
+Operate from durable state outward: PostgreSQL first, then worker ownership, then the scheduler or DALiuGE observation. Never infer external success from a control-plane status alone.
 
-## Begin a shift
+## Start a shift
 
-<div class="bp-check-grid">
-  <div><span>01</span><strong>preflight</strong><code>beampipe doctor</code></div>
-  <div><span>02</span><strong>queue</strong><code>beampipe status</code></div>
-  <div><span>03</span><strong>workers</strong><code>beampipe worker list</code></div>
-  <div><span>04</span><strong>external</strong><code>scheduler status --profile</code></div>
-  <div><span>05</span><strong>console</strong><code>beampipe console</code></div>
-  <div><span>06</span><strong>alerts</strong><code>/metrics + timeline</code></div>
+```bash
+beampipe doctor
+beampipe status
+beampipe worker list
+beampipe console
+```
+
+For a live profile, add:
+
+```bash
+beampipe doctor --profile PROFILE
+beampipe scheduler status --profile PROFILE
+beampipe daliuge inspect --profile PROFILE
+```
+
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Operator inspection order from readiness through durable state to external systems">
+  <div class="bp-flow-node" data-tone="cyan"><span>01</span><strong>readiness</strong><small>process + dependencies</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>02</span><strong>ledger</strong><small>intent + exact axes</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>03</span><strong>worker</strong><small>claim + heartbeat</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>04</span><strong>external</strong><small>Slurm + DALiuGE</small></div>
 </div>
 
-The [daily workflow](operator-guide.md) explains the role contract and normal path. The console is an operational lens, while PostgreSQL remains authoritative.
+## Process roles
+
+| Role | Command | Scale rule |
+|---|---|---|
+| API | `beampipe serve --worker false` | Scale for HTTP traffic |
+| Scheduler | `BEAMPIPE_WORKER_SCHEDULER_ENABLED=true beampipe serve --worker true` | Exactly one per environment |
+| Worker | `BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker` | Scale for queue throughput |
+| PostgreSQL | external service | One logical primary; back it up |
+
+All roles coordinate through PostgreSQL. The console is a projection of that state plus explicit live probes, not a second control plane.
+
+## Console
+
+```bash
+beampipe console --refresh-ms 2000
+```
+
+The console covers overview, sources, executions, workers, scheduler, DALiuGE, logs, and confirmed operator actions. Use `?` for contextual keys, `/` to filter, `Enter` to inspect, `p` to pause refresh, and `q` to quit. Drain, retry, and cancellation require confirmation and are audited.
 
 ## Triage by symptom
 
-<div class="bp-switcher bp-terminal-frame" data-bp-switcher data-title="triage.selector">
-  <div class="bp-segmented" role="tablist" aria-label="Operational symptom">
-    <button type="button" role="tab" aria-selected="true" aria-controls="triage-backlog" id="tab-backlog" data-bp-target="triage-backlog">backlog grows</button>
-    <button type="button" role="tab" aria-selected="false" aria-controls="triage-submit" id="tab-submit" data-bp-target="triage-submit">submit uncertain</button>
-    <button type="button" role="tab" aria-selected="false" aria-controls="triage-daliuge" id="tab-daliuge" data-bp-target="triage-daliuge">DALiuGE unreachable</button>
-    <button type="button" role="tab" aria-selected="false" aria-controls="triage-output" id="tab-output" data-bp-target="triage-output">outputs fail</button>
-  </div>
-
-  <section id="triage-backlog" role="tabpanel" aria-labelledby="tab-backlog" data-bp-panel>
-    <span class="bp-status" data-tone="amber">QUEUE</span>
-    <h2>Separate admission pressure from worker capacity</h2>
-    <p>Check ready jobs, stale claims, pool labels, per-profile concurrency, and automation caps before adding workers.</p>
-    <p><a href="workers-scheduling/">Workers and scheduling</a></p>
-  </section>
-
-  <section id="triage-submit" role="tabpanel" aria-labelledby="tab-submit" data-bp-panel hidden>
-    <span class="bp-status" data-tone="red">FENCE</span>
-    <h2>Reconcile before retrying</h2>
-    <p>An SSH disconnect after <code>sbatch</code> is not proof of failure. Search by deterministic job identity and resolve the submission axis first.</p>
-    <p><a href="recovery/#retry">Stage-aware retry procedure</a></p>
-  </section>
-
-  <section id="triage-daliuge" role="tabpanel" aria-labelledby="tab-daliuge" data-bp-panel hidden>
-    <span class="bp-status" data-tone="cyan">EXTERNAL</span>
-    <h2>Preserve scheduler and session facts independently</h2>
-    <p>Probe translator and manager endpoints, inspect the persisted session identifier, and compare scheduler state before changing execution state.</p>
-    <p><a href="daliuge-setonix/#live-inspection">DALiuGE live inspection</a></p>
-  </section>
-
-  <section id="triage-output" role="tabpanel" aria-labelledby="tab-output" data-bp-panel hidden>
-    <span class="bp-status" data-tone="red">VERIFY</span>
-    <h2>Do not equate scheduler success with scientific success</h2>
-    <p>Inspect the output-verification axis, immutable artifacts, run record, and provenance before deciding whether work is retryable.</p>
-    <p><a href="recovery/#investigate">Failure investigation</a></p>
-  </section>
-</div>
-
-## Handbook map
-
-| Operational need | Source of truth | Procedure |
+| Symptom | First evidence | Next action |
 |---|---|---|
-| Watch active work | Execution ledger and external axes | [Live console](console.md) |
-| Scale or drain workers | Claims, heartbeats, labels, pools | [Workers and scheduling](workers-scheduling.md) |
-| Check translator, manager, SSH, or Slurm | Profile snapshot and adapter diagnostics | [DALiuGE and Setonix](daliuge-setonix.md) |
-| Explain a failure | Structured diagnostic and provenance | [Recovery and cancellation](recovery.md) |
-| Tune alerts and dashboards | Prometheus metrics | [Observability](observability.md) |
-| Promote a release | Migration, backup, and preflight evidence | [Production runbook](production-runbook.md) |
-| Rotate or restore | Database backup and external secret store | [Upgrades, backups, and secrets](upgrades-backups.md) |
+| API not ready | `beampipe doctor`, database and migration checks | Correct configuration before restarting |
+| Queue grows | queue age, worker heartbeat, dependency latency | [Separate admission from capacity](workers-scheduling.md) |
+| Discovery stalls | source claim, TAP health, project query diagnostics | Reduce concurrency or correct project YAML |
+| Execution stays pending | readiness, automation threshold, profile and global caps | Inspect scheduler decision events |
+| Submission uncertain | stable external identity and observations | [Reconcile; do not resubmit](recovery.md) |
+| Slurm polling fails | profile snapshot, SSH trust, `squeue`/`sacct` probe | Run profile doctor and Slurm ping |
+| DALiuGE graph fails | session ID, graph status, error drops, artifact hashes | Compare graph/runtime versions |
+| Metrics disappear | per-process metrics listener and Prometheus target | [Observability](observability.md) |
 
-## Operator rule
+## Routine actions
+
+```bash
+beampipe timeline execution "$EXECUTION_ID" --table
+beampipe graph diff --execution "$EXECUTION_ID"
+beampipe worker leases --include-expired
+beampipe scheduler jobs --limit 100
+```
+
+Use [Recovery and cancellation](recovery.md) before retrying failed work and [Production runbook](production-runbook.md) before changing binaries, project revisions, profiles, or secrets.
 
 <div class="terminal-note" data-tone="amber">
-<strong>When external state is uncertain, reconcile. Do not resubmit.</strong><br>
-Beampipe persists intent before I/O and fences claims so that process restarts and additional workers do not turn uncertainty into duplicate scientific work.
+<strong>When external state is uncertain, reconcile.</strong><br>
+An SSH timeout after <code>sbatch</code> or an HTTP failure after DIM deployment is not proof that no external work exists.
 </div>

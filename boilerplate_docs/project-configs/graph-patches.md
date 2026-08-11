@@ -1,24 +1,22 @@
-# DALiuGE graph patches
+# Graph preparation
 
-Graph patches are the final deterministic graph-shaping step before translation and deployment. The v2 YAML key is `graph_patches`; every match, expression result, changed field, and artifact checksum remains inspectable.
+Graph preparation combines a generated manifest with a logical DALiuGE graph, applies deterministic patches, and stores checksummed source and patched artifacts before translation.
 
-## Preparation flow
+## Preparation path
 
-<div class="bp-flow-diagram bp-flow-diagram--wide" role="img" aria-label="Logical graph and manifest are validated, patched, checksummed, translated, and deployed">
-  <div class="bp-flow-node" data-tone="cyan"><span>INPUT</span><strong>logical graph</strong><small>URL or path</small></div>
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Manifest and logical graph combine in a validated patch step before translation">
+  <div class="bp-flow-node" data-tone="cyan"><span>INPUT</span><strong>manifest</strong><small>project-shaped JSON</small></div>
   <span class="bp-flow-link" aria-hidden="true">+</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>CONTEXT</span><strong>manifest</strong><small>pinned artifact</small></div>
+  <div class="bp-flow-node" data-tone="cyan"><span>INPUT</span><strong>logical graph</strong><small>URL or path</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>VALIDATE</span><strong>patch reducer</strong><small>match + evaluate + set</small></div>
+  <div class="bp-flow-node" data-tone="amber"><span>VALIDATE</span><strong>patch</strong><small>match + evaluate + set</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>ARTIFACT</span><strong>patched graph</strong><small>diff + sha256</small></div>
+  <div class="bp-flow-node" data-tone="green"><span>ARTIFACT</span><strong>patched graph</strong><small>diff + SHA-256</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>EXTERNAL</span><strong>translator</strong><small>then deployment</small></div>
+  <div class="bp-flow-node" data-tone="cyan"><span>EXTERNAL</span><strong>TM</strong><small>translate later</small></div>
 </div>
 
-## Typed shape
-
-Set the scatter count from manifest data:
+## Patch a node
 
 ```yaml
 graph_patches:
@@ -29,49 +27,45 @@ graph_patches:
       num_of_copies: "$count(sbids[].datasets[])"
 ```
 
-`match.kind` is the closed enum `node_name`. `match.equals` identifies the full DALiuGE node name. Each `set` value is either a literal or one of the supported manifest expressions.
+`match.kind` currently supports `node_name`. A missing or ambiguous target is an error. Values can be literals or manifest expressions:
 
-## Expressions
+| Expression | Result |
+|---|---|
+| `$count(path)` | number of selected values |
+| `$sum(path)` | numeric sum of selected values |
 
-| Expression | Result | Typical use |
-|---|---|---|
-| `$count(path)` | Number of selected manifest elements | Scatter copies |
-| `$sum(path)` | Numeric sum across selected values | Aggregate resource or workload field |
+Use a literal patch for runtime compatibility only when the installed application contract requires it:
 
-Expressions run against the immutable manifest context. Put archive normalization in typed transforms and reserve WASM for survey logic that cannot be expressed safely in the built-in model.
+```yaml
+graph_patches:
+  - match:
+      kind: node_name
+      equals: process_CSV_str
+    set:
+      output_parser: pickle
+```
 
-## Patch diagnostics
-
-Graph preparation reports:
-
-- the patch index and target node;
-- whether zero, one, or multiple nodes matched;
-- each field before and after mutation;
-- expression input path and evaluated value;
-- graph checksum before and after mutation;
-- validation errors with a structured path and hint.
-
-Precise matches are deliberate. A missing node is an error rather than a silent no-op; an ambiguous match is rejected rather than applied to multiple nodes.
+Pin and record the runtime package version alongside such a patch. Graph configuration should not hide an unexplained environment mismatch.
 
 ## Manifest injection
 
-Existing graphs can use the `beampipe-ingest` palette. During preparation, Beampipe locates the named node, validates its `manifest_path` field, creates readonly graph configuration, and embeds the generated manifest JSON before translation.
+Graphs using the `beampipe-ingest` palette can receive the generated manifest through the node's `manifest_path` field. Beampipe validates the node and field, injects read-only configuration, and records the resulting artifact.
 
-| Contract element | Meaning |
-|---|---|
-| `beampipe-ingest` node | Marker that the graph accepts a Beampipe manifest |
-| `manifest_path` | Graph field or path where manifest JSON is exposed |
-| Generated manifest | Project-shaped source, SBID, and dataset grouping |
+Manifest templates may read dataset fields directly or through logical `flags.*` references. Persisted discovery values are resolved consistently in either form.
 
-Use injection when graph applications consume the manifest directly. Use ordinary patches for structural settings such as scatter counts.
-
-## Operator preview
+## Preview
 
 ```bash
 beampipe graph prepare \
   --project wallaby_hires \
-  --source WALLABY_J123456-123456
-beampipe graph diff --execution "$EXECUTION_ID"
+  --source HIPASSJ1313-15
 ```
 
-Before live submission, confirm the target count, expression values, node/field diff, manifest injection path, and output checksums. Then use [deployment profiles](../architecture/deployment-profiles.md) to select the translator and deployment boundary.
+For an existing execution:
+
+```bash
+beampipe graph diff --execution "$EXECUTION_ID"
+beampipe daliuge translate --execution "$EXECUTION_ID"
+```
+
+Before submission, verify the project revision, graph source, patch target count, changed fields, manifest checksum, source graph checksum, and patched graph checksum. A remote branch URL is mutable until fetched; use an immutable URL or retain and verify the expected hash for release qualification.

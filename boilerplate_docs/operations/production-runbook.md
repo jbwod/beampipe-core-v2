@@ -1,91 +1,88 @@
 # Production runbook
 
-Use this page for promotion, incident response, and config change control. It assumes you already understand the process model from [Operator guide](operator-guide.md).
+Promote in layers: durable state, identity and security, configuration, workers, external contracts, then one controlled execution.
 
-For the controlled single-source qualification sequence and its evidence
-contract, use [End-to-end scientific demo](end-to-end-demo.md).
+## Promotion sequence
 
-## Promotion checklist
-
-| Stage | Check | Evidence |
-|-------|-------|----------|
-| Build | Image or binary comes from intended commit | release artifact, image tag, or `beampipe --version` |
-| Database | Migrations have run once | `beampipe migrate` exits cleanly |
-| Security | Production gates pass | `beampipe security check` |
-| Identity | First operator exists | Admin login succeeds |
-| Config | Project YAML validates | `beampipe project validate -f config/wallaby_hires.v2.yaml` |
-| Profiles | Deployment profiles validate and upload | profile API response |
-| API | Health and readiness are green | `GET /api/v2/health`, `GET /api/v2/ready` |
-| Metrics | API and workers are scraped | Prometheus targets up |
-| Backend | TAP, DALiuGE Translator Manager, DALiuGE DIM, or Slurm reachable | dependency checks, `beampipe slurm ping --profile <name>` |
-
-## Backend preflight
-
-<div class="terminal-diagram">
-<pre>CASDA TAP ----\
-VizieR TAP ----+--> worker --> metadata --> manifest --> DALiuGE TM --> DIM/Slurm
-Postgres  ----/        |          |           |          |       |
-                       v          v           v          v       v
-                    events     signature    graph     deploy   poll</pre>
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Production rollout from backup and migrations through API scheduler workers and one controlled run">
+  <div class="bp-flow-node" data-tone="cyan"><span>01</span><strong>backup</strong><small>DB + versions</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>02</span><strong>migrate</strong><small>one writer</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>03</span><strong>API</strong><small>health + auth</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>04</span><strong>workers</strong><small>one scheduler</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>05</span><strong>qualify</strong><small>one bounded run</small></div>
 </div>
 
-| Backend | Required before real runs |
-|---------|---------------------------|
-| CASDA | Credentials, TAP endpoint, staging account, expected collections |
-| VizieR | TAP endpoint reachable from workers |
-| DALiuGE Translator Manager | `tm_url` reachable and compatible with the graph format |
-| DALiuGE DIM REST | Deploy host/port reachable; status URLs readable |
-| Slurm | SSH key, known hosts, login node, account/partition, DALiuGE install path |
+## Before rollout
 
-Keep `BEAMPIPE_USE_REAL_BACKENDS=false` until project config validation, manifest creation, and dry execution are proven.
+```bash
+beampipe --version
+beampipe project validate -f config/wallaby_hires.v2.yaml
+BEAMPIPE_ENV=production beampipe security check
+beampipe doctor --json
+```
 
-## Rollout sequence
+Take a PostgreSQL backup and retain it with the binary/image version, active project YAML, redacted profile export, and OpenAPI document:
 
-1. Start PostgreSQL.
-2. Apply migrations.
-3. Start the API role.
-4. Start exactly one scheduler role.
-5. Start worker-only replicas.
-6. Upload project config and deployment profiles.
-7. Register a small source batch.
-8. Run discovery and inspect metadata/signatures.
-9. Queue a dry execution with `do_stage=false` and `do_submit=false`.
-10. Enable real backend work and submit one source.
-11. Scale source count, worker count, and batch limits gradually while watching metrics.
+```bash
+pg_dump --format=custom \
+  --file "beampipe-$(date -u +%Y%m%dT%H%M%SZ).dump" \
+  "$DATABASE_URL"
+```
 
-## Incident decision tree
+Never include `.env`, private keys, passphrases, CASDA passwords, bearer tokens, or signed URLs in the evidence archive.
 
-| Symptom | Immediate action | Follow-up |
-|---------|------------------|-----------|
-| API not ready | Check database connectivity, migrations, production security gates | Keep workers running only if queue recovery is desired |
-| Queue depth rising | Pause source registration or scheduler, inspect oldest queued job and worker logs | Add workers only if dependencies are healthy |
-| Duplicate scheduler ticks | Stop extra scheduler-enabled processes | Confirm one scheduler role |
-| Discovery failures | Check TAP dependency health and query templates | Reduce discovery batch size if TAP latency is high |
-| Metadata changes every run | Inspect signature exclusions and volatile TAP columns | Exclude URLs, sizes, and timestamps that should not trigger reruns |
-| Execution stuck pending | Check metadata readiness, automation caps, queue depth | Confirm deployment profile name matches project config |
-| Slurm polling failures | Check known hosts, key permissions, login node reachability | Run `beampipe slurm ping --profile <name>` |
-| DALiuGE DIM errors | Read execution debug URLs and provenance events | Verify Translator Manager output and the DALiuGE DIM endpoint |
-| Alerts silent | Send test notification | Check secret references and production redaction rules |
+## Roll out
 
-## Change control
+1. Stop recurring admission or drain scheduler-capable workers.
+2. Confirm no submission is `in_flight` or `uncertain`.
+3. Verify the backup can be listed with `pg_restore --list`.
+4. Install the immutable binary or image.
+5. Run `beampipe migrate` exactly once.
+6. Start API-only replicas and verify health, readiness, login, and metrics.
+7. Start one scheduler-enabled process.
+8. Start worker-only replicas and verify heartbeats, pools, and capabilities.
+9. Run `beampipe doctor --profile PROFILE` for each live backend.
+10. Register one approved source and complete the [qualification run](end-to-end-demo.md) before increasing caps.
 
-| Change | Expected impact |
-|--------|-----------------|
-| Field maps | Prepared metadata shape and signatures may change |
-| Discovery flags | Readiness gates and manifest values may change |
-| Signatures | Skip/re-run behavior changes |
-| Transform definitions | Query variables, metadata, and flags may change |
-| Manifest grouping | Execution grouping changes |
-| DALiuGE Graphs | Translated graph shape changes |
-| Automation caps | Scheduler admission behavior changes |
-| Deployment profile | Backend routing, staging, and polling behavior changes |
+## Change impact
 
-Validate YAML, upload a new config revision, and run a small discovery/execution sample after any change in this table.
+| Change | Revalidate |
+|---|---|
+| Project queries or transforms | discovery rows, flags, signature stability |
+| Manifest or graph patches | graph diff, DALiuGE application/runtime compatibility |
+| Deployment profile | TM/DIM or SSH/Slurm preflight and resource render |
+| Runtime image/modules | graph application signatures and output parser contracts |
+| Worker or admission settings | queue age, dependency load, profile caps |
+| Database migration | backup restore and mixed-version compatibility |
 
-For backup, restore rehearsal, binary/schema upgrade order, and credential rotation, use
-[Upgrades, backup, and secrets](upgrades-backups.md). For an execution incident, use
-[Failure, retry, and cancellation](recovery.md) before considering manual external work.
+Project and profile revisions affect future executions. In-flight executions retain pinned snapshots.
 
-## Cutover note
+## Rotate secrets
 
-The Rust v2 docs do not preserve legacy stack setup instructions. During cutover, compare old and new ledgers only as temporary validation evidence. Once Rust v2 is live, operate `/api/v2`, project config YAML, and deployment profiles as the source of truth.
+| Secret | Procedure |
+|---|---|
+| JWT | Rotate across all API replicas and require re-authentication |
+| CASDA password | Replace mounted file atomically, restart affected workers, run doctor |
+| SSH key | Add new public key remotely, replace mounted file, restart workers, run Slurm ping, remove old key |
+| Known hosts | Verify facility-announced key out of band before replacing the file |
+
+`beampipe config explain` reports sources with redacted values. Never disable host-key verification as routine recovery.
+
+## Restore rehearsal
+
+```bash
+createdb beampipe_restore_test
+pg_restore --clean --if-exists --no-owner \
+  --dbname beampipe_restore_test beampipe-TIMESTAMP.dump
+DATABASE_URL=postgres://localhost/beampipe_restore_test beampipe doctor --json
+```
+
+Migrations are forward-only. Do not run an older binary against a migrated database unless that release explicitly documents compatibility.
+
+## Roll back or stop
+
+Stop promotion when readiness regresses, workers cannot heartbeat, a profile preflight fails, graph/runtime versions disagree, or submission becomes uncertain. Preserve the database and external identifiers, stop new admission, and follow [Recovery and cancellation](recovery.md).

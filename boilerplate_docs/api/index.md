@@ -1,103 +1,114 @@
-# API workflow guide
+# API workflow
 
-The Rust API is mounted at `/api/v2`. Use this page for workflow order and copyable calls; use [Redoc reference](reference.md) for request and response schemas.
+The Axum API is mounted at `/api/v2`. Health is public; operational resources require a bearer token, and mutating administrative surfaces require a superuser.
 
-## Setup
+## Authenticate
 
 ```bash
-BASE=http://127.0.0.1:8080
-TOKEN=$(curl -s -X POST "$BASE/api/v2/login" \
+export BASE=http://127.0.0.1:8080
+export TOKEN=$(curl -fsS -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"replace-this-local-password"}' | jq -r .access_token)
-AUTH="Authorization: Bearer $TOKEN"
+  -d '{"username":"admin","password":"replace-this-local-password"}' \
+  | jq -er .access_token)
+export AUTH="Authorization: Bearer $TOKEN"
+
+curl -fsS "$BASE/api/v2/user/me" -H "$AUTH" | jq .
 ```
 
-Create the admin user with `beampipe admin create-user` before logging in.
+Access and refresh tokens carry `jti` claims. Refresh rotates the refresh token; logout blacklists token hashes. Public user responses never include password hashes.
 
-## Project config
+## Resource order
+
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="API resource order from project and profile through source discovery to execution evidence">
+  <div class="bp-flow-node" data-tone="cyan"><span>CONFIG</span><strong>project + profile</strong><small>immutable policy</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>SOURCE</span><strong>register</strong><small>stable identity</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>DISCOVERY</span><strong>mark + schedule</strong><small>metadata signature</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>EXECUTION</span><strong>prepare + execute</strong><small>pinned artifacts</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>EVIDENCE</span><strong>status + events</strong><small>observations</small></div>
+</div>
+
+## Project and profile
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v2.yaml
-
-curl -s -X POST "$BASE/api/v2/project-configs" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/x-yaml' \
+curl -fsS -X POST "$BASE/api/v2/project-configs" \
+  -H "$AUTH" -H 'Content-Type: application/x-yaml' \
   --data-binary @config/wallaby_hires.v2.yaml | jq .
 
-curl -s "$BASE/api/v2/project-configs/wallaby_hires" -H "$AUTH" | jq .
-curl -s "$BASE/api/v2/project-configs/wallaby_hires/versions" -H "$AUTH" | jq .
-```
-
-## Sources and discovery
-
-```bash
-SOURCE=$(curl -s -X POST "$BASE/api/v2/sources" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "project_module": "wallaby_hires",
-    "source_identifier": "HIPASSJ1313-15",
-    "enabled": true
-  }')
-SOURCE_ID=$(echo "$SOURCE" | jq -r .uuid)
-
-curl -s "$BASE/api/v2/sources?project_module=wallaby_hires" -H "$AUTH" | jq .
-curl -s -X POST "$BASE/api/v2/sources/discover" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifiers":["HIPASSJ1313-15"]}' | jq .
-curl -s "$BASE/api/v2/sources/$SOURCE_ID/status" -H "$AUTH" | jq .
-```
-
-## Deployment profiles
-
-```bash
-curl -s -X POST "$BASE/api/v2/deployment-profiles" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
+curl -fsS -X POST "$BASE/api/v2/deployment-profiles" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d @profile.json | jq .
-
-curl -s "$BASE/api/v2/deployment-profiles?project_module=wallaby_hires" \
-  -H "$AUTH" | jq .
 ```
 
-## Executions
+Project uploads create immutable versions. Profile responses are redacted and future executions pin the selected revision.
+
+## Source and discovery
 
 ```bash
-EXEC=$(curl -s -X POST "$BASE/api/v2/executions" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "project_module": "wallaby_hires",
-    "sources": [{"source_identifier": "HIPASSJ1313-15"}],
-    "archive_name": "casda",
-    "deployment_profile_name": "slurm-remote"
-  }')
-EXEC_ID=$(echo "$EXEC" | jq -r .uuid)
+SOURCE=$(curl -fsS -X POST "$BASE/api/v2/sources" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1313-15","enabled":true}')
+SOURCE_ID=$(jq -r .uuid <<<"$SOURCE")
 
-curl -s -X POST "$BASE/api/v2/executions/$EXEC_ID/execute" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
+curl -fsS -X POST "$BASE/api/v2/sources/discover" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1313-15"}' | jq .
+
+curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/status" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/metadata" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/events" -H "$AUTH" | jq .
+```
+
+`sources/discover` marks matching enabled sources for rediscovery. The scheduler and workers perform the durable claim/query/persistence path asynchronously.
+
+## Prepare and execute
+
+Use the same body for preflight and creation:
+
+```bash
+cat > /tmp/execution.json <<'JSON'
+{
+  "project_module": "wallaby_hires",
+  "sources": [{"source_identifier": "HIPASSJ1313-15"}],
+  "archive_name": "casda",
+  "deployment_profile_name": "slurm-remote"
+}
+JSON
+
+curl -fsS -X POST "$BASE/api/v2/executions/prepare" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d @/tmp/execution.json | jq .
+
+EXEC=$(curl -fsS -X POST "$BASE/api/v2/executions" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d @/tmp/execution.json)
+EXEC_ID=$(jq -r .uuid <<<"$EXEC")
+
+curl -fsS -X POST "$BASE/api/v2/executions/$EXEC_ID/execute" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"do_stage":false,"do_submit":false}' | jq .
-
-curl -s "$BASE/api/v2/executions/$EXEC_ID/status" -H "$AUTH" | jq .
-curl -s "$BASE/api/v2/executions/$EXEC_ID/summary" -H "$AUTH" | jq .
-curl -s "$BASE/api/v2/executions/$EXEC_ID/ledger-snapshot" -H "$AUTH" | jq .
 ```
 
-## Observability
+Inspect exact state instead of polling only the compact status:
 
 ```bash
-curl -s "$BASE/api/v2/health" | jq .
-curl -s "$BASE/api/v2/ready" | jq .
-curl -s "$BASE/api/v2/metrics"
-curl -s "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/status" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/ledger-snapshot" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/observations" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/artifacts" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 ```
 
-## OpenAPI
+## Contract
+
+The [generated API schema](reference.md) is the field-level source of truth. Export it after Rust request/response changes:
 
 ```bash
 beampipe openapi export > openapi.json
+cp openapi.json boilerplate_docs/openapi.json
 ```
 
-The committed OpenAPI document drives Redoc, Bruno, and external clients. Regenerate it whenever Rust request or response types change.
+Swagger UI and JSON are also served by the running API at `/api/v2/docs` and `/api/v2/openapi.json` when documentation is enabled.

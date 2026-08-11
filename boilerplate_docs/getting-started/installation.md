@@ -1,47 +1,81 @@
-# Installation
+# Install and configure
 
-beampipe-core v2 ships as one Rust CLI binary named `beampipe`. Operators should prefer a released binary on `PATH`; Docker Compose is the typical local or small-deploy stack; `cargo run` is for Rust development only.
+Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a source build when qualifying a commit. PostgreSQL is always required.
 
-## One binary
+## Install the binary
 
-The CLI is defined as `beampipe` in `crates/beampipe-cli/Cargo.toml`. The Docker image sets `ENTRYPOINT ["beampipe"]`, so container commands map directly to host commands.
+=== "Release"
 
-| Command | Purpose |
-|---------|---------|
-| `beampipe init` | Generate local/production config and a secret-free `.env.example` |
-| `beampipe setup` | Guided PostgreSQL, admin, CASDA, DALiuGE, SLURM, profile, and worker setup |
-| `beampipe doctor` | Run configuration and live dependency diagnostics |
-| `beampipe console` | Open the live terminal operator interface |
-| `beampipe migrate` | Apply database migrations |
-| `beampipe admin create-user` | Create an operator account |
-| `beampipe serve` | Run the HTTP API, optionally with embedded scheduler/worker ticks |
-| `beampipe serve --worker false` | API-only process |
-| `beampipe worker` | Worker-only process |
-| `beampipe project validate` | Validate project config YAML/JSON |
-| `beampipe wasm upload` | Upload WASM hook modules |
-| `beampipe slurm ping` | Smoke-test a Slurm SSH deployment profile |
-| `beampipe openapi export` | Export the OpenAPI contract |
+    Download the archive for your platform, verify it against `SHA256SUMS`, and place `beampipe` on `PATH`.
 
-## Preferred: binary on PATH
+    ```bash
+    beampipe --version
+    beampipe init --directory operator-local
+    ```
 
-Download a release archive, verify it against `SHA256SUMS`, put `beampipe` on `PATH`,
-then bootstrap the database and API:
+=== "Build from source"
+
+    ```bash
+    git clone https://github.com/jbwod/beampipe-core-v2.git
+    cd beampipe-core-v2
+    cargo build --locked --release -p beampipe-cli --bin beampipe
+    export PATH="$PWD/target/release:$PATH"
+    ```
+
+=== "Docker Compose"
+
+    Compose builds the same binary into one image and assigns it API, scheduler, and worker roles.
+
+    ```bash
+    cp .env.example .env
+    docker compose build api
+    docker compose up -d postgres
+    docker compose run --rm api migrate
+    docker compose run --rm api admin create-user \
+      --username admin \
+      --password 'replace-this-local-password' \
+      --email admin@example.test
+    docker compose up -d api scheduler worker
+    ```
+
+## Configuration precedence
+
+Settings resolve in this order, with later sources winning:
+
+<div class="bp-flow-diagram bp-flow-diagram--animated" role="img" aria-label="Configuration precedence from defaults to environment variables">
+  <div class="bp-flow-node" data-tone="cyan"><span>LOW</span><strong>defaults</strong><small>safe development</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>FILE</span><strong>beampipe.yaml</strong><small>non-secret settings</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>LOCAL</span><strong>.env</strong><small>private runtime</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>HIGH</span><strong>environment</strong><small>deployment override</small></div>
+</div>
+
+Inspect the effective value and its source without exposing secrets:
 
 ```bash
-beampipe init
-beampipe setup
-beampipe doctor
-beampipe serve --worker false
+beampipe config explain
 ```
 
-Run worker capacity from another shell:
+Start from `.env.example`. The minimum host configuration is:
 
 ```bash
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker
+BEAMPIPE_ENV=development
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
+BEAMPIPE_JWT_SECRET=replace-with-at-least-32-random-characters
+BEAMPIPE_USE_REAL_BACKENDS=false
 ```
 
-For production-style process splits, run exactly one scheduler-enabled process and any number of API/worker-only replicas:
+## Process layout
+
+For evaluation, one process is enough:
+
+```bash
+beampipe start
+```
+
+For production, separate the roles:
 
 ```bash
 beampipe serve --worker false
@@ -49,90 +83,26 @@ BEAMPIPE_WORKER_SCHEDULER_ENABLED=true beampipe serve --worker true
 BEAMPIPE_WORKER_SCHEDULER_ENABLED=false BEAMPIPE_WORKER_CONCURRENCY=4 beampipe worker
 ```
 
-## Build from source
+Run exactly one scheduler-enabled process. API and worker-only processes can scale independently.
 
-Use this path when a release artifact is not available for the target host.
+## Essential settings
 
-```bash
-git clone https://github.com/jbwod/beampipe-core-v2.git
-cd beampipe-core-v2
-cargo build --release -p beampipe-cli --bin beampipe
-```
+| Area | Settings | Guidance |
+|---|---|---|
+| API | `BEAMPIPE_BIND_ADDR`, token lifetimes, CORS | Bind to loopback until ingress and TLS are configured |
+| Workers | concurrency, lock seconds, pool, capabilities | Keep the lease longer than normal external calls |
+| Admission | `BEAMPIPE_SHAPING_*` | Cluster-wide safety limits; project YAML adds survey limits |
+| Metrics | `BEAMPIPE_METRICS_BIND_ADDR`, OTEL settings | Give each host process a unique metrics port |
+| Real backends | `BEAMPIPE_USE_REAL_BACKENDS` | Enable only after profile-specific doctor checks pass |
+| Secrets | mounted files or environment references | Never put credentials in project YAML or deployment profiles |
 
-Run the built binary directly:
+Use `beampipe config explain` for the complete release-specific list. Environment names and defaults are also documented in `.env.example` and `.env.template`.
 
-```bash
-target/release/beampipe init --directory operator-local
-cd operator-local
-../target/release/beampipe setup
-../target/release/beampipe doctor
-../target/release/beampipe serve --worker false
-```
-
-Or install it into Cargo's binary directory:
+## Production gates
 
 ```bash
-cargo install --path crates/beampipe-cli
-beampipe setup
+BEAMPIPE_ENV=production beampipe security check
+beampipe doctor --json
 ```
 
-## Docker Compose
-
-Docker Compose starts PostgreSQL, an API process, a scheduler process, and worker replicas.
-The base file uses mock external backends and requires no SSH secret. Setup still owns
-migrations and initial administrator creation.
-
-```bash
-docker compose build api
-cp .env.example .env
-docker compose up -d postgres
-docker compose run --rm api migrate
-docker compose run --rm api admin create-user \
-  --username admin \
-  --password 'replace-this-local-password' \
-  --email admin@example.test
-docker compose up -d api scheduler worker
-```
-
-Compose services:
-
-| Service | Runtime |
-|---------|---------|
-| `postgres` | PostgreSQL on `:5432` |
-| `api` | `beampipe serve --worker false` on `:8080` |
-| `scheduler` | `beampipe serve --worker true` for recurring ticks |
-| `worker` | `beampipe worker`, scaled by Compose |
-
-Optional observability:
-
-```bash
-docker compose --profile observability up -d
-```
-
-Prometheus is exposed on `http://127.0.0.1:9099`.
-
-## Development with cargo run
-
-Use `cargo run` only when hacking Rust on the host. It is the same command surface after Cargo compiles:
-
-```bash
-docker compose up -d postgres
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-export BEAMPIPE_JWT_SECRET=replace-with-at-least-32-random-characters
-
-cargo run -p beampipe-cli --bin beampipe -- migrate
-cargo run -p beampipe-cli --bin beampipe -- admin create-user \
-  --username admin \
-  --password 'replace-this-local-password' \
-  --email admin@example.test
-cargo run -p beampipe-cli --bin beampipe -- serve
-```
-
-## Health check
-
-```bash
-curl -s http://127.0.0.1:8080/api/v2/health | jq .
-curl -s http://127.0.0.1:8080/api/v2/ready | jq .
-```
-
-Next: run [First run](first-run.md) to register a source, discover metadata, and queue a dry execution.
+Production rejects weak JWT configuration, default database credentials, unsafe inline secrets, permissive SSH host-key policy, and other development defaults. See [Deployment profiles and SSH](../architecture/deployment-profiles.md) for backend credentials and [Production runbook](../operations/production-runbook.md) for rollout order.

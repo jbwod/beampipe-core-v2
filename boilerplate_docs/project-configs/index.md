@@ -1,8 +1,36 @@
-# Project config YAML
+# Project YAML
 
-Project configs are the survey configuration surface for beampipe-core. They describe source identity, archive queries, metadata preparation, manifest shape, DALiuGE Graphs, scheduler automation, and optional WASM hooks.
+Project config is immutable, dynamically loaded survey policy. It defines source identity, TAP queries, metadata preparation, manifests, graph preparation, and scheduler automation. No project query is hardcoded in the Rust worker.
 
-## Anatomy
+## Data flow
+
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Project YAML drives query rendering metadata normalization manifest generation graph patches and automation">
+  <div class="bp-flow-node" data-tone="cyan"><span>YAML</span><strong>identity + queries</strong><small>survey policy</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>TAP</span><strong>rows</strong><small>CASDA + VizieR</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>PREPARE</span><strong>metadata</strong><small>map + flag + sign</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>BUILD</span><strong>manifest + graph</strong><small>immutable artifacts</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>POLICY</span><strong>automation</strong><small>admit + execute</small></div>
+</div>
+
+## Start from an example
+
+- `config/wallaby_hires.v2.yaml`: production-shaped WALLABY discovery and Slurm automation.
+- `config/examples/minimal_survey.v2.yaml`: smallest single-archive example.
+
+```bash
+beampipe project validate -f config/wallaby_hires.v2.yaml
+beampipe project explain -f config/wallaby_hires.v2.yaml
+beampipe project render -f config/wallaby_hires.v2.yaml
+beampipe project add -f config/wallaby_hires.v2.yaml
+```
+
+`validate` returns structured diagnostics and a canonical SHA-256. `add` stores a new immutable revision and activates it. Existing executions retain their pinned revision.
+
+## Document shape
 
 ```yaml
 apiVersion: beampipe.dev/v2
@@ -19,73 +47,20 @@ automation: {}
 extension: {}
 ```
 
-| Section | Purpose |
-|---------|---------|
-| `apiVersion` | Config API version, currently `beampipe.dev/v2` |
-| `kind` | Must be `ProjectConfig` |
-| `metadata` | Project ID and description |
-| `definitions` | Named reusable transforms |
-| `source_identity` | Template variables derived from the canonical source identifier |
-| `adapters` | Required archive adapters and TAP policy |
-| `graph` | Logical graph URL or local path |
-| `discovery` | TAP query templates, enrichments, field mapping, flags, signatures |
-| `manifest` | Manifest grouping and JSON templates |
-| `graph_patches` | YAML key for DALiuGE Graph mutations before translation |
-| `automation` | Discovery and execution scheduler policy |
-| `extension` | Optional WASM hook linkage |
+| Section | Owns |
+|---|---|
+| `metadata` | stable project ID and description |
+| `definitions`, `source_identity` | named transforms and query variables |
+| `adapters` | required TAP adapters, endpoints, retry/timeout policy |
+| `discovery` | project-specific ADQL, enrichments, mappings, flags, signature |
+| `manifest` | source/SBID/dataset grouping and output templates |
+| `graph`, `graph_patches` | logical graph source and deterministic mutations |
+| `automation` | discovery cadence and execution admission limits |
+| `extension` | optional pinned WASM hooks |
 
-Validate before upload:
+## Dynamic TAP queries
 
-```bash
-beampipe project validate -f config/wallaby_hires.v2.yaml
-```
-
-Upload through the API:
-
-```bash
-curl -s -X POST "$BASE/api/v2/project-configs" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/x-yaml' \
-  --data-binary @config/wallaby_hires.v2.yaml | jq .
-```
-
-## Metadata
-
-```yaml
-metadata:
-  id: wallaby_hires
-  description: WALLABY HiRes CASDA pipeline reference config
-```
-
-`metadata.id` is the `project_module` used in source registration, executions, events, and deployment profile scoping.
-
-## Definitions and transforms
-
-Definitions hold named transforms. Give transforms survey-meaningful names so field maps stay readable.
-
-```yaml
-definitions:
-  transforms:
-    hipass_source_name:
-      kind: strip_prefix
-      prefix: HIPASS
-    askap_sbid:
-      kind: extract_digits
-    scan_id_from_did:
-      kind: split_last
-      separators: ["/", ":", "#"]
-    has_rows:
-      kind: is_present
-    normalized_sbid:
-      kind: chain
-      steps: [askap_sbid, trim]
-    trim:
-      kind: trim
-```
-
-This WALLABY example converts `HIPASSJ1313-15` into VizieR query variables, normalizes ASKAP SBIDs, splits scan IDs from publisher DIDs, and converts enrichment rows into readiness flags. See [Transforms](transforms.md) for the full reference.
-
-## Source identity
+Queries and enrichments live in YAML and are rendered from source identity plus prior results:
 
 ```yaml
 source_identity:
@@ -95,46 +70,14 @@ source_identity:
       from: canonical
     source_name:
       transform: hipass_source_name
-```
 
-For a registered source `HIPASSJ1313-15`, `{source_identifier}` remains `HIPASSJ1313-15` and `{source_name}` becomes `J1313-15`. This lets CASDA and VizieR use different query formats without changing source registration.
-
-## Adapters
-
-```yaml
 adapters:
-  required:
-    - casda
-    - vizier
+  required: [casda, vizier]
   tap:
     timeout_seconds: 90
     retries: 2
     fail_open: false
-```
 
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `required` | `[]` | Adapters that must be available |
-| `casda_tap_url` | env/default | Optional CASDA TAP override |
-| `vizier_tap_url` | env/default | Optional VizieR TAP override |
-| `tap.timeout_seconds` | `30` | Query timeout |
-| `tap.retries` | `1` | Retry count |
-| `tap.fail_open` | `false` | Allow degraded discovery when adapter checks fail |
-
-## Graph
-
-```yaml
-graph:
-  url: https://raw.githubusercontent.com/jbwod/wallaby-hires-beampipe/refs/heads/main/dlg-graphs/wallaby-hires_deploy-setonix-beampipe.graph
-```
-
-Use `url` for remote graph sources or `path` for local graph files available to the worker.
-
-## Discovery
-
-WALLABY uses CASDA for visibility metadata and VizieR for catalogue enrichment.
-
-```yaml
 discovery:
   queries:
     - name: visibility
@@ -145,7 +88,7 @@ discovery:
     - name: ra_dec_vsys
       adapter: vizier
       template: |
-        SELECT HIPASS, RAJ2000, DEJ2000
+        SELECT HIPASS, RAJ2000, DEJ2000, RVmom
         FROM "VIII/73/hicat" WHERE HIPASS = '{source_name}'
   enrichments:
     - name: sbid_to_eval_file
@@ -154,57 +97,48 @@ discovery:
         SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'
 ```
 
-Field mapping turns TAP rows into persisted archive metadata. `from` reads a field from the current TAP row or enrichment result; `transform` normalizes it before storage.
+Project-level `casda_tap_url` and `vizier_tap_url` can override runtime defaults. Keep credentials outside YAML.
+
+## Metadata and signatures
+
+`prepare_metadata` is nested under `discovery`:
 
 ```yaml
-prepare_metadata:
-  field_map:
-    source_identifier:
-      from: source_identifier
-    dataset_id:
-      from: filename
-    sbid:
-      from: obs_id
-      transform: normalized_sbid
-    scan_id:
-      from: obs_publisher_did
-      transform: scan_id_from_did
-  discovery_flags:
-    ra_dec_vsys_complete:
-      from: enrichments.ra_dec_vsys
-      transform: has_rows
-  signature:
-    exclude_fields:
-      - access_url
-      - filesize
-      - t_max
-      - t_min
-    include_discovery_flags: true
+discovery:
+  prepare_metadata:
+    field_map:
+      dataset_id:
+        from: filename
+      visibility_filename:
+        from: filename
+      sbid:
+        from: obs_id
+        transform: normalized_sbid
+    discovery_flags:
+      ra_dec_vsys_complete:
+        from: enrichments.ra_dec_vsys
+        transform: has_rows
+    signature:
+      exclude_fields: [access_url, filesize, t_max, t_min]
+      include_discovery_flags: true
 ```
 
-Discovery signatures decide whether source metadata changed enough to trigger future execution. Exclude volatile fields when changes should not trigger reruns.
+Every prepared dataset needs `sbid` and either `dataset_id` or `visibility_filename`. Invalid rows fail the whole persistence transaction. Exclude volatile fields only when their changes should not trigger another workflow.
 
-## Manifest
+## Manifest and graph
 
 ```yaml
 manifest:
-  group_by:
-    - source_identifier
-    - sbid
+  group_by: [source_identifier, sbid]
   source_template:
     source_identifier: "{source_identifier}"
     ra_string: "{flags.ra_string}"
     dec_string: "{flags.dec_string}"
     vsys: "{flags.vsys}"
-```
 
-`group_by` controls how metadata rows become manifest groups. Templates can read metadata fields, discovery flags, and staging-derived values.
+graph:
+  url: https://example.org/pinned/wallaby.graph
 
-## DALiuGE Graphs
-
-The YAML key is still `graph_patches`, but the operator-facing concept is DALiuGE Graph preparation.
-
-```yaml
 graph_patches:
   - match:
       kind: node_name
@@ -213,7 +147,7 @@ graph_patches:
       num_of_copies: "$count(sbids[].datasets[])"
 ```
 
-Patches are applied after manifest generation and before DALiuGE translation. Graphs that include the `beampipe-ingest` palette can also receive the generated manifest through a `beampipe-ingest` node with a `manifest_path` field.
+Manifest templates resolve both logical `flags.*` values and the flat persisted fields produced by discovery. Graph bytes are checksummed and stored on the execution, but remote branch URLs remain mutable before preparation; use immutable URLs or externally verified hashes for qualification.
 
 ## Automation
 
@@ -221,34 +155,37 @@ Patches are applied after manifest generation and before DALiuGE translation. Gr
 automation:
   discovery:
     enabled: true
-    tick_discovery_source_limit: 1000
     batch_size: 10
-    tick_discovery_batch_limit: 100
-    concurrent_discovery_batch_limit: 24
     stale_after_hours: 24
   execution:
     enabled: true
     archive_name: casda
     max_sources_per_execution: 1
-    tick_execution_source_limit: 1000
-    tick_execution_run_limit: 50
-    min_sources_to_trigger: 1
-    max_wait_minutes: 1440
-    claim_ttl_minutes: 180
-    concurrent_execution_run_limit: 10
-    deployment_profile_name: slurm-remote
+    tick_execution_run_limit: 1
+    concurrent_execution_run_limit: 1
+    deployment_profile_name: setonix
 ```
 
-Project automation limits combine with global `BEAMPIPE_SHAPING_*` environment variables. Use project config for survey policy and environment variables for cluster-wide safety caps.
+Project limits express survey policy. Environment `BEAMPIPE_SHAPING_*` settings and profile concurrency are additional safety ceilings. Make sure the named profile exists before enabling execution automation.
 
-## Extension
+## Optional WASM
+
+Use WASM only when transforms, templates, and graph patches are insufficient. Supported hooks are `prepare_metadata`, `manifest`, and `graph_patches`.
+
+```bash
+beampipe wasm upload \
+  --config-id PROJECT_CONFIG_UUID \
+  -f target/wasm32-wasip1/release/project_hooks.wasm
+```
+
+Reference the returned digest:
 
 ```yaml
 extension:
-  wasm_sha256: "<uploaded-module-sha256>"
-  hooks:
-    - prepare_metadata
-    - manifest
+  wasm_sha256: "<sha256>"
+  hooks: [prepare_metadata]
 ```
 
-Use WASM hooks only when transforms, templates, and DALiuGE Graph patches are not expressive enough. Next: review [Transforms](transforms.md) for concrete normalization examples.
+Hooks must be deterministic and secret-free. They are project logic, not an escape hatch for network calls or deployment behavior.
+
+Continue with [Transforms](transforms.md) and [Graph preparation](graph-patches.md).

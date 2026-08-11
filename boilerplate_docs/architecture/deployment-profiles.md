@@ -1,98 +1,115 @@
-# Deployment profiles
+# Deployment profiles and SSH
 
-A deployment profile tells beampipe how to translate and deploy a prepared graph. Executions reference a profile by UUID, by `deployment_profile_name`, or by the project default.
+A deployment profile is versioned non-secret infrastructure policy. Every execution pins the resolved profile snapshot, so later edits affect only future runs.
 
-## Choosing a profile
+## Choose a backend
 
-| Backend | Use when | Operator concern |
-|---------|----------|------------------|
-| REST remote | A DALiuGE DIM is already running and reachable over HTTP | DIM URL, deploy/poll host, TLS policy |
-| Slurm remote | The graph should run on an HPC cluster through SSH and `sbatch` | SSH trust, Slurm account, DALiuGE paths, poll cadence |
-
-<div class="terminal-diagram terminal-diagram--center">
-<pre>manifest + graph
-      |
-      v
-DALiuGE Translator Manager
-      |
-      +--> REST remote DIM
-      |
-      +--> Slurm remote SSH + sbatch</pre>
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="A prepared graph is translated and then deployed either to an existing DIM or through SSH to Slurm">
+  <div class="bp-flow-node" data-tone="amber"><span>INPUT</span><strong>patched graph</strong><small>immutable artifact</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>TRANSLATE</span><strong>DALiuGE TM</strong><small>logical to physical</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>OPTION A</span><strong>REST DIM</strong><small>deploy + poll HTTP</small></div>
+  <span class="bp-flow-link" aria-hidden="true">or</span>
+  <div class="bp-flow-node" data-tone="green"><span>OPTION B</span><strong>Slurm</strong><small>SSH + SFTP + sbatch</small></div>
 </div>
 
-## Top-level shape
+| Kind | Use when | Prove before enabling |
+|---|---|---|
+| `rest_remote` | A DALiuGE Data Island Manager already runs | worker-to-TM, TM-to-DIM, worker-to-DIM connectivity and TLS |
+| `slurm_remote` | DALiuGE should start inside an HPC allocation | SSH trust, account/partition, paths, runtime environment, `sbatch`/`squeue`/`sacct` |
+
+Profiles never contain private keys, passphrases, CASDA passwords, or tokens.
+
+## Create a profile
+
+The setup wizard is the easiest path:
+
+=== "REST remote"
+
+    ```bash
+    beampipe setup \
+      --deployment rest_remote \
+      --profile-name local-daliuge \
+      --tm-url https://translator.example.org \
+      --dim-url https://manager.example.org:8001
+    ```
+
+=== "Slurm remote"
+
+    ```bash
+    beampipe setup \
+      --deployment slurm_remote \
+      --profile-name setonix \
+      --facility setonix \
+      --ssh-host setonix.pawsey.org.au \
+      --ssh-user "$USER" \
+      --slurm-account PROJECT \
+      --slurm-partition work \
+      --remote-home /scratch/PROJECT \
+      --dlg-root /scratch/PROJECT/$USER/dlg \
+      --remote-logs /scratch/PROJECT/$USER/dlg/log
+    ```
+
+For automation or review, place the JSON profile in a private operator directory and install it with:
+
+```bash
+beampipe profile add -f profile.json
+beampipe profile validate PROFILE_NAME
+beampipe profile render PROFILE_NAME
+```
+
+`profile validate` accepts an installed profile name. File validation occurs during `profile add`.
+
+## Common fields
 
 ```json
 {
-  "name": "slurm-remote",
-  "description": "Setonix Slurm profile",
+  "name": "setonix",
+  "description": "WALLABY qualification profile",
   "project_module": "wallaby_hires",
   "is_default": true,
+  "max_concurrent_executions": 1,
   "translation": {
     "algo": "metis",
     "num_par": 1,
     "num_islands": 1,
-    "tm_url": "http://dlg-tm.example"
+    "tm_url": "https://translator.example.org"
   },
-  "deployment": {
-    "kind": "slurm_remote"
-  }
+  "deployment": {"kind": "slurm_remote"}
 }
 ```
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| `name` | yes | 1-50 characters; referenced by executions and project automation |
-| `description` | no | Operator notes |
-| `project_module` | no | `null` means global profile |
-| `is_default` | no | Default profile when an execution omits a name |
-| `translation` | yes | DALiuGE Translator Manager settings |
-| `deployment` | yes | `rest_remote` or `slurm_remote` |
-
-Profile changes apply to future executions. In-flight runs keep the config/profile already recorded on the execution.
-
-## Translation fields
-
-| Field | Default | Validation | Purpose |
-|-------|---------|------------|---------|
-| `algo` | `metis` | `metis` or `mysarkar` | DALiuGE partition algorithm |
-| `num_par` | `1` | `>= 1` | Partition count |
-| `num_islands` | `0` | `>= 0` | Island count |
-| `tm_url` | unset | URL string | Translator Manager base URL |
-
-`tm_url` must be reachable from the worker that performs translation, not just from the operator laptop.
+`project_module=null` makes a profile global. Project automation resolves `deployment_profile_name`; otherwise Beampipe uses the applicable default. Keep `max_concurrent_executions` low until the target has passed a load qualification.
 
 ## REST remote
-
-Use REST remote when a DALiuGE DIM is already running and reachable over HTTP.
 
 ```json
 {
   "kind": "rest_remote",
-  "dim_host_for_tm": "dlg-dim",
+  "dim_host_for_tm": "dlg-dim.internal",
   "dim_port_for_tm": 8001,
-  "deploy_host": "dlg-dim.example",
+  "deploy_host": "dlg-dim.example.org",
   "deploy_port": 8001,
   "use_https": true,
   "verify_ssl": true
 }
 ```
 
-| Field | Required | Default | Purpose |
-|-------|----------|---------|---------|
-| `kind` | yes | none | Must be `rest_remote` |
-| `dim_host_for_tm` | no | unset | DIM hostname as seen by Translator Manager |
-| `dim_port_for_tm` | no | `8001` | DIM port as seen by Translator Manager |
-| `deploy_host` | yes | none | Data Island Manager host used by Beampipe for deploy and polling |
-| `deploy_port` | no | `8001` | DIM deploy/polling port |
-| `use_https` | no | `false` | Use HTTPS for manager requests |
-| `verify_ssl` | no | `true` | Verify TLS certificates; disabling this is never the default |
+- `dim_host_for_tm` is the DIM address visible from Translator Manager.
+- `deploy_host` is the address visible from Beampipe workers.
+- Keep TLS verification enabled. Use trusted CA configuration instead of disabling it.
+- Validate the graph application/runtime package versions, not only endpoint health.
 
-Best for local DALiuGE DIM stacks, staging systems, and integration tests where a long-running DIM service already exists.
+```bash
+beampipe doctor --profile local-daliuge
+beampipe daliuge inspect --profile local-daliuge
+beampipe daliuge sessions --profile local-daliuge
+```
 
 ## Slurm remote
 
-Use Slurm remote for HPC clusters. The worker translates through DALiuGE Translator Manager, uploads artifacts over SSH, submits with `sbatch`, and polls with batched `squeue`/`sacct`.
+Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_dir`, and `dlg_root`. Resource settings belong under `resources`; manager placement belongs under `manager_topology`.
 
 ```json
 {
@@ -104,118 +121,90 @@ Use Slurm remote for HPC clusters. The worker translates through DALiuGE Transla
   "home_dir": "/scratch/project_account",
   "log_dir": "/scratch/project_account/operator/dlg/log",
   "dlg_root": "/scratch/project_account/operator/dlg",
-  "modules": "module load python/3.11",
-  "venv": "source /path/to/venv/bin/activate",
+  "modules": "module load singularity",
+  "venv": "source /software/project/venv/bin/activate",
   "exec_prefix": "srun -l",
   "facility": "setonix",
-  "job_duration_minutes": 30,
-  "num_nodes": 1,
-  "num_islands": 1,
-  "verbose_level": 1,
-  "max_threads": 0,
-  "all_nics": false,
-  "zerorun": false,
-  "sleepncopy": false,
-  "check_with_session": false
+  "resources": {
+    "partition": "work",
+    "nodes": 1,
+    "tasks": 1,
+    "cpus_per_task": 1,
+    "memory": "32G",
+    "wall_time_minutes": 60
+  },
+  "manager_topology": {
+    "nodes": 1,
+    "islands": 1,
+    "co_host_dim": false
+  }
 }
 ```
 
-| Field | Required | Default | Purpose |
-|-------|----------|---------|---------|
-| `kind` | yes | none | Must be `slurm_remote` |
-| `login_node` | yes | none | Slurm login hostname |
-| `ssh_port` | no | `22` | SSH port |
-| `remote_user` | no | current user fallback | Remote SSH user |
-| `account` | yes | none | Slurm account/project |
-| `home_dir` | yes | none | Remote scratch/home path |
-| `log_dir` | yes | none | DALiuGE log directory |
-| `dlg_root` | yes | none | DALiuGE install root |
-| `modules` | no | unset | Module load snippet before submit |
-| `venv` | no | unset | Virtualenv activation snippet |
-| `exec_prefix` | no | `srun -l` | Execution prefix passed to DALiuGE |
-| `facility` | no | `setonix` | Facility id passed to DALiuGE |
-| `job_duration_minutes` | no | `30` | Slurm wall time |
-| `num_nodes` | no | `1` | Slurm node count |
-| `num_islands` | no | `1` | DALiuGE island count for deploy |
-| `verbose_level` | no | `1` | DALiuGE verbosity |
-| `max_threads` | no | `0` | DALiuGE max threads |
-| `all_nics` | no | `false` | Use all NICs |
-| `zerorun` | no | `false` | DALiuGE zero-run mode |
-| `sleepncopy` | no | `false` | DALiuGE sleep-and-copy behavior |
-| `check_with_session` | no | `false` | Session checking behavior |
-| `slurm_template` | no | unset | Optional Slurm template override |
+`beampipe profile render PROFILE_NAME` shows effective `#SBATCH` directives and DALiuGE settings before submission.
 
-Worker environment for Slurm:
+## Preferred SSH key model
 
-```bash
-export BEAMPIPE_USE_REAL_BACKENDS=true
-export SLURM_SSH_PRIVATE_KEY_FILE=/run/secrets/slurm_ssh_key
-export SLURM_SSH_KNOWN_HOSTS_SOURCE=/run/slurm-ssh/known_hosts
-```
+Keep the private key outside Beampipe and mount or expose it only to scheduler/worker processes.
 
-## Slurm SSH keys
+=== "Bare metal"
 
-Deployment profiles describe the remote Slurm target. SSH private keys, passphrases, and host-key trust stay outside the profile and are supplied to the worker process through environment variables or mounted files. This keeps profiles safe to store in Postgres and return through the API.
+    ```bash
+    install -d -m 0700 "$HOME/.config/beampipe/credentials"
+    install -m 0600 /path/to/dedicated_service_key \
+      "$HOME/.config/beampipe/credentials/slurm_key"
+    export SLURM_SSH_PRIVATE_KEY_FILE="$HOME/.config/beampipe/credentials/slurm_key"
+    export SLURM_SSH_KNOWN_HOSTS_SOURCE="$HOME/.config/beampipe/credentials/known_hosts"
+    ```
 
-Production setup:
+    Provision a dedicated key for the service instead of copying a personal login key. It should normally be owned by the Beampipe service user and mode `0600` or `0400`.
 
-```bash
-export BEAMPIPE_ENV=production
-export BEAMPIPE_USE_REAL_BACKENDS=true
-export SLURM_SSH_PRIVATE_KEY_FILE=/run/secrets/slurm_ssh_key
-export SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE=/run/secrets/slurm_ssh_passphrase
-export SLURM_SSH_KNOWN_HOSTS_SOURCE=/run/slurm-ssh/known_hosts
-```
+=== "Docker / Kubernetes"
 
-Use plain OpenSSH known-hosts entries for each Slurm login node. Non-default ports must use bracket syntax:
+    Mount the key read-only as a secret and point the process at its in-container path:
+
+    ```bash
+    SLURM_SSH_PRIVATE_KEY_FILE=/run/secrets/slurm_ssh_key
+    SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE=/run/secrets/slurm_ssh_passphrase
+    SLURM_SSH_KNOWN_HOSTS_SOURCE=/run/slurm-ssh/known_hosts
+    ```
+
+    The file may be root-owned when the Beampipe process can read it. The container does not create or own the key; the orchestrator mounts it.
+
+=== "systemd credentials"
+
+    Point the variables at files under `%d`/`$CREDENTIALS_DIRECTORY`. Keep credentials out of the unit environment and filesystem image.
+
+Production rejects symlinked or non-regular key files, group/world permissions, owners other than the process user or root, empty secret files, and home-key fallback.
+
+## Host-key trust
+
+Obtain the public host key through a trusted facility channel. Use ordinary OpenSSH entries:
 
 ```text
 login.hpc.example ssh-ed25519 AAAAC3...
 [login.hpc.example]:2222 ssh-ed25519 AAAAC3...
 ```
 
-Production rejects group/world-readable private keys, symlinked key paths, missing or empty known-hosts files, hashed known-hosts entries, and host keys that do not match the selected `login_node` and `ssh_port`.
-
-Development may use an inline PEM or home-directory fallback, but production should not:
+Hashed entries are not supported. Verification is host- and port-aware; unrelated keys do not satisfy the check.
 
 ```bash
-export SLURM_SSH_PRIVATE_KEY='-----BEGIN OPENSSH PRIVATE KEY-----...'
-export BEAMPIPE_SLURM_SSH_ALLOW_HOME_FALLBACK=true
-```
+export BEAMPIPE_ENV=production
+export BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS=true
+export BEAMPIPE_SLURM_SSH_ALLOW_HOME_FALLBACK=false
+export BEAMPIPE_ALLOW_INLINE_SECRETS=false
+export BEAMPIPE_ALLOW_INSECURE_SSH_HOST_KEYS=false
 
-In production, inline PEM requires `BEAMPIPE_ALLOW_INLINE_SECRETS=true`; disabling strict host-key verification requires `BEAMPIPE_ALLOW_INSECURE_SSH_HOST_KEYS=true`. Treat both as break-glass only.
-
-## Validation
-
-Run offline checks first:
-
-```bash
 beampipe security check
+beampipe doctor --profile setonix
+beampipe slurm ping --profile setonix
+beampipe scheduler status --profile setonix
 ```
 
-Then test the live deployment profile:
+Inline PEM, home-directory fallback, and disabled host-key checks are development or break-glass features. Do not make them normal deployment configuration.
 
-```bash
-beampipe slurm ping --profile slurm-remote
-```
+## Slurm scale checks
 
-If the ping fails, check the profile `login_node`, `ssh_port`, and `remote_user`, then the key path, key permissions, passphrase file, and known-hosts entry.
+Before raising concurrency, qualify one run and then a paced batch. Watch login-node SSH/SFTP pressure, remote filesystem growth, TM availability, profile caps, and poll duration. Polling is batched by target through pooled SSH sessions, but submission still stages files per execution.
 
-## API
-
-```bash
-curl -s -X POST "$BASE/api/v2/deployment-profiles" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d @profile.json | jq .
-
-curl -s "$BASE/api/v2/deployment-profiles?project_module=wallaby_hires" \
-  -H "$AUTH" | jq .
-
-curl -s -X PATCH "$BASE/api/v2/deployment-profiles/$PROFILE_ID" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d '{"is_default":true}' | jq .
-```
-
-Next: connect profiles to survey automation in [Project config YAML](../project-configs/index.md#automation).
+The strongest unresolved risk from local testing is graph/runtime package compatibility. Pin DALiuGE and project application versions in the Slurm runtime and record them with each qualification result.

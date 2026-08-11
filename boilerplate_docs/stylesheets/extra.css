@@ -1425,6 +1425,43 @@ body:has(#redoc-frame) .md-main {
   white-space: nowrap;
 }
 
+/* Motion carries sequence in workflow diagrams without changing layout. */
+.bp-flow-diagram--animated .bp-flow-link {
+  animation: bp-flow-signal 2.8s steps(4, end) infinite;
+}
+
+.bp-flow-diagram--animated .bp-flow-link:nth-of-type(2) {
+  animation-delay: 0.35s;
+}
+
+.bp-flow-diagram--animated .bp-flow-link:nth-of-type(3) {
+  animation-delay: 0.7s;
+}
+
+.bp-flow-diagram--animated .bp-flow-link:nth-of-type(4) {
+  animation-delay: 1.05s;
+}
+
+.bp-flow-diagram--animated .bp-flow-link:nth-of-type(5) {
+  animation-delay: 1.4s;
+}
+
+@keyframes bp-flow-signal {
+  0%,
+  100% {
+    color: var(--bp-subtle);
+    transform: translateX(0);
+  }
+  45% {
+    color: var(--bp-code-name);
+    transform: translateX(0.18rem);
+  }
+  65% {
+    color: var(--bp-code-string);
+    transform: translateX(0.18rem);
+  }
+}
+
 .bp-system-map {
   display: flex;
   gap: 0.45rem;

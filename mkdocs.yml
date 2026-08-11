@@ -36,47 +36,31 @@ plugins:
 nav:
   - Home: index.md
   - Start:
-      - Choose a path: getting-started/index.md
-      - Five-minute local: getting-started/five-minute-start.md
-      - Installation: getting-started/installation.md
+      - Quick start: getting-started/index.md
+      - Install and configure: getting-started/installation.md
       - First workflow: getting-started/first-run.md
-      - Application configuration: getting-started/configuration.md
   - Operate:
       - Operator handbook: operations/index.md
-      - Daily workflow: operations/operator-guide.md
-      - Live console: operations/console.md
       - Workers and scheduling: operations/workers-scheduling.md
-      - DALiuGE and Setonix: operations/daliuge-setonix.md
       - Observability: operations/observability.md
-      - Demo readiness: operations/demo-readiness.md
-      - End-to-end scientific demo: operations/end-to-end-demo.md
       - Recovery and cancellation: operations/recovery.md
       - Production runbook: operations/production-runbook.md
-      - Upgrades, backups, and secrets: operations/upgrades-backups.md
+      - Qualification run: operations/end-to-end-demo.md
   - Configure projects:
-      - YAML model: project-configs/index.md
+      - Project YAML: project-configs/index.md
       - Transforms: project-configs/transforms.md
-      - DALiuGE graph patches: project-configs/graph-patches.md
-      - WASM extensions: project-configs/wasm-hooks.md
+      - Graph preparation: project-configs/graph-patches.md
+      - Deployment profiles and SSH: architecture/deployment-profiles.md
   - Understand:
-      - Architecture map: architecture/index.md
-      - Current system audit: architecture/current-system-audit.md
-      - Control-plane boundaries: architecture/control-plane.md
-      - Discovery and execution: architecture/lifecycle.md
+      - Architecture: architecture/index.md
       - Execution state model: architecture/state-machine.md
-      - Integration adapters: architecture/adapters.md
-      - Deployment profiles: architecture/deployment-profiles.md
   - Reference:
       - CLI commands: reference/cli.md
-      - Glossary: reference/glossary.md
       - API workflow: api/index.md
       - API schema: api/reference.md
-      - Bruno collection: tools/bruno.md
-      - OpenAPI export: tools/openapi.md
+      - Glossary: reference/glossary.md
   - Engineering:
       - Contributing: contributing.md
-      - Documentation map: about/documentation-map.md
-      - Overhaul design record: architecture/operator-overhaul-assessment.md
 
 exclude_docs: |
   overrides/

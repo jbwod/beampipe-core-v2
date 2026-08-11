@@ -1,120 +1,101 @@
-# First run
+# First workflow
 
-This workflow proves the control-plane path with one `wallaby_hires` source: authenticate, upload config, register a source, run discovery, create an execution, and queue a dry backend run. Keep `do_stage` and `do_submit` disabled until real CASDA, DALiuGE Translator Manager, DALiuGE DIM, or Slurm access is configured.
+This walkthrough uses one known WALLABY source to prove live public CASDA/VizieR discovery and deterministic graph preparation. It does not request CASDA staging or submit work to DALiuGE.
 
-## 1. Start services
+Complete the [quick start](index.md), leave `BEAMPIPE_USE_REAL_BACKENDS=false`, and keep `beampipe start` running.
 
-For Compose:
-
-```bash
-docker compose build api
-docker compose up -d postgres api scheduler worker
-docker compose run --rm api migrate
-```
-
-For a host binary, start the API and at least one worker as described in [Installation](installation.md). The examples below assume:
+## 1. Authenticate
 
 ```bash
-BASE=http://127.0.0.1:8080
-```
-
-## 2. Login
-
-Create an admin user first if you have not already done so.
-
-```bash
-TOKEN=$(curl -s -X POST "$BASE/api/v2/login" \
+export BASE=http://127.0.0.1:8080
+export TOKEN=$(curl -fsS -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"replace-this-local-password"}' | jq -r .access_token)
-AUTH="Authorization: Bearer $TOKEN"
+  -d '{"username":"admin","password":"replace-this-local-password"}' \
+  | jq -er .access_token)
+export AUTH="Authorization: Bearer $TOKEN"
 ```
 
-## 3. Validate and upload project config
-
-Validate locally before API upload:
+## 2. Register and discover
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v2.yaml
-```
-
-Upload the YAML:
-
-```bash
-curl -s -X POST "$BASE/api/v2/project-configs" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/x-yaml' \
-  --data-binary @config/wallaby_hires.v2.yaml | jq .
-```
-
-Confirm the active config:
-
-```bash
-curl -s "$BASE/api/v2/project-configs/wallaby_hires" -H "$AUTH" | jq .
-```
-
-## 4. Register a source
-
-```bash
-SOURCE=$(curl -s -X POST "$BASE/api/v2/sources" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
+SOURCE=$(curl -fsS -X POST "$BASE/api/v2/sources" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{
-    "project_module": "wallaby_hires",
-    "source_identifier": "HIPASSJ1313-15",
-    "enabled": true
+    "project_module":"wallaby_hires",
+    "source_identifier":"HIPASSJ1313-15",
+    "enabled":true
   }')
-SOURCE_ID=$(echo "$SOURCE" | jq -r .uuid)
-echo "$SOURCE" | jq .
+SOURCE_ID=$(jq -r .uuid <<<"$SOURCE")
+
+curl -fsS -X POST "$BASE/api/v2/sources/discover" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1313-15"}' \
+  | jq .
 ```
 
-## 5. Trigger discovery
+The endpoint marks the source stale. The scheduler claims it and a worker executes the project-defined TAP queries. Poll until `ready` is true and the discovery claim is empty:
 
 ```bash
-curl -s -X POST "$BASE/api/v2/sources/discover" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifiers":["HIPASSJ1313-15"]}' | jq .
+watch -n 2 "curl -fsS '$BASE/api/v2/sources/$SOURCE_ID/status' -H '$AUTH' | jq ."
 ```
 
-Poll source status until metadata and discovery flags are present:
+Expected for the reference source at the time of qualification: visibility datasets from SBID `72962`, populated RA/DEC/VSys values, and `ra_dec_vsys_complete=true`. Archive results can change; readiness and a stable signature are the contract, not a permanent row count.
+
+## 3. Inspect preparation
+
+Ask the API whether the source can form an execution:
 
 ```bash
-curl -s "$BASE/api/v2/sources/$SOURCE_ID/status" -H "$AUTH" | jq .
-curl -s "$BASE/api/v2/sources/$SOURCE_ID/events" -H "$AUTH" | jq .
-```
-
-## 6. Create and queue an execution
-
-```bash
-EXEC=$(curl -s -X POST "$BASE/api/v2/executions" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
+curl -fsS -X POST "$BASE/api/v2/executions/prepare" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{
-    "project_module": "wallaby_hires",
-    "sources": [{"source_identifier": "HIPASSJ1313-15"}],
-    "archive_name": "casda",
-    "deployment_profile_name": "slurm-remote"
-  }')
-EXEC_ID=$(echo "$EXEC" | jq -r .uuid)
-echo "$EXEC" | jq .
+    "project_module":"wallaby_hires",
+    "sources":[{"source_identifier":"HIPASSJ1313-15"}],
+    "archive_name":"casda",
+    "deployment_profile_name":"slurm-remote"
+  }' | jq .
 ```
 
-Queue a dry run:
+Build the manifest and patched graph without external submission:
 
 ```bash
-curl -s -X POST "$BASE/api/v2/executions/$EXEC_ID/execute" \
-  -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d '{"do_stage":false,"do_submit":false}' | jq .
+beampipe graph prepare \
+  --project wallaby_hires \
+  --source HIPASSJ1313-15
 ```
 
-## 7. Inspect state
+Confirm the output includes the active project revision, manifest checksum, source graph checksum, patched graph checksum, and graph-patch summary.
+
+## 4. Inspect automatic execution
+
+The reference project has execution automation enabled. With mock backends, the scheduler may admit the ready source automatically. Find and inspect the resulting execution:
 
 ```bash
-curl -s "$BASE/api/v2/executions/$EXEC_ID/status" -H "$AUTH" | jq .
-curl -s "$BASE/api/v2/executions/$EXEC_ID/summary" -H "$AUTH" | jq .
-curl -s "$BASE/api/v2/executions/$EXEC_ID/ledger-snapshot" -H "$AUTH" | jq .
-curl -s "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions?project_module=wallaby_hires" \
+  -H "$AUTH" | jq '.items[0] | {uuid,status,control_phase,submission_state}'
 ```
 
-Next: review [Configuration](configuration.md) for environment variables, then choose a backend in [Deployment profiles](../architecture/deployment-profiles.md).
+Set `EXEC_ID` to that UUID, then inspect durable evidence:
+
+```bash
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/status" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/ledger-snapshot" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/artifacts" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
+```
+
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="First workflow from source registration through discovery and graph preparation to mock execution evidence">
+  <div class="bp-flow-node" data-tone="cyan"><span>01</span><strong>source</strong><small>stable identity</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>02</span><strong>TAP</strong><small>query + enrich</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>03</span><strong>metadata</strong><small>normalize + sign</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>04</span><strong>artifacts</strong><small>manifest + graph</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>05</span><strong>ledger</strong><small>mock outcome</small></div>
+</div>
+
+## Next boundary
+
+To submit real work, replace the local mock profile with a validated `rest_remote` or `slurm_remote` profile, run `beampipe doctor --profile NAME`, then enable `BEAMPIPE_USE_REAL_BACKENDS=true`. Follow [Deployment profiles and SSH](../architecture/deployment-profiles.md); do not reuse a mock profile for live submission.

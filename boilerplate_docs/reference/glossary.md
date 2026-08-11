@@ -9,12 +9,12 @@ Use these terms consistently across project configuration, API responses, the co
 | Artifact | Immutable manifest, logical graph, patched graph, translated graph, or run record tied to an execution. |
 | CASDA | CSIRO ASKAP Science Data Archive, queried through TAP for source and dataset metadata. |
 | Claim | Time-bounded worker ownership of a durable job. Claims carry a fencing token. |
-| Control phase | Precise internal stage of an execution, from discovery through output verification. |
+| Control phase | Precise internal stage of an execution, from discovery through terminal reconciliation. |
 | DALiuGE | Data Activated Liu Graph Engine, used to translate and execute scientific graphs. |
 | Deployment profile | Versioned translator, manager, scheduler, resource, TLS, and facility configuration pinned by an execution. |
 | Diagnostic | Structured message with `path`, `severity`, `code`, `message`, and optional `hint`. |
 | Discovery signature | Stable digest of prepared archive metadata used to decide whether relevant source state changed. |
-| External axis | Independently observed submission, scheduler, DALiuGE, or output-verification state. |
+| External axis | Independently observed submission, scheduler, DALiuGE, or modeled output state. |
 | Fencing token | Monotonic claim value that prevents a stale worker from committing effects after ownership changed. |
 | Graph patch | Validated deterministic mutation applied to a logical DALiuGE graph before translation. |
 | Manifest | Project-shaped source and dataset document generated from prepared discovery metadata. |

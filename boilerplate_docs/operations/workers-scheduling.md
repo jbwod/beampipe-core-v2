@@ -1,116 +1,69 @@
 # Workers and scheduling
 
-Workers claim jobs from PostgreSQL. Schedulers enqueue recurring work. This page is the queue and tuning reference; use [Operator guide](operator-guide.md) for the process overview.
+Schedulers create durable intent. Workers claim compatible PostgreSQL jobs under renewable leases. Fencing prevents a stale worker from committing after another worker has recovered the job.
 
 ## Queue lifecycle
 
-<div class="terminal-diagram">
-<pre>scheduler tick
-     |
-     v
-+------------------+      +----------------------+      +------------------+
-| enqueue job      | ---> | worker claims row    | ---> | job handler      |
-| discovery/exec   |      | lock + lease         |      | TAP/DALiuGE/Slurm |
-+------------------+      +----------+-----------+      +--------+---------+
-                                      |                           |
-                                      v                           v
-                              renew or release             events + metrics</pre>
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Durable job lifecycle from scheduler enqueue through worker claim and completion or retry">
+  <div class="bp-flow-node" data-tone="cyan"><span>TICK</span><strong>enqueue</strong><small>idempotency key</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>DB</span><strong>queued</strong><small>pool + capability</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>LEASE</span><strong>claimed</strong><small>SKIP LOCKED</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>EFFECT</span><strong>handler</strong><small>heartbeat + fence</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>RESULT</span><strong>complete</strong><small>or delayed retry</small></div>
 </div>
 
-If a worker exits mid-job, the lease expires after `BEAMPIPE_WORKER_LOCK_SECONDS` and another worker can recover the job.
+If a worker exits, the lease expires and another compatible worker can recover the job. Retries use exponential delay with jitter; exhausted work becomes operator-visible instead of looping forever.
 
 ## Job families
 
-| Job family | Enqueued by | Consumed by | Purpose |
-|------------|-------------|-------------|---------|
-| `scheduler_tick` | Scheduler bootstrap | Scheduler-enabled process | Periodically enqueue discovery/execution/poll ticks |
-| `discover_batch` | Discovery tick or API request | Worker | Query adapters and prepare source metadata |
-| `execution_tick` | Scheduler tick | Worker | Admit eligible sources into execution runs |
-| `execute` | API or execution tick | Worker | Stage, translate, submit, and record a run |
-| `slurm_poll_tick` | Scheduler tick | Worker | Batch Slurm state polling over SSH |
-| `dim_poll_tick` | Scheduler tick | Worker | Poll DALiuGE DIM/REST deployment state |
+| Job | Purpose |
+|---|---|
+| `scheduler_tick` | Claim stale sources and enqueue discovery batches |
+| `discover_batch` | Run project-configured TAP queries and persist metadata |
+| `execution_scheduler_tick` | Admit workflow-pending sources under policy limits |
+| `execute` | Stage, prepare, translate, and submit an execution |
+| `dim_poll`, `dim_poll_tick` | Reconcile REST/DIM sessions |
+| `slurm_poll_tick` | Batch `squeue`/`sacct` observations by Slurm target |
+| `alert_evaluator_tick` | Evaluate configured alert rules |
 
-## Process layouts
-
-Single-process development:
-
-```bash
-beampipe serve --worker true
-```
-
-Split host processes:
+## Scale safely
 
 ```bash
-beampipe serve --worker false
-BEAMPIPE_WORKER_SCHEDULER_ENABLED=true BEAMPIPE_WORKER_CONCURRENCY=2 beampipe worker
-BEAMPIPE_WORKER_SCHEDULER_ENABLED=false BEAMPIPE_WORKER_CONCURRENCY=4 beampipe worker
+# one recurring scheduler
+BEAMPIPE_WORKER_SCHEDULER_ENABLED=true beampipe serve --worker true
+
+# worker-only replicas
+BEAMPIPE_WORKER_SCHEDULER_ENABLED=false \
+BEAMPIPE_WORKER_CONCURRENCY=4 \
+beampipe worker
 ```
 
-Compose:
+| Control | Scope | Use |
+|---|---|---|
+| `BEAMPIPE_WORKER_CONCURRENCY` | one process | Parallel claimed jobs |
+| `BEAMPIPE_WORKER_LOCK_SECONDS` | one claim | Lease duration |
+| `BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY` | one discovery batch | Concurrent TAP requests |
+| `BEAMPIPE_SHAPING_QUEUE_MAX_DEPTH` | environment | Stop enqueue under backlog |
+| `BEAMPIPE_SHAPING_DISCOVERY_MAX_IN_FLIGHT_BATCHES` | environment | Protect TAP services |
+| `BEAMPIPE_SHAPING_EXECUTION_MAX_IN_FLIGHT_RUNS` | environment | Protect execution backends |
+| `automation.*` | project | Survey-specific cadence and grouping |
+| `max_concurrent_executions` | profile | Protect one DIM or Slurm target |
+
+Start with low profile and global execution caps. Increase one limit at a time while watching queue age, dependency latency, SSH sessions, submission errors, and scheduler poll duration. For Slurm, polling is already batched by target; submission and SFTP still create per-execution login-node pressure.
+
+## Inspect and drain
 
 ```bash
-docker compose up -d api scheduler
-docker compose up -d --scale worker=8 worker
+beampipe worker list --include-stopped
+beampipe worker inspect "$WORKER_ID"
+beampipe worker leases --include-expired
+beampipe worker pools
+beampipe worker drain "$WORKER_ID"
+beampipe worker resume "$WORKER_ID"
 ```
 
-Do not run more than one scheduler-enabled process unless you are deliberately testing duplicate-tick protection.
-
-## Tuning reference
-
-| Variable | Applies to | Effect |
-|----------|------------|--------|
-| `BEAMPIPE_WORKER_CONCURRENCY` | Worker process | Parallel queue consumers inside one process |
-| `BEAMPIPE_WORKER_LOCK_SECONDS` | Worker process | Lease duration for claimed jobs |
-| `BEAMPIPE_SCHEDULER_INTERVAL_SECONDS` | Scheduler | Recurring scheduler cadence |
-| `BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY` | Discovery job | Parallel TAP requests inside each discovery batch |
-| `BEAMPIPE_SHAPING_QUEUE_MAX_DEPTH` | Scheduler/admission | Stops enqueue when queue depth is too high |
-| `BEAMPIPE_SHAPING_DISCOVERY_MAX_BATCHES_PER_TICK` | Discovery tick | Batch enqueue limit per tick |
-| `BEAMPIPE_SHAPING_DISCOVERY_MAX_IN_FLIGHT_BATCHES` | Discovery admission | Global discovery batch concurrency |
-| `BEAMPIPE_SHAPING_EXECUTION_MAX_IN_FLIGHT_RUNS` | Execution admission | Global execute/stage/submit cap |
-
-## Survey automation caps
-
-Project config adds survey-local caps under `automation.discovery` and `automation.execution`.
-
-```yaml
-automation:
-  discovery:
-    enabled: true
-    tick_discovery_source_limit: 1000
-    batch_size: 10
-    tick_discovery_batch_limit: 100
-    concurrent_discovery_batch_limit: 24
-    stale_after_hours: 24
-  execution:
-    enabled: true
-    max_sources_per_execution: 1
-    tick_execution_source_limit: 1000
-    tick_execution_run_limit: 50
-    concurrent_execution_run_limit: 10
-    deployment_profile_name: slurm-remote
-```
-
-Treat global `BEAMPIPE_SHAPING_*` values as cluster safety limits and project config as survey policy.
-
-## Sizing patterns
-
-| Scenario | Starting point | Watch |
-|----------|----------------|-------|
-| Local test | One API with embedded worker | API latency, queue depth |
-| 100 sources | One scheduler, two workers, `BEAMPIPE_WORKER_CONCURRENCY=2` | TAP latency and discovery completion |
-| 1000 sources | One scheduler, eight workers, `BEAMPIPE_WORKER_CONCURRENCY=4` | CASDA/VizieR latency, queue age, metadata freshness |
-| Slurm-heavy execution | Keep discovery steady, raise workers slowly | Slurm poll duration, SSH failures, remote account limits |
-
-Scale one dimension at a time. If queue age grows while dependency latency is normal, add worker capacity. If dependency latency grows, lower concurrency or batch size before adding more workers.
-
-## Recovery behavior
-
-| Situation | Expected behavior |
-|-----------|-------------------|
-| Worker exits mid-job | Lease expires; another worker can recover |
-| Scheduler restarts | Recurring ticks resume from durable state |
-| TAP outage | Discovery jobs fail or defer; dependency readiness shows cause |
-| Slurm login outage | Poll jobs fail or retry; execution ledger remains inspectable |
-| Queue depth too high | Admission pauses until depth returns below caps |
-
-Next: use [Observability](observability.md) for metrics, events, and debug URLs.
+Draining stops new claims and allows active leases to finish. During upgrades, drain workers before replacing binaries. During a dependency outage, lower admission or stop the scheduler before adding capacity: more workers amplify a slow TAP service or login node.

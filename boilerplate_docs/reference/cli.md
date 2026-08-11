@@ -1,20 +1,20 @@
-# CLI command reference
+# CLI reference
 
-The `beampipe` binary is the common entrypoint for local evaluation, API service, workers, diagnostics, and operator actions. Run `beampipe <command> --help` for the exact options supported by the installed release.
+`beampipe` is the common entry point for setup, services, diagnostics, project/profile management, and guarded operator actions. The installed release's `beampipe COMMAND --help` is authoritative for flags.
 
 ## Command families
 
-| Intent | Commands | Typical role |
-|---|---|---|
-| Bootstrap | `init`, `setup`, `migrate`, `admin` | Installer |
-| Run services | `start`, `serve`, `worker` | Operator |
-| Verify | `doctor`, `security`, `bench` | Operator / security |
-| Configure | `config`, `project`, `profile`, `wasm` | Project maintainer |
-| Inspect backends | `scheduler`, `daliuge`, `slurm` | HPC operator |
-| Operate executions | `execution`, `graph`, `timeline`, `status`, `console` | Operator |
-| Maintain contracts | `openapi`, `migrate-data`, `purge-provenance` | Engineer |
+| Intent | Commands |
+|---|---|
+| Bootstrap | `init`, `setup`, `migrate`, `admin create-user` |
+| Run | `start`, `serve`, `worker` |
+| Verify | `doctor`, `security check`, `config explain`, `bench` |
+| Configure | `project`, `profile`, `wasm` |
+| Inspect backends | `scheduler`, `daliuge`, `slurm` |
+| Operate | `status`, `console`, `timeline`, `execution`, `graph` |
+| Maintain | `openapi export`, `purge-provenance`, `migrate-data` |
 
-## Bootstrap and run
+## Bootstrap
 
 ```bash
 beampipe init --directory operator-local
@@ -24,9 +24,9 @@ beampipe doctor
 beampipe start
 ```
 
-`start` runs the normal API plus embedded worker path. Use `serve` and `worker` separately when processes must scale or fail independently.
+`start` runs a compact API plus worker. Use `serve --worker false` and worker-only processes when roles need independent scaling.
 
-## Inspect before acting
+## Inspect
 
 ```bash
 beampipe status
@@ -36,37 +36,42 @@ beampipe daliuge inspect --profile PROFILE
 beampipe timeline execution "$EXECUTION_ID" --table
 ```
 
-The CLI and API use the same structured diagnostics. Errors carry a stable code, severity, path, message, and optional hint.
-
-## Project and profile validation
+## Validate and prepare
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v2.yaml
-beampipe profile validate config/deployment_profile.slurm-remote.json
-beampipe graph prepare \
-  --project wallaby_hires \
-  --source WALLABY_J123456-123456
+beampipe project validate -f PROJECT.yaml
+beampipe project add -f PROJECT.yaml
+beampipe profile add -f PROFILE.json
+beampipe profile validate PROFILE_NAME
+beampipe profile render PROFILE_NAME
+beampipe graph prepare --project PROJECT_ID --source SOURCE_ID
 beampipe graph diff --execution "$EXECUTION_ID"
 ```
 
-Validation should happen before upload or activation. Graph preparation writes deterministic artifacts and reports graph-patch matches before external submission.
-
-## Recovery actions
+## Live checks
 
 ```bash
-beampipe execution retry "$EXECUTION_ID" \
-  --reason "Translator endpoint restored after planned maintenance"
+beampipe doctor --profile PROFILE_NAME
+beampipe slurm ping --profile PROFILE_NAME
+beampipe daliuge ping --profile PROFILE_NAME
+beampipe scheduler status --profile PROFILE_NAME
+```
 
+## Guarded actions
+
+```bash
+beampipe worker drain "$WORKER_ID"
+beampipe execution retry "$EXECUTION_ID" --reason "dependency restored"
 beampipe execution cancel "$EXECUTION_ID"
 ```
 
-Retry and cancellation are stage-aware. An uncertain submission is fenced until reconciliation proves whether external work exists.
+Retries and cancellation share the same safety policy as the API and console. Uncertain external work blocks resubmission.
 
 ## Output conventions
 
-- Human-readable tables are the default for interactive inspection.
-- Structured diagnostics preserve stable fields for scripts and API clients.
-- Secrets are redacted from explanations and diagnostic output.
-- Non-zero exit status means at least one error diagnostic or command failure occurred.
+- Inspection commands default to human-readable output where appropriate.
+- Diagnostics expose stable code, severity, path, message, and hint fields.
+- Secret-bearing values and external errors are redacted.
+- Non-zero exit status indicates a failed command or error diagnostic.
 
-Continue with the [API workflow](../api/index.md) for HTTP equivalents or the [operator handbook](../operations/index.md) for task-oriented procedures.
+Use the [API workflow](../api/index.md) for HTTP equivalents.

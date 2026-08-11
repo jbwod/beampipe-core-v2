@@ -1,41 +1,45 @@
 # Contributing
 
-Contributions should keep the Rust v2 operator story consistent: `beampipe` binary examples, `/api/v2` API examples, project config YAML, and generated OpenAPI/Redoc kept in sync.
+Keep implementation, generated contracts, examples, and operator procedures synchronized.
 
-## Local checks
-
-```bash
-cargo test
-python3 -m mkdocs build --strict
-beampipe openapi export > openapi.json
-cp openapi.json boilerplate_docs/openapi.json
-```
-
-Use the `cargo run` OpenAPI command only when developing before installing the binary:
+## Required checks
 
 ```bash
-cargo run -p beampipe-cli --bin beampipe -- openapi export > openapi.json
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+beampipe project validate -f config/wallaby_hires.v2.yaml
+make docs-build
 ```
 
-## API contract
+`make docs-build` exports OpenAPI, copies it into the docs tree, and runs MkDocs in strict mode.
 
-| Change | Required follow-up |
-|--------|--------------------|
-| Request/response schema | Regenerate OpenAPI and update Redoc docs asset |
-| Auth flow | Update API workflow and Bruno collection |
-| Project config schema | Update YAML model and transforms docs |
-| Deployment profile schema | Update deployment profiles and first-run examples |
-| Execution lifecycle | Update lifecycle, operator guide, and observability docs |
+## Documentation ownership
 
-## Docs style
+| Change | Update |
+|---|---|
+| CLI command or setup behavior | quick start and CLI reference |
+| Environment setting or security policy | install/configuration and deployment profiles |
+| Project schema | project YAML, transforms, graph preparation |
+| API type or route | generated OpenAPI and API workflow if task order changes |
+| Execution transition | architecture state model and recovery procedure |
+| Metric or alert | observability dashboard order and alert guidance |
+| Backend behavior | deployment profiles and qualification run |
 
-| Rule | Reason |
-|------|--------|
-| Prefer `beampipe` examples | Operators run the installed binary |
-| Keep `cargo run` in dev-only sections | Avoid confusing production paths |
-| Use `/api/v2` examples only | Avoid stale client code |
-| Keep YAML keys literal | Operators copy config snippets |
-| Say DALiuGE Graphs in prose | Keep the docs readable while preserving `graph_patches` YAML |
-| Link to Redoc for schema detail | Avoid duplicating long request/response definitions |
+## Writing rules
 
-Run `python3 -m mkdocs build --strict` before publishing documentation changes.
+- Put a procedure in one page and link to it elsewhere.
+- Use installed `beampipe` commands in operator docs; reserve `cargo run` for development.
+- Keep all HTTP examples on `/api/v2`.
+- State whether a command observes, prepares, or performs an external side effect.
+- Never imply scheduler or DALiuGE completion proves scientific output.
+- Prefer diagrams for ownership and sequence; keep them accessible and respect reduced motion.
+- Link to generated API reference instead of duplicating every request field.
+
+## Preview
+
+```bash
+make docs-serve
+```
+
+Review desktop and narrow layouts, keyboard behavior for interactive diagrams, code wrapping, navigation depth, and every changed link before committing.
