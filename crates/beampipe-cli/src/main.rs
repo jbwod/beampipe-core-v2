@@ -483,15 +483,6 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("security validation failed:\n  - {}", errors.join("\n  - "));
             }
             let pool = beampipe_db::connect(&settings.database_url).await?;
-            beampipe_metrics::init_recorder();
-            if settings.metrics_server_enabled {
-                if let Ok(addr) = settings.metrics_bind_addr.parse() {
-                    drop(beampipe_metrics::server::spawn_metrics_server(
-                        addr,
-                        Some(pool.clone()),
-                    ));
-                }
-            }
             let config = beampipe_jobs::WorkerConfig::from_settings(&settings);
             tracing::info!(
                 concurrency = config.concurrency,
