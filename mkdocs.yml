@@ -48,6 +48,7 @@ nav:
       - Workers and scheduling: operations/workers-scheduling.md
       - DALiuGE and Setonix: operations/daliuge-setonix.md
       - Observability: operations/observability.md
+      - Demo readiness: operations/demo-readiness.md
       - Recovery and cancellation: operations/recovery.md
       - Production runbook: operations/production-runbook.md
       - Upgrades, backups, and secrets: operations/upgrades-backups.md

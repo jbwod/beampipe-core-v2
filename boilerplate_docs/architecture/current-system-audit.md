@@ -29,7 +29,7 @@ The strongest implementation areas are:
 
 The implementation can exercise real TAP, CASDA staging, DALiuGE REST, and
 Slurm paths. A repeatable demonstration still needs a few explicit completion
-items, assessed in the next audit stage.
+items, assessed in [Demo readiness](../operations/demo-readiness.md).
 
 ## Runtime architecture
 
@@ -103,9 +103,10 @@ record groups are:
 | Artifacts and provenance | Checksummed execution inputs and append-oriented operational history |
 | Alerts and notifications | Operator alert policy and redacted delivery records |
 
-Executions pin the active project-config UUID and a deployment profile at
-creation. Generated manifest, source graph, and patched graph are persisted as
-content-addressed artifacts before submission proceeds.
+Executions pin the active project-config UUID and, when resolved, a deployment
+profile at creation. Generated manifest, source graph, and patched graph are
+persisted as content-addressed artifacts before submission proceeds. Explicit
+unknown profile names are a demo-readiness validation gap.
 
 ## Configuration model
 
@@ -218,9 +219,9 @@ Slurm connectivity, and remote directory writability as applicable.
 Production policy rejects weak JWT settings, unsafe inline secrets, permissive
 SSH host-key handling, unsafe key files, and other insecure defaults. Public
 responses and stored external errors pass through shared redaction. Prometheus
-metrics, structured tracing, Grafana provisioning, alert rules, and
-notification channels cover the principal API, queue, worker, discovery,
-execution, dependency, and security signals.
+metrics, structured tracing, alert rules, and notification channels cover the
+principal API, queue, worker, discovery, execution, dependency, and security
+signals. Grafana packaging remains a demo-readiness gap.
 
 ## Verification performed
 
@@ -252,5 +253,5 @@ limitation is recorded as unverified evidence, not as a product failure.
 This audit establishes what the repository implements and how its components
 connect. It does not claim successful access to live CASDA, VizieR, TM, DIM,
 Setonix, or scientific output storage. A full demonstration must prove those
-contracts with controlled credentials and a known source. The remaining gaps
-and eventual procedure are documented in the following audit stages.
+contracts with controlled credentials and a known source. See
+[Demo readiness](../operations/demo-readiness.md) for the remaining gaps.
