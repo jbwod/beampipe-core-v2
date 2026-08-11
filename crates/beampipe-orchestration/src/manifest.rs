@@ -189,6 +189,7 @@ fn render_template_value(template: &Value, record: &Value, context: &Value) -> V
                     record
                         .get("discovery_flags")
                         .and_then(|f| f.get(flag_key))
+                        .or_else(|| record.get(flag_key))
                         .or_else(|| context.get(flag_key))
                         .cloned()
                         .unwrap_or(Value::String(s.clone()))
