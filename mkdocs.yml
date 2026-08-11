@@ -58,6 +58,7 @@ nav:
       - WASM extensions: project-configs/wasm-hooks.md
   - Understand:
       - Architecture map: architecture/index.md
+      - Current system audit: architecture/current-system-audit.md
       - Control-plane boundaries: architecture/control-plane.md
       - Discovery and execution: architecture/lifecycle.md
       - Execution state model: architecture/state-machine.md
