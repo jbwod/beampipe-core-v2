@@ -49,6 +49,7 @@ nav:
       - DALiuGE and Setonix: operations/daliuge-setonix.md
       - Observability: operations/observability.md
       - Demo readiness: operations/demo-readiness.md
+      - End-to-end scientific demo: operations/end-to-end-demo.md
       - Recovery and cancellation: operations/recovery.md
       - Production runbook: operations/production-runbook.md
       - Upgrades, backups, and secrets: operations/upgrades-backups.md

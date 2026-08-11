@@ -254,4 +254,6 @@ This audit establishes what the repository implements and how its components
 connect. It does not claim successful access to live CASDA, VizieR, TM, DIM,
 Setonix, or scientific output storage. A full demonstration must prove those
 contracts with controlled credentials and a known source. See
-[Demo readiness](../operations/demo-readiness.md) for the remaining gaps.
+[Demo readiness](../operations/demo-readiness.md) for the remaining gaps and
+[End-to-end scientific demo](../operations/end-to-end-demo.md) for the gated
+operator procedure.

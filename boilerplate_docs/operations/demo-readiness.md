@@ -101,7 +101,8 @@ does not require internet access.
 **Finding.** Two substantial E2E shell scripts exist in the working tree but
 are untracked and therefore absent from releases and CI. They overlap, mutate a
 shared database, use different process models, manually enqueue poll ticks,
-and declare success before asserting DALiuGE and scientific output completion.
+manually create executions while automation is enabled, and declare success
+before asserting DALiuGE and scientific output completion.
 One host SSH probe uses `StrictHostKeyChecking=accept-new`, which is weaker than
 the application's production policy and does not prove the Rust SSH path.
 
@@ -138,10 +139,11 @@ successful setup report that did not test the selected facility profile.
 
 **Required change.** Reject an unknown explicit profile name during execution
 creation. Give setup an explicit demo mode/profile contract, invoke doctor with
-the installed profile, and make project activation verify that an automation
-profile exists and belongs to the same project or is global. Update the
-first-run guide to create services in migration-safe order and use the profile
-actually installed.
+the installed profile, honor exported secret-bearing settings before prompting
+or accepting command-line values, and make project activation verify that an
+automation profile exists and belongs to the same project or is global. Update
+the first-run guide to create services in migration-safe order and use the
+profile actually installed.
 
 **Acceptance.** A clean setup either installs every referenced profile and
 passes profile-specific checks or exits non-zero with one remediation command.
@@ -235,3 +237,4 @@ Call the demonstration complete only when all of the following are true:
 
 Until those gates pass, use the precise level label L0, L1, L2, or L3 rather
 than describing the result as a full end-to-end scientific demonstration.
+The exact gated procedure is [End-to-end scientific demo](end-to-end-demo.md).

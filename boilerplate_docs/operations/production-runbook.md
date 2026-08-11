@@ -2,6 +2,9 @@
 
 Use this page for promotion, incident response, and config change control. It assumes you already understand the process model from [Operator guide](operator-guide.md).
 
+For the controlled single-source qualification sequence and its evidence
+contract, use [End-to-end scientific demo](end-to-end-demo.md).
+
 ## Promotion checklist
 
 | Stage | Check | Evidence |
