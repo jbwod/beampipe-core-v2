@@ -4,3 +4,4 @@ target/
 .docs-venv/
 
 /site
+/playbook-runs/

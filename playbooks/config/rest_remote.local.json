@@ -1,0 +1,22 @@
+{
+  "name": "local-rest-no-downloads",
+  "description": "Local DALiuGE REST profile for the no-download demonstration",
+  "project_module": "wallaby_hires_nodownloads_rest_demo",
+  "is_default": true,
+  "max_concurrent_executions": 3,
+  "translation": {
+    "algo": "metis",
+    "num_par": 1,
+    "num_islands": 1,
+    "tm_url": "http://dlg-tm.desk"
+  },
+  "deployment": {
+    "kind": "rest_remote",
+    "dim_host_for_tm": "dlg-dim.desk",
+    "dim_port_for_tm": 80,
+    "deploy_host": "dlg-dim.desk",
+    "deploy_port": 80,
+    "use_https": false,
+    "verify_ssl": true
+  }
+}

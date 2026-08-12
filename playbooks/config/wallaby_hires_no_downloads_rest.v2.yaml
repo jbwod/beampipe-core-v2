@@ -1,0 +1,141 @@
+apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata:
+  id: wallaby_hires_nodownloads_rest_demo
+  description: Multi-source WALLABY no-download REST demonstration
+
+definitions:
+  transforms:
+    hipass_source_name:
+      kind: strip_prefix
+      prefix: HIPASS
+    askap_sbid:
+      kind: extract_digits
+    scan_id_from_did:
+      kind: split_last
+      separators: ["/", ":", "#"]
+    has_rows:
+      kind: is_present
+    normalized_sbid:
+      kind: chain
+      steps: [askap_sbid, trim]
+    trim:
+      kind: trim
+
+source_identity:
+  canonical: source_identifier
+  template_vars:
+    source_identifier:
+      from: canonical
+    source_name:
+      transform: hipass_source_name
+
+adapters:
+  required: [casda, vizier]
+  tap:
+    timeout_seconds: 90
+    # Public VizieR can briefly reject synchronous work when saturated.
+    retries: 5
+    fail_open: false
+
+# Pin the graph to a repository commit for a repeatable demonstration.
+# Expected SHA-256: 8c36c3b7c75eba40be9ec9a051b39b445b33516ea34437fa363c275228b7e9ca
+graph:
+  url: https://raw.githubusercontent.com/jbwod/wallaby-hires-beampipe/a253546d5ae3d08ec4e7137fc733e8c5736398ca/dlg-graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph
+
+discovery:
+  queries:
+    - name: visibility
+      adapter: casda
+      template: |
+        SELECT o.* FROM ivoa.obscore o
+        INNER JOIN (
+          SELECT MAX(t_max) AS mx FROM ivoa.obscore
+          WHERE filename LIKE '{source_identifier}%'
+          AND obs_collection IN ('ASKAP Pilot Survey for WALLABY', 'WALLABY')
+        ) AS latest ON o.t_max = latest.mx
+        WHERE o.filename LIKE '{source_identifier}%'
+        AND o.obs_collection IN ('ASKAP Pilot Survey for WALLABY', 'WALLABY')
+    - name: ra_dec_vsys
+      adapter: vizier
+      template: |
+        SELECT HIPASS, RAJ2000, DEJ2000, RV50max, RV50min, RVmom
+        FROM "VIII/73/hicat" WHERE HIPASS = '{source_name}'
+  enrichments:
+    - name: sbid_to_eval_file
+      adapter: casda
+      template: |
+        SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'
+  prepare_metadata:
+    field_map:
+      source_identifier:
+        from: source_identifier
+      dataset_id:
+        from: filename
+      visibility_filename:
+        from: filename
+      sbid:
+        from: obs_id
+        transform: normalized_sbid
+      scan_id:
+        from: obs_publisher_did
+        transform: scan_id_from_did
+    discovery_flags:
+      ra_dec_vsys_complete:
+        from: enrichments.ra_dec_vsys
+        transform: has_rows
+    signature:
+      exclude_fields:
+        - access_url
+        - evaluation_file_access_url
+        - filesize
+        - t_max
+        - t_min
+      include_discovery_flags: true
+
+manifest:
+  group_by: [source_identifier, sbid]
+  source_template:
+    source_identifier: "{source_identifier}"
+    ra_string: "{flags.ra_string}"
+    dec_string: "{flags.dec_string}"
+    vsys: "{flags.vsys}"
+
+graph_patches:
+  # The no-download graph uses this exact scatter node name.
+  - match:
+      kind: node_name
+      equals: Scatter/GenericScatterApp
+    set:
+      num_of_copies: "$count(sbids[].datasets[])"
+  # Match the output contract of the currently qualified WALLABY package.
+  - match:
+      kind: node_name
+      equals: process_CSV_str
+    set:
+      output_parser: pickle
+
+automation:
+  discovery:
+    enabled: true
+    tick_discovery_source_limit: 20
+    batch_size: 3
+    tick_discovery_batch_limit: 10
+    concurrent_discovery_batch_limit: 2
+    stale_after_hours: 24
+    claim_ttl_minutes: 30
+  execution:
+    enabled: true
+    # This archive name makes the execution path skip CASDA staging. The graph
+    # itself also contains no download drops.
+    archive_name: no_downloads
+    max_sources_per_execution: 1
+    tick_execution_source_limit: 20
+    tick_execution_run_limit: 3
+    min_sources_to_trigger: 1
+    max_wait_minutes: 5
+    claim_ttl_minutes: 30
+    concurrent_execution_run_limit: 3
+    deployment_profile_name: local-rest-no-downloads
+    execution_rest_remote_poll_max_rounds: 240
+    execution_rest_remote_poll_interval_seconds: 3

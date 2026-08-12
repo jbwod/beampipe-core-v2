@@ -41,6 +41,7 @@ nav:
       - Deployment topologies: getting-started/deployment.md
       - Dashboard tour: getting-started/dashboard.md
       - First workflow: getting-started/first-run.md
+      - REST demonstration playbook: getting-started/rest-no-downloads-demo.md
   - Operate:
       - Operator handbook: operations/index.md
       - Workers and scheduling: operations/workers-scheduling.md

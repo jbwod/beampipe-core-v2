@@ -107,6 +107,7 @@ See the [qualification run](https://beampipe-core.readthedocs.io/operations/end-
 | Install and reach a healthy system | [Quick start](https://beampipe-core.readthedocs.io/getting-started/) |
 | Choose Docker, native, system-service, or orchestrated deployment | [Deployment topologies](https://beampipe-core.readthedocs.io/getting-started/deployment/) |
 | Run one discovery and graph preparation | [First workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/) |
+| Demonstrate multiple no-download REST runs | [REST demonstration playbook](https://beampipe-core.readthedocs.io/getting-started/rest-no-downloads-demo/) |
 | Connect REST or Slurm and manage SSH keys | [Deployment profiles and SSH](https://beampipe-core.readthedocs.io/architecture/deployment-profiles/) |
 | Operate and recover work | [Operator handbook](https://beampipe-core.readthedocs.io/operations/) |
 | Author project-defined TAP and graph policy | [Project YAML](https://beampipe-core.readthedocs.io/project-configs/) |
