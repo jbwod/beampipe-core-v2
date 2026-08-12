@@ -876,15 +876,8 @@ impl ConfigDiscoveryRunner {
         casda_tap_url: Option<String>,
         vizier_tap_url: Option<String>,
     ) -> Self {
-        let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
-        if let Some(url) = casda_tap_url.as_ref() {
-            clients.insert("casda".into(), Arc::new(casda_tap(url)));
-        }
-        if let Some(url) = vizier_tap_url.as_ref() {
-            clients.insert("vizier".into(), Arc::new(vizier_tap(url)));
-        }
         Self {
-            clients,
+            clients: BTreeMap::new(),
             pool,
             casda_tap_url,
             vizier_tap_url,

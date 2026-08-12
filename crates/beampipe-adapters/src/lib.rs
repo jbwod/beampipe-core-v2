@@ -123,7 +123,7 @@ impl HttpTapAdapter {
     async fn query_rows_sync_get(&self, adql: &str) -> Result<Vec<TapRow>, AdapterError> {
         let request = TapQueryRequest::new(adql);
         let mut last_error = None;
-        for _ in 0..=self.retries {
+        for attempt in 0..=self.retries {
             let response = self
                 .client
                 .get(&self.base_url)
@@ -132,12 +132,20 @@ impl HttpTapAdapter {
                 .send()
                 .await;
             match response {
-                Ok(response) => return parse_tap_http_response(response).await,
+                Ok(response) => match parse_tap_http_response(response).await {
+                    Err(err @ AdapterError::Transient(_)) if attempt < self.retries => {
+                        last_error = Some(err)
+                    }
+                    result => return result,
+                },
                 Err(err) if err.is_timeout() => last_error = Some(AdapterError::Timeout),
                 Err(err) if err.is_connect() || err.is_request() => {
                     last_error = Some(AdapterError::Transient(err.to_string()))
                 }
                 Err(err) => last_error = Some(AdapterError::Http(err)),
+            }
+            if attempt < self.retries {
+                tokio::time::sleep(tap_retry_delay(attempt)).await;
             }
         }
         Err(last_error.unwrap_or_else(|| AdapterError::Transient("request failed".into())))
@@ -146,7 +154,7 @@ impl HttpTapAdapter {
     async fn query_rows_sync_post(&self, adql: &str) -> Result<Vec<TapRow>, AdapterError> {
         let request = TapQueryRequest::new(adql);
         let mut last_error = None;
-        for _ in 0..=self.retries {
+        for attempt in 0..=self.retries {
             let response = self
                 .client
                 .post(&self.base_url)
@@ -155,12 +163,20 @@ impl HttpTapAdapter {
                 .send()
                 .await;
             match response {
-                Ok(response) => return parse_tap_http_response(response).await,
+                Ok(response) => match parse_tap_http_response(response).await {
+                    Err(err @ AdapterError::Transient(_)) if attempt < self.retries => {
+                        last_error = Some(err)
+                    }
+                    result => return result,
+                },
                 Err(err) if err.is_timeout() => last_error = Some(AdapterError::Timeout),
                 Err(err) if err.is_connect() || err.is_request() => {
                     last_error = Some(AdapterError::Transient(err.to_string()))
                 }
                 Err(err) => last_error = Some(AdapterError::Http(err)),
+            }
+            if attempt < self.retries {
+                tokio::time::sleep(tap_retry_delay(attempt)).await;
             }
         }
         Err(last_error.unwrap_or_else(|| AdapterError::Transient("request failed".into())))
@@ -168,7 +184,8 @@ impl HttpTapAdapter {
 }
 
 async fn parse_tap_http_response(response: reqwest::Response) -> Result<Vec<TapRow>, AdapterError> {
-    let response = response.error_for_status()?;
+    let status = response.status();
+    let status_error = response.error_for_status_ref().err();
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -176,6 +193,15 @@ async fn parse_tap_http_response(response: reqwest::Response) -> Result<Vec<TapR
         .unwrap_or("")
         .to_ascii_lowercase();
     let text = response.text().await?;
+    if let Some(error) = status_error {
+        if is_transient_tap_response(status, &text) {
+            return Err(AdapterError::Transient(format!(
+                "HTTP {status}: {}",
+                compact_tap_error(&text)
+            )));
+        }
+        return Err(AdapterError::Http(error));
+    }
     if content_type.contains("json")
         || text.trim_start().starts_with('{')
         || text.trim_start().starts_with('[')
@@ -190,6 +216,38 @@ async fn parse_tap_http_response(response: reqwest::Response) -> Result<Vec<TapR
     Err(AdapterError::InvalidRowShape(
         "unsupported TAP response content type".into(),
     ))
+}
+
+fn tap_retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis(500_u64.saturating_mul(1_u64 << attempt.min(3)))
+}
+
+fn is_transient_tap_response(status: reqwest::StatusCode, body: &str) -> bool {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        return true;
+    }
+    if status != reqwest::StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    [
+        "tap service too busy",
+        "no connection available",
+        "unable to check the adql query",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|marker| body.contains(marker))
+}
+
+fn compact_tap_error(body: &str) -> String {
+    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 240;
+    if compact.chars().count() <= MAX_CHARS {
+        compact
+    } else {
+        format!("{}...", compact.chars().take(MAX_CHARS).collect::<String>())
+    }
 }
 
 #[async_trait]
@@ -364,6 +422,29 @@ mod tests {
     fn tap_query_params_include_adql() {
         let request = TapQueryRequest::new("SELECT * FROM t WHERE name = 'A''B'");
         assert_eq!(request.params()[2].1, "SELECT * FROM t WHERE name = 'A''B'");
+    }
+
+    #[test]
+    fn tap_overload_responses_are_transient_but_adql_errors_are_not() {
+        assert!(is_transient_tap_response(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "service unavailable"
+        ));
+        assert!(is_transient_tap_response(
+            reqwest::StatusCode::BAD_REQUEST,
+            "Unable to check the ADQL query!"
+        ));
+        assert!(!is_transient_tap_response(
+            reqwest::StatusCode::BAD_REQUEST,
+            "Incorrect ADQL query: unknown table"
+        ));
+    }
+
+    #[test]
+    fn tap_retry_backoff_is_bounded() {
+        assert_eq!(tap_retry_delay(0), Duration::from_millis(500));
+        assert_eq!(tap_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(tap_retry_delay(20), Duration::from_secs(4));
     }
 
     #[test]
