@@ -1,87 +1,114 @@
 # REST demonstration playbook
 
-Use the repository notebook to present multiple WALLABY sources from registration through independent terminal DALiuGE executions. It runs the compiled `beampipe` binary, calls `/api/v2` for workflow intent, and retains a redacted evidence bundle.
+Demonstrate multiple WALLABY sources from registration through separate terminal DALiuGE executions using the compiled `beampipe` binary, `curl`, and `jq`. There is no Jupyter or Python orchestration layer.
+
+The complete copy-and-run playbook is [playbooks/rest_remote_no_downloads.md](https://github.com/jbwod/beampipe-core-v2/blob/main/playbooks/rest_remote_no_downloads.md). Run it from the repository root.
 
 ## Demonstration boundary
 
 <div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="No-download REST demonstration from project configuration through source discovery and separate DALiuGE executions">
-  <div class="bp-flow-node" data-tone="cyan"><span>CONFIG</span><strong>project + profile</strong><small>validated revisions</small></div>
+  <div class="bp-flow-node" data-tone="cyan"><span>CONFIG</span><strong>project + profile</strong><small>binary commands</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>DISCOVER</span><strong>multiple sources</strong><small>CASDA + VizieR TAP</small></div>
+  <div class="bp-flow-node" data-tone="cyan"><span>DISCOVER</span><strong>multiple sources</strong><small>curl + TAP</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>PREVIEW</span><strong>manifest + graph</strong><small>no submission</small></div>
+  <div class="bp-flow-node" data-tone="amber"><span>PREVIEW</span><strong>manifest + graph</strong><small>operator pause</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
   <div class="bp-flow-node" data-tone="green"><span>ADMIT</span><strong>one run per source</strong><small>durable jobs</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
   <div class="bp-flow-node" data-tone="green"><span>REST</span><strong>TM + DIM</strong><small>deploy + poll</small></div>
 </div>
 
-The project uses the no-download graph and `archive_name: no_downloads`. Discovery still queries live public TAP services, but execution does not request CASDA staging. This proves control-plane and DALiuGE runtime behavior, not scientific products.
+The project uses the no-download graph and `archive_name: no_downloads`. Discovery still queries CASDA and VizieR, but execution does not request CASDA staging. This proves control-plane and DALiuGE runtime behavior, not scientific products.
 
-The notebook serializes source-level TAP requests for a reliable public-service demonstration. Do not treat its discovery concurrency as a production throughput recommendation.
+CASDA credentials are not required: discovery uses public TAP access and authenticated staging is skipped.
 
-## Launch
-
-From the repository root:
+## Prerequisites
 
 ```bash
 cargo build --locked --release -p beampipe-cli --bin beampipe
 docker compose up -d postgres
-jupyter lab playbooks/rest_remote_no_downloads.ipynb
 ```
 
-Docker is optional when `DATABASE_URL` points at an existing PostgreSQL server. The notebook uses only the Python standard library. Open `playbooks/README.md` when Jupyter is unavailable; its commands and configuration files can be followed from any notebook-capable editor.
+Docker is optional when `DATABASE_URL` already points at PostgreSQL. The operator terminal also needs `curl`, `jq`, `sed`, and `openssl`.
 
-## Configure the run
+Run a mock rehearsal first. The playbook's `LIVE_SUBMIT=false` still performs live archive discovery and graph preparation, but uses mock execution clients. Change it to `true` only when the REST profile test passes against the intended Translator Manager and DIM.
 
-In the first notebook cell:
+## Three-terminal layout
 
-1. set a fresh `RUN_TAG`, or export `BEAMPIPE_PLAYBOOK_RUN_TAG` before launching Jupyter;
-2. review the source list and keep at least two distinct identifiers;
-3. set the TM URL and both DIM address perspectives;
-4. leave `LIVE_SUBMIT=False` for a mock rehearsal;
-5. set `LIVE_SUBMIT=True` only after the live profile test passes.
+| Terminal | Process | Scheduling |
+|---|---|---|
+| A | `beampipe serve --worker false` | API only |
+| B | `beampipe worker` | Disabled during discovery and graph review |
+| C | `curl` and `jq` | Operator intent and evidence |
 
-The public TAP defaults may be replaced with `BEAMPIPE_CASDA_TAP_URL` and `BEAMPIPE_VIZIER_TAP_URL`. Project YAML controls request timeout and retry count; the notebook also retries a blocked source discovery up to three times before stopping.
+At the go/no-go point, stop Terminal B and restart it with `BEAMPIPE_WORKER_SCHEDULER_ENABLED=true`. That explicit action permits automatic execution admission.
 
-The worker-facing DIM host can differ from the host visible to Translator Manager. Treat that as an expected topology choice, not a duplicated setting.
+## Deployment profile, start to finish
+
+The tracked starting point is `playbooks/config/rest_remote.local.json`.
+
+```mermaid
+flowchart LR
+    B["Beampipe worker"] -->|"translation.tm_url"| T["Translator Manager"]
+    T -->|"dim_host_for_tm"| D["DIM"]
+    B -->|"deploy_host"| D
+```
+
+1. Choose an immutable profile name and project scope.
+2. Configure Translator Manager URL and partitioning policy.
+3. Configure both DIM address perspectives; they may differ across Docker, VPN, and host networks.
+4. Keep `verify_ssl: true` for production HTTPS.
+5. Begin with a low `max_concurrent_executions`.
+6. Install with `beampipe profile add -f PROFILE.json`.
+7. Run `profile validate`, `profile render`, then the live `profile test`.
+8. Reference the exact profile name in project execution automation.
+
+Profiles contain no credentials. External secrets remain environment or mounted-file references.
+
+## Project YAML, start to finish
+
+The tracked project is `playbooks/config/wallaby_hires_no_downloads_rest.v2.yaml`. All TAP ADQL is dynamically loaded from this file.
+
+```mermaid
+flowchart LR
+    I["source identity"] --> Q["TAP queries"]
+    Q --> M["metadata + signatures"]
+    M --> F["manifest"]
+    F --> G["graph patches"]
+    G --> A["automation"]
+```
+
+1. Define canonical source identity and reusable transforms.
+2. Set TAP timeout, retries, and fail policy.
+3. Define primary CASDA/VizieR queries and SBID enrichment queries.
+4. Map required dataset identity and readiness flags.
+5. Exclude only volatile metadata from stable signatures.
+6. Define manifest grouping and templates.
+7. Pin the logical graph and patch exact node/field names.
+8. Configure discovery shaping and one-source-per-run execution admission.
+9. Validate with `project validate`, `project explain`, and `project render`.
+10. Activate with `project add`, then prove representative discovery and graph previews before enabling scheduling.
 
 ## Operator pause
 
-The notebook starts an API and discovery worker first, leaving execution scheduling off. It then waits for every discovery claim, summarizes metadata, and previews each source-specific graph. Only the next explicit cell starts the scheduler and permits one-source-per-run admission.
-
-This ordering gives the presenter a clean go/no-go point:
+Continue to live scheduling only when:
 
 - project and profile revisions validate;
-- the graph input matches its expected SHA-256;
-- at least two sources are ready;
-- manifests and patched graphs have durable hashes;
-- the live deployment profile test has passed when `LIVE_SUBMIT=True`.
-
-## Configuration walkthroughs
-
-The notebook ends with two presenter-ready appendices:
-
-- **Deployment profile, start to finish:** address perspectives, translation, TLS, concurrency, installation, validation, rendering, live testing, and revision pinning.
-- **Project YAML, start to finish:** identity, transforms, TAP queries, enrichments, metadata, signatures, manifests, graph patches, automation, validation, activation, and qualification.
-
-The reviewed inputs are:
-
-```text
-playbooks/config/rest_remote.local.json
-playbooks/config/wallaby_hires_no_downloads_rest.v2.yaml
-```
-
-For deeper field reference, continue with [Deployment profiles and SSH](../architecture/deployment-profiles.md) and [Project YAML](../project-configs/index.md).
+- the REST profile test passes;
+- all selected sources are ready;
+- the pinned graph is available;
+- each source-specific preview has durable hashes;
+- both expected graph fields changed;
+- the intended `LIVE_SUBMIT` mode is visible in the shell.
 
 ## Common stops
 
 | Stop | Meaning | Action |
 |---|---|---|
-| Profile already exists | `RUN_TAG` was reused against the same database | Choose a fresh tag; profiles and projects are intentionally immutable |
-| `ra_dec_vsys_complete` blocks a source | VizieR returned no enrichment row or rejected work while saturated | Let the notebook retry, then use an approved TAP mirror/proxy or rerun later; do not bypass the flag for a live run |
-| TAP health is `ok`, but discovery fails | Health proves reachability, not query capacity | Inspect `discovery-worker.log` for the bounded external error |
-| Profile test cannot reach DIM | The TM-visible and worker-visible DIM addresses are wrong for the current network | Correct both address perspectives in the first cell and use a fresh tag |
-| Fewer executions than sources | Admission limits, pending state, or readiness blocked a source | Inspect the per-source status table before starting the scheduler |
+| Profile already exists | The run tag was reused | Choose a fresh run tag; do not overwrite qualified infrastructure policy |
+| `ra_dec_vsys_complete` blocks a source | VizieR returned no row or was saturated | Retry later or use an approved mirror/proxy; keep the flag strict for live runs |
+| TAP health is `ok`, but discovery fails | Reachability does not prove query capacity | Inspect `discovery-worker.log` for the bounded external error |
+| Profile test cannot reach DIM | One of the two DIM address perspectives is wrong | Correct the profile and use a fresh immutable name |
+| Fewer executions than sources | Readiness or admission policy blocked work | Inspect source status before changing limits |
 
-Every stop occurs before or alongside durable evidence. Do not delete the run directory until the presenter has captured the relevant logs and status output.
+Runtime configuration, API responses, graph previews, and terminal ledger snapshots are retained under the ignored `playbook-runs/<RUN_TAG>/` directory.
