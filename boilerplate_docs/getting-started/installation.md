@@ -6,9 +6,16 @@ Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a sou
 
 === "Release"
 
-    Download the archive for your platform, verify it against `SHA256SUMS`, and place `beampipe` on `PATH`.
+    Download the archive for your platform from the [GitHub Releases](https://github.com/jbwod/beampipe-core-v2/releases) page, verify it against `SHA256SUMS`, and place `beampipe` on `PATH`.
 
     ```bash
+    VERSION=0.1.0
+    TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu / aarch64-apple-darwin
+    curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/beampipe-${TARGET}.tar.gz"
+    curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/SHA256SUMS"
+    sha256sum -c SHA256SUMS --ignore-missing
+    tar -xzf "beampipe-${TARGET}.tar.gz"
+    sudo install -m 0755 "beampipe-${TARGET}/beampipe" /usr/local/bin/beampipe
     beampipe --version
     beampipe setup --yes --runtime host --skip-admin --skip-upload
     ```
@@ -25,7 +32,7 @@ Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a sou
 
 === "Docker Compose"
 
-    Compose builds the same binary into one image and assigns it API, scheduler, and worker roles.
+    Compose pulls the published `ghcr.io/jbwod/beampipe-core-v2` image and assigns it API, scheduler, and worker roles. Set `BEAMPIPE_BUILD=1` only when you need to compile this checkout.
 
     ```bash
     ./deploy/setup-docker.sh --yes --skip-admin --skip-upload

@@ -28,7 +28,7 @@ beampipe setup --yes --runtime host --skip-admin --skip-upload
 
 If Compose Postgres is down, migrate / admin / upload / doctor are skipped on **both** paths and the recipe starts with `docker compose up -d postgres`. `--postgres existing` uses `DATABASE_URL` and fails if that URL is down.
 
-Setup does not create a deployment profile. Install one later with `beampipe profile add`. Dash is docker-only and opt-in (`--dashboard`). `./deploy/setup-docker.sh` builds the image and runs setup; it does not `compose up`.
+Setup does not create a deployment profile. Install one later with `beampipe profile add`. Dash is docker-only and opt-in (`--dashboard`). `./deploy/setup-docker.sh` pulls the published image and runs setup; it does not `compose up`. Set `BEAMPIPE_BUILD=1` to compile this checkout instead.
 
 `beampipe init --directory operator-local` is a compact native footnote. That directory has no Compose file; use `--runtime host --postgres existing`. `start` runs a compact API plus worker.
 

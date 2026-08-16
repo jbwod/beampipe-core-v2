@@ -34,9 +34,12 @@ x-beampipe-config-volume: &beampipe-config-volume
   target: /var/lib/beampipe/config
   read_only: true
 
-# One image for API, scheduler, and workers. Build once with `docker compose build api`.
+# One image for API, scheduler, and workers. Pull the published release by default.
+# Override with BEAMPIPE_IMAGE=beampipe-v2:local and `docker compose build api`,
+# or BEAMPIPE_BUILD=1 ./deploy/setup-docker.sh, to compile from this checkout.
 x-beampipe-image: &beampipe-image
-  image: beampipe-v2:local
+  image: ${BEAMPIPE_IMAGE:-ghcr.io/jbwod/beampipe-core-v2:0.1.0}
+  pull_policy: ${BEAMPIPE_PULL_POLICY:-missing}
   build:
     context: .
     dockerfile: Dockerfile

@@ -68,13 +68,17 @@ container platforms, REST/DIM, and Slurm.
 
 ### Native binary
 
-Prerequisites: Rust stable, Docker Compose, `curl`, and `jq`.
+Prefer a [released archive](https://github.com/jbwod/beampipe-core-v2/releases). Verify `SHA256SUMS`, then put `beampipe` on `PATH`. A source build is only for qualifying a commit.
 
 ```bash
-# Docker (no host Rust): prints a recipe, does not start containers
+# Docker (no host Rust): pulls ghcr.io/jbwod/beampipe-core-v2:0.1.0, prints a recipe
 ./deploy/setup-docker.sh --yes --skip-admin --skip-upload
 
-# Host binary
+# Host binary from a release (example: Linux x86_64)
+# VERSION=0.1.0 TARGET=x86_64-unknown-linux-gnu
+# curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/beampipe-${TARGET}.tar.gz"
+
+# Host binary from this checkout
 cargo build --locked --release -p beampipe-cli --bin beampipe
 export PATH="$PWD/target/release:$PATH"
 beampipe setup --yes --runtime host --skip-admin --skip-upload

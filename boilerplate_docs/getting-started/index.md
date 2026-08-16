@@ -9,7 +9,7 @@ External execution stays mocked until you enable real backends. TAP discovery be
 - This repository checkout.
 - Docker Engine with Compose v2 (used for Postgres on both paths, and for the whole stack on the Docker path).
 - Ports `5432`, `8080`, and `9090` (`3000` if you attach Dash).
-- A host Rust toolchain only for the host-binary path.
+- A released `beampipe` binary on `PATH`, or a host Rust toolchain if you build from source.
 
 `--yes` requires `--runtime docker` or `--runtime host`. Interactive setup asks.
 
@@ -36,7 +36,7 @@ docker compose run --rm api project add -f config/wallaby_hires.v2.yaml
 docker compose up -d api scheduler worker
 ```
 
-`./deploy/setup-docker.sh` builds the image and runs `beampipe setup --runtime docker`. It does not `compose up`. The image has no `git`; clone Dash on the host before adding `--dashboard`.
+`./deploy/setup-docker.sh` pulls `ghcr.io/jbwod/beampipe-core-v2:0.1.0` (or builds this checkout if the pull fails) and runs `beampipe setup --runtime docker`. It does not `compose up`. The image has no `git`; clone Dash on the host before adding `--dashboard`.
 
 Verify:
 

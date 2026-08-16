@@ -36,6 +36,23 @@ make docs-build
 - Prefer diagrams for ownership and sequence; keep them accessible and respect reduced motion.
 - Link to generated API reference instead of duplicating every request field.
 
+## Cut a release
+
+Tag a semver version that matches `[workspace.package] version` in `Cargo.toml`. Pushing `v0.1.0` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which publishes:
+
+- `beampipe-x86_64-unknown-linux-gnu.tar.gz`
+- `beampipe-aarch64-unknown-linux-gnu.tar.gz`
+- `beampipe-aarch64-apple-darwin.tar.gz`
+- `SHA256SUMS`
+- `ghcr.io/jbwod/beampipe-core-v2:0.1.0` (also `:0.1` and `:latest`)
+
+```bash
+git tag -a v0.1.0 -m "Beampipe 0.1.0"
+git push origin v0.1.0
+```
+
+After the first container publish, set the GHCR package visibility to public so Compose users can pull without a GitHub token. Bump `BEAMPIPE_IMAGE` in [`.env.example`](../.env.example) and the default in [`docker-compose.yml`](../docker-compose.yml) when the workspace version changes.
+
 ## Preview
 
 ```bash

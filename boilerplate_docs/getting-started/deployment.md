@@ -45,7 +45,7 @@ docker context show
 git clone https://github.com/jbwod/beampipe-core-v2.git
 cd beampipe-core-v2
 
-# Prints a recipe; does not start containers.
+# Pulls the published image and prints a recipe; does not start containers.
 ./deploy/setup-docker.sh --yes --skip-admin --skip-upload
 
 docker compose up -d postgres
