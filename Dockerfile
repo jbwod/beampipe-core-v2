@@ -7,7 +7,7 @@ COPY migrations ./migrations
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo build --release -p beampipe-cli --bin beampipe \
+    cargo build --locked --release -p beampipe-cli --bin beampipe \
     && strip target/release/beampipe \
     && install -D target/release/beampipe /out/beampipe
 
