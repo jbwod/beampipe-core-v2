@@ -27,14 +27,15 @@ Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a sou
     Compose builds the same binary into one image and assigns it API, scheduler, and worker roles.
 
     ```bash
-    cp .env.example .env
+    test -e .env || cp .env.example .env
     docker compose build api
     docker compose up -d postgres
     docker compose run --rm api migrate
     docker compose run --rm api admin create-user \
       --username admin \
       --password 'replace-this-local-password' \
-      --email admin@example.test
+      --email admin@example.test \
+      --superuser
     docker compose up -d api scheduler worker
     ```
 
@@ -97,6 +98,22 @@ Run exactly one scheduler-enabled process. API and worker-only processes can sca
 | Secrets | mounted files or environment references | Never put credentials in project YAML or deployment profiles |
 
 Use `beampipe config explain` for the complete release-specific list. Environment names and defaults are also documented in `.env.example` and `.env.template`.
+
+## Choose a deployment layout
+
+Installation places the same Beampipe binary into one or more runtime roles.
+Where those roles run is an operator choice; REST/DIM and Slurm are execution
+backends, not alternative Beampipe binaries.
+
+| Layout | Best for | Process shape |
+|---|---|---|
+| Native compact | laptop evaluation | one `beampipe start` process |
+| Docker Compose | local service or single host | API + one scheduler + worker replicas + PostgreSQL |
+| Native services | managed VM or bare metal | separate systemd/supervisor units |
+| Container platform | multi-host production | separately scaled API, scheduler, and worker workloads |
+
+Continue with [Deployment topologies](deployment.md) for complete examples and
+network diagrams.
 
 ## Production gates
 

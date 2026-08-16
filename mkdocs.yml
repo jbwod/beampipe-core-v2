@@ -38,6 +38,8 @@ nav:
   - Start:
       - Quick start: getting-started/index.md
       - Install and configure: getting-started/installation.md
+      - Deployment topologies: getting-started/deployment.md
+      - Dashboard tour: getting-started/dashboard.md
       - First workflow: getting-started/first-run.md
   - Operate:
       - Operator handbook: operations/index.md
