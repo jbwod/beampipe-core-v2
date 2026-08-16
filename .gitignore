@@ -1,6 +1,7 @@
 target/
 .env
 .DS_Store
+.docs-venv/
 
 /site
 boilerplate_docs/assets/dash/operator-overview.jpg
