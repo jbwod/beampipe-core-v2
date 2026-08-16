@@ -27,6 +27,13 @@ x-beampipe-slurm-ssh-volume: &beampipe-slurm-ssh-volume
   target: /run/beampipe/ssh
   read_only: true
 
+# Host profiles and project YAML for `compose run api profile add` / `project add`.
+x-beampipe-config-volume: &beampipe-config-volume
+  type: bind
+  source: ./config
+  target: /var/lib/beampipe/config
+  read_only: true
+
 # One image for API, scheduler, and workers. Build once with `docker compose build api`.
 x-beampipe-image: &beampipe-image
   image: beampipe-v2:local
@@ -72,6 +79,7 @@ services:
       <<: *beampipe-backend-env
     volumes:
       - *beampipe-slurm-ssh-volume
+      - *beampipe-config-volume
     ports:
       - "8080:8080"
       - "9090:9090"

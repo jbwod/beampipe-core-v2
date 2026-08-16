@@ -94,35 +94,35 @@ enum CliCommand {
         #[arg(long)]
         tm_url: Option<String>,
         #[arg(long)]
-        dim_url: Option<String>,
-        #[arg(long)]
         worker_pool: Option<String>,
-        #[arg(long, value_parser = ["rest_remote", "slurm_remote"])]
-        deployment: Option<String>,
-        #[arg(long)]
-        profile_name: Option<String>,
-        #[arg(long)]
-        facility: Option<String>,
-        #[arg(long)]
-        ssh_host: Option<String>,
-        #[arg(long)]
-        ssh_user: Option<String>,
-        #[arg(long)]
-        slurm_account: Option<String>,
-        #[arg(long)]
-        slurm_partition: Option<String>,
-        #[arg(long)]
-        dlg_root: Option<String>,
-        #[arg(long)]
-        remote_home: Option<String>,
-        #[arg(long)]
-        remote_logs: Option<String>,
-        #[arg(long)]
-        use_real_backends: bool,
         #[arg(long)]
         skip_admin: bool,
         #[arg(long)]
         skip_upload: bool,
+        /// How Beampipe will run after setup: docker or host. Required with --yes.
+        #[arg(long, value_parser = ["docker", "host"])]
+        runtime: Option<String>,
+        /// PostgreSQL source: compose (Compose postgres service) or existing DATABASE_URL.
+        #[arg(long, value_parser = ["compose", "existing"])]
+        postgres: Option<String>,
+        /// Alias for --runtime docker.
+        #[arg(long, conflicts_with = "skip_docker")]
+        docker: bool,
+        /// Alias for --runtime host.
+        #[arg(long)]
+        skip_docker: bool,
+        /// Prepare optional Beampipe Dash (clone if missing; does not start containers).
+        #[arg(long, conflicts_with = "skip_dashboard")]
+        dashboard: bool,
+        /// Skip Beampipe Dash preparation.
+        #[arg(long)]
+        skip_dashboard: bool,
+        /// Dash checkout directory (default: sibling ../beampipe-dash).
+        #[arg(long)]
+        dash_dir: Option<PathBuf>,
+        /// Git URL used when cloning a missing Dash checkout.
+        #[arg(long, default_value = "https://github.com/jbwod/beampipe-dash")]
+        dash_repo_url: String,
     },
     /// Health and configuration preflight checks.
     Doctor {
@@ -647,21 +647,17 @@ async fn main() -> anyhow::Result<()> {
             project_config,
             casda_tap_url,
             tm_url,
-            dim_url,
             worker_pool,
-            deployment,
-            profile_name,
-            facility,
-            ssh_host,
-            ssh_user,
-            slurm_account,
-            slurm_partition,
-            dlg_root,
-            remote_home,
-            remote_logs,
-            use_real_backends,
             skip_admin,
             skip_upload,
+            runtime,
+            postgres,
+            docker,
+            skip_docker,
+            dashboard,
+            skip_dashboard,
+            dash_dir,
+            dash_repo_url,
         } => {
             if matches!(command, Some(SetupCommand::Check)) {
                 setup::run_setup_check(false, None, false).await?;
@@ -676,21 +672,17 @@ async fn main() -> anyhow::Result<()> {
                     project_config,
                     casda_tap_url,
                     tm_url,
-                    dim_url,
                     worker_pool,
-                    deployment,
-                    profile_name,
-                    facility,
-                    ssh_host,
-                    ssh_user,
-                    slurm_account,
-                    slurm_partition,
-                    dlg_root,
-                    remote_home,
-                    remote_logs,
-                    use_real_backends,
                     skip_admin,
                     skip_upload,
+                    docker,
+                    skip_docker,
+                    runtime,
+                    postgres,
+                    dashboard,
+                    skip_dashboard,
+                    dash_dir,
+                    dash_repo_url: Some(dash_repo_url),
                 })
                 .await?;
             }

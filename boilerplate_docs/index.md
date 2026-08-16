@@ -29,24 +29,21 @@ hide:
 Run the API, durable job system, and console locally. External execution stays mocked until you explicitly enable real backends. Discovery uses live TAP only after you register and trigger a source.
 
 ```bash
+# Docker
+./deploy/setup-docker.sh --yes --skip-admin --skip-upload
+# then the printed recipe, starting with:
 docker compose up -d postgres
-cargo build --locked --release -p beampipe-cli --bin beampipe
-export PATH="$PWD/target/release:$PATH"
 
-beampipe init --directory operator-local
-cd operator-local
-beampipe setup --yes \
-  --admin-password 'replace-this-local-password' \
-  --project-config ../config/wallaby_hires.v2.yaml
+# Host
+beampipe setup --yes --runtime host --skip-admin --skip-upload
+# then the printed recipe, starting with:
+docker compose up -d postgres
 beampipe start
 ```
 
-From another terminal in `operator-local`:
-
 ```bash
-beampipe doctor
-beampipe status
-beampipe console
+curl -fsS http://127.0.0.1:8080/api/v2/health
+docker compose exec api beampipe doctor
 ```
 
 [Open the complete quick start](getting-started/index.md){ .bp-inline-action }

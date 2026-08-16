@@ -91,34 +91,20 @@ Do not apply it blindly. Pin the DALiuGE and WALLABY package versions and docume
 === "Existing local DIM"
 
     ```bash
-    beampipe setup \
-      --deployment rest_remote \
-      --profile-name local-daliuge-e2e \
-      --tm-url http://TRANSLATOR_HOST \
-      --dim-url http://DIM_HOST:PORT
-    beampipe doctor --profile local-daliuge-e2e
-    beampipe daliuge inspect --profile local-daliuge-e2e
+    beampipe profile add -f config/deployment_profile.dlg-dim.json
+    beampipe doctor --profile dlg-dim
+    beampipe daliuge inspect --profile dlg-dim
     ```
 
 === "Slurm"
 
     ```bash
-    beampipe setup \
-      --deployment slurm_remote \
-      --profile-name setonix-e2e \
-      --facility setonix \
-      --ssh-host setonix.pawsey.org.au \
-      --ssh-user "$USER" \
-      --slurm-account PROJECT \
-      --slurm-partition work \
-      --remote-home /scratch/PROJECT \
-      --dlg-root /scratch/PROJECT/$USER/dlg \
-      --remote-logs /scratch/PROJECT/$USER/dlg/log
-
+    beampipe slurm credentials init --slot setonix --acl
+    beampipe profile add -f config/deployment_profile.slurm-remote.json
     beampipe security check
-    beampipe doctor --profile setonix-e2e
-    beampipe slurm ping --profile setonix-e2e
-    beampipe profile render setonix-e2e
+    beampipe doctor --profile slurm-remote
+    beampipe slurm ping --profile slurm-remote
+    beampipe profile render slurm-remote
     ```
 
 For Slurm, verify the graph application packages and DALiuGE CLI inside the same modules, virtual environment, or container that the batch job will use. A successful SSH probe does not prove runtime compatibility.

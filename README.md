@@ -71,29 +71,18 @@ container platforms, REST/DIM, and Slurm.
 Prerequisites: Rust stable, Docker Compose, `curl`, and `jq`.
 
 ```bash
-docker compose up -d postgres
+# Docker (no host Rust): prints a recipe, does not start containers
+./deploy/setup-docker.sh --yes --skip-admin --skip-upload
+
+# Host binary
 cargo build --locked --release -p beampipe-cli --bin beampipe
 export PATH="$PWD/target/release:$PATH"
-
-beampipe init --directory operator-local
-cd operator-local
-beampipe setup --yes \
-  --admin-password 'replace-this-local-password' \
-  --project-config ../config/wallaby_hires.v2.yaml \
-  --profile-name slurm-remote
-beampipe doctor
-beampipe start
+beampipe setup --yes --runtime host --skip-admin --skip-upload
 ```
 
-From another terminal in `operator-local`:
+`--yes` requires `--runtime docker` or `--runtime host`. Setup prints a recipe that starts with `docker compose up -d postgres`. It does not start Postgres or the stack.
 
-```bash
-beampipe status
-beampipe worker list
-beampipe console
-```
-
-The API is at `http://127.0.0.1:8080/api/v2`. Setup installs a mock REST profile under the policy-referenced `slurm-remote` name for local evaluation. Replace that profile before setting `BEAMPIPE_USE_REAL_BACKENDS=true`; discovery uses live TAP only after a source is triggered.
+The API is at `http://127.0.0.1:8080/api/v2` after you run that recipe. Install a deployment profile with `beampipe profile add` before setting `BEAMPIPE_USE_REAL_BACKENDS=true`.
 
 Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-started/) and [first workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/).
 

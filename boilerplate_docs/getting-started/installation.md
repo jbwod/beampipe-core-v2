@@ -10,7 +10,7 @@ Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a sou
 
     ```bash
     beampipe --version
-    beampipe init --directory operator-local
+    beampipe setup --yes --runtime host --skip-admin --skip-upload
     ```
 
 === "Build from source"
@@ -20,6 +20,7 @@ Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a sou
     cd beampipe-core-v2
     cargo build --locked --release -p beampipe-cli --bin beampipe
     export PATH="$PWD/target/release:$PATH"
+    beampipe setup --yes --runtime host --skip-admin --skip-upload
     ```
 
 === "Docker Compose"
@@ -27,8 +28,7 @@ Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a sou
     Compose builds the same binary into one image and assigns it API, scheduler, and worker roles.
 
     ```bash
-    test -e .env || cp .env.example .env
-    docker compose build api
+    ./deploy/setup-docker.sh --yes --skip-admin --skip-upload
     docker compose up -d postgres
     docker compose run --rm api migrate
     docker compose run --rm api admin create-user \
@@ -36,6 +36,7 @@ Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a sou
       --password 'replace-this-local-password' \
       --email admin@example.test \
       --superuser
+    docker compose run --rm api project add -f config/wallaby_hires.v2.yaml
     docker compose up -d api scheduler worker
     ```
 

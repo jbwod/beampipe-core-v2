@@ -42,11 +42,11 @@ both present.
 
 ```bash
 docker context show
-docker context ls
-
 git clone https://github.com/jbwod/beampipe-core-v2.git
 cd beampipe-core-v2
-test -e .env || cp .env.example .env
+
+# Prints a recipe; does not start containers.
+./deploy/setup-docker.sh --yes --skip-admin --skip-upload
 
 docker compose up -d postgres
 docker compose run --rm api migrate
@@ -55,8 +55,11 @@ docker compose run --rm api admin create-user \
   --email admin@example.test \
   --password 'replace-this-local-password' \
   --superuser
+docker compose run --rm api project add -f config/wallaby_hires.v2.yaml
 docker compose up -d api scheduler worker
 ```
+
+Host binary path: `beampipe setup --yes --runtime host --skip-admin --skip-upload`, then the printed host recipe (`docker compose up -d postgres` then `beampipe migrate` … `beampipe start`). Slurm keys stay under `deploy/ssh/credentials/<slot>/`; use `--acl` so uid 10001 can read them. See [deploy/ssh/README.md](../../deploy/ssh/README.md).
 
 When a specific engine is required, keep it explicit for the whole lifecycle:
 
@@ -111,8 +114,12 @@ Dash can use `http://api:8080` over Docker DNS.
 
 ## Core and Dash on one Docker engine
 
+`beampipe setup --dashboard` clones a missing sibling `beampipe-dash` checkout
+and writes `compose.beampipe-local.yml` with `BEAMPIPE_API_URL=http://api:8080`
+and the Core Compose network (`{core_dir}_default`). It does not start Dash.
+
 Compose creates project-scoped networks. Attach Dash to the Core network with
-an override in the Dash repository:
+that override, or write it by hand:
 
 ```yaml
 services:

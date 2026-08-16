@@ -10,21 +10,27 @@
 | Run | `start`, `serve`, `worker` |
 | Verify | `doctor`, `security check`, `config explain`, `bench` |
 | Configure | `project`, `profile`, `wasm` |
-| Inspect backends | `scheduler`, `daliuge`, `slurm` |
+| Inspect backends | `scheduler`, `daliuge`, `slurm`, `slurm credentials` |
 | Operate | `status`, `console`, `timeline`, `execution`, `graph` |
 | Maintain | `openapi export`, `purge-provenance`, `migrate-data` |
 
 ## Bootstrap
 
+From the repository root (where `docker-compose.yml` lives). `--yes` requires `--runtime docker` or `--runtime host` (`--docker` / `--skip-docker` are aliases). Setup never starts containers; it prints one recipe. PostgreSQL is either the Compose `postgres` service or an existing URL (`--postgres compose|existing`). The Compose service is line 1 of the recipe when you chose it (default when `docker-compose.yml` exists).
+
 ```bash
-beampipe init --directory operator-local
-cd operator-local
-beampipe setup
-beampipe doctor
-beampipe start
+# Docker path (no host Rust)
+./deploy/setup-docker.sh --yes --skip-admin --skip-upload
+
+# Host path
+beampipe setup --yes --runtime host --skip-admin --skip-upload
 ```
 
-`start` runs a compact API plus worker. Use `serve --worker false` and worker-only processes when roles need independent scaling.
+If Compose Postgres is down, migrate / admin / upload / doctor are skipped on **both** paths and the recipe starts with `docker compose up -d postgres`. `--postgres existing` uses `DATABASE_URL` and fails if that URL is down.
+
+Setup does not create a deployment profile. Install one later with `beampipe profile add`. Dash is docker-only and opt-in (`--dashboard`). `./deploy/setup-docker.sh` builds the image and runs setup; it does not `compose up`.
+
+`beampipe init --directory operator-local` is a compact native footnote. That directory has no Compose file; use `--runtime host --postgres existing`. `start` runs a compact API plus worker.
 
 ## Inspect
 
@@ -51,11 +57,15 @@ beampipe graph diff --execution "$EXECUTION_ID"
 ## Live checks
 
 ```bash
+beampipe slurm credentials init --slot setonix
+beampipe slurm credentials check --slot setonix
 beampipe doctor --profile PROFILE_NAME
 beampipe slurm ping --profile PROFILE_NAME
 beampipe daliuge ping --profile PROFILE_NAME
 beampipe scheduler status --profile PROFILE_NAME
 ```
+
+`slurm credentials init` writes `private_key`, optional `passphrase`, and `known_hosts` under the credentials root. It never accepts a passphrase on the command line; use a TTY prompt, `--passphrase-file`, or `--no-passphrase`. Setup does not create SSH slots; run this command when you add a Slurm profile.
 
 ## Guarded actions
 
