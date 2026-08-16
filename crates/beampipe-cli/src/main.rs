@@ -2,6 +2,7 @@ mod bench_tap;
 mod console;
 mod doctor;
 mod init;
+mod materialize;
 mod operator;
 mod setup;
 mod slurm_credentials;
@@ -123,6 +124,16 @@ enum CliCommand {
         /// Git URL used when cloning a missing Dash checkout.
         #[arg(long, default_value = "https://github.com/jbwod/beampipe-dash")]
         dash_repo_url: String,
+        /// Operator directory. Defaults to the current directory when it already
+        /// has docker-compose.yml, otherwise ~/beampipe.
+        #[arg(long)]
+        directory: Option<PathBuf>,
+        /// Start Postgres and the stack after writing files (default).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        start: bool,
+        /// Write files and print a recipe without starting anything.
+        #[arg(long = "no-start")]
+        no_start: bool,
     },
     /// Health and configuration preflight checks.
     Doctor {
@@ -658,6 +669,9 @@ async fn main() -> anyhow::Result<()> {
             skip_dashboard,
             dash_dir,
             dash_repo_url,
+            directory,
+            start,
+            no_start,
         } => {
             if matches!(command, Some(SetupCommand::Check)) {
                 setup::run_setup_check(false, None, false).await?;
@@ -683,6 +697,8 @@ async fn main() -> anyhow::Result<()> {
                     skip_dashboard,
                     dash_dir,
                     dash_repo_url: Some(dash_repo_url),
+                    directory,
+                    start: start && !no_start,
                 })
                 .await?;
             }

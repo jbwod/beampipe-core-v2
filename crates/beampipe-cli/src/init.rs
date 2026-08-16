@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::materialize;
+
 #[derive(Debug, Clone)]
 pub struct InitOptions {
     pub directory: PathBuf,
@@ -47,11 +49,25 @@ pub fn run(options: InitOptions) -> Result<InitReport> {
         replaced: Vec::new(),
         next_steps: vec![
             "review beampipe.yaml and .env.example".into(),
-            "set BEAMPIPE_JWT_SECRET outside committed configuration".into(),
-            "run `beampipe doctor --json`".into(),
-            "run `beampipe setup` to migrate PostgreSQL and create an administrator".into(),
+            format!(
+                "run `beampipe setup --directory {}` to start Postgres and the stack",
+                root.display()
+            ),
+            "or `beampipe setup --no-start` to print a recipe only".into(),
         ],
     };
+
+    let materialized = materialize::materialize(&root, options.force)?;
+    report.created.extend(materialized.created);
+    report.replaced.extend(materialized.replaced);
+    if options.production {
+        write_managed(
+            &root.join(".env.example"),
+            production_env(),
+            true,
+            &mut report,
+        )?;
+    }
 
     write_managed(
         &root.join("beampipe.yaml"),
@@ -59,16 +75,6 @@ pub fn run(options: InitOptions) -> Result<InitReport> {
             production_config()
         } else {
             development_config()
-        },
-        options.force,
-        &mut report,
-    )?;
-    write_managed(
-        &root.join(".env.example"),
-        if options.production {
-            production_env()
-        } else {
-            development_env()
         },
         options.force,
         &mut report,
@@ -194,6 +200,7 @@ telemetry:
 "#
 }
 
+#[allow(dead_code)]
 fn development_env() -> &'static str {
     r#"# Copy to .env and replace the development-only values before sharing the environment.
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
@@ -240,5 +247,23 @@ mod tests {
     fn production_template_contains_no_generated_secret() {
         assert!(production_config().contains("jwt_secret: null"));
         assert!(!production_config().contains("change-me"));
+    }
+
+    #[test]
+    fn init_writes_pull_only_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = run(InitOptions {
+            directory: dir.path().into(),
+            force: false,
+            production: false,
+        })
+        .unwrap();
+        assert!(report
+            .created
+            .iter()
+            .any(|path| path.ends_with("docker-compose.yml")));
+        let compose = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert!(!compose.contains("build:"));
+        assert!(dir.path().join("config/wallaby_hires.v2.yaml").exists());
     }
 }

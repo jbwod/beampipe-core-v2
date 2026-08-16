@@ -6,10 +6,14 @@ beampipe-core/
 
 target/
 
-deploy/
+deploy/**
+!deploy/operator/
+!deploy/operator/docker-compose.yml
+!deploy/operator/.env.example
 docs/
 scripts/
-config/
+config/**
+!config/wallaby_hires.v2.yaml
 .github/
 .cursor/
 agent-transcripts/

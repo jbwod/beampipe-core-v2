@@ -6,9 +6,10 @@ use crossterm::style::Stylize;
 use sqlx::PgPool;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use uuid::Uuid;
 
-use crate::doctor;
+use crate::{doctor, materialize};
 
 const DEFAULT_CASDA_TAP_URL: &str = "https://casda.csiro.au/casda_vo_tools/tap/sync";
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
@@ -37,6 +38,8 @@ pub struct SetupOptions {
     pub skip_dashboard: bool,
     pub dash_dir: Option<PathBuf>,
     pub dash_repo_url: Option<String>,
+    pub directory: Option<PathBuf>,
+    pub start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,14 +69,18 @@ fn format_step(n: usize, total: usize, title: &str) -> String {
     format!("== {n}/{total}  {title} ==")
 }
 
-fn print_banner() {
+fn print_banner(start: bool) {
     let title = "Beampipe setup";
     if stdout_is_tty() {
         println!("{}", title.bold());
     } else {
         println!("{title}");
     }
-    print_hint("Writes .env. Does not start Postgres or the stack.");
+    if start {
+        print_hint("Writes files, then starts Postgres and the stack.");
+    } else {
+        print_hint("Writes files. Does not start Postgres or the stack (--no-start).");
+    }
     print_hint("Deployment profiles are configured later with beampipe profile add.");
 }
 
@@ -161,13 +168,21 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-pub async fn run_setup(opts: SetupOptions) -> Result<()> {
-    let root = std::env::current_dir().context("cwd")?;
+pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
+    let root = resolve_operator_root(&opts)?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create {}", root.display()))?;
+    std::env::set_current_dir(&root)
+        .with_context(|| format!("chdir {}", root.display()))?;
     let env_path = root.join(".env");
-    let template_path = root.join(".env.template");
-    let compose_exists = compose_file_exists(&root);
 
-    print_banner();
+    print_banner(opts.start);
+
+    let materialized = materialize::materialize(&root, false)?;
+    for path in &materialized.created {
+        println!("Created {}", path.display());
+    }
+    let compose_exists = compose_file_exists(&root);
 
     print_step(1, 4, "How will you run Beampipe?");
     let runtime = resolve_runtime(&opts, compose_exists)?;
@@ -183,7 +198,11 @@ pub async fn run_setup(opts: SetupOptions) -> Result<()> {
     });
 
     print_step(2, 4, "PostgreSQL");
-    let postgres = resolve_postgres(&opts, compose_exists)?;
+    let mut postgres = resolve_postgres(&opts, compose_exists)?;
+    if runtime == RuntimeKind::Docker && postgres == PostgresKind::Existing {
+        print_hint("Docker runtime uses the Compose postgres service.");
+        postgres = PostgresKind::Compose;
+    }
     if postgres == PostgresKind::Compose && !compose_exists {
         bail!(
             "--postgres compose requires docker-compose.yml in {}",
@@ -193,7 +212,11 @@ pub async fn run_setup(opts: SetupOptions) -> Result<()> {
     let database_url = resolve_database_url(&opts, postgres)?;
     if postgres == PostgresKind::Compose {
         print_hint(&format!("Using {database_url}"));
-        print_hint("Start it later with: docker compose up -d postgres");
+        if opts.start {
+            print_hint("Starting Compose Postgres next.");
+        } else {
+            print_hint("Start it later with: docker compose up -d postgres");
+        }
     }
 
     let prepare_docker = runtime == RuntimeKind::Docker;
@@ -221,13 +244,7 @@ pub async fn run_setup(opts: SetupOptions) -> Result<()> {
 
     print_step(4, 4, "Files");
     if !env_path.exists() {
-        if template_path.exists() {
-            std::fs::copy(&template_path, &env_path).context("copy .env.template to .env")?;
-            println!("Created .env from .env.template");
-        } else {
-            std::fs::write(&env_path, default_env_skeleton()).context("write .env")?;
-            println!("Created minimal .env");
-        }
+        seed_env_file(&root, &env_path)?;
     } else if !opts.yes {
         print!("`.env` already exists. Continue without overwriting? [Y/n] ");
         io::stdout().flush()?;
@@ -268,7 +285,14 @@ pub async fn run_setup(opts: SetupOptions) -> Result<()> {
     update_env_file(&env_path, "BEAMPIPE_TM_URL", &tm_url)?;
     update_env_file(&env_path, "BEAMPIPE_WORKER_POOL", &worker_pool)?;
     update_env_file(&env_path, "BEAMPIPE_USE_REAL_BACKENDS", "false")?;
+    ensure_beampipe_version(&root, &env_path)?;
     println!("Wrote .env (0600)");
+
+    if !opts.skip_admin && opts.admin_password.as_deref().unwrap_or("").is_empty() && opts.yes {
+        let password = generate_admin_password();
+        println!("Generated admin password (shown once): {password}");
+        opts.admin_password = Some(password);
+    }
 
     std::env::set_var("DATABASE_URL", &database_url);
     std::env::set_var("BEAMPIPE_JWT_SECRET", &jwt_secret);
@@ -278,15 +302,30 @@ pub async fn run_setup(opts: SetupOptions) -> Result<()> {
     std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", "false");
 
     let mut docker_context = None;
-    if prepare_docker {
+    if prepare_docker || (opts.start && postgres == PostgresKind::Compose) {
         docker_context = prepare_docker_env(&root, &env_path)?;
-        println!(
-            "Prepared Docker Compose (network {}). Containers were not started.",
-            compose_network_name(&root)
-        );
+        if opts.start {
+            println!(
+                "Prepared Docker Compose (network {}).",
+                compose_network_name(&root)
+            );
+        } else {
+            println!(
+                "Prepared Docker Compose (network {}). Containers were not started.",
+                compose_network_name(&root)
+            );
+        }
         if let Some(context) = docker_context.as_deref() {
             println!("Docker context: {context}");
         }
+    }
+
+    if opts.start && postgres == PostgresKind::Compose {
+        require_docker_compose()?;
+        if prepare_docker {
+            compose_pull_api(&root)?;
+        }
+        compose_up_postgres(&root)?;
     }
 
     let pool = match beampipe_db::connect(&database_url).await {
@@ -374,7 +413,11 @@ pub async fn run_setup(opts: SetupOptions) -> Result<()> {
             .exists()
             .then(|| display_repo_path(&root, &project_path)),
     });
-    print_recipe(&commands);
+    if opts.start {
+        finish_start(&root, prepare_docker, &opts)?;
+    } else {
+        print_recipe(&commands);
+    }
     print_hint(
         "When you are ready to connect REST or Slurm, use `beampipe profile add` (see Deployment profiles and SSH).",
     );
@@ -449,6 +492,115 @@ async fn upload_project_config(
 
 fn generate_jwt_secret() -> String {
     Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string()
+}
+
+pub fn generate_admin_password() -> String {
+    format!("bp-{}", Uuid::new_v4().simple())
+}
+
+fn resolve_operator_root(opts: &SetupOptions) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("cwd")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let root = materialize::default_operator_directory(&cwd, home.as_deref(), opts.directory.as_deref());
+    if root.is_absolute() {
+        Ok(root)
+    } else {
+        Ok(cwd.join(root))
+    }
+}
+
+fn require_docker_compose() -> Result<()> {
+    let output = Command::new("docker")
+        .args(["compose", "version"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!("Docker Compose v2 is required. Install Docker Engine and retry. {stderr}");
+        }
+        Err(error) => bail!("Docker Compose v2 is required. Install Docker Engine and retry. {error}"),
+    }
+}
+
+fn compose_cmd(root: &Path, args: &[&str]) -> Result<()> {
+    println!("  docker compose {}", args.join(" "));
+    let status = Command::new("docker")
+        .arg("compose")
+        .args(args)
+        .current_dir(root)
+        .status()
+        .context("docker compose")?;
+    if !status.success() {
+        bail!("docker compose {} failed", args.join(" "));
+    }
+    Ok(())
+}
+
+fn compose_pull_api(root: &Path) -> Result<()> {
+    println!("  docker compose pull api");
+    let status = Command::new("docker")
+        .args(["compose", "pull", "api"])
+        .current_dir(root)
+        .status()
+        .context("docker compose pull")?;
+    if !status.success() {
+        bail!(
+            "published image unavailable. Confirm ghcr.io/jbwod/beampipe-core-v2 is public, or run docker login ghcr.io. This installer does not compile from source."
+        );
+    }
+    Ok(())
+}
+
+fn compose_up_postgres(root: &Path) -> Result<()> {
+    compose_cmd(root, &["up", "-d", "--wait", "postgres"])
+}
+
+fn compose_up_stack(root: &Path) -> Result<()> {
+    compose_cmd(root, &["up", "-d", "api", "scheduler", "worker"])
+}
+
+fn check_api_health() {
+    let result = Command::new("curl")
+        .args(["-fsS", "http://127.0.0.1:8080/api/v2/health"])
+        .status();
+    match result {
+        Ok(status) if status.success() => {
+            println!("API is up at http://127.0.0.1:8080/api/v2");
+        }
+        _ => {
+            println!("Check http://127.0.0.1:8080/api/v2/health when the API is ready.");
+        }
+    }
+}
+
+fn finish_start(root: &Path, runtime_docker: bool, opts: &SetupOptions) -> Result<()> {
+    if runtime_docker {
+        compose_up_stack(root)?;
+        check_api_health();
+        println!("Beampipe is running from {}.", root.display());
+        return Ok(());
+    }
+    if opts.yes {
+        println!("PostgreSQL is up. Start the host process with:");
+        println!("  beampipe start");
+        return Ok(());
+    }
+    if prompt_yes_no("Start beampipe now?", true)? {
+        let exe = std::env::current_exe().context("current executable")?;
+        let status = Command::new(exe)
+            .arg("start")
+            .current_dir(root)
+            .status()
+            .context("beampipe start")?;
+        if !status.success() {
+            bail!("beampipe start failed");
+        }
+    } else {
+        println!("Start the host process with:");
+        println!("  beampipe start");
+    }
+    Ok(())
 }
 
 fn prompt_default(label: &str, default: &str) -> Result<String> {
@@ -527,7 +679,50 @@ fn set_private_file_permissions(_path: &Path) -> Result<()> {
 }
 
 fn default_env_skeleton() -> String {
-    "BEAMPIPE_ENV=development\nBEAMPIPE_JWT_SECRET=change-me\nDATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe\n".into()
+    "BEAMPIPE_ENV=development\nBEAMPIPE_VERSION=0.1.0\nBEAMPIPE_JWT_SECRET=change-me\nDATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe\n".into()
+}
+
+fn seed_env_file(root: &Path, env_path: &Path) -> Result<()> {
+    let example_path = root.join(".env.example");
+    let template_path = root.join(".env.template");
+    if example_path.exists() {
+        std::fs::copy(&example_path, env_path).context("copy .env.example to .env")?;
+        println!("Created .env from .env.example");
+    } else if template_path.exists() {
+        std::fs::copy(&template_path, env_path).context("copy .env.template to .env")?;
+        println!("Created .env from .env.template");
+    } else {
+        std::fs::write(env_path, default_env_skeleton()).context("write .env")?;
+        println!("Created minimal .env");
+    }
+    Ok(())
+}
+
+fn env_file_value(path: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let prefix = format!("{key}=");
+    for line in content.lines() {
+        if let Some(value) = line.trim().strip_prefix(&prefix) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn ensure_beampipe_version(root: &Path, env_path: &Path) -> Result<()> {
+    if !env_value_empty(env_path, "BEAMPIPE_VERSION") {
+        return Ok(());
+    }
+    let version = std::env::var("BEAMPIPE_VERSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_file_value(&root.join(".env.example"), "BEAMPIPE_VERSION"))
+        .unwrap_or_else(|| "0.1.0".into());
+    update_env_file(env_path, "BEAMPIPE_VERSION", &version)
 }
 
 const DEFAULT_DASH_REPO: &str = "https://github.com/jbwod/beampipe-dash";
@@ -614,8 +809,8 @@ fn resolve_runtime(opts: &SetupOptions, compose_exists: bool) -> Result<RuntimeK
     if let Some(runtime) = decide_runtime(opts)? {
         return Ok(runtime);
     }
-    let default = if compose_exists { 0 } else { 1 };
-    let index = prompt_choice("How will you run Beampipe?", &runtime_choices(), default)?;
+    let _ = compose_exists;
+    let index = prompt_choice("How will you run Beampipe?", &runtime_choices(), 0)?;
     Ok([RuntimeKind::Docker, RuntimeKind::Host][index])
 }
 
@@ -842,14 +1037,12 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
 }
 
 async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
-    let (username, password, email) = if opts.yes {
+    let (username, password, email) =     if opts.yes {
         let password = opts
             .admin_password
             .clone()
             .filter(|password| !password.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("--admin-password is required with --yes when creating admin user")
-            })?;
+            .unwrap_or_else(generate_admin_password);
         (
             opts.admin_user.clone().unwrap_or_else(|| "admin".into()),
             password,
@@ -1038,6 +1231,43 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn seed_env_prefers_example_and_fills_missing_version() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".env.example"),
+            "BEAMPIPE_VERSION=0.2.0\nBEAMPIPE_ENV=development\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join(".env.template"),
+            "BEAMPIPE_ENV=development\n",
+        )
+        .unwrap();
+
+        let env_path = root.path().join(".env");
+        seed_env_file(root.path(), &env_path).unwrap();
+        ensure_beampipe_version(root.path(), &env_path).unwrap();
+        let content = std::fs::read_to_string(&env_path).unwrap();
+        assert!(content.contains("BEAMPIPE_VERSION=0.2.0\n"));
+        assert!(content.contains("BEAMPIPE_ENV=development\n"));
+
+        let empty = tempfile::tempdir().unwrap();
+        let created = empty.path().join(".env");
+        std::fs::write(&created, "BEAMPIPE_ENV=development\n").unwrap();
+        ensure_beampipe_version(empty.path(), &created).unwrap();
+        assert!(std::fs::read_to_string(&created)
+            .unwrap()
+            .contains("BEAMPIPE_VERSION=0.1.0\n"));
+    }
+
+    #[test]
+    fn generated_admin_password_is_long_enough() {
+        let password = generate_admin_password();
+        assert!(password.len() >= 12);
+        assert!(password.starts_with("bp-"));
     }
 
     #[test]

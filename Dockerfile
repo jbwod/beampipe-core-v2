@@ -4,6 +4,8 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
+COPY deploy/operator/docker-compose.yml deploy/operator/.env.example ./deploy/operator/
+COPY config/wallaby_hires.v2.yaml ./config/wallaby_hires.v2.yaml
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \

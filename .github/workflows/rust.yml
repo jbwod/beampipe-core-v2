@@ -52,5 +52,8 @@ jobs:
       - name: Promtool alert rules
         run: bash scripts/promtool-test-alerts.sh
 
+      - name: Installer target mapping
+        run: sh deploy/install-target-test.sh
+
       - name: Run tests
         run: cargo test --workspace
