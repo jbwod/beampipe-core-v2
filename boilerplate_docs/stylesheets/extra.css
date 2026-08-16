@@ -1903,110 +1903,286 @@ body:has(#redoc-frame) .md-main {
 }
 
 .bp-install-builder {
-  margin: 1.25rem 0 1.75rem;
-  padding: 0.9rem 1rem 1rem;
+  margin: 1.25rem 0 1.85rem;
+  overflow: hidden;
   border: 1px solid var(--bp-border);
-  background: #000;
+  background: rgba(0, 0, 0, 0.93);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.018);
 }
 
-.md-typeset .bp-install-builder legend {
-  padding: 0 0.35rem;
+.bp-install-builder__chrome {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem 1.15rem;
+  min-height: 2.15rem;
+  padding: 0.35rem 0.85rem;
+  border-bottom: 1px solid var(--bp-border);
+  background: #050607;
+}
+
+.md-typeset .bp-install-builder__title,
+.md-typeset .bp-install-builder__meta,
+.md-typeset .bp-install-builder__kicker,
+.md-typeset .bp-install-builder__note,
+.md-typeset .bp-install-builder__hint,
+.md-typeset .bp-install-builder__status {
+  margin: 0;
+}
+
+.md-typeset .bp-install-builder__title {
+  margin-right: auto;
   color: var(--bp-code-name);
   font-size: 0.72rem;
 }
 
-.md-typeset .bp-install-builder fieldset {
-  margin: 0;
-  padding: 0.35rem 0 0;
-  border: 0;
+.md-typeset .bp-install-builder__meta {
+  color: var(--bp-muted);
+  font-size: 0.66rem;
 }
 
-.bp-install-builder__grid {
+.md-typeset .bp-install-builder__meta b {
+  margin-right: 0.28rem;
+  font-weight: 500;
+}
+
+.bp-install-builder__form {
+  margin: 0;
+}
+
+.bp-install-builder__body {
   display: grid;
-  gap: 0.75rem 1rem;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem 1.25rem;
+  padding: 1rem 0.95rem 1.05rem;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+}
+
+.bp-install-builder__section--admin {
+  grid-column: 1 / -1;
+  padding-top: 0.15rem;
+  border-top: 1px solid var(--bp-border-soft);
+}
+
+.md-typeset .bp-install-builder__kicker {
+  margin: 0 0 0.55rem;
+  color: var(--bp-code-key);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+}
+
+.bp-install-builder__chips,
+.bp-install-builder__checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 
 .bp-install-builder__checks {
-  display: flex;
   flex-direction: column;
-  gap: 0.4rem;
-  grid-column: 1 / -1;
 }
 
-.md-typeset .bp-install-builder label {
-  display: block;
-  margin: 0;
-  color: var(--bp-highlight);
-  font-size: 0.74rem;
-}
-
-.md-typeset .bp-install-builder__checks label {
+.md-typeset .bp-install-builder__chip,
+.md-typeset .bp-install-builder__toggle {
   display: flex;
+  position: relative;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.38rem 0.55rem 0.38rem 0.5rem;
+  border: 1px solid var(--bp-border-soft);
+  color: var(--bp-highlight);
+  background: #050505;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.md-typeset .bp-install-builder__chip::before,
+.md-typeset .bp-install-builder__toggle::before {
+  content: "[ ]";
+  color: var(--bp-muted);
+  font-size: 0.72rem;
+}
+
+.md-typeset .bp-install-builder__chip:hover,
+.md-typeset .bp-install-builder__toggle:hover {
+  border-color: var(--bp-border);
+  color: var(--bp-text);
+}
+
+.md-typeset .bp-install-builder__chip:has(input:checked),
+.md-typeset .bp-install-builder__toggle:has(input:checked) {
+  border-color: var(--bp-code-name);
+  color: var(--bp-text);
+  background: rgba(127, 215, 230, 0.06);
+}
+
+.md-typeset .bp-install-builder__chip:has(input:checked)::before,
+.md-typeset .bp-install-builder__toggle:has(input:checked)::before {
+  content: "[x]";
+  color: var(--bp-code-name);
+}
+
+.md-typeset .bp-install-builder__toggle.is-disabled,
+.md-typeset .bp-install-builder__toggle:has(input:disabled) {
+  color: var(--bp-subtle);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.md-typeset .bp-install-builder__chip input,
+.md-typeset .bp-install-builder__toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  border: 0;
+  white-space: nowrap;
+}
+
+.md-typeset .bp-install-builder__chip:has(input:focus-visible),
+.md-typeset .bp-install-builder__toggle:has(input:focus-visible),
+.md-typeset .bp-install-builder input[type="text"]:focus,
+.md-typeset .bp-install-builder input[type="email"]:focus,
+.md-typeset .bp-install-builder input[type="password"]:focus {
+  outline: 1px solid var(--bp-code-name);
+  outline-offset: 2px;
+}
+
+.md-typeset .bp-install-builder__toggle small {
+  color: var(--bp-subtle);
+  font-size: 0.62rem;
+}
+
+.bp-install-builder__field {
+  margin-top: 0.7rem;
+}
+
+.bp-install-builder__admin {
+  display: grid;
+  gap: 0.7rem 0.85rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.md-typeset .bp-install-builder__field label {
+  display: block;
+  margin: 0 0 0.28rem;
+  color: var(--bp-highlight);
+  font-size: 0.7rem;
 }
 
 .md-typeset .bp-install-builder input[type="text"],
 .md-typeset .bp-install-builder input[type="email"],
-.md-typeset .bp-install-builder input[type="password"],
-.md-typeset .bp-install-builder select {
+.md-typeset .bp-install-builder input[type="password"] {
   width: 100%;
-  margin-top: 0.28rem;
-  padding: 0.28rem 0.4rem;
+  margin: 0;
+  padding: 0.38rem 0.5rem;
   border: 1px solid var(--bp-border);
   color: var(--bp-text);
   background: #050505;
   font: inherit;
+  font-size: 0.78rem;
 }
 
-.md-typeset .bp-install-builder input:focus,
-.md-typeset .bp-install-builder select:focus {
-  outline: 1px solid var(--bp-code-name);
-}
-
-.md-typeset .bp-install-builder input:disabled {
+.md-typeset .bp-install-builder input::placeholder {
   color: var(--bp-subtle);
 }
 
 .md-typeset .bp-install-builder__note,
 .md-typeset .bp-install-builder__hint,
 .md-typeset .bp-install-builder__status {
-  margin: 0.7rem 0 0;
   color: var(--bp-muted);
-  font-size: 0.72rem;
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.md-typeset .bp-install-builder__note {
+  margin-top: 0.65rem;
 }
 
 .md-typeset .bp-install-builder__status {
-  color: var(--bp-code-string);
   min-height: 1.1em;
+  color: var(--bp-code-string);
 }
 
-.bp-install-builder__command-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.75rem;
-  margin-top: 0.85rem;
+.bp-install-builder__output {
+  padding: 0.85rem 0.95rem 1rem;
+  border-top: 1px solid var(--bp-border);
+  background: #020303;
+}
+
+.bp-install-builder__prompt {
+  display: grid;
+  align-items: start;
+  gap: 0.65rem 0.7rem;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--bp-border-soft);
+  background: #000;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.md-typeset .bp-install-builder__ps {
+  color: var(--bp-code-name);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .md-typeset .bp-install-builder pre {
-  flex: 1;
   margin: 0;
-  overflow-x: auto;
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  color: var(--bp-text);
 }
 
-.md-typeset .bp-install-builder .terminal-button {
-  flex: 0 0 auto;
-  min-width: 6.5rem;
+.md-typeset .bp-install-builder pre code {
+  display: block;
+  padding: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  background: transparent;
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.md-typeset .bp-install-builder .terminal-button,
+.md-typeset .bp-install-builder .terminal-button:nth-child(1),
+.md-typeset .bp-install-builder .terminal-button:nth-child(2) {
+  min-width: 6.4rem;
+  border-color: var(--bp-code-name);
+  color: var(--bp-code-name);
+  background: #000;
+}
+
+.md-typeset .bp-install-builder .terminal-button:hover,
+.md-typeset .bp-install-builder .terminal-button.is-copied {
+  color: #000;
+  background: var(--bp-code-name);
+}
+
+.md-typeset .bp-install-builder__hint {
+  margin-top: 0.7rem;
 }
 
 @media (max-width: 47em) {
-  .bp-install-builder__grid {
+  .bp-install-builder__chrome {
+    flex-wrap: wrap;
+    gap: 0.2rem 0.85rem;
+  }
+
+  .bp-install-builder__body,
+  .bp-install-builder__admin {
     grid-template-columns: 1fr;
   }
 
-  .bp-install-builder__command-row {
-    flex-direction: column;
+  .bp-install-builder__prompt {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .md-typeset .bp-install-builder .terminal-button {
+    width: 100%;
+    grid-column: 1 / -1;
   }
 }
 

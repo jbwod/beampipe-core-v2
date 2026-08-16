@@ -42,8 +42,14 @@
     return CURL + " -s -- " + flags.join(" ");
   }
 
+  function selectedRuntime(root) {
+    var radio = root.querySelector('input[name="runtime"]:checked');
+    var select = root.querySelector("#bp-install-runtime");
+    var value = radio ? radio.value : select ? select.value : "docker";
+    return value === "host" ? "host" : "docker";
+  }
+
   function readState(root) {
-    var runtime = root.querySelector("#bp-install-runtime");
     var directory = root.querySelector("#bp-install-directory");
     var yes = root.querySelector("#bp-install-yes");
     var start = root.querySelector("#bp-install-start");
@@ -52,7 +58,7 @@
     var adminEmail = root.querySelector("#bp-install-admin-email");
     var adminPassword = root.querySelector("#bp-install-admin-password");
     return {
-      runtime: runtime && runtime.value === "host" ? "host" : "docker",
+      runtime: selectedRuntime(root),
       directory: directory ? directory.value.trim() : "",
       yes: !yes || yes.checked,
       start: !start || start.checked,
@@ -65,6 +71,7 @@
 
   function syncDashboard(root, state) {
     var dashboard = root.querySelector("#bp-install-dashboard");
+    var label = root.querySelector("#bp-install-dashboard-label");
     var host = state.runtime === "host";
     if (!dashboard) {
       return;
@@ -72,6 +79,9 @@
     dashboard.disabled = host;
     if (host) {
       dashboard.checked = false;
+    }
+    if (label) {
+      label.classList.toggle("is-disabled", host);
     }
   }
 
@@ -90,9 +100,14 @@
   function copyCommand(root) {
     var command = render(root);
     var status = root.querySelector("#bp-install-status");
+    var copy = root.querySelector("#bp-install-copy");
     var done = function (ok) {
       if (status) {
         status.textContent = ok ? "Copied." : "Copy failed. Select the command and copy it manually.";
+      }
+      if (copy) {
+        copy.classList.toggle("is-copied", ok);
+        copy.textContent = ok ? "Copied" : "Copy";
       }
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -137,8 +152,13 @@
       });
       form.addEventListener("input", function () {
         var status = root.querySelector("#bp-install-status");
+        var copy = root.querySelector("#bp-install-copy");
         if (status) {
           status.textContent = "";
+        }
+        if (copy) {
+          copy.classList.remove("is-copied");
+          copy.textContent = "Copy";
         }
         render(root);
       });
