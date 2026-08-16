@@ -30,7 +30,7 @@ Host binary (Compose is used only for Postgres):
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime host
 ```
 
-The script installs `~/.local/bin/beampipe` and runs `beampipe setup --directory ~/beampipe`. Setup starts Postgres, migrates, creates `admin` (password printed once), loads `wallaby_hires`, and starts the API. `--yes` requires `--runtime docker` or `--runtime host`. `--no-start` writes files and prints a recipe only.
+The script installs `~/.local/bin/beampipe` and runs `beampipe setup --directory ~/beampipe`. Setup starts Postgres, migrates, creates `admin` (password printed once), and loads `wallaby_hires`. Docker `--yes` then starts the API. Host `--yes` leaves the API down; run `cd ~/beampipe && beampipe start` next. `--yes` requires `--runtime docker` or `--runtime host`. `--no-start` writes files and prints a recipe only.
 
 Verify:
 

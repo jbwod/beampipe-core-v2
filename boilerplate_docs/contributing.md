@@ -60,7 +60,7 @@ git tag -a v0.1.0 -m "Beampipe 0.1.0"
 git push origin v0.1.0
 ```
 
-The first GHCR package is private. The release job tries to set it public and ignores failure. Confirm visibility once so `install.sh` and Compose users can pull without a GitHub token. `beampipe setup --runtime docker` does not compile from source when the pull fails. A git checkout can still use `./deploy/setup-docker.sh` which falls back to a local build.
+The GHCR package is public (`ghcr.io/jbwod/beampipe-core-v2`). `beampipe setup --runtime docker` does not compile from source when the pull fails. A git checkout can still use `./deploy/setup-docker.sh` which falls back to a local build.
 
 ## Preview
 

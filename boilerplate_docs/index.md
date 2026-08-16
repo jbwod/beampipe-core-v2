@@ -70,7 +70,7 @@ Run the API, durable job system, and console locally. External execution stays m
           </label>
         </div>
       </div>
-      <div class="bp-install-builder__section bp-install-builder__section--admin">
+      <div class="bp-install-builder__section">
         <p class="bp-install-builder__kicker">03 / admin</p>
         <div class="bp-install-builder__admin">
           <div class="bp-install-builder__field">

@@ -1953,13 +1953,7 @@ body:has(#redoc-frame) .md-main {
   display: grid;
   gap: 1rem 1.25rem;
   padding: 1rem 0.95rem 1.05rem;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
-}
-
-.bp-install-builder__section--admin {
-  grid-column: 1 / -1;
-  padding-top: 0.15rem;
-  border-top: 1px solid var(--bp-border-soft);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .md-typeset .bp-install-builder__kicker {
@@ -2061,8 +2055,12 @@ body:has(#redoc-frame) .md-main {
 
 .bp-install-builder__admin {
   display: grid;
-  gap: 0.7rem 0.85rem;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.bp-install-builder__admin .bp-install-builder__field {
+  margin-top: 0;
 }
 
 .md-typeset .bp-install-builder__field label {
@@ -2171,8 +2169,7 @@ body:has(#redoc-frame) .md-main {
     gap: 0.2rem 0.85rem;
   }
 
-  .bp-install-builder__body,
-  .bp-install-builder__admin {
+  .bp-install-builder__body {
     grid-template-columns: 1fr;
   }
 

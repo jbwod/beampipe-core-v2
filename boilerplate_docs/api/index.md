@@ -4,11 +4,15 @@ The Axum API is mounted at `/api/v2`. Health is public; operational resources re
 
 ## Authenticate
 
+Use the password setup printed once. It is not stored in `.env`.
+
 ```bash
 export BASE=http://127.0.0.1:8080
+export ADMIN_USER="${ADMIN_USER:-admin}"
+export ADMIN_PASSWORD="${ADMIN_PASSWORD:?set to the password setup printed}"
 export TOKEN=$(curl -fsS -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"replace-this-local-password"}' \
+  -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
   | jq -er .access_token)
 export AUTH="Authorization: Bearer $TOKEN"
 

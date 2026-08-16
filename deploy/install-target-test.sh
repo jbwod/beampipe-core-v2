@@ -19,4 +19,25 @@ expect linux amd64 x86_64-unknown-linux-gnu
 expect Linux aarch64 aarch64-unknown-linux-gnu
 expect Darwin arm64 aarch64-apple-darwin
 expect Darwin x86_64 x86_64-apple-darwin
+
+if beampipe_has_flag --yes --runtime docker; then
+  echo "beampipe_has_flag missed --yes" >&2
+  exit 1
+fi
+if ! beampipe_has_flag --yes --yes --runtime docker; then
+  echo "beampipe_has_flag missed present --yes" >&2
+  exit 1
+fi
+if beampipe_has_runtime_flag --yes; then
+  echo "beampipe_has_runtime_flag false positive" >&2
+  exit 1
+fi
+if ! beampipe_has_runtime_flag --yes --runtime docker; then
+  echo "beampipe_has_runtime_flag missed --runtime" >&2
+  exit 1
+fi
+if ! beampipe_has_runtime_flag --skip-docker; then
+  echo "beampipe_has_runtime_flag missed --skip-docker" >&2
+  exit 1
+fi
 echo "install target mapping ok"

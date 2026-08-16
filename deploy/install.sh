@@ -75,17 +75,71 @@ install_beampipe() {
   case ":${PATH}:" in
     *":${bindir}:"*) ;;
     *)
-      echo "Add ${bindir} to PATH:"
-      echo "  export PATH=\"${bindir}:\$PATH\""
       PATH="${bindir}:${PATH}"
       export PATH
+      echo "This session can run beampipe. For new terminals:"
+      echo "  echo 'export PATH=\"${bindir}:\$PATH\"' >> ~/.profile && export PATH=\"${bindir}:\$PATH\""
+      beampipe_offer_persist_path "$bindir"
+      ;;
+  esac
+}
+
+beampipe_has_flag() {
+  want=$1
+  shift
+  for arg in "$@"; do
+    [ "$arg" = "$want" ] && return 0
+  done
+  return 1
+}
+
+beampipe_has_runtime_flag() {
+  prev=
+  for arg in "$@"; do
+    if [ "$prev" = "--runtime" ] || [ "$arg" = "--docker" ] || [ "$arg" = "--skip-docker" ]; then
+      return 0
+    fi
+    prev=$arg
+  done
+  return 1
+}
+
+beampipe_offer_persist_path() {
+  bindir=$1
+  if [ ! -t 1 ] || [ ! -c /dev/tty ]; then
+    return 0
+  fi
+  printf "Append that line to ~/.profile now? [y/N] " > /dev/tty
+  ans=
+  IFS= read -r ans < /dev/tty || return 0
+  case $ans in
+    y|Y|yes|YES)
+      if [ -f "$HOME/.profile" ] && grep -F "export PATH=\"${bindir}:\$PATH\"" "$HOME/.profile" >/dev/null 2>&1; then
+        echo "PATH line already in ~/.profile"
+        return 0
+      fi
+      echo "export PATH=\"${bindir}:\$PATH\"" >> "$HOME/.profile"
+      echo "Wrote ~/.profile"
       ;;
   esac
 }
 
 run_setup() {
   home="${BEAMPIPE_HOME:-$HOME/beampipe}"
-  exec beampipe setup --directory "$home" "$@"
+  if [ -t 0 ] || beampipe_has_flag --yes "$@"; then
+    exec beampipe setup --directory "$home" "$@"
+  fi
+  if [ -t 1 ] && [ -c /dev/tty ]; then
+    echo "stdin is a pipe; reading setup prompts from the terminal."
+    exec beampipe setup --directory "$home" "$@" </dev/tty
+  fi
+  if ! beampipe_has_runtime_flag "$@"; then
+    echo "stdin is not a terminal; running non-interactive Docker setup."
+    echo "  curl -fsSL ${RELEASES}/latest/download/install.sh | sh -s -- --yes --runtime docker"
+    exec beampipe setup --directory "$home" --yes --runtime docker "$@"
+  fi
+  echo "stdin is not a terminal; adding --yes."
+  exec beampipe setup --directory "$home" --yes "$@"
 }
 
 main() {

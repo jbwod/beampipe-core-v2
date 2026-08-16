@@ -5,8 +5,10 @@ use beampipe_project::ProjectConfig;
 use crossterm::style::Stylize;
 use sqlx::PgPool;
 use std::io::{self, IsTerminal, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{doctor, materialize};
@@ -165,19 +167,24 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
 
 pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     let root = resolve_operator_root(&opts)?;
+    print_banner(opts.start);
+    preflight_before_materialize(&opts)?;
+
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     std::env::set_current_dir(&root).with_context(|| format!("chdir {}", root.display()))?;
     let env_path = root.join(".env");
-
-    print_banner(opts.start);
 
     let materialized = materialize::materialize(&root, false)?;
     for path in &materialized.created {
         println!("Created {}", path.display());
     }
     let compose_exists = compose_file_exists(&root);
+    let tentative_docker = !matches!(decide_runtime(&opts)?, Some(RuntimeKind::Host));
+    let total_steps = setup_step_total(&opts, tentative_docker);
+    let mut step = 1;
 
-    print_step(1, 4, "How will you run Beampipe?");
+    print_step(step, total_steps, "How will you run Beampipe?");
+    step += 1;
     let runtime = resolve_runtime(&opts, compose_exists)?;
     if runtime == RuntimeKind::Docker && !compose_exists {
         bail!(
@@ -190,7 +197,8 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         RuntimeKind::Host => "Host binary: beampipe start on this machine.",
     });
 
-    print_step(2, 4, "PostgreSQL");
+    print_step(step, total_steps, "PostgreSQL");
+    step += 1;
     let mut postgres = resolve_postgres(&opts, compose_exists)?;
     if runtime == RuntimeKind::Docker && postgres == PostgresKind::Existing {
         print_hint("Docker runtime uses the Compose postgres service.");
@@ -213,29 +221,31 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     }
 
     let prepare_docker = runtime == RuntimeKind::Docker;
-    print_step(3, 4, "Dashboard");
-    if opts.dashboard && !prepare_docker {
-        println!("--dashboard requires --runtime docker; skipped.");
-    } else if !prepare_docker {
-        print_hint("Host runtime: Dash is Docker-only; skipped.");
-    }
+    preflight_after_choices(&opts, runtime, postgres)?;
+
     let mut dash_dir = None;
-    if resolve_prepare_dashboard(&opts, prepare_docker)? {
-        match prepare_dashboard(&root, &opts, &compose_network_name(&root)) {
-            Ok(prepared) => {
-                println!(
-                    "Prepared Beampipe Dash at {} (not started).",
-                    prepared.display()
-                );
-                dash_dir = Some(prepared);
-            }
-            Err(error) => {
-                println!("Dash preparation skipped: {error}");
+    if decide_dashboard(&opts, prepare_docker) != Some(false) {
+        print_step(step, total_steps, "Dashboard");
+        step += 1;
+        if resolve_prepare_dashboard(&opts, prepare_docker)? {
+            match prepare_dashboard(&root, &opts, &compose_network_name(&root)) {
+                Ok(prepared) => {
+                    println!(
+                        "Prepared Beampipe Dash at {} (not started).",
+                        prepared.display()
+                    );
+                    dash_dir = Some(prepared);
+                }
+                Err(error) => {
+                    println!("Dash preparation skipped: {error}");
+                }
             }
         }
+    } else if opts.dashboard && !prepare_docker {
+        println!("--dashboard requires --runtime docker; skipped.");
     }
 
-    print_step(4, 4, "Files");
+    print_step(step, total_steps, "Files");
     if !env_path.exists() {
         seed_env_file(&root, &env_path)?;
     } else if !opts.yes {
@@ -517,6 +527,102 @@ fn require_docker_compose() -> Result<()> {
     }
 }
 
+fn setup_step_total(opts: &SetupOptions, docker: bool) -> usize {
+    if decide_dashboard(opts, docker) == Some(false) {
+        3
+    } else {
+        4
+    }
+}
+
+fn port_in_use(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+fn require_bind_ports_free(ports: &[(u16, &str)]) -> Result<()> {
+    let mut busy = Vec::new();
+    for (port, name) in ports {
+        if port_in_use(*port) {
+            busy.push(format!("{name} (127.0.0.1:{port})"));
+        }
+    }
+    if !busy.is_empty() {
+        bail!(
+            "bind ports already in use: {}. Stop the other process or pass --no-start.",
+            busy.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn preflight_before_materialize(opts: &SetupOptions) -> Result<()> {
+    match decide_runtime(opts)? {
+        Some(RuntimeKind::Docker) => {
+            require_docker_compose()?;
+            if opts.start {
+                require_bind_ports_free(&[(5432, "PostgreSQL"), (8080, "API"), (9090, "metrics")])?;
+            }
+        }
+        Some(RuntimeKind::Host) if opts.start => {
+            let mut ports = vec![(8080, "API")];
+            if matches!(opts.postgres.as_deref(), Some("compose")) {
+                ports.insert(0, (5432, "PostgreSQL"));
+            }
+            require_bind_ports_free(&ports)?;
+        }
+        None if opts.start => {
+            require_bind_ports_free(&[(8080, "API")])?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn preflight_after_choices(
+    opts: &SetupOptions,
+    runtime: RuntimeKind,
+    postgres: PostgresKind,
+) -> Result<()> {
+    if runtime == RuntimeKind::Docker {
+        require_docker_compose()?;
+    }
+    if !opts.start {
+        return Ok(());
+    }
+    let mut ports = Vec::new();
+    if postgres == PostgresKind::Compose {
+        ports.push((5432, "PostgreSQL"));
+    }
+    ports.push((8080, "API"));
+    if runtime == RuntimeKind::Docker {
+        ports.push((9090, "metrics"));
+    }
+    require_bind_ports_free(&ports)
+}
+
+fn host_start_command(root: &Path) -> String {
+    format!("  cd {} && beampipe start", root.display())
+}
+
+fn login_snippet_lines(username: &str) -> Vec<String> {
+    vec![
+        format!("  export ADMIN_USER={username}"),
+        "  export ADMIN_PASSWORD=\"${ADMIN_PASSWORD:?set to the password setup printed}\"".into(),
+        "  curl -fsS -X POST http://127.0.0.1:8080/api/v2/login \\".into(),
+        "    -H 'Content-Type: application/json' \\".into(),
+        "    -d \"{\\\"username\\\":\\\"${ADMIN_USER}\\\",\\\"password\\\":\\\"${ADMIN_PASSWORD}\\\"}\""
+            .into(),
+    ]
+}
+
+fn print_login_snippet(username: &str) {
+    println!("Login once the API is up:");
+    for line in login_snippet_lines(username) {
+        println!("{line}");
+    }
+}
+
 fn compose_cmd(root: &Path, args: &[&str]) -> Result<()> {
     println!("  docker compose {}", args.join(" "));
     let status = Command::new("docker")
@@ -551,7 +657,7 @@ fn compose_up_postgres(root: &Path) -> Result<()> {
 }
 
 fn compose_up_stack(root: &Path) -> Result<()> {
-    compose_cmd(root, &["up", "-d", "api", "scheduler", "worker"])
+    compose_cmd(root, &["up", "-d", "--wait", "api", "scheduler", "worker"])
 }
 
 fn check_api_health() {
@@ -576,8 +682,8 @@ fn finish_start(root: &Path, runtime_docker: bool, opts: &SetupOptions) -> Resul
         return Ok(());
     }
     if opts.yes {
-        println!("PostgreSQL is up. Start the host process with:");
-        println!("  beampipe start");
+        println!("The API is not up yet. PostgreSQL is ready. Start the host process with:");
+        println!("{}", host_start_command(root));
         return Ok(());
     }
     if prompt_yes_no("Start beampipe now?", true)? {
@@ -591,8 +697,8 @@ fn finish_start(root: &Path, runtime_docker: bool, opts: &SetupOptions) -> Resul
             bail!("beampipe start failed");
         }
     } else {
-        println!("Start the host process with:");
-        println!("  beampipe start");
+        println!("The API is not up yet. Start the host process with:");
+        println!("{}", host_start_command(root));
     }
     Ok(())
 }
@@ -1046,7 +1152,7 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
         )
     } else {
         let username = prompt_default("Admin username", "admin")?;
-        let password = rpassword::prompt_password("Admin password: ")?;
+        let password = rpassword::prompt_password("Admin password (12+ characters): ")?;
         let email = prompt_default("Admin email", "admin@example.test")?;
         (username, password, email)
     };
@@ -1061,7 +1167,11 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
         println!("Created admin user '{username}'.");
     } else {
         println!("Admin user '{username}' already exists; skipped.");
+        println!(
+            "The password is not stored in .env. Use the value setup printed when this user was created."
+        );
     }
+    print_login_snippet(&username);
     Ok(())
 }
 
@@ -1194,6 +1304,59 @@ mod tests {
             format_step(1, 4, "How will you run Beampipe?"),
             "== 1/4  How will you run Beampipe? =="
         );
+    }
+
+    #[test]
+    fn setup_step_total_skips_dashboard_when_it_cannot_apply() {
+        let yes_docker = SetupOptions {
+            yes: true,
+            runtime: Some("docker".into()),
+            ..Default::default()
+        };
+        assert_eq!(setup_step_total(&yes_docker, true), 3);
+
+        let host = SetupOptions {
+            yes: true,
+            runtime: Some("host".into()),
+            ..Default::default()
+        };
+        assert_eq!(setup_step_total(&host, false), 3);
+
+        let with_dash = SetupOptions {
+            yes: true,
+            dashboard: true,
+            ..Default::default()
+        };
+        assert_eq!(setup_step_total(&with_dash, true), 4);
+
+        let interactive = SetupOptions::default();
+        assert_eq!(setup_step_total(&interactive, true), 4);
+    }
+
+    #[test]
+    fn host_start_command_includes_cd_and_start() {
+        let command = host_start_command(Path::new("/home/op/beampipe"));
+        assert_eq!(command, "  cd /home/op/beampipe && beampipe start");
+    }
+
+    #[test]
+    fn login_snippet_reads_password_from_the_environment() {
+        let joined = login_snippet_lines("admin").join("\n");
+        assert!(joined.contains("export ADMIN_USER=admin"));
+        assert!(joined.contains("ADMIN_PASSWORD:?set to the password setup printed"));
+        assert!(joined.contains("/api/v2/login"));
+        assert!(!joined.contains("replace-this-local-password"));
+    }
+
+    #[test]
+    fn require_bind_ports_free_names_the_busy_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let error = require_bind_ports_free(&[(port, "API")]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("API"));
+        assert!(message.contains(&port.to_string()));
+        assert!(message.contains("--no-start"));
     }
 
     #[test]
