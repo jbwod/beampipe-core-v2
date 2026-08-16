@@ -38,20 +38,29 @@ make docs-build
 
 ## Cut a release
 
-Tag a semver version that matches `[workspace.package] version` in `Cargo.toml`. Pushing `v0.1.0` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which publishes:
+Bump these together so Compose pull and setup-created `.env` stay on the same image:
+
+- `[workspace.package] version` in [`Cargo.toml`](../Cargo.toml)
+- `BEAMPIPE_VERSION` in [`.env.example`](../.env.example), [`.env.template`](../.env.template), and [`deploy/operator/.env.example`](../deploy/operator/.env.example)
+- the `${BEAMPIPE_VERSION:-0.1.0}` default in [`docker-compose.yml`](../docker-compose.yml), [`deploy/operator/docker-compose.yml`](../deploy/operator/docker-compose.yml), and the header comment in [`deploy/setup-docker.sh`](../deploy/setup-docker.sh)
+- the `0.1.0` fallback in [`crates/beampipe-cli/src/setup.rs`](../crates/beampipe-cli/src/setup.rs) (`default_env_skeleton` / `ensure_beampipe_version`)
+
+Tag a matching semver. Pushing `v0.1.0` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml). Rust CI must pass before binaries or the container publish. The GitHub Release is created only when every binary matrix leg succeeds. The container job only needs CI, so GHCR can publish even when a host-archive leg fails:
 
 - `beampipe-x86_64-unknown-linux-gnu.tar.gz`
 - `beampipe-aarch64-unknown-linux-gnu.tar.gz`
 - `beampipe-aarch64-apple-darwin.tar.gz`
+- `beampipe-x86_64-apple-darwin.tar.gz`
 - `SHA256SUMS`
-- `ghcr.io/jbwod/beampipe-core-v2:0.1.0` (also `:0.1` and `:latest`)
+- `install.sh`
+- `ghcr.io/jbwod/beampipe-core-v2:0.1.0` (also `:0.1` and `:latest`; `linux/amd64` and `linux/arm64`)
 
 ```bash
 git tag -a v0.1.0 -m "Beampipe 0.1.0"
 git push origin v0.1.0
 ```
 
-After the first container publish, set the GHCR package visibility to public so Compose users can pull without a GitHub token. Bump `BEAMPIPE_IMAGE` in [`.env.example`](../.env.example) and the default in [`docker-compose.yml`](../docker-compose.yml) when the workspace version changes.
+The first GHCR package is private. The release job tries to set it public and ignores failure. Confirm visibility once so `install.sh` and Compose users can pull without a GitHub token. `beampipe setup --runtime docker` does not compile from source when the pull fails. A git checkout can still use `./deploy/setup-docker.sh` which falls back to a local build.
 
 ## Preview
 

@@ -16,21 +16,24 @@
 
 ## Bootstrap
 
-From the repository root (where `docker-compose.yml` lives). `--yes` requires `--runtime docker` or `--runtime host` (`--docker` / `--skip-docker` are aliases). Setup never starts containers; it prints one recipe. PostgreSQL is either the Compose `postgres` service or an existing URL (`--postgres compose|existing`). The Compose service is line 1 of the recipe when you chose it (default when `docker-compose.yml` exists).
+Prefer the installer (no clone):
 
 ```bash
-# Docker path (no host Rust)
-./deploy/setup-docker.sh --yes --skip-admin --skip-upload
-
-# Host path
-beampipe setup --yes --runtime host --skip-admin --skip-upload
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-If Compose Postgres is down, migrate / admin / upload / doctor are skipped on **both** paths and the recipe starts with `docker compose up -d postgres`. `--postgres existing` uses `DATABASE_URL` and fails if that URL is down.
+`beampipe setup` writes an operator directory (`--directory`, default `~/beampipe` when cwd has no `docker-compose.yml`) and **starts** Postgres and the stack. `--yes` requires `--runtime docker` or `--runtime host` (`--docker` / `--skip-docker` are aliases). Interactive default is Docker. `--no-start` writes files and prints a recipe only. `--yes` without `--admin-password` generates a password and prints it once.
 
-Setup does not create a deployment profile. Install one later with `beampipe profile add`. Dash is docker-only and opt-in (`--dashboard`). `./deploy/setup-docker.sh` pulls the published image and runs setup; it does not `compose up`. Set `BEAMPIPE_BUILD=1` to compile this checkout instead.
+```bash
+beampipe setup --directory ~/beampipe --yes --runtime docker
+beampipe setup --no-start --yes --runtime host
+```
 
-`beampipe init --directory operator-local` is a compact native footnote. That directory has no Compose file; use `--runtime host --postgres existing`. `start` runs a compact API plus worker.
+PostgreSQL is the Compose `postgres` service (default) or an existing URL (`--postgres existing`). Docker runtime always uses Compose Postgres. If `--no-start` and Postgres is down, migrate / admin / upload / doctor are skipped and the recipe starts with `docker compose up -d postgres`.
+
+Setup does not create a deployment profile. Install one later with `beampipe profile add`. Dash is docker-only and opt-in (`--dashboard`). `./deploy/setup-docker.sh` is the checkout developer path and passes `--no-start`. Set `BEAMPIPE_BUILD=1` to compile this checkout instead.
+
+`beampipe init --directory` writes the same pull-only Compose file, sample project, and SSH dirs. Then run `beampipe setup --directory ...`. `start` runs a compact API plus worker.
 
 ## Inspect
 

@@ -35,31 +35,19 @@ flowchart LR
 
 ## Docker Compose: separated roles
 
-The repository Compose file is the recommended single-host starting point.
+The installer writes a pull-only Compose file to `~/beampipe` and starts the stack. The repository Compose file is for a git checkout (local `build:` fallback and observability profiles).
 Run every command against the Docker engine that should own Beampipe. This
 matters on workstations where Docker Desktop and the host Docker engine are
 both present.
 
 ```bash
 docker context show
-git clone https://github.com/jbwod/beampipe-core-v2.git
-cd beampipe-core-v2
-
-# Pulls the published image and prints a recipe; does not start containers.
-./deploy/setup-docker.sh --yes --skip-admin --skip-upload
-
-docker compose up -d postgres
-docker compose run --rm api migrate
-docker compose run --rm api admin create-user \
-  --username admin \
-  --email admin@example.test \
-  --password 'replace-this-local-password' \
-  --superuser
-docker compose run --rm api project add -f config/wallaby_hires.v2.yaml
-docker compose up -d api scheduler worker
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker
 ```
 
-Host binary path: `beampipe setup --yes --runtime host --skip-admin --skip-upload`, then the printed host recipe (`docker compose up -d postgres` then `beampipe migrate` … `beampipe start`). Slurm keys stay under `deploy/ssh/credentials/<slot>/`; use `--acl` so uid 10001 can read them. See [deploy/ssh/README.md](../../deploy/ssh/README.md).
+Host binary path: `install.sh | sh -s -- --yes --runtime host`, then `beampipe start` from `~/beampipe`. Slurm keys stay under `deploy/ssh/credentials/<slot>/`; use `--acl` so uid 10001 can read them. See [deploy/ssh/README.md](../../deploy/ssh/README.md).
+
+A checkout can still use `./deploy/setup-docker.sh --yes --skip-admin --skip-upload` (`--no-start`) and the printed recipe.
 
 When a specific engine is required, keep it explicit for the whole lifecycle:
 

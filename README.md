@@ -37,26 +37,19 @@ The key invariant is simple: persist deterministic intent before external I/O, r
 
 ## Quick start
 
-### Docker Compose
+```bash
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
+```
+
+That installs `beampipe` to `~/.local/bin`, writes `~/beampipe`, and starts Postgres plus the stack. Interactive setup asks Docker (default) or host. Non-interactive:
 
 ```bash
-git clone https://github.com/jbwod/beampipe-core-v2.git
-cd beampipe-core-v2
-
-test -e .env || cp .env.example .env
-
-docker compose up -d postgres
-docker compose run --rm api migrate
-docker compose run --rm api admin create-user \
-  --username admin \
-  --email admin@example.test \
-  --password 'replace-this-local-password' \
-  --superuser
-docker compose up -d api scheduler worker
-
-curl -fsS http://127.0.0.1:8080/api/v2/health
-docker compose ps
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker
 ```
+
+The API is at `http://127.0.0.1:8080/api/v2`. Files live in `~/beampipe`. You do not need to clone this repository. Linux host archives need glibc and OpenSSL 3 (Ubuntu 22.04 / Debian bookworm or newer).
+
+`--no-start` writes files and prints a recipe without starting anything. A source build is only for qualifying a commit and needs Cargo 1.78 or newer.
 
 Use an override to bind API, metrics, and PostgreSQL to loopback on a workstation.
 When Dash is also containerized, attach it to the Core Compose network and use
@@ -66,27 +59,7 @@ See [deployment topologies](https://beampipe-core.readthedocs.io/getting-started
 for secure bindings, Docker contexts, role configuration, system services,
 container platforms, REST/DIM, and Slurm.
 
-### Native binary
-
-Prefer a [released archive](https://github.com/jbwod/beampipe-core-v2/releases). Verify `SHA256SUMS`, then put `beampipe` on `PATH`. A source build is only for qualifying a commit.
-
-```bash
-# Docker (no host Rust): pulls ghcr.io/jbwod/beampipe-core-v2:0.1.0, prints a recipe
-./deploy/setup-docker.sh --yes --skip-admin --skip-upload
-
-# Host binary from a release (example: Linux x86_64)
-# VERSION=0.1.0 TARGET=x86_64-unknown-linux-gnu
-# curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/beampipe-${TARGET}.tar.gz"
-
-# Host binary from this checkout
-cargo build --locked --release -p beampipe-cli --bin beampipe
-export PATH="$PWD/target/release:$PATH"
-beampipe setup --yes --runtime host --skip-admin --skip-upload
-```
-
-`--yes` requires `--runtime docker` or `--runtime host`. Setup prints a recipe that starts with `docker compose up -d postgres`. It does not start Postgres or the stack.
-
-The API is at `http://127.0.0.1:8080/api/v2` after you run that recipe. Install a deployment profile with `beampipe profile add` before setting `BEAMPIPE_USE_REAL_BACKENDS=true`.
+Install a deployment profile with `beampipe profile add` before setting `BEAMPIPE_USE_REAL_BACKENDS=true`.
 
 Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-started/) and [first workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/).
 

@@ -26,27 +26,67 @@ hide:
 
 ## Fastest safe start
 
-Run the API, durable job system, and console locally. External execution stays mocked until you explicitly enable real backends. Discovery uses live TAP only after you register and trigger a source.
+Run the API, durable job system, and console locally. External execution stays mocked until you explicitly enable real backends. Discovery uses live TAP only after you register and trigger a source. Build the installer command, then follow the [quick start](getting-started/index.md).
 
-```bash
-# Docker
-./deploy/setup-docker.sh --yes --skip-admin --skip-upload
-# then the printed recipe, starting with:
-docker compose up -d postgres
-
-# Host
-beampipe setup --yes --runtime host --skip-admin --skip-upload
-# then the printed recipe, starting with:
-docker compose up -d postgres
-beampipe start
-```
-
-```bash
-curl -fsS http://127.0.0.1:8080/api/v2/health
-docker compose exec api beampipe doctor
-```
-
-[Open the complete quick start](getting-started/index.md){ .bp-inline-action }
+<section class="bp-install-builder" id="install-builder" data-bp-install-builder>
+  <form class="bp-install-builder__form" action="#" method="get">
+    <fieldset>
+      <legend>install.sh</legend>
+      <div class="bp-install-builder__grid">
+        <div class="bp-install-builder__field">
+          <label for="bp-install-runtime">Runtime</label>
+          <select id="bp-install-runtime" name="runtime">
+            <option value="docker" selected>Docker Compose</option>
+            <option value="host">Host binary</option>
+          </select>
+        </div>
+        <div class="bp-install-builder__field">
+          <label for="bp-install-directory">Directory</label>
+          <input id="bp-install-directory" name="directory" type="text" spellcheck="false" placeholder="~/beampipe" autocomplete="off">
+        </div>
+        <div class="bp-install-builder__checks">
+          <label>
+            <input id="bp-install-yes" name="yes" type="checkbox" checked>
+            Non-interactive (<code>--yes</code>)
+          </label>
+          <label>
+            <input id="bp-install-start" name="start" type="checkbox" checked>
+            Start Postgres and the stack
+          </label>
+          <label>
+            <input id="bp-install-dashboard" name="dashboard" type="checkbox">
+            Prepare Dash (Docker only)
+          </label>
+        </div>
+        <div class="bp-install-builder__field">
+          <label for="bp-install-admin-user">Admin username</label>
+          <input id="bp-install-admin-user" name="admin-user" type="text" spellcheck="false" placeholder="admin" autocomplete="username">
+        </div>
+        <div class="bp-install-builder__field">
+          <label for="bp-install-admin-email">Admin email</label>
+          <input id="bp-install-admin-email" name="admin-email" type="email" spellcheck="false" placeholder="admin@example.test" autocomplete="email">
+        </div>
+        <div class="bp-install-builder__field">
+          <label for="bp-install-admin-password">Admin password</label>
+          <input id="bp-install-admin-password" name="admin-password" type="password" placeholder="generated if empty" autocomplete="new-password">
+        </div>
+      </div>
+      <p class="bp-install-builder__note">Leave the password empty to generate one at setup. A typed password is included in the command and will sit in shell history.</p>
+    </fieldset>
+  </form>
+  <div class="bp-install-builder__output">
+    <div class="bp-install-builder__command-row">
+      <pre><code id="bp-install-command" aria-live="polite">curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker</code></pre>
+      <button type="button" class="terminal-button" id="bp-install-copy">Copy</button>
+    </div>
+    <p class="bp-install-builder__hint">API at <code>http://127.0.0.1:8080/api/v2</code>. Files in <code>~/beampipe</code> unless you set a directory. Dash stays opt-in.</p>
+    <p class="bp-install-builder__status" id="bp-install-status" aria-live="polite"></p>
+  </div>
+  <noscript>
+    <pre><code>curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
+curl -fsS http://127.0.0.1:8080/api/v2/health</code></pre>
+  </noscript>
+</section>
 
 ## How work moves
 

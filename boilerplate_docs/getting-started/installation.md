@@ -1,51 +1,53 @@
 # Install and configure
 
-Beampipe ships as one Rust binary. Prefer a released binary on `PATH`; use a source build when qualifying a commit. PostgreSQL is always required.
+Beampipe ships as one Rust binary plus a published container image. Prefer the installer; use a source build when qualifying a commit. PostgreSQL is always required.
 
-## Install the binary
+## Install
 
-=== "Release"
+=== "Installer"
 
-    Download the archive for your platform from the [GitHub Releases](https://github.com/jbwod/beampipe-core-v2/releases) page, verify it against `SHA256SUMS`, and place `beampipe` on `PATH`.
+    No git clone. The script installs `beampipe` to `~/.local/bin`, writes `~/beampipe`, and starts the stack. Linux host archives need glibc and OpenSSL 3 (Ubuntu 22.04 / Debian bookworm or newer). Configure flags on the [docs home page](../index.md#install-builder).
+
+    ```bash
+    curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
+    # non-interactive:
+    # curl -fsSL .../install.sh | sh -s -- --yes --runtime docker
+    curl -fsS http://127.0.0.1:8080/api/v2/health
+    ```
+
+    `beampipe setup --directory ~/beampipe --no-start` writes files and prints a recipe only.
+
+=== "Release archive"
+
+    Download the archive for your platform from the [GitHub Releases](https://github.com/jbwod/beampipe-core-v2/releases) page, verify it against `SHA256SUMS`, and place `beampipe` on `PATH`. Then run setup; it writes `~/beampipe` when the current directory has no `docker-compose.yml`.
 
     ```bash
     VERSION=0.1.0
-    TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu / aarch64-apple-darwin
+    TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu / aarch64-apple-darwin / x86_64-apple-darwin
     curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/beampipe-${TARGET}.tar.gz"
     curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/SHA256SUMS"
     sha256sum -c SHA256SUMS --ignore-missing
+    # macOS (aarch64-apple-darwin / x86_64-apple-darwin):
+    # grep "beampipe-${TARGET}.tar.gz" SHA256SUMS | shasum -a 256 -c
     tar -xzf "beampipe-${TARGET}.tar.gz"
-    sudo install -m 0755 "beampipe-${TARGET}/beampipe" /usr/local/bin/beampipe
-    beampipe --version
-    beampipe setup --yes --runtime host --skip-admin --skip-upload
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "beampipe-${TARGET}/beampipe" "$HOME/.local/bin/beampipe"
+    beampipe setup --yes --runtime docker
     ```
 
 === "Build from source"
+
+    Source builds need Cargo 1.78 or newer (lockfile v4). Older Cargo cannot parse `Cargo.lock`. This path is for qualifying a commit.
 
     ```bash
     git clone https://github.com/jbwod/beampipe-core-v2.git
     cd beampipe-core-v2
     cargo build --locked --release -p beampipe-cli --bin beampipe
     export PATH="$PWD/target/release:$PATH"
-    beampipe setup --yes --runtime host --skip-admin --skip-upload
+    beampipe setup --yes --runtime host --no-start
     ```
 
-=== "Docker Compose"
-
-    Compose pulls the published `ghcr.io/jbwod/beampipe-core-v2` image and assigns it API, scheduler, and worker roles. Set `BEAMPIPE_BUILD=1` only when you need to compile this checkout.
-
-    ```bash
-    ./deploy/setup-docker.sh --yes --skip-admin --skip-upload
-    docker compose up -d postgres
-    docker compose run --rm api migrate
-    docker compose run --rm api admin create-user \
-      --username admin \
-      --password 'replace-this-local-password' \
-      --email admin@example.test \
-      --superuser
-    docker compose run --rm api project add -f config/wallaby_hires.v2.yaml
-    docker compose up -d api scheduler worker
-    ```
+    Developers who already have a checkout can run `./deploy/setup-docker.sh --yes --skip-admin --skip-upload` (passes `--no-start`). Set `BEAMPIPE_BUILD=1` to compile this checkout instead of pulling GHCR.
 
 ## Configuration precedence
 

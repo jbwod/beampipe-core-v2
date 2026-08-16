@@ -1902,6 +1902,114 @@ body:has(#redoc-frame) .md-main {
   }
 }
 
+.bp-install-builder {
+  margin: 1.25rem 0 1.75rem;
+  padding: 0.9rem 1rem 1rem;
+  border: 1px solid var(--bp-border);
+  background: #000;
+}
+
+.md-typeset .bp-install-builder legend {
+  padding: 0 0.35rem;
+  color: var(--bp-code-name);
+  font-size: 0.72rem;
+}
+
+.md-typeset .bp-install-builder fieldset {
+  margin: 0;
+  padding: 0.35rem 0 0;
+  border: 0;
+}
+
+.bp-install-builder__grid {
+  display: grid;
+  gap: 0.75rem 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.bp-install-builder__checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  grid-column: 1 / -1;
+}
+
+.md-typeset .bp-install-builder label {
+  display: block;
+  margin: 0;
+  color: var(--bp-highlight);
+  font-size: 0.74rem;
+}
+
+.md-typeset .bp-install-builder__checks label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.md-typeset .bp-install-builder input[type="text"],
+.md-typeset .bp-install-builder input[type="email"],
+.md-typeset .bp-install-builder input[type="password"],
+.md-typeset .bp-install-builder select {
+  width: 100%;
+  margin-top: 0.28rem;
+  padding: 0.28rem 0.4rem;
+  border: 1px solid var(--bp-border);
+  color: var(--bp-text);
+  background: #050505;
+  font: inherit;
+}
+
+.md-typeset .bp-install-builder input:focus,
+.md-typeset .bp-install-builder select:focus {
+  outline: 1px solid var(--bp-code-name);
+}
+
+.md-typeset .bp-install-builder input:disabled {
+  color: var(--bp-subtle);
+}
+
+.md-typeset .bp-install-builder__note,
+.md-typeset .bp-install-builder__hint,
+.md-typeset .bp-install-builder__status {
+  margin: 0.7rem 0 0;
+  color: var(--bp-muted);
+  font-size: 0.72rem;
+}
+
+.md-typeset .bp-install-builder__status {
+  color: var(--bp-code-string);
+  min-height: 1.1em;
+}
+
+.bp-install-builder__command-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-top: 0.85rem;
+}
+
+.md-typeset .bp-install-builder pre {
+  flex: 1;
+  margin: 0;
+  overflow-x: auto;
+}
+
+.md-typeset .bp-install-builder .terminal-button {
+  flex: 0 0 auto;
+  min-width: 6.5rem;
+}
+
+@media (max-width: 47em) {
+  .bp-install-builder__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bp-install-builder__command-row {
+    flex-direction: column;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1919,7 +2027,8 @@ body:has(#redoc-frame) .md-main {
   .md-footer,
   .bp-starfield,
   .bp-reading-progress,
-  .bp-segmented {
+  .bp-segmented,
+  .bp-install-builder .terminal-button {
     display: none !important;
   }
 

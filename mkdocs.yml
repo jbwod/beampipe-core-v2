@@ -100,6 +100,7 @@ extra_css:
 
 extra_javascript:
   - javascripts/terminal-ui.js
+  - javascripts/install-builder.js
   - javascripts/redoc-init.js
 
 repo_name: jbwod/beampipe-core-v2
