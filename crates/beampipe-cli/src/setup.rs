@@ -2068,7 +2068,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_recipe_starts_with_postgres_and_does_not_assume_dash() {
+    fn docker_recipe_uses_the_beampipe_lifecycle_facade() {
         let lines = next_steps_lines(&SetupNextSteps {
             runtime_docker: true,
             compose_postgres: true,
@@ -2078,11 +2078,11 @@ mod tests {
             ..Default::default()
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("docker compose up -d postgres"));
-        assert!(joined.contains("docker compose run --rm api migrate"));
-        assert!(joined
-            .contains("docker compose run --rm api project add -f config/wallaby_hires.v2.yaml"));
-        assert!(joined.contains("docker compose up -d api scheduler worker"));
+        assert!(joined.contains("beampipe start"));
+        assert!(joined.contains("beampipe migrate"));
+        assert!(joined.contains("beampipe project add -f config/wallaby_hires.v2.yaml"));
+        assert!(!joined.contains("docker compose up"));
+        assert!(!joined.contains("docker compose run"));
         assert!(!joined.contains("profile add"));
         assert!(!joined.contains("compose.beampipe-local.yml"));
         assert!(!joined.contains("--deployment"));

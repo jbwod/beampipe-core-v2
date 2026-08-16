@@ -467,6 +467,7 @@ mod tests {
             .contains("ssh_credential"));
     }
 
+    #[test]
     fn profile_schema_rejects_unknown_fields() {
         let error = serde_json::from_value::<DeploymentProfile>(json!({
             "name": "rest",
