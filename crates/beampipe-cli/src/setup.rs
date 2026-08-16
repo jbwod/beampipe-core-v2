@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     doctor,
     installation::{self, InstallationState, RuntimeMode as RuntimeKind},
-    materialize,
+    materialize, runtime,
 };
 
 const DEFAULT_CASDA_TAP_URL: &str = "https://casda.csiro.au/casda_vo_tools/tap/sync";
@@ -736,10 +736,9 @@ fn print_login_snippet(username: &str) {
 
 fn compose_cmd(root: &Path, args: &[&str]) -> Result<()> {
     println!("  docker compose {}", args.join(" "));
-    let status = Command::new("docker")
-        .arg("compose")
+    let context = installation::InstallationContext::from_home(root.to_path_buf())?;
+    let status = runtime::compose_command(&context)?
         .args(args)
-        .current_dir(root)
         .status()
         .context("docker compose")?;
     if !status.success() {
@@ -750,9 +749,9 @@ fn compose_cmd(root: &Path, args: &[&str]) -> Result<()> {
 
 fn compose_pull_api(root: &Path) -> Result<()> {
     println!("  docker compose pull api");
-    let status = Command::new("docker")
-        .args(["compose", "pull", "api"])
-        .current_dir(root)
+    let context = installation::InstallationContext::from_home(root.to_path_buf())?;
+    let status = runtime::compose_command(&context)?
+        .args(["pull", "api"])
         .status()
         .context("docker compose pull")?;
     if !status.success() {
@@ -765,10 +764,6 @@ fn compose_pull_api(root: &Path) -> Result<()> {
 
 fn compose_up_postgres(root: &Path) -> Result<()> {
     compose_cmd(root, &["up", "-d", "--wait", "postgres"])
-}
-
-fn compose_up_stack(root: &Path) -> Result<()> {
-    compose_cmd(root, &["up", "-d", "--wait", "api", "scheduler", "worker"])
 }
 
 fn check_api_health() {
@@ -787,7 +782,8 @@ fn check_api_health() {
 
 fn finish_start(root: &Path, runtime_docker: bool, opts: &SetupOptions) -> Result<()> {
     if runtime_docker {
-        compose_up_stack(root)?;
+        let context = installation::InstallationContext::from_home(root.to_path_buf())?;
+        runtime::start(&context)?;
         check_api_health();
         println!("Beampipe is running from {}.", root.display());
         return Ok(());

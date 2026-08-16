@@ -5,6 +5,7 @@ mod init;
 mod installation;
 mod materialize;
 mod operator;
+mod runtime;
 mod setup;
 mod slurm_credentials;
 mod timeline;
@@ -37,10 +38,25 @@ enum CliCommand {
         #[arg(long)]
         production: bool,
     },
-    /// Start the API and embedded worker.
+    /// Start the configured installation runtime.
     Start {
+        /// Host mode only: run the embedded Postgres job worker in the API process.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         worker: bool,
+    },
+    /// Stop a configured Docker runtime without deleting data.
+    Stop,
+    /// Recreate and restart a configured Docker runtime.
+    Restart,
+    /// Stream logs from the configured Docker runtime.
+    Logs {
+        /// Limit output to postgres, api, scheduler, or worker.
+        #[arg(long)]
+        service: Option<String>,
+        #[arg(short, long)]
+        follow: bool,
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
     },
     /// Run API, optionally with the embedded Postgres job worker.
     Serve {
@@ -180,7 +196,7 @@ enum CliCommand {
         #[command(subcommand)]
         command: GraphCommand,
     },
-    /// Queue and backlog summary.
+    /// Installation, runtime, and queue status.
     Status,
     /// Open the live terminal operator console.
     Console {
@@ -527,9 +543,11 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::Init { .. } => cli.home.as_deref(),
         _ => cli.home.as_deref(),
     };
-    if !matches!(&cli.command, CliCommand::Init { .. }) {
-        installation::activate_if_selected(selected_home)?;
-    }
+    let installation_context = if !matches!(&cli.command, CliCommand::Init { .. }) {
+        installation::activate_if_selected(selected_home)?
+    } else {
+        None
+    };
     match cli.command {
         CliCommand::Init {
             directory,
@@ -543,17 +561,37 @@ async fn main() -> anyhow::Result<()> {
             })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        CliCommand::Serve { worker } | CliCommand::Start { worker } => {
-            std::env::set_var(
-                "BEAMPIPE_PROCESS_ROLE",
-                if worker { "scheduler" } else { "api" },
-            );
-            let settings = Settings::from_env()?;
-            let pool = beampipe_db::connect(&settings.database_url).await?;
-            if settings.migrate_on_serve {
-                beampipe_db::migrate(&pool).await?;
+        CliCommand::Start { worker } => {
+            let docker = installation_context
+                .as_ref()
+                .and_then(|context| context.state.as_ref())
+                .is_some_and(|state| state.runtime == installation::RuntimeMode::Docker);
+            if docker {
+                runtime::start(installation_context.as_ref().expect("checked above"))?;
+            } else {
+                serve_host(worker).await?;
             }
-            beampipe_api::serve(settings, pool, worker).await?;
+        }
+        CliCommand::Serve { worker } => {
+            serve_host(worker).await?;
+        }
+        CliCommand::Stop => {
+            runtime::stop(require_installation(installation_context.as_ref())?)?;
+        }
+        CliCommand::Restart => {
+            runtime::restart(require_installation(installation_context.as_ref())?)?;
+        }
+        CliCommand::Logs {
+            service,
+            follow,
+            tail,
+        } => {
+            runtime::logs(
+                require_installation(installation_context.as_ref())?,
+                service.as_deref(),
+                follow,
+                tail,
+            )?;
         }
         CliCommand::Worker { command: None } => {
             std::env::set_var("BEAMPIPE_PROCESS_ROLE", "worker");
@@ -731,10 +769,31 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::Execution { command } => operator::run_execution_command(command).await?,
         CliCommand::Graph { command } => operator::run_graph_command(command).await?,
         CliCommand::Status => {
-            let settings = Settings::from_env()?;
-            let pool = beampipe_db::connect(&settings.database_url).await?;
-            let summary = doctor::run_status(&pool).await;
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+            let context = match installation_context.as_ref() {
+                Some(context) => context.clone(),
+                None => installation::InstallationContext::resolve(cli.home.as_deref())?,
+            };
+            let runtime_status = runtime::status(&context);
+            let queue = if let Ok(settings) = Settings::from_env() {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    beampipe_db::connect(&settings.database_url),
+                )
+                .await
+                {
+                    Ok(Ok(pool)) => Some(doctor::run_status(&pool).await),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "installation": runtime_status,
+                    "queue": queue,
+                }))?
+            );
         }
         CliCommand::Console { refresh_ms } => console::run(refresh_ms).await?,
         CliCommand::Timeline { command } => {
@@ -902,6 +961,30 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     }
+    Ok(())
+}
+
+fn require_installation(
+    context: Option<&installation::InstallationContext>,
+) -> anyhow::Result<&installation::InstallationContext> {
+    context.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no configured Beampipe installation was found; select one with --home or run `beampipe setup`"
+        )
+    })
+}
+
+async fn serve_host(worker: bool) -> anyhow::Result<()> {
+    std::env::set_var(
+        "BEAMPIPE_PROCESS_ROLE",
+        if worker { "scheduler" } else { "api" },
+    );
+    let settings = Settings::from_env()?;
+    let pool = beampipe_db::connect(&settings.database_url).await?;
+    if settings.migrate_on_serve {
+        beampipe_db::migrate(&pool).await?;
+    }
+    beampipe_api::serve(settings, pool, worker).await?;
     Ok(())
 }
 
