@@ -75,6 +75,8 @@ beampipe scheduler status --profile PROFILE_NAME
 
 Credential commands resolve the active installation's canonical root. They never accept a passphrase on the command line; use a TTY prompt or `--passphrase-file`. `sync` checks the recorded read-only Docker bind and live container readability without copying key material.
 
+After reassigning every profile that references a slot, remove it explicitly with `beampipe slurm credentials remove --slot SLOT --yes`.
+
 ## Guarded actions
 
 ```bash

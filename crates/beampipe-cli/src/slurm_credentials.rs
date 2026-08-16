@@ -341,6 +341,26 @@ pub fn sync(context: &InstallationContext, slot: Option<&str>) -> Result<SyncRes
     })
 }
 
+pub fn remove(slot: &str, dir: Option<&Path>, confirmed: bool) -> Result<()> {
+    validate_slot(slot)?;
+    if !confirmed {
+        bail!(
+            "removing a credential slot requires --yes after deployment profiles have been reassigned"
+        );
+    }
+    let slot_dir = resolve_root(dir).join(slot);
+    let metadata = fs::symlink_metadata(&slot_dir)
+        .with_context(|| format!("inspect {}", slot_dir.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "credential slot is not a managed directory: {}",
+            slot_dir.display()
+        );
+    }
+    fs::remove_dir_all(&slot_dir).with_context(|| format!("remove {}", slot_dir.display()))?;
+    Ok(())
+}
+
 pub fn list_slots(dir: Option<&Path>) -> Result<Vec<String>> {
     let root = resolve_root(dir);
     if !root.is_dir() {

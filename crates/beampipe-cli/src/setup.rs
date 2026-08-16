@@ -30,6 +30,7 @@ pub struct SetupOptions {
     pub jwt_secret: Option<String>,
     pub admin_user: Option<String>,
     pub admin_password: Option<String>,
+    pub admin_password_file: Option<PathBuf>,
     pub admin_email: Option<String>,
     pub project_config: Option<PathBuf>,
     pub profile_config: Option<PathBuf>,
@@ -474,6 +475,11 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     }
 
     if opts.start && postgres == PostgresKind::Compose {
+        if let Some(endpoint) = remote_docker_endpoint() {
+            bail!(
+                "the active Docker context uses remote endpoint {endpoint}; host-side setup cannot seed its private Compose database. Use --postgres existing with a database reachable from both host and containers, or select a local Docker context"
+            );
+        }
         require_docker_compose()?;
         if prepare_docker {
             compose_pull_api(&root)?;
@@ -686,6 +692,17 @@ fn generate_jwt_secret() -> String {
 
 fn generate_database_password() -> String {
     Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string()
+}
+
+fn read_secret_file(path: &Path, label: &str) -> Result<String> {
+    let value = std::fs::read_to_string(path)
+        .with_context(|| format!("read {label} file {}", path.display()))?
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    if value.is_empty() {
+        bail!("{label} file {} is empty", path.display());
+    }
+    Ok(value)
 }
 
 fn select_jwt_secret(
@@ -1214,6 +1231,27 @@ fn docker_context_show() -> Option<String> {
     }
 }
 
+fn remote_docker_endpoint() -> Option<String> {
+    let output = std::process::Command::new("docker")
+        .args([
+            "context",
+            "inspect",
+            "--format",
+            "{{.Endpoints.docker.Host}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let endpoint = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let remote = endpoint.starts_with("ssh://")
+        || (endpoint.starts_with("tcp://")
+            && !endpoint.contains("127.0.0.1")
+            && !endpoint.contains("localhost"));
+    remote.then_some(endpoint)
+}
+
 fn prepare_docker_env(root: &Path, env_path: &Path) -> Result<Option<String>> {
     if !compose_file_exists(root) {
         bail!("docker-compose.yml not found in {}", root.display());
@@ -1370,11 +1408,20 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
             .clone()
             .filter(|password| !password.is_empty())
         {
-            Some(password) => password,
-            None => {
-                let password = generate_admin_password();
-                println!("Generated admin password (shown once): {password}");
+            Some(password) => {
+                eprintln!(
+                    "warning: --admin-password can be exposed through shell history; prefer --admin-password-file"
+                );
                 password
+            }
+            None => {
+                if let Some(path) = opts.admin_password_file.as_deref() {
+                    read_secret_file(path, "admin password")?
+                } else {
+                    let password = generate_admin_password();
+                    println!("Generated admin password (shown once): {password}");
+                    password
+                }
             }
         }
     } else {
@@ -1599,7 +1646,7 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
         if !steps.admin_ready {
             lines.push("  beampipe admin create-user \\".into());
             lines.push("    --username admin --email admin@example.test \\".into());
-            lines.push("    --password 'replace-this-immediately' --superuser".into());
+            lines.push("    --password-file /path/to/protected/admin-password --superuser".into());
         }
         if !steps.db_applied {
             if let Some(project) = &steps.project_file {
@@ -1622,7 +1669,7 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
         if !steps.admin_ready {
             lines.push("  beampipe admin create-user \\".into());
             lines.push("    --username admin --email admin@example.test \\".into());
-            lines.push("    --password 'replace-this-immediately' --superuser".into());
+            lines.push("    --password-file /path/to/protected/admin-password --superuser".into());
         }
         if !steps.db_applied {
             if let Some(project) = &steps.project_file {

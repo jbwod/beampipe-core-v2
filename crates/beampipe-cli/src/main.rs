@@ -106,6 +106,8 @@ enum CliCommand {
         admin_user: Option<String>,
         #[arg(long)]
         admin_password: Option<String>,
+        #[arg(long, conflicts_with = "admin_password")]
+        admin_password_file: Option<PathBuf>,
         #[arg(long)]
         admin_email: Option<String>,
         #[arg(long)]
@@ -499,6 +501,15 @@ enum SlurmCredentialsCommand {
         #[arg(long)]
         slot: Option<String>,
     },
+    /// Remove a managed credential slot after profiles have been reassigned.
+    Remove {
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -588,8 +599,11 @@ enum AdminCommand {
     CreateUser {
         #[arg(long)]
         username: String,
+        /// Deprecated: use --password-file or the interactive prompt.
+        #[arg(long, conflicts_with = "password_file")]
+        password: Option<String>,
         #[arg(long)]
-        password: String,
+        password_file: Option<PathBuf>,
         #[arg(long)]
         email: String,
         #[arg(long, default_value = "Admin")]
@@ -780,6 +794,7 @@ async fn main() -> anyhow::Result<()> {
             jwt_secret,
             admin_user,
             admin_password,
+            admin_password_file,
             admin_email,
             project_config,
             profile_config,
@@ -817,6 +832,7 @@ async fn main() -> anyhow::Result<()> {
                     jwt_secret,
                     admin_user,
                     admin_password,
+                    admin_password_file,
                     admin_email,
                     project_config,
                     profile_config,
@@ -927,11 +943,13 @@ async fn main() -> anyhow::Result<()> {
                 AdminCommand::CreateUser {
                     username,
                     password,
+                    password_file,
                     email,
                     name,
                     superuser,
                 },
         } => {
+            let password = resolve_cli_password(password, password_file.as_deref())?;
             let settings = Settings::from_env()?;
             let pool = beampipe_db::connect(&settings.database_url).await?;
             beampipe_db::migrate(&pool).await?;
@@ -1042,6 +1060,10 @@ async fn main() -> anyhow::Result<()> {
                 )?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
+            SlurmCredentialsCommand::Remove { slot, dir, yes } => {
+                slurm_credentials::remove(&slot, dir.as_deref(), yes)?;
+                println!("Removed SSH credential slot '{slot}'.");
+            }
         },
         CliCommand::Slurm {
             command:
@@ -1115,6 +1137,31 @@ async fn serve_host(worker: bool) -> anyhow::Result<()> {
     }
     beampipe_api::serve(settings, pool, worker).await?;
     Ok(())
+}
+
+fn resolve_cli_password(
+    inline: Option<String>,
+    password_file: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    let password = if let Some(password) = inline {
+        eprintln!(
+            "warning: --password can be exposed through shell history and process inspection; prefer --password-file"
+        );
+        password
+    } else if let Some(path) = password_file {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("read password file {}", path.display()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_string()
+    } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        rpassword::prompt_password("Admin password: ")?
+    } else {
+        anyhow::bail!("use --password-file when stdin is not a terminal");
+    };
+    if password.is_empty() {
+        anyhow::bail!("admin password is empty");
+    }
+    Ok(password)
 }
 
 async fn slurm_ping(
