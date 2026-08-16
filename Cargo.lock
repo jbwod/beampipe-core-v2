@@ -497,6 +497,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dotenvy",
+ "getrandom 0.3.4",
  "ratatui",
  "redis",
  "rpassword",
@@ -505,10 +506,12 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "sqlx",
+ "ssh-key",
  "tempfile",
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

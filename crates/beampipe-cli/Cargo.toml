@@ -37,6 +37,9 @@ sqlx.workspace = true
 uuid.workspace = true
 redis.workspace = true
 rpassword = "7"
+ssh-key = { workspace = true, features = ["ed25519", "encryption"] }
+zeroize.workspace = true
+getrandom = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

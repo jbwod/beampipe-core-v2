@@ -273,6 +273,24 @@ enum ProfileCommand {
     Add {
         #[arg(short, long)]
         file: PathBuf,
+        /// Assign this non-secret credential slot to a Slurm profile.
+        #[arg(long)]
+        ssh_slot: Option<String>,
+        /// Import an existing host key into the assigned credential slot.
+        #[arg(long, requires = "ssh_slot")]
+        ssh_private_key: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_public_key: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_known_hosts: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_passphrase_file: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_acl: bool,
+        #[arg(long, requires = "ssh_private_key")]
+        accept_host_key: bool,
+        #[arg(long, requires = "ssh_private_key")]
+        force: bool,
     },
     List,
     Validate {
@@ -392,6 +410,8 @@ enum SlurmCredentialsCommand {
         dir: Option<PathBuf>,
         #[arg(long, default_value = "setonix.pawsey.org.au")]
         host: String,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
         #[arg(long)]
         user: Option<String>,
         #[arg(long)]
@@ -406,6 +426,33 @@ enum SlurmCredentialsCommand {
         force: bool,
         #[arg(long)]
         yes: bool,
+        #[arg(long)]
+        accept_host_key: bool,
+    },
+    /// Import an existing host SSH key into a managed credential slot.
+    Import {
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        public_key: Option<PathBuf>,
+        #[arg(long)]
+        known_hosts: Option<PathBuf>,
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
+        #[arg(long)]
+        acl: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        accept_host_key: bool,
     },
     /// List credential slots under the credentials root.
     List {
@@ -427,6 +474,11 @@ enum SlurmCredentialsCommand {
         dir: Option<PathBuf>,
         #[arg(long)]
         profile: Option<String>,
+    },
+    /// Verify the configured bind source and running container readability.
+    Sync {
+        #[arg(long)]
+        slot: Option<String>,
     },
 }
 
@@ -867,6 +919,7 @@ async fn main() -> anyhow::Result<()> {
                 slot,
                 dir,
                 host,
+                port,
                 user,
                 passphrase_file,
                 no_passphrase,
@@ -874,11 +927,13 @@ async fn main() -> anyhow::Result<()> {
                 acl,
                 force,
                 yes,
+                accept_host_key,
             } => {
                 let result = slurm_credentials::init(slurm_credentials::InitOptions {
                     slot,
                     dir,
                     host,
+                    port,
                     user,
                     passphrase_file,
                     no_passphrase,
@@ -887,6 +942,35 @@ async fn main() -> anyhow::Result<()> {
                     force,
                     yes,
                     skip_keyscan: false,
+                    accept_host_key,
+                })?;
+                slurm_credentials::print_init_next_steps(&result);
+            }
+            SlurmCredentialsCommand::Import {
+                slot,
+                dir,
+                private_key,
+                public_key,
+                known_hosts,
+                passphrase_file,
+                host,
+                port,
+                acl,
+                force,
+                accept_host_key,
+            } => {
+                let result = slurm_credentials::import(slurm_credentials::ImportOptions {
+                    slot,
+                    dir,
+                    private_key,
+                    public_key,
+                    known_hosts,
+                    passphrase_file,
+                    host,
+                    port,
+                    acl,
+                    force,
+                    accept_host_key,
                 })?;
                 slurm_credentials::print_init_next_steps(&result);
             }
@@ -912,6 +996,13 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(profile_name) = profile {
                     slurm_ping(None, None, 22, Some(profile_name)).await?;
                 }
+            }
+            SlurmCredentialsCommand::Sync { slot } => {
+                let result = slurm_credentials::sync(
+                    require_installation(installation_context.as_ref())?,
+                    slot.as_deref(),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
             }
         },
         CliCommand::Slurm {

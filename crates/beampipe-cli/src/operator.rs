@@ -139,9 +139,53 @@ async fn mutate_worker(pool: &PgPool, id: Uuid, draining: bool) -> Result<()> {
 pub async fn run_profile_command(command: ProfileCommand) -> Result<()> {
     let (_, pool) = connect().await?;
     match command {
-        ProfileCommand::Add { file } => {
-            let profile = read_profile(&file)?;
+        ProfileCommand::Add {
+            file,
+            ssh_slot,
+            ssh_private_key,
+            ssh_public_key,
+            ssh_known_hosts,
+            ssh_passphrase_file,
+            ssh_acl,
+            accept_host_key,
+            force,
+        } => {
+            let mut profile = read_profile(&file)?;
+            if let Some(slot) = ssh_slot.as_deref() {
+                beampipe_profiles::validate_ssh_credential_name(slot)?;
+                let DeploymentConfig::SlurmRemote(slurm) = &mut profile.deployment else {
+                    bail!("--ssh-slot is only valid for a slurm_remote profile");
+                };
+                slurm.ssh_credential = Some(slot.to_string());
+            }
             profile.validate()?;
+            if let Some(private_key) = ssh_private_key {
+                let DeploymentConfig::SlurmRemote(slurm) = &profile.deployment else {
+                    bail!("--ssh-private-key is only valid for a slurm_remote profile");
+                };
+                let slot = slurm.ssh_credential.clone().ok_or_else(|| {
+                    anyhow::anyhow!("set --ssh-slot when importing a profile credential")
+                })?;
+                let result =
+                    crate::slurm_credentials::import(crate::slurm_credentials::ImportOptions {
+                        slot,
+                        dir: None,
+                        private_key,
+                        public_key: ssh_public_key,
+                        known_hosts: ssh_known_hosts,
+                        passphrase_file: ssh_passphrase_file,
+                        host: Some(slurm.login_node.clone()),
+                        port: u16::try_from(slurm.ssh_port)
+                            .context("deployment.ssh_port is outside the supported range")?,
+                        acl: ssh_acl,
+                        force,
+                        accept_host_key,
+                    })?;
+                println!(
+                    "Imported SSH credential slot '{}' for profile '{}'.",
+                    result.slot, profile.name
+                );
+            }
             let row = repo::create_deployment_profile(
                 &pool,
                 &profile.name,
