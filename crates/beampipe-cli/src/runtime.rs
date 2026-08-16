@@ -173,7 +173,10 @@ fn parse_compose_ps(stdout: &[u8]) -> Value {
         return Value::Array(Vec::new());
     }
     if let Ok(value) = serde_json::from_slice(stdout) {
-        return value;
+        return match value {
+            Value::Object(_) => Value::Array(vec![value]),
+            value => value,
+        };
     }
     let values = String::from_utf8_lossy(stdout)
         .lines()

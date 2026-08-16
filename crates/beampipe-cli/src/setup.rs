@@ -474,7 +474,9 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         }
 
         let settings = Settings::load()?.settings;
-        let report = doctor::run_doctor(pool, &settings, None, Vec::new()).await;
+        let setup_context = installation::InstallationContext::from_home(root.clone())?;
+        let report =
+            doctor::run_doctor(pool, &settings, None, Vec::new(), Some(&setup_context)).await;
         doctor::print_human(&report);
         if !report.ok {
             bail!("setup completed with doctor failures; fix checks above");
@@ -511,8 +513,9 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
 
 pub async fn run_setup_check(json: bool, profile: Option<&str>, fix: bool) -> Result<()> {
     let mut fixes_applied = Vec::new();
+    let context = installation::InstallationContext::resolve(None)?;
     if fix {
-        let config_dir = std::env::current_dir()?.join("config");
+        let config_dir = context.home.join("config");
         if !config_dir.exists() {
             std::fs::create_dir_all(&config_dir)
                 .with_context(|| format!("create {}", config_dir.display()))?;
@@ -520,28 +523,40 @@ pub async fn run_setup_check(json: bool, profile: Option<&str>, fix: bool) -> Re
         }
     }
 
-    let settings = Settings::load()?.settings;
+    let mut installation_checks = doctor::installation_checks(&context);
+    let settings = match Settings::load() {
+        Ok(settings) => settings.settings,
+        Err(error) => {
+            installation_checks.push(doctor::configuration_error_check(&error.to_string()));
+            let report = doctor::DoctorReport::from_checks(installation_checks, fixes_applied);
+            print_doctor_report(&report, json)?;
+            return Err(error.into());
+        }
+    };
     let pool = match beampipe_db::connect(&settings.database_url).await {
         Ok(pool) => pool,
         Err(error) => {
-            let report =
-                doctor::DoctorReport::database_unreachable(&error.to_string(), fixes_applied);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                doctor::print_human(&report);
-            }
-            std::process::exit(1);
+            installation_checks.push(doctor::database_unreachable_check(&error.to_string()));
+            let report = doctor::DoctorReport::from_checks(installation_checks, fixes_applied);
+            print_doctor_report(&report, json)?;
+            bail!("doctor found required failures");
         }
     };
-    let report = doctor::run_doctor(&pool, &settings, profile, fixes_applied).await;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        doctor::print_human(&report);
-    }
+    let mut report =
+        doctor::run_doctor(&pool, &settings, profile, fixes_applied, Some(&context)).await;
+    report.prepend_checks(installation_checks);
+    print_doctor_report(&report, json)?;
     if !report.ok {
-        std::process::exit(1);
+        bail!("doctor found required failures");
+    }
+    Ok(())
+}
+
+fn print_doctor_report(report: &doctor::DoctorReport, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        doctor::print_human(report);
     }
     Ok(())
 }

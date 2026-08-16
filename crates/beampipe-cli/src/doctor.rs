@@ -1,3 +1,4 @@
+use crate::{installation::InstallationContext, runtime};
 use beampipe_adapters::probe_tap_health;
 use beampipe_config::Settings;
 use beampipe_db::{models::DeploymentProfileRow, repo};
@@ -10,6 +11,8 @@ use beampipe_profiles::{DeploymentConfig, DeploymentProfile};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::PgPool;
+use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -43,21 +46,223 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
-    pub fn database_unreachable(error: &str, fixes_applied: Vec<String>) -> Self {
+    pub fn from_checks(checks: Vec<DoctorCheck>, fixes_applied: Vec<String>) -> Self {
+        let ok = checks.iter().all(|check| check.ok || !check.required);
         Self {
-            ok: false,
+            ok,
             generated_at: Utc::now(),
             profile: None,
-            checks: vec![failure(
-                "postgres.unreachable",
-                "postgres",
-                true,
-                bounded(error),
-                "verify DATABASE_URL, PostgreSQL service state, and network access",
-            )],
+            checks,
             fixes_applied,
         }
     }
+
+    pub fn prepend_checks(&mut self, mut checks: Vec<DoctorCheck>) {
+        checks.append(&mut self.checks);
+        self.checks = checks;
+        self.ok = self.checks.iter().all(|check| check.ok || !check.required);
+    }
+}
+
+pub fn installation_checks(context: &InstallationContext) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    checks.push(success(
+        "binary.version",
+        "beampipe",
+        format!("binary version {}", env!("CARGO_PKG_VERSION")),
+    ));
+    checks.push(if let Some(state) = context.state.as_ref() {
+        success(
+            "installation.state",
+            "installation",
+            format!(
+                "{} runtime at {} (bundle {})",
+                state.runtime.as_str(),
+                context.home.display(),
+                state.operator_bundle_version
+            ),
+        )
+    } else {
+        failure(
+            "installation.state_missing",
+            "installation",
+            true,
+            format!(
+                "installation state is missing from {}",
+                context.home.display()
+            ),
+            "run `beampipe setup` for this installation",
+        )
+    });
+    checks.push(file_check(
+        "installation.environment",
+        "environment",
+        &context.environment_file,
+        true,
+        "rerun `beampipe setup` to create the private environment file",
+    ));
+    checks.push(if context.credential_root.is_dir() {
+        success(
+            "ssh.credential_root",
+            "ssh_credentials",
+            format!("credential root is {}", context.credential_root.display()),
+        )
+    } else {
+        failure(
+            "ssh.credential_root_missing",
+            "ssh_credentials",
+            true,
+            format!(
+                "credential root is missing at {}",
+                context.credential_root.display()
+            ),
+            "rerun `beampipe setup` or create the directory with mode 0700",
+        )
+    });
+
+    let status = runtime::status(context);
+    if context
+        .state
+        .as_ref()
+        .is_some_and(|state| state.runtime == crate::installation::RuntimeMode::Docker)
+    {
+        checks.push(file_check(
+            "docker.compose_file",
+            "docker",
+            &status.compose_file,
+            true,
+            "rerun `beampipe setup` to restore the operator bundle",
+        ));
+        match status.docker {
+            Some(docker) if docker.available && docker.error.is_none() => {
+                checks.push(success(
+                    "docker.available",
+                    "docker",
+                    "Docker daemon and Compose plugin are available",
+                ));
+                for service in ["api", "scheduler", "worker"] {
+                    checks.push(compose_service_check(&docker.services, service));
+                }
+            }
+            Some(docker) => checks.push(failure(
+                "docker.unavailable",
+                "docker",
+                true,
+                docker
+                    .error
+                    .unwrap_or_else(|| "Docker or Compose is unavailable".into()),
+                "start Docker and verify `docker compose version` succeeds",
+            )),
+            None => checks.push(failure(
+                "docker.status_missing",
+                "docker",
+                true,
+                "Docker installation status could not be determined",
+                "rerun setup with an explicit runtime",
+            )),
+        }
+    }
+
+    let api_address = SocketAddr::from(([127, 0, 0, 1], 8080));
+    checks.push(
+        if TcpStream::connect_timeout(&api_address, Duration::from_secs(1)).is_ok() {
+            success(
+                "api.reachable",
+                "api",
+                "API accepts connections on 127.0.0.1:8080",
+            )
+        } else {
+            failure(
+                "api.unreachable",
+                "api",
+                true,
+                "API is not reachable on 127.0.0.1:8080",
+                "run `beampipe start`, then inspect `beampipe logs --service api`",
+            )
+        },
+    );
+    checks
+}
+
+pub fn database_unreachable_check(error: &str) -> DoctorCheck {
+    failure(
+        "postgres.unreachable",
+        "postgres",
+        true,
+        bounded(error),
+        "verify DATABASE_URL and run `beampipe start` or start the configured PostgreSQL service",
+    )
+}
+
+pub fn configuration_error_check(error: &str) -> DoctorCheck {
+    failure(
+        "config.invalid",
+        "configuration",
+        true,
+        bounded(error),
+        "correct the reported environment/configuration value and rerun `beampipe doctor`",
+    )
+}
+
+fn file_check(code: &str, component: &str, path: &Path, required: bool, hint: &str) -> DoctorCheck {
+    if path.is_file() {
+        success(code, component, format!("{} is present", path.display()))
+    } else {
+        failure(
+            code,
+            component,
+            required,
+            format!("{} is missing", path.display()),
+            hint,
+        )
+    }
+}
+
+fn compose_service_check(services: &serde_json::Value, service: &str) -> DoctorCheck {
+    let entries = services.as_array().map(Vec::as_slice).unwrap_or_default();
+    let entry = entries.iter().find(|entry| {
+        json_text(entry, "Service") == Some(service) || json_text(entry, "service") == Some(service)
+    });
+    let Some(entry) = entry else {
+        return failure(
+            &format!("docker.{service}_missing"),
+            service,
+            true,
+            format!("Compose service {service} is not running"),
+            format!("run `beampipe start`, then `beampipe logs --service {service}`"),
+        );
+    };
+    let state = json_text(entry, "State")
+        .or_else(|| json_text(entry, "state"))
+        .unwrap_or("unknown");
+    let health = json_text(entry, "Health")
+        .or_else(|| json_text(entry, "health"))
+        .unwrap_or("");
+    if state.eq_ignore_ascii_case("running")
+        && (health.is_empty() || health.eq_ignore_ascii_case("healthy"))
+    {
+        success(
+            &format!("docker.{service}_running"),
+            service,
+            if health.is_empty() {
+                "running".into()
+            } else {
+                format!("running ({health})")
+            },
+        )
+    } else {
+        failure(
+            &format!("docker.{service}_unhealthy"),
+            service,
+            true,
+            format!("state={state} health={health}"),
+            format!("inspect `beampipe logs --service {service}`"),
+        )
+    }
+}
+
+fn json_text<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(serde_json::Value::as_str)
 }
 
 fn success(code: &str, component: &str, detail: impl Into<String>) -> DoctorCheck {
@@ -116,6 +321,7 @@ pub async fn run_doctor(
     settings: &Settings,
     profile_name: Option<&str>,
     fixes_applied: Vec<String>,
+    installation: Option<&InstallationContext>,
 ) -> DoctorReport {
     let mut checks = Vec::new();
     checks.push(success(
@@ -198,7 +404,7 @@ pub async fn run_doctor(
     match profile {
         Ok(profile) => {
             if let Some(profile) = profile.as_ref() {
-                check_profile(settings, profile, &mut checks).await;
+                check_profile(settings, profile, &mut checks, installation).await;
             } else if let Some(profile_name) = profile_name {
                 checks.push(failure(
                     "profile.not_found",
@@ -497,6 +703,7 @@ async fn check_profile(
     settings: &Settings,
     row: &DeploymentProfileRow,
     checks: &mut Vec<DoctorCheck>,
+    installation: Option<&InstallationContext>,
 ) {
     let profile = match typed_profile(row) {
         Ok(profile) => profile,
@@ -572,6 +779,24 @@ async fn check_profile(
             });
             if !credential_ok {
                 return;
+            }
+            if let (Some(context), Some(slot)) = (installation, slurm.ssh_credential.as_deref()) {
+                match crate::slurm_credentials::sync(context, Some(slot)) {
+                    Ok(sync) => checks.push(success(
+                        "slurm.credential_runtime",
+                        "slurm_ssh",
+                        sync.message,
+                    )),
+                    Err(error) => checks.push(failure(
+                        "slurm.credential_runtime_unreadable",
+                        "slurm_ssh",
+                        true,
+                        bounded(&error.to_string()),
+                        format!(
+                            "run `beampipe slurm credentials sync --slot {slot}` for mount diagnostics"
+                        ),
+                    )),
+                }
             }
             let client = SshSlurmClient {
                 login_node: slurm.login_node.clone(),
