@@ -1,0 +1,42 @@
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:15432:5432"
+
+  api:
+    environment:
+      BEAMPIPE_TM_URL: http://dlg-tm:8084
+      BEAMPIPE_DIM_URL: http://dlg-dim:8001
+    ports: !override
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:19090:9090"
+    networks:
+      - default
+      - dlg-local
+    volumes:
+      - ../wallaby-hires-beampipe/dlg-graphs:/graphs:ro
+
+  scheduler:
+    environment:
+      BEAMPIPE_TM_URL: http://dlg-tm:8084
+      BEAMPIPE_DIM_URL: http://dlg-dim:8001
+    networks:
+      - default
+      - dlg-local
+    volumes:
+      - ../wallaby-hires-beampipe/dlg-graphs:/graphs:ro
+
+  worker:
+    environment:
+      BEAMPIPE_TM_URL: http://dlg-tm:8084
+      BEAMPIPE_DIM_URL: http://dlg-dim:8001
+    networks:
+      - default
+      - dlg-local
+    volumes:
+      - ../wallaby-hires-beampipe/dlg-graphs:/graphs:ro
+
+networks:
+  dlg-local:
+    external: true
+    name: docker_dlg-local

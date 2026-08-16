@@ -37,6 +37,37 @@ The key invariant is simple: persist deterministic intent before external I/O, r
 
 ## Quick start
 
+### Docker Compose
+
+```bash
+git clone https://github.com/jbwod/beampipe-core-v2.git
+cd beampipe-core-v2
+
+test -e .env || cp .env.example .env
+
+docker compose up -d postgres
+docker compose run --rm api migrate
+docker compose run --rm api admin create-user \
+  --username admin \
+  --email admin@example.test \
+  --password 'replace-this-local-password' \
+  --superuser
+docker compose up -d api scheduler worker
+
+curl -fsS http://127.0.0.1:8080/api/v2/health
+docker compose ps
+```
+
+Use an override to bind API, metrics, and PostgreSQL to loopback on a workstation.
+When Dash is also containerized, attach it to the Core Compose network and use
+`http://api:8080`; the browser never needs direct API access.
+
+See [deployment topologies](https://beampipe-core.readthedocs.io/getting-started/deployment/)
+for secure bindings, Docker contexts, role configuration, system services,
+container platforms, REST/DIM, and Slurm.
+
+### Native binary
+
 Prerequisites: Rust stable, Docker Compose, `curl`, and `jq`.
 
 ```bash
@@ -95,7 +126,9 @@ Project-specific ADQL, enrichments, metadata mappings, signatures, manifests, an
 
 ## Current qualification
 
-The current code has been exercised through real CASDA/VizieR discovery, automatic admission, manifest and graph preparation, DALiuGE translation, and REST deployment to a local cluster. That qualification found and fixed manifest flag resolution. A graph/runtime package mismatch prevented terminal graph success; CASDA staging and Slurm remain to be qualified end to end.
+The current code has been exercised through archive discovery, manifest and graph preparation, DALiuGE translation, and REST deployment to a local cluster. A 2026-08-13 no-stage/no-download qualification reached a consistent terminal `succeeded` outcome: both DALiuGE node managers finished and reported zero error drops after the WALLABY list/pickle graph contract was aligned.
+
+That result establishes local control-plane Q0-Q3 for the pinned REST profile and graph/runtime combination. It does not establish CASDA authenticated staging, Slurm execution, or scientific-product verification. VizieR was unavailable during that particular rerun, so its execution used a narrowly scoped pinned catalog fallback rather than being presented as fresh live-VizieR evidence.
 
 The output state axis is implemented, but no worker currently verifies scientific products. Runtime completion must not be described as native scientific-output verification.
 
@@ -106,6 +139,7 @@ See the [qualification run](https://beampipe-core.readthedocs.io/operations/end-
 | Task | Page |
 |---|---|
 | Install and reach a healthy system | [Quick start](https://beampipe-core.readthedocs.io/getting-started/) |
+| Choose Docker, native, system-service, or orchestrated deployment | [Deployment topologies](https://beampipe-core.readthedocs.io/getting-started/deployment/) |
 | Run one discovery and graph preparation | [First workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/) |
 | Connect REST or Slurm and manage SSH keys | [Deployment profiles and SSH](https://beampipe-core.readthedocs.io/architecture/deployment-profiles/) |
 | Operate and recover work | [Operator handbook](https://beampipe-core.readthedocs.io/operations/) |

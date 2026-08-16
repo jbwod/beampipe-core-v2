@@ -44,7 +44,7 @@ services:
 
   # API only — scale with `docker compose up --scale api=2`
   api:
-    <<: *beampipe-image
+    <<: [*beampipe-image, *beampipe-worker-env-file]
     # API-only: no embedded job worker (requires image built with CLI `--worker` Set action).
     command: ["serve", "--worker", "false"]
     environment:
@@ -55,6 +55,10 @@ services:
       BEAMPIPE_METRICS_SERVER_ENABLED: "true"
       BEAMPIPE_DB_MAX_CONNECTIONS: "20"
       BEAMPIPE_WORKER_SCHEDULER_ENABLED: "false"
+      BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      # The API owns /ready and dashboard dependency reporting, so it needs the
+      # same TAP endpoint configuration as scheduler and worker roles.
+      <<: *beampipe-backend-env
     ports:
       - "8080:8080"
       - "9090:9090"
