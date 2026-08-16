@@ -24,6 +24,7 @@ beampipe-domain = { path = "../beampipe-domain" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+dotenvy.workspace = true
 crossterm = "0.28"
 ratatui = "0.28"
 serde.workspace = true

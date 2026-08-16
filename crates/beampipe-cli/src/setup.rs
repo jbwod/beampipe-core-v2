@@ -11,7 +11,11 @@ use std::process::Command;
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::{doctor, materialize};
+use crate::{
+    doctor,
+    installation::{self, InstallationState, RuntimeMode as RuntimeKind},
+    materialize,
+};
 
 const DEFAULT_CASDA_TAP_URL: &str = "https://casda.csiro.au/casda_vo_tools/tap/sync";
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
@@ -41,19 +45,23 @@ pub struct SetupOptions {
     pub dash_dir: Option<PathBuf>,
     pub dash_repo_url: Option<String>,
     pub directory: Option<PathBuf>,
+    pub credentials_dir: Option<PathBuf>,
     pub start: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeKind {
-    Docker,
-    Host,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PostgresKind {
     Compose,
     Existing,
+}
+
+impl PostgresKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Compose => "compose",
+            Self::Existing => "existing",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,11 +174,14 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
 }
 
 pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
-    let root = resolve_operator_root(&opts)?;
+    let mut root = resolve_operator_root(&opts)?;
     print_banner(opts.start);
     preflight_before_materialize(&opts)?;
 
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+    root = root
+        .canonicalize()
+        .with_context(|| format!("resolve {}", root.display()))?;
     std::env::set_current_dir(&root).with_context(|| format!("chdir {}", root.display()))?;
     let env_path = root.join(".env");
 
@@ -258,6 +269,17 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         }
     }
 
+    let credential_root =
+        installation::resolve_credential_root(&root, opts.credentials_dir.as_deref())?;
+    std::fs::create_dir_all(&credential_root)
+        .with_context(|| format!("create {}", credential_root.display()))?;
+    if credential_root != root.join("credentials/ssh") {
+        println!(
+            "Using existing SSH credential root {}.",
+            credential_root.display()
+        );
+    }
+
     let jwt_secret = opts
         .jwt_secret
         .clone()
@@ -288,6 +310,16 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     update_env_file(&env_path, "BEAMPIPE_TM_URL", &tm_url)?;
     update_env_file(&env_path, "BEAMPIPE_WORKER_POOL", &worker_pool)?;
     update_env_file(&env_path, "BEAMPIPE_USE_REAL_BACKENDS", "false")?;
+    update_env_file(
+        &env_path,
+        "BEAMPIPE_SSH_CREDENTIALS_HOST",
+        &credential_root.display().to_string(),
+    )?;
+    update_env_file(
+        &env_path,
+        "BEAMPIPE_SSH_CREDENTIALS_DIR",
+        &credential_root.display().to_string(),
+    )?;
     ensure_beampipe_version(&root, &env_path)?;
     println!("Wrote .env (0600)");
 
@@ -303,6 +335,27 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     std::env::set_var("BEAMPIPE_TM_URL", &tm_url);
     std::env::set_var("BEAMPIPE_WORKER_POOL", &worker_pool);
     std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", "false");
+    std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", &credential_root);
+
+    installation::write_state(
+        &root,
+        &InstallationState {
+            schema_version: installation::INSTALLATION_SCHEMA_VERSION,
+            beampipe_version: env!("CARGO_PKG_VERSION").into(),
+            runtime,
+            database_mode: postgres.as_str().into(),
+            home: root.clone(),
+            environment_file: env_path.clone(),
+            config_file: root.join("beampipe.yaml"),
+            credential_root: credential_root.clone(),
+            operator_bundle_version: env!("CARGO_PKG_VERSION").into(),
+            compose_project: installation::compose_project_name(&root),
+        },
+    )?;
+    println!(
+        "Recorded installation state at {}.",
+        root.join(installation::INSTALLATION_STATE_FILE).display()
+    );
 
     let mut docker_context = None;
     if prepare_docker || (opts.start && postgres == PostgresKind::Compose) {
@@ -502,15 +555,7 @@ pub fn generate_admin_password() -> String {
 }
 
 fn resolve_operator_root(opts: &SetupOptions) -> Result<PathBuf> {
-    let cwd = std::env::current_dir().context("cwd")?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let root =
-        materialize::default_operator_directory(&cwd, home.as_deref(), opts.directory.as_deref());
-    if root.is_absolute() {
-        Ok(root)
-    } else {
-        Ok(cwd.join(root))
-    }
+    installation::resolve_home(opts.directory.as_deref())
 }
 
 fn require_docker_compose() -> Result<()> {
@@ -602,7 +647,7 @@ fn preflight_after_choices(
 }
 
 fn host_start_command(root: &Path) -> String {
-    format!("  cd {} && beampipe start", root.display())
+    format!("  beampipe --home {} start", root.display())
 }
 
 fn login_snippet_lines(username: &str) -> Vec<String> {
@@ -827,7 +872,6 @@ fn ensure_beampipe_version(root: &Path, env_path: &Path) -> Result<()> {
 
 const DEFAULT_DASH_REPO: &str = "https://github.com/jbwod/beampipe-dash";
 const DASH_OVERRIDE_FILE: &str = "compose.beampipe-local.yml";
-const COMPOSE_SSH_HOST: &str = "./deploy/ssh/credentials";
 
 fn env_value_empty(path: &Path, key: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -847,12 +891,7 @@ fn compose_file_exists(root: &Path) -> bool {
 }
 
 fn compose_network_name(root: &Path) -> String {
-    let name = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("beampipe-core-v2");
-    format!("{name}_default")
+    format!("{}_default", installation::compose_project_name(root))
 }
 
 fn parse_runtime(value: &str) -> Result<RuntimeKind> {
@@ -1009,7 +1048,12 @@ fn prepare_docker_env(root: &Path, env_path: &Path) -> Result<Option<String>> {
         bail!("docker-compose.yml not found in {}", root.display());
     }
     if env_value_empty(env_path, "BEAMPIPE_SSH_CREDENTIALS_HOST") {
-        update_env_file(env_path, "BEAMPIPE_SSH_CREDENTIALS_HOST", COMPOSE_SSH_HOST)?;
+        let credential_root = installation::resolve_credential_root(root, None)?;
+        update_env_file(
+            env_path,
+            "BEAMPIPE_SSH_CREDENTIALS_HOST",
+            &credential_root.display().to_string(),
+        )?;
     }
     Ok(docker_context_show())
 }
@@ -1334,9 +1378,9 @@ mod tests {
     }
 
     #[test]
-    fn host_start_command_includes_cd_and_start() {
+    fn host_start_command_selects_installation_without_chdir() {
         let command = host_start_command(Path::new("/home/op/beampipe"));
-        assert_eq!(command, "  cd /home/op/beampipe && beampipe start");
+        assert_eq!(command, "  beampipe --home /home/op/beampipe start");
     }
 
     #[test]
@@ -1458,7 +1502,10 @@ mod tests {
 
         prepare_docker_env(root.path(), &env).unwrap();
         let content = std::fs::read_to_string(&env).unwrap();
-        assert!(content.contains("BEAMPIPE_SSH_CREDENTIALS_HOST=./deploy/ssh/credentials"));
+        assert!(content.contains(&format!(
+            "BEAMPIPE_SSH_CREDENTIALS_HOST={}",
+            root.path().join("credentials/ssh").display()
+        )));
         assert!(!content.contains("BEAMPIPE_SSH_CREDENTIALS_DIR=/"));
     }
 

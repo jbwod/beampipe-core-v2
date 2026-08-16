@@ -21,7 +21,7 @@ x-beampipe-worker-env-file: &beampipe-worker-env-file
 
 x-beampipe-slurm-ssh-volume: &beampipe-slurm-ssh-volume
   type: bind
-  source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./deploy/ssh/credentials}
+  source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./credentials/ssh}
   target: /run/beampipe/ssh
   read_only: true
 

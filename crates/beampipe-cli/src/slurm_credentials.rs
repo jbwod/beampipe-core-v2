@@ -77,16 +77,17 @@ pub fn default_credentials_root() -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
-    let deploy = PathBuf::from("deploy/ssh/credentials");
-    if deploy.is_dir() {
-        return deploy;
+    if let Ok(home) = std::env::var("BEAMPIPE_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join("credentials/ssh");
+        }
     }
     if let Ok(home) = std::env::var("HOME") {
         if !home.trim().is_empty() {
-            return PathBuf::from(home).join(".config/beampipe/credentials");
+            return PathBuf::from(home).join("beampipe/credentials/ssh");
         }
     }
-    deploy
+    PathBuf::from("/run/beampipe/ssh")
 }
 
 pub fn resolve_root(dir: Option<&Path>) -> PathBuf {

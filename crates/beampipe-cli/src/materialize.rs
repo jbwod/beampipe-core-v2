@@ -39,30 +39,12 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
         &mut report,
     )?;
 
-    for dir in [
-        root.join("deploy/ssh/credentials"),
-        root.join("deploy/ssh/credentials/setonix"),
-    ] {
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        write_file(&dir.join(".gitkeep"), "", force, &mut report)?;
-    }
+    let credentials_dir = root.join("credentials/ssh");
+    std::fs::create_dir_all(&credentials_dir)
+        .with_context(|| format!("create {}", credentials_dir.display()))?;
+    write_file(&credentials_dir.join(".gitkeep"), "", force, &mut report)?;
 
     Ok(report)
-}
-
-pub fn default_operator_directory(
-    cwd: &Path,
-    home: Option<&Path>,
-    explicit: Option<&Path>,
-) -> PathBuf {
-    if let Some(path) = explicit {
-        return path.to_path_buf();
-    }
-    if cwd.join("docker-compose.yml").exists() {
-        return cwd.to_path_buf();
-    }
-    home.map(|home| home.join("beampipe"))
-        .unwrap_or_else(|| cwd.join("beampipe"))
 }
 
 fn write_file(
@@ -106,11 +88,7 @@ mod tests {
         assert!(!compose.contains("build:"));
         assert!(!compose.contains("Dockerfile"));
         assert!(compose.contains("ghcr.io/jbwod/beampipe-core-v2"));
-        assert!(dir.path().join("deploy/ssh/credentials/.gitkeep").exists());
-        assert!(dir
-            .path()
-            .join("deploy/ssh/credentials/setonix/.gitkeep")
-            .exists());
+        assert!(dir.path().join("credentials/ssh/.gitkeep").exists());
 
         let project = std::fs::read(dir.path().join("config/wallaby_hires.v2.yaml")).unwrap();
         let config = ProjectConfig::from_slice(&project).unwrap();
@@ -126,32 +104,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap(),
             "owned\n"
-        );
-    }
-
-    #[test]
-    fn default_directory_uses_cwd_when_compose_exists() {
-        let cwd = tempfile::tempdir().unwrap();
-        std::fs::write(cwd.path().join("docker-compose.yml"), "services: {}\n").unwrap();
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(
-            default_operator_directory(cwd.path(), Some(home.path()), None),
-            cwd.path()
-        );
-    }
-
-    #[test]
-    fn default_directory_uses_home_beampipe_without_compose() {
-        let cwd = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(
-            default_operator_directory(cwd.path(), Some(home.path()), None),
-            home.path().join("beampipe")
-        );
-        let explicit = cwd.path().join("custom");
-        assert_eq!(
-            default_operator_directory(cwd.path(), Some(home.path()), Some(&explicit)),
-            explicit
         );
     }
 }

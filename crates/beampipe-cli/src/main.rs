@@ -2,6 +2,7 @@ mod bench_tap;
 mod console;
 mod doctor;
 mod init;
+mod installation;
 mod materialize;
 mod operator;
 mod setup;
@@ -17,6 +18,9 @@ use uuid::Uuid;
 #[derive(Debug, Parser)]
 #[command(name = "beampipe", version, about = "Beampipe v2 Rust control plane")]
 struct Cli {
+    /// Select the Beampipe installation. Defaults to BEAMPIPE_HOME, then ~/beampipe.
+    #[arg(long, global = true)]
+    home: Option<PathBuf>,
     #[command(subcommand)]
     command: CliCommand,
 }
@@ -124,10 +128,12 @@ enum CliCommand {
         /// Git URL used when cloning a missing Dash checkout.
         #[arg(long, default_value = "https://github.com/jbwod/beampipe-dash")]
         dash_repo_url: String,
-        /// Operator directory. Defaults to the current directory when it already
-        /// has docker-compose.yml, otherwise ~/beampipe.
+        /// Compatibility alias for --home. Defaults to BEAMPIPE_HOME, then ~/beampipe.
         #[arg(long)]
         directory: Option<PathBuf>,
+        /// Canonical host directory containing per-profile SSH credential slots.
+        #[arg(long)]
+        credentials_dir: Option<PathBuf>,
         /// Start Postgres and the stack after writing files (default).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         start: bool,
@@ -516,6 +522,14 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
+    let selected_home = match &cli.command {
+        CliCommand::Setup { directory, .. } => directory.as_deref().or(cli.home.as_deref()),
+        CliCommand::Init { .. } => cli.home.as_deref(),
+        _ => cli.home.as_deref(),
+    };
+    if !matches!(&cli.command, CliCommand::Init { .. }) {
+        installation::activate_if_selected(selected_home)?;
+    }
     match cli.command {
         CliCommand::Init {
             directory,
@@ -670,6 +684,7 @@ async fn main() -> anyhow::Result<()> {
             dash_dir,
             dash_repo_url,
             directory,
+            credentials_dir,
             start,
             no_start,
         } => {
@@ -697,7 +712,8 @@ async fn main() -> anyhow::Result<()> {
                     skip_dashboard,
                     dash_dir,
                     dash_repo_url: Some(dash_repo_url),
-                    directory,
+                    directory: directory.or(cli.home),
+                    credentials_dir,
                     start: start && !no_start,
                 })
                 .await?;
