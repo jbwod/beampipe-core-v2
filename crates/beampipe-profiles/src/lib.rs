@@ -100,6 +100,11 @@ pub struct SlurmRemoteDeploymentConfig {
     pub ssh_port: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_user: Option<String>,
+    /// Non-secret slot name for the SSH private key and known_hosts files.
+    /// Profiles never store key material; workers resolve files from
+    /// `BEAMPIPE_SSH_CREDENTIALS_DIR/<ssh_credential>/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_credential: Option<String>,
     pub account: String,
     pub home_dir: String,
     pub log_dir: String,
@@ -233,6 +238,9 @@ impl DeploymentProfile {
                         "deployment.login_node is required".into(),
                     ));
                 }
+                if let Some(slot) = dep.ssh_credential.as_deref() {
+                    validate_ssh_credential_name(slot)?;
+                }
                 validate_port(Some(dep.ssh_port), "deployment.ssh_port")?;
                 if dep.dlg_root.trim().is_empty() {
                     return Err(ProfileValidationError::Message(
@@ -305,6 +313,24 @@ fn validate_positive(value: i32, name: &str) -> Result<(), ProfileValidationErro
         return Err(ProfileValidationError::Message(format!(
             "{name} must be >= 1"
         )));
+    }
+    Ok(())
+}
+
+pub fn validate_ssh_credential_name(name: &str) -> Result<(), ProfileValidationError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 50
+        || trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || !trimmed
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        return Err(ProfileValidationError::Message(
+            "deployment.ssh_credential must be 1-50 ASCII letters, digits, '.', '_', or '-'".into(),
+        ));
     }
     Ok(())
 }
@@ -419,6 +445,28 @@ mod tests {
     }
 
     #[test]
+    fn slurm_profile_rejects_unsafe_ssh_credential_names() {
+        let profile: DeploymentProfile = serde_json::from_value(json!({
+            "name": "setonix",
+            "translation": {"num_par": 1},
+            "deployment": {
+                "kind": "slurm_remote",
+                "login_node": "setonix.example.org",
+                "ssh_credential": "../etc",
+                "account": "project",
+                "home_dir": "/scratch/project",
+                "log_dir": "/scratch/project/logs",
+                "dlg_root": "/scratch/project/dlg"
+            }
+        }))
+        .unwrap();
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("ssh_credential"));
+    }
+
     fn profile_schema_rejects_unknown_fields() {
         let error = serde_json::from_value::<DeploymentProfile>(json!({
             "name": "rest",

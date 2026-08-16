@@ -6,6 +6,7 @@ fn sample_slurm_config() -> SlurmRemoteDeploymentConfig {
         login_node: "login".into(),
         ssh_port: 22,
         remote_user: None,
+        ssh_credential: None,
         account: "acct".into(),
         home_dir: "/home".into(),
         log_dir: "/log".into(),

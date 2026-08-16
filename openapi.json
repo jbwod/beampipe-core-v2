@@ -2530,6 +2530,11 @@
             "nullable": true,
             "type": "string"
           },
+          "ssh_credential": {
+            "description": "Non-secret slot name for the SSH private key and known_hosts files. Profiles never store key material; workers resolve files from `BEAMPIPE_SSH_CREDENTIALS_DIR/<ssh_credential>/`.",
+            "nullable": true,
+            "type": "string"
+          },
           "resources": {
             "$ref": "#/components/schemas/SlurmResourceConfig"
           },

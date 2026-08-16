@@ -2,3 +2,7 @@
 !.gitignore
 !README.md
 !known_hosts.example
+!credentials/
+!credentials/.gitkeep
+!credentials/setonix/
+!credentials/setonix/.gitkeep

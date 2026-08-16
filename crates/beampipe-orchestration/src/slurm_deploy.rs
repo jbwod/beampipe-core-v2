@@ -285,6 +285,7 @@ mod tests {
             login_node: "login".into(),
             ssh_port: 22,
             remote_user: None,
+            ssh_credential: None,
             account: "myacct".into(),
             home_dir: "/home".into(),
             log_dir: "/log".into(),

@@ -20,12 +20,14 @@ use tokio::sync::Mutex;
 const SQUEUE_FORMAT: &str = "%i|%T|%R";
 const SACCT_FORMAT: &str = "JobID,State,ExitCode";
 
-/// Hashable SSH target for session pooling (credentials are process-wide from env).
+/// Hashable SSH target for session pooling. Credential slot is part of the key
+/// so two profiles that share a login node but use different keys stay isolated.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SlurmTarget {
     pub login_node: String,
     pub ssh_port: u16,
     pub remote_user: String,
+    pub credential_slot: Option<String>,
 }
 
 impl SlurmTarget {
@@ -34,6 +36,12 @@ impl SlurmTarget {
             login_node: deployment.login_node.clone(),
             ssh_port: deployment.ssh_port.max(1).min(u16::MAX as i32) as u16,
             remote_user: username.to_string(),
+            credential_slot: deployment
+                .ssh_credential
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
         }
     }
 
@@ -228,7 +236,7 @@ pub struct SlurmSshSession {
 
 impl SlurmSshSession {
     pub async fn connect(target: &SlurmTarget) -> Result<Self, OrchestrationError> {
-        let creds = SlurmSshCredentials::resolve()?;
+        let creds = SlurmSshCredentials::resolve_for(target.credential_slot.as_deref())?;
         Self::connect_with_credentials(target, &creds).await
     }
 

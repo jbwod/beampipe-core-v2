@@ -23,43 +23,25 @@ Profiles never contain private keys, passphrases, CASDA passwords, or tokens.
 
 ## Create a profile
 
-The setup wizard is the easiest path:
+`beampipe setup` does not create a profile. Write a JSON file, then install and check it:
 
 === "REST remote"
 
     ```bash
-    beampipe setup \
-      --deployment rest_remote \
-      --profile-name local-daliuge \
-      --tm-url https://translator.example.org \
-      --dim-url https://manager.example.org:8001
+    beampipe profile add -f config/deployment_profile.dlg-dim.json
+    beampipe profile validate dlg-dim
+    beampipe profile render dlg-dim
     ```
 
 === "Slurm remote"
 
     ```bash
-    beampipe setup \
-      --deployment slurm_remote \
-      --profile-name setonix \
-      --facility setonix \
-      --ssh-host setonix.pawsey.org.au \
-      --ssh-user "$USER" \
-      --slurm-account PROJECT \
-      --slurm-partition work \
-      --remote-home /scratch/PROJECT \
-      --dlg-root /scratch/PROJECT/$USER/dlg \
-      --remote-logs /scratch/PROJECT/$USER/dlg/log
+    beampipe profile add -f config/deployment_profile.slurm-remote.json
+    beampipe profile validate slurm-remote
+    beampipe profile render slurm-remote
     ```
 
-For automation or review, place the JSON profile in a private operator directory and install it with:
-
-```bash
-beampipe profile add -f profile.json
-beampipe profile validate PROFILE_NAME
-beampipe profile render PROFILE_NAME
-```
-
-`profile validate` accepts an installed profile name. File validation occurs during `profile add`.
+Place operator-owned copies in a private directory if you do not want to edit the examples in `config/`. File validation occurs during `profile add`. `profile validate` accepts an installed profile name.
 
 ## Common fields
 
@@ -117,6 +99,7 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
   "login_node": "login.hpc.example",
   "ssh_port": 22,
   "remote_user": "operator",
+  "ssh_credential": "setonix",
   "account": "project_account",
   "home_dir": "/scratch/project_account",
   "log_dir": "/scratch/project_account/operator/dlg/log",
@@ -145,35 +128,76 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
 
 ## Preferred SSH key model
 
-Keep the private key outside Beampipe and mount or expose it only to scheduler/worker processes.
+Keep private keys outside Beampipe. Profiles store only a non-secret `ssh_credential` slot name. The binary and Docker both resolve files from the same directory tree.
+
+```text
+$BEAMPIPE_SSH_CREDENTIALS_DIR/
+  known_hosts                         # optional shared host keys
+  setonix/
+    private_key                       # or slurm_key
+    passphrase                        # required when the private key is encrypted
+    known_hosts                       # optional per-slot host keys
+  garrawarla/
+    private_key
+```
+
+Passphrase-locked keys are supported. Put the passphrase in a mode-`0600` file named `passphrase` (or `passcode`) next to the key. Dash never accepts the passphrase. Inline `SLURM_SSH_PRIVATE_KEY_PASSPHRASE` is a development fallback.
+
+Default directory: `$HOME/.config/beampipe/credentials` on a host, or `/run/beampipe/ssh` when that path exists in a container. Set `BEAMPIPE_SSH_CREDENTIALS_DIR` to pin it.
+
+A profile with `"ssh_credential": "setonix"` uses only that slot. It never falls back to another project's key. Omit the field to keep the process-wide `SLURM_SSH_PRIVATE_KEY_*` files.
+
+Create the files with the built-in tool:
+
+```bash
+beampipe slurm credentials init --slot setonix --acl
+beampipe slurm credentials check --slot setonix
+beampipe slurm ping --profile slurm-remote
+```
+
+Setup does not create SSH slots. Run `beampipe slurm credentials init` when you add a Slurm profile.
 
 === "Bare metal"
 
     ```bash
-    install -d -m 0700 "$HOME/.config/beampipe/credentials"
-    install -m 0600 /path/to/dedicated_service_key \
-      "$HOME/.config/beampipe/credentials/slurm_key"
-    export SLURM_SSH_PRIVATE_KEY_FILE="$HOME/.config/beampipe/credentials/slurm_key"
-    export SLURM_SSH_KNOWN_HOSTS_SOURCE="$HOME/.config/beampipe/credentials/known_hosts"
+    install -d -m 0700 "$HOME/.config/beampipe/credentials/setonix"
+    ssh-keygen -t ed25519 -f "$HOME/.config/beampipe/credentials/setonix/private_key" \
+      -C "beampipe-setonix@$(hostname)"
+    # ssh-keygen prompts for a passphrase; write the same value to passphrase
+    install -m 0600 /dev/stdin \
+      "$HOME/.config/beampipe/credentials/setonix/passphrase" <<<'your-passphrase'
+    ssh-keyscan -t ed25519 login.hpc.example \
+      > "$HOME/.config/beampipe/credentials/known_hosts"
+    export BEAMPIPE_SSH_CREDENTIALS_DIR="$HOME/.config/beampipe/credentials"
+    export BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS=true
     ```
 
-    Provision a dedicated key for the service instead of copying a personal login key. It should normally be owned by the Beampipe service user and mode `0600` or `0400`.
+    Provision a dedicated key per facility or project instead of copying a personal login key. Files should be mode `0600` or `0400`.
 
 === "Docker / Kubernetes"
 
-    Mount the key read-only as a secret and point the process at its in-container path:
+    Mount the same credentials tree and point the process at the in-container path:
 
-    ```bash
-    SLURM_SSH_PRIVATE_KEY_FILE=/run/secrets/slurm_ssh_key
-    SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE=/run/secrets/slurm_ssh_passphrase
-    SLURM_SSH_KNOWN_HOSTS_SOURCE=/run/slurm-ssh/known_hosts
+    ```yaml
+    environment:
+      BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: "true"
+    volumes:
+      - type: bind
+        source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./deploy/ssh/credentials}
+        target: /run/beampipe/ssh
+        read_only: true
     ```
 
-    The file may be root-owned when the Beampipe process can read it. The container does not create or own the key; the orchestrator mounts it.
+    The repository Compose files already mount this tree for `api`, `scheduler`, and `worker`.
+
+    The container user is uid `10001`. Keep host files `0600` and grant that uid read access with ACLs, or expose each key as a Docker secret with `uid: "10001"` and `mode: 0400` and set `SLURM_SSH_PRIVATE_KEY_PATH_<SLOT>`.
 
 === "systemd credentials"
 
-    Point the variables at files under `%d`/`$CREDENTIALS_DIRECTORY`. Keep credentials out of the unit environment and filesystem image.
+    Point `BEAMPIPE_SSH_CREDENTIALS_DIR` or `SLURM_SSH_PRIVATE_KEY_PATH_<SLOT>` at files under `%d`/`$CREDENTIALS_DIRECTORY`. Keep credentials out of the unit environment and filesystem image.
+
+Per-slot env overrides use the slot name in uppercase with `-` and `.` replaced by `_`. Example: slot `setonix-pawsey0411` reads `SLURM_SSH_PRIVATE_KEY_PATH_SETONIX_PAWSEY0411`.
 
 Production rejects symlinked or non-regular key files, group/world permissions, owners other than the process user or root, empty secret files, and home-key fallback.
 

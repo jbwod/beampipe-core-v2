@@ -16,6 +16,8 @@ pub struct SlurmSshCredentials {
     pub key_source: SlurmKeySource,
     pub known_hosts_path: Option<String>,
     pub strict_known_hosts: bool,
+    /// Named credential slot from `deployment.ssh_credential`, if any.
+    pub slot: Option<String>,
 }
 
 #[derive(Clone)]
@@ -42,6 +44,7 @@ impl fmt::Debug for SlurmSshCredentials {
         }
         debug
             .field("strict_known_hosts", &self.strict_known_hosts)
+            .field("slot", &self.slot)
             .finish()
     }
 }
@@ -122,32 +125,170 @@ fn first_non_empty(vars: &[&str]) -> Option<String> {
     None
 }
 
-fn resolve_known_hosts_path() -> Option<String> {
+fn env_suffix(slot: &str) -> String {
+    slot.chars()
+        .map(|character| {
+            if character == '-' || character == '.' {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+fn first_slotted(bases: &[&str], suffix: &str) -> Option<String> {
+    let names = bases
+        .iter()
+        .map(|base| format!("{base}_{suffix}"))
+        .collect::<Vec<_>>();
+    first_non_empty(&names.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// Operator credentials root used by both the native binary and containers.
+/// Docker should mount the same tree at this path and set the env var.
+pub fn ssh_credentials_dir() -> Option<PathBuf> {
+    if let Some(path) = first_non_empty(&["BEAMPIPE_SSH_CREDENTIALS_DIR"]) {
+        return Some(PathBuf::from(path));
+    }
+    let runtime = PathBuf::from("/run/beampipe/ssh");
+    if runtime.is_dir() {
+        return Some(runtime);
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| PathBuf::from(home).join(".config/beampipe/credentials"))
+}
+
+fn slot_dir(slot: &str) -> Option<PathBuf> {
+    ssh_credentials_dir().map(|root| root.join(slot))
+}
+
+fn slot_key_path(slot: &str) -> Option<PathBuf> {
+    let dir = slot_dir(slot)?;
+    for name in ["private_key", "slurm_key"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn slot_known_hosts_path(slot: &str) -> Option<String> {
+    if let Some(path) = slot_dir(slot).map(|dir| dir.join("known_hosts")) {
+        if path.is_file() {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+    if let Some(path) = ssh_credentials_dir().map(|root| root.join("known_hosts")) {
+        if path.is_file() {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Immediate valid subdirectory names under the credentials root.
+pub fn list_credential_slots() -> Vec<String> {
+    let Some(root) = ssh_credentials_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names = entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| beampipe_profiles::validate_ssh_credential_name(name).is_ok())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+pub fn has_global_ssh_key_config() -> bool {
+    first_non_empty(&[
+        "SLURM_SSH_PRIVATE_KEY",
+        "SLURM_SSH_PRIVATE_KEY_PATH",
+        "SLURM_SSH_PRIVATE_KEY_FILE",
+    ])
+    .is_some()
+        || parse_bool_env("BEAMPIPE_SLURM_SSH_ALLOW_HOME_FALLBACK").unwrap_or(false)
+}
+
+fn resolve_known_hosts_path(slot: Option<&str>) -> Option<String> {
+    if let Some(name) = slot {
+        let suffix = env_suffix(name);
+        if let Some(path) =
+            first_slotted(&["SLURM_SSH_KNOWN_HOSTS", "SLURM_SSH_KNOWN_HOSTS_SOURCE"], &suffix)
+        {
+            return Some(path);
+        }
+        if let Some(path) = slot_known_hosts_path(name) {
+            return Some(path);
+        }
+    }
     first_non_empty(&["SLURM_SSH_KNOWN_HOSTS", "SLURM_SSH_KNOWN_HOSTS_SOURCE"])
 }
 
-fn resolve_passphrase() -> Result<Option<Zeroizing<String>>, OrchestrationError> {
-    // Passphrase / passcode (operator wording) — file takes precedence over inline env.
+fn read_passphrase_file(path: &str) -> Result<Option<Zeroizing<String>>, OrchestrationError> {
+    check_private_key_permissions(Path::new(path))?;
+    let mut buf = String::new();
+    std::fs::File::open(path)
+        .and_err_path(path)?
+        .read_to_string(&mut buf)
+        .map_err(|e| OrchestrationError::Backend(format!("read passphrase file: {e}")))?;
+    let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+    Ok(if trimmed.is_empty() {
+        None
+    } else {
+        Some(Zeroizing::new(trimmed))
+    })
+}
+
+fn resolve_passphrase(slot: Option<&str>) -> Result<Option<Zeroizing<String>>, OrchestrationError> {
+    if let Some(name) = slot {
+        let suffix = env_suffix(name);
+        if let Some(path) = first_slotted(
+            &[
+                "SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE",
+                "SLURM_SSH_PRIVATE_KEY_PASSCODE_FILE",
+            ],
+            &suffix,
+        ) {
+            return read_passphrase_file(&path);
+        }
+        if let Some(inline) = first_slotted(
+            &[
+                "SLURM_SSH_PRIVATE_KEY_PASSPHRASE",
+                "SLURM_SSH_PRIVATE_KEY_PASSCODE",
+            ],
+            &suffix,
+        ) {
+            return Ok(Some(Zeroizing::new(inline)));
+        }
+        if let Some(dir) = slot_dir(name) {
+            for filename in ["passphrase", "passcode"] {
+                let path = dir.join(filename);
+                if path.is_file() {
+                    return read_passphrase_file(&path.to_string_lossy());
+                }
+            }
+        }
+        return Ok(None);
+    }
     if let Some(path) = first_non_empty(&[
         "SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE",
         "SLURM_SSH_PRIVATE_KEY_PASSCODE_FILE",
     ]) {
-        let mut buf = String::new();
-        std::fs::File::open(&path)
-            .and_err_path(&path)?
-            .read_to_string(&mut buf)
-            .map_err(|e| OrchestrationError::Backend(format!("read passphrase file: {e}")))?;
-        let t = buf.trim_end_matches(['\r', '\n']).to_string();
-        return Ok(if t.is_empty() {
-            None
-        } else {
-            Some(Zeroizing::new(t))
-        });
+        return read_passphrase_file(&path);
     }
     Ok(first_non_empty(&[
         "SLURM_SSH_PRIVATE_KEY_PASSPHRASE",
         "SLURM_SSH_PRIVATE_KEY_PASSCODE",
-        // Legacy Python / manual_ssh parity
         "SSH_KEY_PASSPHRASE",
     ])
     .map(Zeroizing::new))
@@ -217,7 +358,7 @@ fn map_key_load_error(
             || msg.contains("password")
             || msg.contains("incorrect"))
     {
-        " — set SLURM_SSH_PRIVATE_KEY_PASSPHRASE or SLURM_SSH_PRIVATE_KEY_PASSCODE (or *_FILE)"
+        " — set a 0600 passphrase file next to the key, or SLURM_SSH_PRIVATE_KEY_PASSPHRASE / *_FILE"
     } else {
         ""
     };
@@ -226,6 +367,75 @@ fn map_key_load_error(
     } else {
         OrchestrationError::Backend(format!("load SSH key {}: {msg}{hint}", path.display()))
     }
+}
+
+fn normalize_slot(slot: Option<&str>) -> Result<Option<String>, OrchestrationError> {
+    let Some(raw) = slot.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    beampipe_profiles::validate_ssh_credential_name(raw).map_err(|error| {
+        OrchestrationError::Backend(error.to_string())
+    })?;
+    Ok(Some(raw.to_string()))
+}
+
+fn reject_inline_pem() -> Result<(), OrchestrationError> {
+    if is_production_env() && !allow_inline_secrets_override() {
+        return Err(OrchestrationError::Backend(
+            "SLURM_SSH_PRIVATE_KEY inline PEM is not allowed in production; use SLURM_SSH_PRIVATE_KEY_PATH or SLURM_SSH_PRIVATE_KEY_FILE, or set BEAMPIPE_ALLOW_INLINE_SECRETS=true"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_key_source(slot: Option<&str>) -> Result<SlurmKeySource, OrchestrationError> {
+    if let Some(name) = slot {
+        let suffix = env_suffix(name);
+        if let Some(pem) = first_slotted(&["SLURM_SSH_PRIVATE_KEY"], &suffix) {
+            reject_inline_pem()?;
+            return Ok(SlurmKeySource::Pem(Zeroizing::new(pem.into_bytes())));
+        }
+        if let Some(path) = first_slotted(
+            &["SLURM_SSH_PRIVATE_KEY_PATH", "SLURM_SSH_PRIVATE_KEY_FILE"],
+            &suffix,
+        ) {
+            let pb = PathBuf::from(&path);
+            check_private_key_permissions(&pb)?;
+            return Ok(SlurmKeySource::Path(pb));
+        }
+        if let Some(path) = slot_key_path(name) {
+            check_private_key_permissions(&path)?;
+            return Ok(SlurmKeySource::Path(path));
+        }
+        let looked = ssh_credentials_dir()
+            .map(|root| root.join(name).join("private_key"))
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| format!("<credentials>/{name}/private_key"));
+        return Err(OrchestrationError::Backend(format!(
+            "no Slurm SSH private key for credential '{name}': place private_key or slurm_key at {looked}, or set SLURM_SSH_PRIVATE_KEY_PATH_{suffix}"
+        )));
+    }
+
+    if let Some(pem) = first_non_empty(&["SLURM_SSH_PRIVATE_KEY"]) {
+        reject_inline_pem()?;
+        return Ok(SlurmKeySource::Pem(Zeroizing::new(pem.into_bytes())));
+    }
+    if let Some(path) =
+        first_non_empty(&["SLURM_SSH_PRIVATE_KEY_PATH", "SLURM_SSH_PRIVATE_KEY_FILE"])
+    {
+        let pb = PathBuf::from(&path);
+        check_private_key_permissions(&pb)?;
+        return Ok(SlurmKeySource::Path(pb));
+    }
+    if let Some(path) = home_ssh_fallback() {
+        check_private_key_permissions(&path)?;
+        return Ok(SlurmKeySource::DevHome(path));
+    }
+    Err(OrchestrationError::Backend(
+        "no Slurm SSH private key: set SLURM_SSH_PRIVATE_KEY, SLURM_SSH_PRIVATE_KEY_PATH, or SLURM_SSH_PRIVATE_KEY_FILE (or BEAMPIPE_SLURM_SSH_ALLOW_HOME_FALLBACK=true for ~/.ssh)"
+            .into(),
+    ))
 }
 
 fn home_ssh_fallback() -> Option<PathBuf> {
@@ -244,8 +454,13 @@ fn home_ssh_fallback() -> Option<PathBuf> {
 
 impl SlurmSshCredentials {
     pub fn resolve() -> Result<Self, OrchestrationError> {
+        Self::resolve_for(None)
+    }
+
+    pub fn resolve_for(slot: Option<&str>) -> Result<Self, OrchestrationError> {
+        let slot = normalize_slot(slot)?;
         let strict_known_hosts = strict_known_hosts_default();
-        let known_hosts_path = resolve_known_hosts_path();
+        let known_hosts_path = resolve_known_hosts_path(slot.as_deref());
 
         if is_production_env() && !strict_known_hosts && !allow_insecure_ssh_host_keys() {
             return Err(OrchestrationError::Backend(
@@ -266,46 +481,29 @@ impl SlurmSshCredentials {
             let kh = known_hosts_path.as_deref().unwrap_or("");
             if kh.is_empty() || kh.eq_ignore_ascii_case("none") {
                 return Err(OrchestrationError::Backend(
-                    "known_hosts required: set SLURM_SSH_KNOWN_HOSTS or SLURM_SSH_KNOWN_HOSTS_SOURCE when strict host verification is enabled"
-                        .into(),
+                    if slot.is_some() {
+                        "known_hosts required for this SSH credential: add known_hosts next to the key, or set SLURM_SSH_KNOWN_HOSTS_<SLOT> / SLURM_SSH_KNOWN_HOSTS"
+                    } else {
+                        "known_hosts required: set SLURM_SSH_KNOWN_HOSTS or SLURM_SSH_KNOWN_HOSTS_SOURCE when strict host verification is enabled"
+                    }
+                    .into(),
                 ));
             }
             crate::slurm_ssh::load_known_host_keys(kh)?;
         }
 
-        let key_source = if let Some(pem) = first_non_empty(&["SLURM_SSH_PRIVATE_KEY"]) {
-            if is_production_env() && !allow_inline_secrets_override() {
-                return Err(OrchestrationError::Backend(
-                    "SLURM_SSH_PRIVATE_KEY inline PEM is not allowed in production; use SLURM_SSH_PRIVATE_KEY_PATH or SLURM_SSH_PRIVATE_KEY_FILE, or set BEAMPIPE_ALLOW_INLINE_SECRETS=true"
-                        .into(),
-                ));
-            }
-            SlurmKeySource::Pem(Zeroizing::new(pem.into_bytes()))
-        } else if let Some(path) =
-            first_non_empty(&["SLURM_SSH_PRIVATE_KEY_PATH", "SLURM_SSH_PRIVATE_KEY_FILE"])
-        {
-            let pb = PathBuf::from(&path);
-            check_private_key_permissions(&pb)?;
-            SlurmKeySource::Path(pb)
-        } else if let Some(path) = home_ssh_fallback() {
-            check_private_key_permissions(&path)?;
-            SlurmKeySource::DevHome(path)
-        } else {
-            return Err(OrchestrationError::Backend(
-                "no Slurm SSH private key: set SLURM_SSH_PRIVATE_KEY, SLURM_SSH_PRIVATE_KEY_PATH, or SLURM_SSH_PRIVATE_KEY_FILE (or BEAMPIPE_SLURM_SSH_ALLOW_HOME_FALLBACK=true for ~/.ssh)"
-                    .into(),
-            ));
-        };
+        let key_source = resolve_key_source(slot.as_deref())?;
 
         Ok(Self {
             key_source,
             known_hosts_path,
             strict_known_hosts,
+            slot,
         })
     }
 
     pub fn load_private_key(&self) -> Result<PrivateKey, OrchestrationError> {
-        let passphrase = resolve_passphrase()?;
+        let passphrase = resolve_passphrase(self.slot.as_deref())?;
         match &self.key_source {
             SlurmKeySource::Pem(bytes) => {
                 let pem = std::str::from_utf8(bytes).map_err(|e| {
@@ -325,7 +523,12 @@ impl SlurmSshCredentials {
 
     /// Whether Slurm SSH credentials can be resolved (for health checks).
     pub fn try_resolve_ok() -> bool {
-        Self::resolve().is_ok()
+        if Self::resolve().is_ok() {
+            return true;
+        }
+        list_credential_slots()
+            .iter()
+            .any(|slot| Self::resolve_for(Some(slot)).is_ok())
     }
 }
 
@@ -491,8 +694,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pass_path = dir.path().join("passphrase");
         std::fs::write(&pass_path, "  secret with spaces  \n").unwrap();
+        let mut perms = std::fs::metadata(&pass_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&pass_path, perms).unwrap();
         std::env::set_var("SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE", &pass_path);
-        let passphrase = resolve_passphrase().unwrap().unwrap();
+        let passphrase = resolve_passphrase(None).unwrap().unwrap();
         assert_eq!(passphrase.as_str(), "  secret with spaces  ");
         std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE");
     }
@@ -503,6 +709,7 @@ mod tests {
             key_source: SlurmKeySource::Pem(Zeroizing::new(b"PRIVATE KEY MATERIAL".to_vec())),
             known_hosts_path: Some("/tmp/known_hosts".into()),
             strict_known_hosts: true,
+            slot: None,
         };
         let rendered = format!("{creds:?}");
         assert!(rendered.contains("[REDACTED]"));
@@ -556,6 +763,145 @@ mod tests {
 
         std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PASSPHRASE");
         std::env::remove_var("SLURM_SSH_PRIVATE_KEY_FILE");
+        std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
+        std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    fn write_mode600(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn named_slot_uses_directory_key_and_ignores_global_key() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("setonix-pawsey0411");
+        std::fs::create_dir(&slot).unwrap();
+        let slot_key = slot.join("private_key");
+        let global_key = dir.path().join("global_key");
+        write_mode600(&slot_key, "slot-key");
+        write_mode600(&global_key, "global-key");
+
+        std::env::set_var("BEAMPIPE_ENV", "development");
+        std::env::set_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS", "false");
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+        std::env::set_var("SLURM_SSH_PRIVATE_KEY_FILE", &global_key);
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PATH");
+
+        let creds = SlurmSshCredentials::resolve_for(Some("setonix-pawsey0411")).unwrap();
+        match creds.key_source {
+            SlurmKeySource::Path(path) => assert_eq!(path, slot_key),
+            other => panic!("expected slot path, got {other:?}"),
+        }
+        assert_eq!(creds.slot.as_deref(), Some("setonix-pawsey0411"));
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_FILE");
+        std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
+        std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    #[test]
+    fn named_slot_does_not_fall_back_to_global_key() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let global_key = dir.path().join("global_key");
+        write_mode600(&global_key, "global-key");
+        std::env::set_var("BEAMPIPE_ENV", "development");
+        std::env::set_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS", "false");
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+        std::env::set_var("SLURM_SSH_PRIVATE_KEY_FILE", &global_key);
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PATH");
+
+        let err = SlurmSshCredentials::resolve_for(Some("missing-slot"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing-slot"));
+        assert!(!err.contains("SLURM_SSH_PRIVATE_KEY_FILE"));
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_FILE");
+        std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
+        std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    #[test]
+    fn slotted_env_path_overrides_directory() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("setonix");
+        std::fs::create_dir(&slot).unwrap();
+        let dir_key = slot.join("private_key");
+        let env_key = dir.path().join("env_key");
+        write_mode600(&dir_key, "dir-key");
+        write_mode600(&env_key, "env-key");
+
+        std::env::set_var("BEAMPIPE_ENV", "development");
+        std::env::set_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS", "false");
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+        std::env::set_var("SLURM_SSH_PRIVATE_KEY_PATH_SETONIX", &env_key);
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PATH");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_FILE");
+
+        let creds = SlurmSshCredentials::resolve_for(Some("setonix")).unwrap();
+        match creds.key_source {
+            SlurmKeySource::Path(path) => assert_eq!(path, env_key),
+            other => panic!("expected env path, got {other:?}"),
+        }
+
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PATH_SETONIX");
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
+        std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
+        std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    #[test]
+    fn named_slot_unlocks_passphrase_protected_key_from_slot_file() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("setonix");
+        std::fs::create_dir(&slot).unwrap();
+        let key_path = slot.join("private_key");
+        let pass = "slot-passcode-123";
+        let status = std::process::Command::new("ssh-keygen")
+            .args([
+                "-t",
+                "ed25519",
+                "-f",
+                key_path.to_str().unwrap(),
+                "-N",
+                pass,
+                "-q",
+            ])
+            .status()
+            .expect("ssh-keygen");
+        assert!(status.success(), "ssh-keygen failed");
+        let mut key_perms = std::fs::metadata(&key_path).unwrap().permissions();
+        key_perms.set_mode(0o600);
+        std::fs::set_permissions(&key_path, key_perms).unwrap();
+        write_mode600(&slot.join("passphrase"), pass);
+
+        std::env::set_var("BEAMPIPE_ENV", "development");
+        std::env::set_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS", "false");
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PATH");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_FILE");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PASSPHRASE");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_PASSPHRASE_FILE");
+
+        let creds = SlurmSshCredentials::resolve_for(Some("setonix")).unwrap();
+        creds
+            .load_private_key()
+            .expect("slot passphrase file unlocks the key");
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
         std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
         std::env::remove_var("BEAMPIPE_ENV");
     }

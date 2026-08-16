@@ -18,6 +18,15 @@ x-beampipe-worker-env-file: &beampipe-worker-env-file
     - path: .env
       required: false
 
+# Host tree bind-mounted for Slurm SSH. In-container path is always
+# /run/beampipe/ssh so a host path in .env does not leak into the process.
+# Layout: <host>/<slot>/{private_key,passphrase,known_hosts}
+x-beampipe-slurm-ssh-volume: &beampipe-slurm-ssh-volume
+  type: bind
+  source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./deploy/ssh/credentials}
+  target: /run/beampipe/ssh
+  read_only: true
+
 # One image for API, scheduler, and workers. Build once with `docker compose build api`.
 x-beampipe-image: &beampipe-image
   image: beampipe-v2:local
@@ -56,9 +65,13 @@ services:
       BEAMPIPE_DB_MAX_CONNECTIONS: "20"
       BEAMPIPE_WORKER_SCHEDULER_ENABLED: "false"
       BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: ${BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS:-true}
       # The API owns /ready and dashboard dependency reporting, so it needs the
       # same TAP endpoint configuration as scheduler and worker roles.
       <<: *beampipe-backend-env
+    volumes:
+      - *beampipe-slurm-ssh-volume
     ports:
       - "8080:8080"
       - "9090:9090"
@@ -88,7 +101,11 @@ services:
       BEAMPIPE_WORKER_SCHEDULER_ENABLED: "true"
       BEAMPIPE_DB_MAX_CONNECTIONS: "20"
       BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: ${BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS:-true}
       <<: [*beampipe-shaping, *beampipe-backend-env]
+    volumes:
+      - *beampipe-slurm-ssh-volume
     expose:
       - "9090"
     depends_on:
@@ -113,7 +130,11 @@ services:
       BEAMPIPE_DB_MAX_CONNECTIONS: "25"
       BEAMPIPE_WORKER_POLL_INTERVAL_MS: "200"
       BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: ${BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS:-true}
       <<: [*beampipe-shaping, *beampipe-backend-env]
+    volumes:
+      - *beampipe-slurm-ssh-volume
     expose:
       - "9090"
     depends_on:

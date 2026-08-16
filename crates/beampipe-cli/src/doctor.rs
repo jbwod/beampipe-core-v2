@@ -543,20 +543,31 @@ async fn check_profile(
             check_manager(manager_url.as_deref(), checks, settings.use_real_backends).await;
         }
         DeploymentConfig::SlurmRemote(slurm) => {
-            let credential_ok = SlurmSshCredentials::try_resolve_ok();
+            let credential_ok =
+                SlurmSshCredentials::resolve_for(slurm.ssh_credential.as_deref()).is_ok();
             checks.push(if credential_ok {
                 success(
                     "slurm.credentials",
                     "slurm_ssh",
-                    "SSH credentials and host verification policy resolve",
+                    match slurm.ssh_credential.as_deref() {
+                        Some(slot) => format!(
+                            "SSH credential '{slot}' and host verification policy resolve"
+                        ),
+                        None => "SSH credentials and host verification policy resolve".into(),
+                    },
                 )
             } else {
                 failure(
                     "slurm.credentials_missing",
                     "slurm_ssh",
                     true,
-                    "SSH credentials could not be resolved",
-                    "configure a private key and verified known_hosts file",
+                    match slurm.ssh_credential.as_deref() {
+                        Some(slot) => format!(
+                            "SSH credential '{slot}' could not be resolved"
+                        ),
+                        None => "SSH credentials could not be resolved".into(),
+                    },
+                    "place private_key and known_hosts under BEAMPIPE_SSH_CREDENTIALS_DIR/<slot>/, or configure the process-wide SLURM_SSH_* files",
                 )
             });
             if !credential_ok {

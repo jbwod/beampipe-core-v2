@@ -1,6 +1,9 @@
 //! Startup security checks (JWT, Slurm SSH, CASDA, database URL).
 
-use crate::slurm_credentials::{beampipe_env, is_production_env, SlurmSshCredentials};
+use crate::slurm_credentials::{
+    beampipe_env, has_global_ssh_key_config, is_production_env, list_credential_slots,
+    SlurmSshCredentials,
+};
 use beampipe_config::Settings;
 use beampipe_security::{bool_env, resolve_secret, SecretPolicy, SecretRef};
 
@@ -63,40 +66,18 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
     }
 
     if use_real_backends() {
-        match SlurmSshCredentials::resolve() {
-            Ok(creds) => {
-                if is_production_env() && creds.key_source.source_kind() == "env" {
-                    errors.push(
-                        "SLURM_SSH_PRIVATE_KEY inline PEM is not allowed in production without BEAMPIPE_ALLOW_INLINE_SECRETS=true"
-                            .into(),
-                    );
-                }
-                if is_production_env()
-                    && !creds.strict_known_hosts
-                    && !bool_env("BEAMPIPE_ALLOW_INSECURE_SSH_HOST_KEYS").unwrap_or(false)
-                {
-                    errors.push(
-                        "Slurm strict known-hosts verification is required in production".into(),
-                    );
-                }
-                if creds.strict_known_hosts {
-                    match creds.known_hosts_path.as_ref() {
-                        Some(path) if !std::path::Path::new(path).is_file() => {
-                            errors.push(format!("SLURM_SSH_KNOWN_HOSTS file not found: {path}"));
-                        }
-                        Some(path) => {
-                            if let Err(e) = crate::slurm_ssh::load_known_host_entries(path) {
-                                errors.push(format!("SLURM_SSH_KNOWN_HOSTS invalid: {e}"));
-                            }
-                        }
-                        None if is_production_env() => {
-                            errors.push("SLURM_SSH_KNOWN_HOSTS is required in production".into());
-                        }
-                        None => {}
-                    }
-                }
+        let slots = list_credential_slots();
+        if has_global_ssh_key_config() {
+            push_slurm_credential_issues(&mut errors, None);
+        }
+        for slot in &slots {
+            push_slurm_credential_issues(&mut errors, Some(slot.as_str()));
+        }
+        if !has_global_ssh_key_config() && slots.is_empty() {
+            match SlurmSshCredentials::resolve() {
+                Ok(creds) => push_resolved_slurm_issues(&mut errors, &creds),
+                Err(e) => errors.push(format!("Slurm SSH credentials: {e}")),
             }
-            Err(e) => errors.push(format!("Slurm SSH credentials: {e}")),
         }
 
         let casda_user = std::env::var("CASDA_USERNAME")
@@ -123,6 +104,55 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
     }
 
     errors
+}
+
+fn push_slurm_credential_issues(errors: &mut Vec<String>, slot: Option<&str>) {
+    match SlurmSshCredentials::resolve_for(slot) {
+        Ok(creds) => push_resolved_slurm_issues(errors, &creds),
+        Err(e) => errors.push(match slot {
+            Some(name) => format!("Slurm SSH credential '{name}': {e}"),
+            None => format!("Slurm SSH credentials: {e}"),
+        }),
+    }
+}
+
+fn push_resolved_slurm_issues(errors: &mut Vec<String>, creds: &SlurmSshCredentials) {
+    let label = creds
+        .slot
+        .as_deref()
+        .map(|name| format!(" credential '{name}'"))
+        .unwrap_or_default();
+    if is_production_env() && creds.key_source.source_kind() == "env" {
+        errors.push(format!(
+            "SLURM_SSH_PRIVATE_KEY inline PEM is not allowed in production{label} without BEAMPIPE_ALLOW_INLINE_SECRETS=true"
+        ));
+    }
+    if is_production_env()
+        && !creds.strict_known_hosts
+        && !bool_env("BEAMPIPE_ALLOW_INSECURE_SSH_HOST_KEYS").unwrap_or(false)
+    {
+        errors.push(format!(
+            "Slurm strict known-hosts verification is required in production{label}"
+        ));
+    }
+    if creds.strict_known_hosts {
+        match creds.known_hosts_path.as_ref() {
+            Some(path) if !std::path::Path::new(path).is_file() => {
+                errors.push(format!("SLURM_SSH_KNOWN_HOSTS file not found{label}: {path}"));
+            }
+            Some(path) => {
+                if let Err(e) = crate::slurm_ssh::load_known_host_entries(path) {
+                    errors.push(format!("SLURM_SSH_KNOWN_HOSTS invalid{label}: {e}"));
+                }
+            }
+            None if is_production_env() => {
+                errors.push(format!(
+                    "SLURM_SSH_KNOWN_HOSTS is required in production{label}"
+                ));
+            }
+            None => {}
+        }
+    }
 }
 
 pub fn validate_security(settings: &Settings) -> Result<(), Vec<String>> {

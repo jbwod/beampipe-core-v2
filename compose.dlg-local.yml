@@ -14,6 +14,10 @@ services:
       - default
       - dlg-local
     volumes:
+      - type: bind
+        source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./deploy/ssh/credentials}
+        target: /run/beampipe/ssh
+        read_only: true
       - ../wallaby-hires-beampipe/dlg-graphs:/graphs:ro
 
   scheduler:
@@ -24,6 +28,10 @@ services:
       - default
       - dlg-local
     volumes:
+      - type: bind
+        source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./deploy/ssh/credentials}
+        target: /run/beampipe/ssh
+        read_only: true
       - ../wallaby-hires-beampipe/dlg-graphs:/graphs:ro
 
   worker:
@@ -34,6 +42,10 @@ services:
       - default
       - dlg-local
     volumes:
+      - type: bind
+        source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./deploy/ssh/credentials}
+        target: /run/beampipe/ssh
+        read_only: true
       - ../wallaby-hires-beampipe/dlg-graphs:/graphs:ro
 
 networks:

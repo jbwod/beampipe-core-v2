@@ -742,6 +742,7 @@ mod tests {
             login_node: "login.example".into(),
             ssh_port: 22,
             remote_user: Some("operator".into()),
+            ssh_credential: None,
             account: "science".into(),
             home_dir: "/home/operator".into(),
             log_dir: "/logs".into(),

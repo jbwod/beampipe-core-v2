@@ -4,6 +4,7 @@ mod doctor;
 mod init;
 mod operator;
 mod setup;
+mod slurm_credentials;
 mod timeline;
 
 use anyhow::Context;
@@ -338,6 +339,59 @@ enum SlurmCommand {
         user: Option<String>,
         #[arg(long, default_value_t = 22)]
         port: i32,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Create and inspect per-profile SSH credential slots.
+    Credentials {
+        #[command(subcommand)]
+        command: SlurmCredentialsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SlurmCredentialsCommand {
+    /// Create a credential slot directory, ed25519 key, optional passphrase, and known_hosts.
+    Init {
+        #[arg(long, default_value = "setonix")]
+        slot: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long, default_value = "setonix.pawsey.org.au")]
+        host: String,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
+        #[arg(long)]
+        no_passphrase: bool,
+        #[arg(long)]
+        copy_id: bool,
+        #[arg(long)]
+        acl: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List credential slots under the credentials root.
+    List {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Show redacted file status for a slot.
+    Show {
+        #[arg(long, default_value = "setonix")]
+        slot: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Resolve and load the slot key (optional live ping via --profile).
+    Check {
+        #[arg(long, default_value = "setonix")]
+        slot: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
         #[arg(long)]
         profile: Option<String>,
     },
@@ -724,6 +778,57 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         CliCommand::Slurm {
+            command: SlurmCommand::Credentials { command },
+        } => match command {
+            SlurmCredentialsCommand::Init {
+                slot,
+                dir,
+                host,
+                user,
+                passphrase_file,
+                no_passphrase,
+                copy_id,
+                acl,
+                force,
+                yes,
+            } => {
+                let result = slurm_credentials::init(slurm_credentials::InitOptions {
+                    slot,
+                    dir,
+                    host,
+                    user,
+                    passphrase_file,
+                    no_passphrase,
+                    copy_id,
+                    acl,
+                    force,
+                    yes,
+                    skip_keyscan: false,
+                })?;
+                slurm_credentials::print_init_next_steps(&result);
+            }
+            SlurmCredentialsCommand::List { dir } => {
+                let slots = slurm_credentials::list_slots(dir.as_deref())?;
+                println!("{}", serde_json::to_string_pretty(&slots)?);
+            }
+            SlurmCredentialsCommand::Show { slot, dir } => {
+                let status = slurm_credentials::show(&slot, dir.as_deref())?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+            SlurmCredentialsCommand::Check { slot, dir, profile } => {
+                let status = slurm_credentials::check(&slot, dir.as_deref())?;
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "slot": status.slot,
+                    "private_key": status.private_key.path,
+                    "passphrase": status.passphrase.present,
+                }))?);
+                if let Some(profile_name) = profile {
+                    slurm_ping(None, None, 22, Some(profile_name)).await?;
+                }
+            }
+        },
+        CliCommand::Slurm {
             command:
                 SlurmCommand::Ping {
                     host,
@@ -732,84 +837,7 @@ async fn main() -> anyhow::Result<()> {
                     profile,
                 },
         } => {
-            let (login, remote_user, ssh_port) = if let Some(profile_name) = profile {
-                let settings = Settings::from_env()?;
-                let pool = beampipe_db::connect(&settings.database_url).await?;
-                let row = beampipe_db::repo::get_deployment_profile_by_name(&pool, &profile_name)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("deployment profile not found: {profile_name}")
-                    })?;
-                let dep: beampipe_profiles::SlurmRemoteDeploymentConfig =
-                    match serde_json::from_value(row.deployment)? {
-                        beampipe_profiles::DeploymentConfig::SlurmRemote(s) => s,
-                        _ => anyhow::bail!("profile is not slurm_remote"),
-                    };
-                (
-                    dep.login_node,
-                    dep.remote_user
-                        .or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
-                        .or(user),
-                    dep.ssh_port,
-                )
-            } else {
-                (
-                    host.ok_or_else(|| anyhow::anyhow!("--host or --profile required"))?,
-                    user.or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
-                        .or_else(|| std::env::var("USER").ok()),
-                    port,
-                )
-            };
-            let remote_user = remote_user.ok_or_else(|| anyhow::anyhow!("remote user required"))?;
-            let deployment = beampipe_profiles::SlurmRemoteDeploymentConfig {
-                login_node: login,
-                ssh_port,
-                remote_user: Some(remote_user.clone()),
-                account: String::new(),
-                home_dir: String::new(),
-                log_dir: String::new(),
-                exec_prefix: String::new(),
-                dlg_root: String::new(),
-                venv: None,
-                modules: None,
-                facility: String::new(),
-                job_duration_minutes: 0,
-                num_nodes: 1,
-                num_islands: 1,
-                verbose_level: 0,
-                max_threads: 0,
-                all_nics: false,
-                zerorun: false,
-                sleepncopy: false,
-                check_with_session: false,
-                verify_ssl: None,
-                slurm_template: None,
-                resources: Default::default(),
-                manager_topology: Default::default(),
-                container_runtime: None,
-                environment_setup: None,
-            };
-            let target =
-                beampipe_orchestration::SlurmTarget::from_deployment(&deployment, &remote_user);
-            let mut session = beampipe_orchestration::SlurmSshSession::connect(&target).await?;
-            let squeue_out = session
-                .run_command("squeue -u $USER -h | head -3")
-                .await
-                .context("squeue via russh")?;
-            let sacct_out = session
-                .run_command("sacct -u $USER --format=JobID,State --noheader | head -3")
-                .await
-                .unwrap_or_else(|e| format!("(sacct failed: {e})"));
-            let _ = session.close().await;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "target": format!("{remote_user}@{}", deployment.login_node),
-                    "transport": "russh",
-                    "squeue_stdout": squeue_out.trim(),
-                    "sacct_stdout": sacct_out.trim(),
-                }))?
-            );
+            slurm_ping(host, user, port, profile).await?;
         }
         CliCommand::Security {
             command: SecurityCommand::Check,
@@ -847,6 +875,93 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     }
+    Ok(())
+}
+
+async fn slurm_ping(
+    host: Option<String>,
+    user: Option<String>,
+    port: i32,
+    profile: Option<String>,
+) -> anyhow::Result<()> {
+    let (login, remote_user, ssh_port, ssh_credential) = if let Some(profile_name) = profile {
+        let settings = Settings::from_env()?;
+        let pool = beampipe_db::connect(&settings.database_url).await?;
+        let row = beampipe_db::repo::get_deployment_profile_by_name(&pool, &profile_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("deployment profile not found: {profile_name}"))?;
+        let dep: beampipe_profiles::SlurmRemoteDeploymentConfig =
+            match serde_json::from_value(row.deployment)? {
+                beampipe_profiles::DeploymentConfig::SlurmRemote(s) => s,
+                _ => anyhow::bail!("profile is not slurm_remote"),
+            };
+        (
+            dep.login_node,
+            dep.remote_user
+                .or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
+                .or(user),
+            dep.ssh_port,
+            dep.ssh_credential,
+        )
+    } else {
+        (
+            host.ok_or_else(|| anyhow::anyhow!("--host or --profile required"))?,
+            user.or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
+                .or_else(|| std::env::var("USER").ok()),
+            port,
+            None,
+        )
+    };
+    let remote_user = remote_user.ok_or_else(|| anyhow::anyhow!("remote user required"))?;
+    let deployment = beampipe_profiles::SlurmRemoteDeploymentConfig {
+        login_node: login,
+        ssh_port,
+        remote_user: Some(remote_user.clone()),
+        ssh_credential,
+        account: String::new(),
+        home_dir: String::new(),
+        log_dir: String::new(),
+        exec_prefix: String::new(),
+        dlg_root: String::new(),
+        venv: None,
+        modules: None,
+        facility: String::new(),
+        job_duration_minutes: 0,
+        num_nodes: 1,
+        num_islands: 1,
+        verbose_level: 0,
+        max_threads: 0,
+        all_nics: false,
+        zerorun: false,
+        sleepncopy: false,
+        check_with_session: false,
+        verify_ssl: None,
+        slurm_template: None,
+        resources: Default::default(),
+        manager_topology: Default::default(),
+        container_runtime: None,
+        environment_setup: None,
+    };
+    let target = beampipe_orchestration::SlurmTarget::from_deployment(&deployment, &remote_user);
+    let mut session = beampipe_orchestration::SlurmSshSession::connect(&target).await?;
+    let squeue_out = session
+        .run_command("squeue -u $USER -h | head -3")
+        .await
+        .context("squeue via russh")?;
+    let sacct_out = session
+        .run_command("sacct -u $USER --format=JobID,State --noheader | head -3")
+        .await
+        .unwrap_or_else(|e| format!("(sacct failed: {e})"));
+    let _ = session.close().await;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "target": format!("{remote_user}@{}", deployment.login_node),
+            "transport": "russh",
+            "squeue_stdout": squeue_out.trim(),
+            "sacct_stdout": sacct_out.trim(),
+        }))?
+    );
     Ok(())
 }
 
