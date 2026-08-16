@@ -175,15 +175,34 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
 
 pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     let mut root = resolve_operator_root(&opts)?;
-    print_banner(opts.start);
-    preflight_before_materialize(&opts)?;
-
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     root = root
         .canonicalize()
         .with_context(|| format!("resolve {}", root.display()))?;
+    let existing_context = installation::InstallationContext::from_home(root.clone())?;
+    let env_existed = existing_context.environment_file.is_file();
+    let compose_preexisting = root.join("docker-compose.yml").is_file();
+    if existing_context.exists() {
+        existing_context.activate()?;
+    }
+    if let Some(state) = existing_context.state.as_ref() {
+        if opts.runtime.is_none() && !opts.docker && !opts.skip_docker {
+            opts.runtime = Some(state.runtime.as_str().into());
+        }
+        if opts.postgres.is_none() {
+            opts.postgres = Some(state.database_mode.clone());
+        }
+        println!(
+            "Existing installation detected: runtime={}, database={}.",
+            state.runtime.as_str(),
+            state.database_mode
+        );
+    }
+
+    print_banner(opts.start);
+    preflight_before_materialize(&opts)?;
     std::env::set_current_dir(&root).with_context(|| format!("chdir {}", root.display()))?;
-    let env_path = root.join(".env");
+    let env_path = existing_context.environment_file.clone();
 
     let materialized = materialize::materialize(&root, false)?;
     for path in &materialized.created {
@@ -280,17 +299,14 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         );
     }
 
-    let jwt_secret = opts
-        .jwt_secret
-        .clone()
-        .or_else(|| std::env::var("BEAMPIPE_JWT_SECRET").ok())
-        .filter(|secret| secret.len() >= 32 && secret != "change-me")
-        .unwrap_or_else(|| {
-            if !opts.yes {
-                println!("Generated a random JWT secret and stored it in .env.");
-            }
-            generate_jwt_secret()
-        });
+    let jwt_secret = select_jwt_secret(
+        opts.jwt_secret.as_deref(),
+        std::env::var("BEAMPIPE_JWT_SECRET").ok().as_deref(),
+        env_existed,
+    )?;
+    if !env_existed && opts.jwt_secret.is_none() {
+        println!("Generated a random JWT secret and stored it in .env.");
+    }
 
     let casda_tap_url = env_override(
         opts.casda_tap_url.as_deref(),
@@ -303,13 +319,18 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         "BEAMPIPE_WORKER_POOL",
         DEFAULT_WORKER_POOL,
     );
+    let use_real_backends = std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "false".into());
 
     update_env_file(&env_path, "DATABASE_URL", &database_url)?;
     update_env_file(&env_path, "BEAMPIPE_JWT_SECRET", &jwt_secret)?;
     update_env_file(&env_path, "BEAMPIPE_CASDA_TAP_URL", &casda_tap_url)?;
     update_env_file(&env_path, "BEAMPIPE_TM_URL", &tm_url)?;
     update_env_file(&env_path, "BEAMPIPE_WORKER_POOL", &worker_pool)?;
-    update_env_file(&env_path, "BEAMPIPE_USE_REAL_BACKENDS", "false")?;
+    update_env_file(&env_path, "BEAMPIPE_USE_REAL_BACKENDS", &use_real_backends)?;
     update_env_file(
         &env_path,
         "BEAMPIPE_SSH_CREDENTIALS_HOST",
@@ -323,18 +344,12 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     ensure_beampipe_version(&root, &env_path)?;
     println!("Wrote .env (0600)");
 
-    if !opts.skip_admin && opts.admin_password.as_deref().unwrap_or("").is_empty() && opts.yes {
-        let password = generate_admin_password();
-        println!("Generated admin password (shown once): {password}");
-        opts.admin_password = Some(password);
-    }
-
     std::env::set_var("DATABASE_URL", &database_url);
     std::env::set_var("BEAMPIPE_JWT_SECRET", &jwt_secret);
     std::env::set_var("BEAMPIPE_CASDA_TAP_URL", &casda_tap_url);
     std::env::set_var("BEAMPIPE_TM_URL", &tm_url);
     std::env::set_var("BEAMPIPE_WORKER_POOL", &worker_pool);
-    std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", "false");
+    std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", &use_real_backends);
     std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", &credential_root);
 
     installation::write_state(
@@ -346,10 +361,24 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             database_mode: postgres.as_str().into(),
             home: root.clone(),
             environment_file: env_path.clone(),
-            config_file: root.join("beampipe.yaml"),
+            config_file: existing_context.config_file.clone(),
             credential_root: credential_root.clone(),
-            operator_bundle_version: env!("CARGO_PKG_VERSION").into(),
-            compose_project: installation::compose_project_name(&root),
+            operator_bundle_version: existing_context
+                .state
+                .as_ref()
+                .map(|state| state.operator_bundle_version.clone())
+                .unwrap_or_else(|| {
+                    if compose_preexisting {
+                        "legacy-unversioned".into()
+                    } else {
+                        env!("CARGO_PKG_VERSION").into()
+                    }
+                }),
+            compose_project: existing_context
+                .state
+                .as_ref()
+                .map(|state| state.compose_project.clone())
+                .unwrap_or_else(|| installation::compose_project_name(&root)),
         },
     )?;
     println!(
@@ -548,6 +577,43 @@ async fn upload_project_config(
 
 fn generate_jwt_secret() -> String {
     Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string()
+}
+
+fn select_jwt_secret(
+    explicit: Option<&str>,
+    existing: Option<&str>,
+    env_existed: bool,
+) -> Result<String> {
+    if let Some(secret) = explicit.filter(|secret| !secret.trim().is_empty()) {
+        if !jwt_secret_is_valid(secret) {
+            bail!("--jwt-secret must be at least 32 characters and not a known placeholder");
+        }
+        return Ok(secret.to_string());
+    }
+    if let Some(secret) = existing.filter(|secret| !secret.trim().is_empty()) {
+        if jwt_secret_is_valid(secret) {
+            return Ok(secret.to_string());
+        }
+        if env_existed {
+            bail!(
+                "existing BEAMPIPE_JWT_SECRET is weak or a placeholder; setup will not rotate it silently. Supply a new secret explicitly"
+            );
+        }
+    }
+    Ok(generate_jwt_secret())
+}
+
+fn jwt_secret_is_valid(secret: &str) -> bool {
+    let normalized = secret.trim().to_ascii_lowercase();
+    secret.len() >= 32
+        && ![
+            "change-me",
+            "secret-key",
+            "local-dev-jwt-secret-change-me",
+            "replace-with-at-least-32-random-characters",
+            "change-me-to-at-least-32-random-characters",
+        ]
+        .contains(&normalized.as_str())
 }
 
 pub fn generate_admin_password() -> String {
@@ -1181,40 +1247,49 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
 }
 
 async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
-    let (username, password, email) = if opts.yes {
-        let password = opts
+    let username = if opts.yes {
+        opts.admin_user.clone().unwrap_or_else(|| "admin".into())
+    } else {
+        prompt_default("Admin username", "admin")?
+    };
+
+    if repo::get_user_by_username(pool, &username).await?.is_some() {
+        println!("Admin user '{username}' already exists; skipped.");
+        print_login_snippet(&username);
+        return Ok(());
+    }
+
+    let password = if opts.yes {
+        match opts
             .admin_password
             .clone()
             .filter(|password| !password.is_empty())
-            .unwrap_or_else(generate_admin_password);
-        (
-            opts.admin_user.clone().unwrap_or_else(|| "admin".into()),
-            password,
-            opts.admin_email
-                .clone()
-                .unwrap_or_else(|| "admin@example.test".into()),
-        )
+        {
+            Some(password) => password,
+            None => {
+                let password = generate_admin_password();
+                println!("Generated admin password (shown once): {password}");
+                password
+            }
+        }
     } else {
-        let username = prompt_default("Admin username", "admin")?;
-        let password = rpassword::prompt_password("Admin password (12+ characters): ")?;
-        let email = prompt_default("Admin email", "admin@example.test")?;
-        (username, password, email)
+        rpassword::prompt_password("Admin password (12+ characters): ")?
+    };
+    let email = if opts.yes {
+        opts.admin_email
+            .clone()
+            .unwrap_or_else(|| "admin@example.test".into())
+    } else {
+        prompt_default("Admin email", "admin@example.test")?
     };
 
     if password.len() < 12 {
         bail!("admin password must be at least 12 characters");
     }
 
-    if repo::get_user_by_username(pool, &username).await?.is_none() {
-        let hash = beampipe_auth::hash_password(&password)?;
-        repo::create_user(pool, "Admin", &username, &email, &hash, true).await?;
-        println!("Created admin user '{username}'.");
-    } else {
-        println!("Admin user '{username}' already exists; skipped.");
-        println!(
-            "The password is not stored in .env. Use the value setup printed when this user was created."
-        );
-    }
+    let hash = beampipe_auth::hash_password(&password)?;
+    repo::create_user(pool, "Admin", &username, &email, &hash, true).await?;
+    println!("Created admin user '{username}'.");
     print_login_snippet(&username);
     Ok(())
 }
@@ -1469,6 +1544,41 @@ mod tests {
         let password = generate_admin_password();
         assert!(password.len() >= 12);
         assert!(password.starts_with("bp-"));
+    }
+
+    #[test]
+    fn setup_preserves_an_existing_valid_jwt_secret() {
+        let existing = "existing-production-secret-with-more-than-32-characters";
+        assert_eq!(
+            select_jwt_secret(None, Some(existing), true).unwrap(),
+            existing
+        );
+    }
+
+    #[test]
+    fn setup_requires_explicit_replacement_for_a_weak_existing_jwt_secret() {
+        let error = select_jwt_secret(None, Some("change-me"), true).unwrap_err();
+        assert!(error.to_string().contains("will not rotate it silently"));
+    }
+
+    #[test]
+    fn explicit_jwt_secret_replaces_an_existing_placeholder() {
+        let replacement = "new-production-secret-with-more-than-32-characters";
+        assert_eq!(
+            select_jwt_secret(Some(replacement), Some("change-me"), true).unwrap(),
+            replacement
+        );
+    }
+
+    #[test]
+    fn known_long_jwt_placeholders_are_rejected() {
+        let error = select_jwt_secret(
+            Some("replace-with-at-least-32-random-characters"),
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("known placeholder"));
     }
 
     #[test]

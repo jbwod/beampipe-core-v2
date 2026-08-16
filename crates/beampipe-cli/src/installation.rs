@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 pub const INSTALLATION_STATE_FILE: &str = "installation.json";
 pub const INSTALLATION_SCHEMA_VERSION: u32 = 1;
@@ -12,6 +13,15 @@ pub const INSTALLATION_SCHEMA_VERSION: u32 = 1;
 pub enum RuntimeMode {
     Docker,
     Host,
+}
+
+impl RuntimeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+            Self::Host => "host",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,7 +175,7 @@ pub fn write_state(home: &Path, state: &InstallationState) -> Result<()> {
     let destination = home.join(INSTALLATION_STATE_FILE);
     let temporary = home.join(format!(
         ".{INSTALLATION_STATE_FILE}.tmp-{}",
-        std::process::id()
+        Uuid::new_v4().simple()
     ));
     let bytes = serde_json::to_vec_pretty(state)?;
     let mut file = OpenOptions::new()
