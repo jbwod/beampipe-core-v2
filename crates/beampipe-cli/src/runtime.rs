@@ -33,7 +33,16 @@ pub struct DockerStatus {
 
 pub fn start(context: &InstallationContext) -> Result<()> {
     require_runtime(context, RuntimeMode::Docker)?;
-    compose_status(context, &["up", "-d", "--wait"], STACK_SERVICES)
+    let mut services = Vec::with_capacity(4);
+    if context
+        .state
+        .as_ref()
+        .is_some_and(|state| state.database_mode == "compose")
+    {
+        services.push("postgres");
+    }
+    services.extend_from_slice(STACK_SERVICES);
+    compose_status(context, &["up", "-d", "--wait"], &services)
 }
 
 pub fn stop(context: &InstallationContext) -> Result<()> {
@@ -50,12 +59,25 @@ pub fn restart(context: &InstallationContext) -> Result<()> {
         RuntimeMode::Docker => compose_status(
             context,
             &["up", "-d", "--wait", "--force-recreate"],
-            STACK_SERVICES,
+            &restart_services(context),
         ),
         RuntimeMode::Host => bail!(
             "host runtime is not daemonized by Beampipe; restart it with your service manager or stop it and run `beampipe start`"
         ),
     }
+}
+
+fn restart_services(context: &InstallationContext) -> Vec<&'static str> {
+    let mut services = Vec::with_capacity(4);
+    if context
+        .state
+        .as_ref()
+        .is_some_and(|state| state.database_mode == "compose")
+    {
+        services.push("postgres");
+    }
+    services.extend_from_slice(STACK_SERVICES);
+    services
 }
 
 pub fn logs(

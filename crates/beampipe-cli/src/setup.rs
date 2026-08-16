@@ -208,6 +208,14 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     for path in &materialized.created {
         println!("Created {}", path.display());
     }
+    for path in &materialized.replaced {
+        println!("Updated managed file {}", path.display());
+    }
+    if !materialized.bundle_current {
+        println!(
+            "Preserved operator-modified bundle files. Review them before relying on new release defaults."
+        );
+    }
     let compose_exists = compose_file_exists(&root);
     let tentative_docker = !matches!(decide_runtime(&opts)?, Some(RuntimeKind::Host));
     let total_steps = setup_step_total(&opts, tentative_docker);
@@ -229,20 +237,47 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
 
     print_step(step, total_steps, "PostgreSQL");
     step += 1;
-    let mut postgres = resolve_postgres(&opts, compose_exists)?;
-    if runtime == RuntimeKind::Docker && postgres == PostgresKind::Existing {
-        print_hint("Docker runtime uses the Compose postgres service.");
-        postgres = PostgresKind::Compose;
-    }
+    let postgres = resolve_postgres(&opts, compose_exists)?;
     if postgres == PostgresKind::Compose && !compose_exists {
         bail!(
             "--postgres compose requires docker-compose.yml in {}",
             root.display()
         );
     }
-    let database_url = resolve_database_url(&opts, postgres)?;
+    let postgres_password = (postgres == PostgresKind::Compose).then(|| {
+        std::env::var("BEAMPIPE_POSTGRES_PASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                if env_existed {
+                    println!(
+                        "Existing Compose database has no managed password setting; preserving the legacy password."
+                    );
+                    "postgres".into()
+                } else {
+                    generate_database_password()
+                }
+            })
+    });
+    let database_url =
+        if postgres == PostgresKind::Compose && opts.database_url.is_none() && !env_existed {
+            format!(
+                "postgres://postgres:{}@localhost:5432/beampipe",
+                postgres_password.as_deref().unwrap_or_default()
+            )
+        } else {
+            resolve_database_url(&opts, postgres)?
+        };
+    if runtime == RuntimeKind::Docker
+        && postgres == PostgresKind::Existing
+        && (database_url.contains("@localhost") || database_url.contains("@127.0.0.1"))
+    {
+        print_hint(
+            "The external database URL points at the container itself. Use a hostname reachable from Docker, such as host.docker.internal on Docker Desktop.",
+        );
+    }
     if postgres == PostgresKind::Compose {
-        print_hint(&format!("Using {database_url}"));
+        print_hint("Using the installation-managed PostgreSQL service.");
         if opts.start {
             print_hint("Starting Compose Postgres next.");
         } else {
@@ -326,6 +361,22 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         .unwrap_or_else(|| "false".into());
 
     update_env_file(&env_path, "DATABASE_URL", &database_url)?;
+    if let Some(password) = postgres_password.as_deref() {
+        update_env_file(&env_path, "BEAMPIPE_POSTGRES_PASSWORD", password)?;
+    }
+    let docker_database_url = if postgres == PostgresKind::Compose {
+        format!(
+            "postgres://postgres:{}@postgres:5432/beampipe",
+            postgres_password.as_deref().unwrap_or_default()
+        )
+    } else {
+        database_url.clone()
+    };
+    update_env_file(
+        &env_path,
+        "BEAMPIPE_DATABASE_URL_DOCKER",
+        &docker_database_url,
+    )?;
     update_env_file(&env_path, "BEAMPIPE_JWT_SECRET", &jwt_secret)?;
     update_env_file(&env_path, "BEAMPIPE_CASDA_TAP_URL", &casda_tap_url)?;
     update_env_file(&env_path, "BEAMPIPE_TM_URL", &tm_url)?;
@@ -341,7 +392,11 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         "BEAMPIPE_SSH_CREDENTIALS_DIR",
         &credential_root.display().to_string(),
     )?;
-    ensure_beampipe_version(&root, &env_path)?;
+    if env_existed {
+        ensure_beampipe_version(&root, &env_path)?;
+    } else {
+        update_env_file(&env_path, "BEAMPIPE_VERSION", env!("CARGO_PKG_VERSION"))?;
+    }
     println!("Wrote .env (0600)");
 
     std::env::set_var("DATABASE_URL", &database_url);
@@ -363,17 +418,21 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             environment_file: env_path.clone(),
             config_file: existing_context.config_file.clone(),
             credential_root: credential_root.clone(),
-            operator_bundle_version: existing_context
-                .state
-                .as_ref()
-                .map(|state| state.operator_bundle_version.clone())
-                .unwrap_or_else(|| {
-                    if compose_preexisting {
-                        "legacy-unversioned".into()
-                    } else {
-                        env!("CARGO_PKG_VERSION").into()
-                    }
-                }),
+            operator_bundle_version: if materialized.bundle_current {
+                env!("CARGO_PKG_VERSION").into()
+            } else {
+                existing_context
+                    .state
+                    .as_ref()
+                    .map(|state| state.operator_bundle_version.clone())
+                    .unwrap_or_else(|| {
+                        if compose_preexisting {
+                            "legacy-unversioned".into()
+                        } else {
+                            env!("CARGO_PKG_VERSION").into()
+                        }
+                    })
+            },
             compose_project: existing_context
                 .state
                 .as_ref()
@@ -591,6 +650,10 @@ async fn upload_project_config(
 }
 
 fn generate_jwt_secret() -> String {
+    Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string()
+}
+
+fn generate_database_password() -> String {
     Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string()
 }
 
