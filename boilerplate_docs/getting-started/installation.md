@@ -1,135 +1,152 @@
 # Install and configure
 
-Beampipe ships as one Rust binary plus a published container image. Prefer the installer; use a source build when qualifying a commit. PostgreSQL is always required.
+Beampipe has one installation directory and one management command. PostgreSQL is required; Docker is recommended but not mandatory.
 
-## Install
-
-=== "Installer"
-
-    No git clone. The script installs `beampipe` to `~/.local/bin`, writes `~/beampipe`, and starts the stack. Linux host archives need glibc and OpenSSL 3 (Ubuntu 22.04 / Debian bookworm or newer). Configure flags on the [docs home page](../index.md#install-builder).
-
-    ```bash
-    curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
-    # non-interactive:
-    # curl -fsSL .../install.sh | sh -s -- --yes --runtime docker
-    curl -fsS http://127.0.0.1:8080/api/v2/health
-    ```
-
-    `beampipe setup --directory ~/beampipe --no-start` writes files and prints a recipe only.
-
-=== "Release archive"
-
-    Download the archive for your platform from the [GitHub Releases](https://github.com/jbwod/beampipe-core-v2/releases) page, verify it against `SHA256SUMS`, and place `beampipe` on `PATH`. Then run setup; it writes `~/beampipe` when the current directory has no `docker-compose.yml`.
-
-    ```bash
-    VERSION=0.1.0
-    TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu / aarch64-apple-darwin / x86_64-apple-darwin
-    curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/beampipe-${TARGET}.tar.gz"
-    curl -fsSL -O "https://github.com/jbwod/beampipe-core-v2/releases/download/v${VERSION}/SHA256SUMS"
-    sha256sum -c SHA256SUMS --ignore-missing
-    # macOS (aarch64-apple-darwin / x86_64-apple-darwin):
-    # grep "beampipe-${TARGET}.tar.gz" SHA256SUMS | shasum -a 256 -c
-    tar -xzf "beampipe-${TARGET}.tar.gz"
-    mkdir -p "$HOME/.local/bin"
-    install -m 0755 "beampipe-${TARGET}/beampipe" "$HOME/.local/bin/beampipe"
-    beampipe setup --yes --runtime docker
-    ```
-
-=== "Build from source"
-
-    Source builds need Cargo 1.78 or newer (lockfile v4). Older Cargo cannot parse `Cargo.lock`. This path is for qualifying a commit.
-
-    ```bash
-    git clone https://github.com/jbwod/beampipe-core-v2.git
-    cd beampipe-core-v2
-    cargo build --locked --release -p beampipe-cli --bin beampipe
-    export PATH="$PWD/target/release:$PATH"
-    beampipe setup --yes --runtime host --no-start
-    ```
-
-    Developers who already have a checkout can run `./deploy/setup-docker.sh --yes --skip-admin --skip-upload` (passes `--no-start`). Set `BEAMPIPE_BUILD=1` to compile this checkout instead of pulling GHCR.
-
-## Configuration precedence
-
-Settings resolve in this order, with later sources winning:
-
-<div class="bp-flow-diagram bp-flow-diagram--animated" role="img" aria-label="Configuration precedence from defaults to environment variables">
-  <div class="bp-flow-node" data-tone="cyan"><span>LOW</span><strong>defaults</strong><small>safe development</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>FILE</span><strong>beampipe.yaml</strong><small>non-secret settings</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>LOCAL</span><strong>.env</strong><small>private runtime</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>HIGH</span><strong>environment</strong><small>deployment override</small></div>
-</div>
-
-Inspect the effective value and its source without exposing secrets:
-
-```bash
-beampipe config explain
+```text
+$BEAMPIPE_HOME/                  default: ~/beampipe
+|-- installation.json           runtime and bundle identity, no secrets
+|-- .env                        private runtime configuration, mode 0600
+|-- docker-compose.yml          version-managed operator bundle
+|-- config/                     project and profile examples
+`-- credentials/ssh/<slot>/     managed SSH credential copies
 ```
 
-Start from `.env.example`. The minimum host configuration is:
+The active installation is selected by global `--home`, then `BEAMPIPE_HOME`, then `~/beampipe`. The current directory does not select an installation.
+
+## 1. Docker: recommended
+
+Use this path for a workstation or a single-host service. It downloads the release binary and published container image; no repository clone or Rust toolchain is needed.
 
 ```bash
-BEAMPIPE_ENV=development
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-BEAMPIPE_JWT_SECRET=replace-with-at-least-32-random-characters
-BEAMPIPE_USE_REAL_BACKENDS=false
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-## Process layout
+Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback, migrates the database, creates the first administrator, and uploads the reference project.
 
-For evaluation, one process is enough:
+Unattended equivalent:
 
 ```bash
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh \
+  | sh -s -- --yes --runtime docker --postgres compose
+```
+
+Manage it from any directory:
+
+```bash
+beampipe status
+beampipe doctor
+beampipe logs --follow
+beampipe restart
+beampipe stop
 beampipe start
 ```
 
-For production, separate the roles:
+Use an existing PostgreSQL server instead:
 
 ```bash
-beampipe serve --worker false
-BEAMPIPE_WORKER_SCHEDULER_ENABLED=true beampipe serve --worker true
-BEAMPIPE_WORKER_SCHEDULER_ENABLED=false BEAMPIPE_WORKER_CONCURRENCY=4 beampipe worker
+beampipe setup --yes --runtime docker --postgres existing \
+  --database-url 'postgres://beampipe@database.internal/beampipe'
 ```
 
-Run exactly one scheduler-enabled process. API and worker-only processes can scale independently.
+The database hostname must be reachable from both the host setup command and Docker containers. `localhost` inside a container is the container itself.
 
-## Essential settings
+## 2. Native host
 
-| Area | Settings | Guidance |
-|---|---|---|
-| API | `BEAMPIPE_BIND_ADDR`, token lifetimes, CORS | Bind to loopback until ingress and TLS are configured |
-| Workers | concurrency, lock seconds, pool, capabilities | Keep the lease longer than normal external calls |
-| Admission | `BEAMPIPE_SHAPING_*` | Cluster-wide safety limits; project YAML adds survey limits |
-| Metrics | `BEAMPIPE_METRICS_BIND_ADDR`, OTEL settings | Give each host process a unique metrics port |
-| Real backends | `BEAMPIPE_USE_REAL_BACKENDS` | Enable only after profile-specific doctor checks pass |
-| Secrets | mounted files or environment references | Never put credentials in project YAML or deployment profiles |
-
-Use `beampipe config explain` for the complete release-specific list. Environment names and defaults are also documented in `.env.example` and `.env.template`.
-
-## Choose a deployment layout
-
-Installation places the same Beampipe binary into one or more runtime roles.
-Where those roles run is an operator choice; REST/DIM and Slurm are execution
-backends, not alternative Beampipe binaries.
-
-| Layout | Best for | Process shape |
-|---|---|---|
-| Native compact | laptop evaluation | one `beampipe start` process |
-| Docker Compose | local service or single host | API + one scheduler + worker replicas + PostgreSQL |
-| Native services | managed VM or bare metal | separate systemd/supervisor units |
-| Container platform | multi-host production | separately scaled API, scheduler, and worker workloads |
-
-Continue with [Deployment topologies](deployment.md) for complete examples and
-network diagrams.
-
-## Production gates
+Use this path when Beampipe processes should run directly under the service user. PostgreSQL may be an existing service or the installation's Compose PostgreSQL only.
 
 ```bash
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh \
+  | sh -s -- --yes --runtime host --postgres existing \
+      --database-url 'postgres://beampipe@127.0.0.1/beampipe'
+
+beampipe start
+```
+
+For Compose PostgreSQL with a native Beampipe process:
+
+```bash
+beampipe setup --yes --runtime host --postgres compose --no-start
+beampipe start
+```
+
+`beampipe start` starts the managed PostgreSQL container when required, then runs the compact API/scheduler process in the foreground. Production native deployments should run separate API, singleton scheduler, and worker units under systemd or another process supervisor; see [Deployment topologies](deployment.md).
+
+## 3. Build from source
+
+Use this path for development and commit qualification.
+
+```bash
+git clone https://github.com/jbwod/beampipe-core-v2.git
+cd beampipe-core-v2
+cargo build --locked --release -p beampipe-cli --bin beampipe
+export PATH="$PWD/target/release:$PATH"
+```
+
+Native developer installation:
+
+```bash
+beampipe --home "$PWD/.local-install" setup \
+  --yes --runtime host --postgres existing --no-start \
+  --database-url 'postgres://postgres:postgres@127.0.0.1/beampipe'
+```
+
+Source-built Docker stack:
+
+```bash
+BEAMPIPE_BUILD=1 ./deploy/setup-docker.sh --yes --skip-admin --skip-upload
+```
+
+The checkout Compose file may build local images and includes developer tooling. Ordinary release installations use the embedded pull-only operator bundle.
+
+## Add a deployment profile
+
+Setup can install a profile immediately:
+
+```bash
+beampipe setup --profile-config config/deployment_profile.dlg-dim.json
+```
+
+Or add one later:
+
+```bash
+beampipe profile add -f "$HOME/beampipe/config/deployment_profile.dlg-dim.json"
+beampipe profile validate dlg-dim
+beampipe doctor --profile dlg-dim
+```
+
+Import and associate a Slurm key in the same operation:
+
+```bash
+beampipe profile add \
+  -f "$HOME/beampipe/config/deployment_profile.slurm-remote.json" \
+  --ssh-slot setonix \
+  --ssh-private-key "$HOME/.ssh/id_ed25519" \
+  --ssh-known-hosts "$HOME/.ssh/known_hosts" \
+  --ssh-acl
+
+beampipe slurm credentials sync --slot setonix
+beampipe doctor --profile slurm-remote
+```
+
+The source key is never modified. Beampipe stores a private managed copy under the selected installation and mounts the credential root read-only into Docker services. See [Deployment profiles and SSH](../architecture/deployment-profiles.md).
+
+## Upgrade and rerun setup
+
+`beampipe setup` is idempotent. It preserves existing JWT/database secrets, profiles, project revisions, SSH slots, and data volumes. Unmodified generated bundle files are upgraded; operator-edited files are retained and reported.
+
+```bash
+beampipe setup
+beampipe doctor
+```
+
+There is no implicit reset. Back up PostgreSQL before removing an installation or its Compose volume.
+
+## Configuration and production checks
+
+```bash
+beampipe config explain
 BEAMPIPE_ENV=production beampipe security check
 beampipe doctor --json
 ```
 
-Production rejects weak JWT configuration, default database credentials, unsafe inline secrets, permissive SSH host-key policy, and other development defaults. See [Deployment profiles and SSH](../architecture/deployment-profiles.md) for backend credentials and [Production runbook](../operations/production-runbook.md) for rollout order.
+Settings resolve from defaults, `beampipe.yaml`, the installation `.env`, then process environment. Secret values are redacted by diagnostics. Production credentials should use mounted files or external secret injection rather than project/profile documents.

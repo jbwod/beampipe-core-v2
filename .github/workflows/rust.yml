@@ -55,5 +55,19 @@ jobs:
       - name: Installer target mapping
         run: sh deploy/install-target-test.sh
 
+      - name: Materialized release installation
+        run: |
+          install_home="$RUNNER_TEMP/beampipe-install"
+          cargo run -p beampipe-cli --bin beampipe -- \
+            --home "$install_home" setup --yes --runtime docker --postgres compose \
+            --no-start --skip-admin --skip-upload
+          docker compose \
+            --project-directory "$install_home" \
+            --env-file "$install_home/.env" \
+            --file "$install_home/docker-compose.yml" \
+            config --quiet
+          (cd "$RUNNER_TEMP" && cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
+            -p beampipe-cli --bin beampipe -- --home "$install_home" status)
+
       - name: Run tests
         run: cargo test --workspace

@@ -31,14 +31,27 @@ beampipe_release_target() {
 beampipe_verify_checksum() {
   sums=$1
   archive=$2
+  expected=$(awk -v archive="$archive" '$2 == archive || $2 == "*" archive { print $1; found = 1; exit } END { if (!found) exit 1 }' "$sums") || {
+    echo "checksum entry missing for ${archive}" >&2
+    return 1
+  }
   if command -v sha256sum >/dev/null 2>&1; then
-    grep "$archive" "$sums" | sha256sum -c -
+    actual=$(sha256sum "$archive" | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
-    grep "$archive" "$sums" | shasum -a 256 -c
+    actual=$(shasum -a 256 "$archive" | awk '{print $1}')
   else
     echo "need sha256sum or shasum to verify the release archive" >&2
     return 1
   fi
+  if [ "$actual" != "$expected" ]; then
+    echo "checksum verification failed for ${archive}" >&2
+    return 1
+  fi
+  echo "${archive}: OK"
+}
+
+beampipe_archive_name() {
+  printf 'beampipe-%s.tar.gz\n' "$1"
 }
 
 install_beampipe() {
@@ -49,7 +62,7 @@ install_beampipe() {
 
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
-  archive="beampipe-${target}.tar.gz"
+  archive=$(beampipe_archive_name "$target")
 
   if [ "$version" = "latest" ]; then
     base="${RELEASES}/latest/download"
@@ -127,19 +140,19 @@ beampipe_offer_persist_path() {
 run_setup() {
   home="${BEAMPIPE_HOME:-$HOME/beampipe}"
   if [ -t 0 ] || beampipe_has_flag --yes "$@"; then
-    exec beampipe setup --directory "$home" "$@"
+    exec beampipe --home "$home" setup "$@"
   fi
   if [ -t 1 ] && [ -c /dev/tty ]; then
     echo "stdin is a pipe; reading setup prompts from the terminal."
-    exec beampipe setup --directory "$home" "$@" </dev/tty
+    exec beampipe --home "$home" setup "$@" </dev/tty
   fi
   if ! beampipe_has_runtime_flag "$@"; then
     echo "stdin is not a terminal; running non-interactive Docker setup."
     echo "  curl -fsSL ${RELEASES}/latest/download/install.sh | sh -s -- --yes --runtime docker"
-    exec beampipe setup --directory "$home" --yes --runtime docker "$@"
+    exec beampipe --home "$home" setup --yes --runtime docker "$@"
   fi
   echo "stdin is not a terminal; adding --yes."
-  exec beampipe setup --directory "$home" --yes "$@"
+  exec beampipe --home "$home" setup --yes "$@"
 }
 
 main() {

@@ -20,6 +20,34 @@ expect Linux aarch64 aarch64-unknown-linux-gnu
 expect Darwin arm64 aarch64-apple-darwin
 expect Darwin x86_64 x86_64-apple-darwin
 
+if [ "$(beampipe_archive_name aarch64-apple-darwin)" != "beampipe-aarch64-apple-darwin.tar.gz" ]; then
+  echo "archive naming is incorrect" >&2
+  exit 1
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+printf 'release payload\n' > "$tmp/beampipe-test.tar.gz"
+if command -v sha256sum >/dev/null 2>&1; then
+  checksum=$(sha256sum "$tmp/beampipe-test.tar.gz" | awk '{print $1}')
+else
+  checksum=$(shasum -a 256 "$tmp/beampipe-test.tar.gz" | awk '{print $1}')
+fi
+printf '%s  %s\n' "$checksum" beampipe-test.tar.gz > "$tmp/SHA256SUMS"
+(
+  cd "$tmp"
+  beampipe_verify_checksum SHA256SUMS beampipe-test.tar.gz
+)
+printf '0%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 > "$tmp/BADSUM"
+printf '  %s\n' beampipe-test.tar.gz >> "$tmp/BADSUM"
+if (
+  cd "$tmp"
+  beampipe_verify_checksum BADSUM beampipe-test.tar.gz >/dev/null 2>&1
+); then
+  echo "checksum mismatch was accepted" >&2
+  exit 1
+fi
+
 if beampipe_has_flag --yes --runtime docker; then
   echo "beampipe_has_flag missed --yes" >&2
   exit 1

@@ -1,6 +1,8 @@
 # Installation and setup architecture audit
 
-Status: initial review, before implementation.
+Status: historical pre-implementation audit. The installation identity, idempotent setup, lifecycle facade, SSH import/sync, guided profile setup, installation-aware doctor, and managed operator bundle described below have since been implemented. Use [Install and configure](../getting-started/installation.md) for current operator instructions.
+
+The current implementation is represented by local commits `3e2a67f` through `38f791a`; problem statements and diagrams below intentionally preserve the original evidence and should not be read as current command documentation.
 
 This audit treats the Rust source as authoritative. It covers release and source
 installations, Docker and host runtimes, deployment profiles, SSH credential
