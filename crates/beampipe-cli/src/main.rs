@@ -825,12 +825,15 @@ async fn main() -> anyhow::Result<()> {
             }
             SlurmCredentialsCommand::Check { slot, dir, profile } => {
                 let status = slurm_credentials::check(&slot, dir.as_deref())?;
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "ok": true,
-                    "slot": status.slot,
-                    "private_key": status.private_key.path,
-                    "passphrase": status.passphrase.present,
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "slot": status.slot,
+                        "private_key": status.private_key.path,
+                        "passphrase": status.passphrase.present,
+                    }))?
+                );
                 if let Some(profile_name) = profile {
                     slurm_ping(None, None, 22, Some(profile_name)).await?;
                 }

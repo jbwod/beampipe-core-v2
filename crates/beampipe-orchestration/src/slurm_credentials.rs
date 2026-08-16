@@ -222,9 +222,10 @@ pub fn has_global_ssh_key_config() -> bool {
 fn resolve_known_hosts_path(slot: Option<&str>) -> Option<String> {
     if let Some(name) = slot {
         let suffix = env_suffix(name);
-        if let Some(path) =
-            first_slotted(&["SLURM_SSH_KNOWN_HOSTS", "SLURM_SSH_KNOWN_HOSTS_SOURCE"], &suffix)
-        {
+        if let Some(path) = first_slotted(
+            &["SLURM_SSH_KNOWN_HOSTS", "SLURM_SSH_KNOWN_HOSTS_SOURCE"],
+            &suffix,
+        ) {
             return Some(path);
         }
         if let Some(path) = slot_known_hosts_path(name) {
@@ -373,9 +374,8 @@ fn normalize_slot(slot: Option<&str>) -> Result<Option<String>, OrchestrationErr
     let Some(raw) = slot.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    beampipe_profiles::validate_ssh_credential_name(raw).map_err(|error| {
-        OrchestrationError::Backend(error.to_string())
-    })?;
+    beampipe_profiles::validate_ssh_credential_name(raw)
+        .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
     Ok(Some(raw.to_string()))
 }
 

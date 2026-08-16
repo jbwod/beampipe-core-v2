@@ -121,12 +121,7 @@ fn print_choice_items(items: &[ChoiceItem], default_index: usize) {
         } else {
             ""
         };
-        println!(
-            "  {}) {}   {}{marker}",
-            index + 1,
-            item.label,
-            item.hint
-        );
+        println!("  {}) {}   {}{marker}", index + 1, item.label, item.hint);
     }
 }
 
@@ -170,10 +165,8 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
 
 pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     let root = resolve_operator_root(&opts)?;
-    std::fs::create_dir_all(&root)
-        .with_context(|| format!("create {}", root.display()))?;
-    std::env::set_current_dir(&root)
-        .with_context(|| format!("chdir {}", root.display()))?;
+    std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+    std::env::set_current_dir(&root).with_context(|| format!("chdir {}", root.display()))?;
     let env_path = root.join(".env");
 
     print_banner(opts.start);
@@ -501,7 +494,8 @@ pub fn generate_admin_password() -> String {
 fn resolve_operator_root(opts: &SetupOptions) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("cwd")?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let root = materialize::default_operator_directory(&cwd, home.as_deref(), opts.directory.as_deref());
+    let root =
+        materialize::default_operator_directory(&cwd, home.as_deref(), opts.directory.as_deref());
     if root.is_absolute() {
         Ok(root)
     } else {
@@ -510,16 +504,16 @@ fn resolve_operator_root(opts: &SetupOptions) -> Result<PathBuf> {
 }
 
 fn require_docker_compose() -> Result<()> {
-    let output = Command::new("docker")
-        .args(["compose", "version"])
-        .output();
+    let output = Command::new("docker").args(["compose", "version"]).output();
     match output {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             bail!("Docker Compose v2 is required. Install Docker Engine and retry. {stderr}");
         }
-        Err(error) => bail!("Docker Compose v2 is required. Install Docker Engine and retry. {error}"),
+        Err(error) => {
+            bail!("Docker Compose v2 is required. Install Docker Engine and retry. {error}")
+        }
     }
 }
 
@@ -973,8 +967,8 @@ fn patch_compose_network_name(contents: &str, network: &str) -> String {
 
 fn write_or_patch_dash_override(path: &Path, network: &str) -> Result<()> {
     if path.exists() {
-        let contents = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let contents =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         std::fs::write(path, patch_compose_network_name(&contents, network))
             .with_context(|| format!("patch {}", path.display()))?;
     } else {
@@ -1037,7 +1031,7 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
 }
 
 async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
-    let (username, password, email) =     if opts.yes {
+    let (username, password, email) = if opts.yes {
         let password = opts
             .admin_password
             .clone()
@@ -1427,16 +1421,17 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("docker compose up -d postgres"));
         assert!(joined.contains("docker compose run --rm api migrate"));
-        assert!(joined.contains(
-            "docker compose run --rm api project add -f config/wallaby_hires.v2.yaml"
-        ));
+        assert!(joined
+            .contains("docker compose run --rm api project add -f config/wallaby_hires.v2.yaml"));
         assert!(joined.contains("docker compose up -d api scheduler worker"));
         assert!(!joined.contains("profile add"));
         assert!(!joined.contains("compose.beampipe-local.yml"));
         assert!(!joined.contains("--deployment"));
         assert!(!joined.contains("slurm_remote"));
         assert!(!joined.contains("docker compose build api"));
-        assert!(!lines.iter().any(|line| line.trim() == "docker compose up -d"));
+        assert!(!lines
+            .iter()
+            .any(|line| line.trim() == "docker compose up -d"));
     }
 
     #[test]

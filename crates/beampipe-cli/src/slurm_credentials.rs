@@ -107,8 +107,7 @@ pub fn init(opts: InitOptions) -> Result<InitResult> {
 
     let root = resolve_root(opts.dir.as_deref());
     let slot_dir = root.join(&opts.slot);
-    fs::create_dir_all(&slot_dir)
-        .with_context(|| format!("create {}", slot_dir.display()))?;
+    fs::create_dir_all(&slot_dir).with_context(|| format!("create {}", slot_dir.display()))?;
     set_dir_mode(&slot_dir, 0o700)?;
 
     let private_key = slot_dir.join("private_key");
@@ -192,7 +191,8 @@ pub fn show(slot: &str, dir: Option<&Path>) -> Result<SlotStatus> {
         private_key: file_status(&slot_dir.join("private_key")),
         public_key: file_status(&slot_dir.join("private_key.pub")),
         passphrase: file_status(&slot_dir.join("passphrase")),
-        known_hosts: file_status(&slot_dir.join("known_hosts")).or_else_present(&root.join("known_hosts")),
+        known_hosts: file_status(&slot_dir.join("known_hosts"))
+            .or_else_present(&root.join("known_hosts")),
     })
 }
 
@@ -231,10 +231,7 @@ pub fn print_init_next_steps(result: &InitResult) {
     println!("  known_hosts  {}", result.known_hosts.display());
     println!("\nNext:");
     println!("  set deployment.ssh_credential to \"{}\"", result.slot);
-    println!(
-        "  beampipe slurm credentials check --slot {}",
-        result.slot
-    );
+    println!("  beampipe slurm credentials check --slot {}", result.slot);
     println!("  beampipe slurm ping --profile slurm-remote");
     println!(
         "  Container uid is 10001; re-run with --acl or `setfacl -m u:10001:r` on private_key and passphrase so Compose can read them."
@@ -288,7 +285,14 @@ fn generate_ed25519_key(path: &Path, passphrase: Option<&str>) -> Result<()> {
             "-N",
             passphrase.unwrap_or(""),
             "-C",
-            &format!("beampipe-{}@{}", path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("slurm"), hostname()),
+            &format!(
+                "beampipe-{}@{}",
+                path.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("slurm"),
+                hostname()
+            ),
             "-q",
         ])
         .status()
@@ -333,7 +337,11 @@ fn write_known_hosts(path: &Path, host: &str) -> Result<()> {
 
 fn copy_id(public_key: &Path, user: &str, host: &str) -> Result<()> {
     let status = Command::new("ssh-copy-id")
-        .args(["-i", public_key.to_str().context("public key path")?, &format!("{user}@{host}")])
+        .args([
+            "-i",
+            public_key.to_str().context("public key path")?,
+            &format!("{user}@{host}"),
+        ])
         .status()
         .context("run ssh-copy-id")?;
     if !status.success() {
@@ -344,7 +352,11 @@ fn copy_id(public_key: &Path, user: &str, host: &str) -> Result<()> {
 
 fn apply_container_acl(path: &Path) -> Result<()> {
     let status = Command::new("setfacl")
-        .args(["-m", &format!("u:{CONTAINER_UID}:r"), path.to_str().context("acl path")?])
+        .args([
+            "-m",
+            &format!("u:{CONTAINER_UID}:r"),
+            path.to_str().context("acl path")?,
+        ])
         .status();
     match status {
         Ok(code) if code.success() => Ok(()),

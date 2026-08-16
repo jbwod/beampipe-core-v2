@@ -45,7 +45,8 @@ pub use scheduler::{
 pub use security::{collect_security_issues, validate_security};
 pub use slurm_batch::SlurmJobPollResult;
 pub use slurm_credentials::{
-    beampipe_env, is_production_env, list_credential_slots, ssh_credentials_dir, SlurmSshCredentials,
+    beampipe_env, is_production_env, list_credential_slots, ssh_credentials_dir,
+    SlurmSshCredentials,
 };
 pub use slurm_deploy::probe_slurm_login;
 pub use slurm_ssh::{query_slurm_states_batch, SlurmSshPool, SlurmSshSession, SlurmTarget};

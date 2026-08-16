@@ -138,7 +138,9 @@ fn push_resolved_slurm_issues(errors: &mut Vec<String>, creds: &SlurmSshCredenti
     if creds.strict_known_hosts {
         match creds.known_hosts_path.as_ref() {
             Some(path) if !std::path::Path::new(path).is_file() => {
-                errors.push(format!("SLURM_SSH_KNOWN_HOSTS file not found{label}: {path}"));
+                errors.push(format!(
+                    "SLURM_SSH_KNOWN_HOSTS file not found{label}: {path}"
+                ));
             }
             Some(path) => {
                 if let Err(e) = crate::slurm_ssh::load_known_host_entries(path) {

@@ -40,12 +40,12 @@ make docs-build
 
 Bump these together so Compose pull and setup-created `.env` stay on the same image:
 
-- `[workspace.package] version` in [`Cargo.toml`](../Cargo.toml)
-- `BEAMPIPE_VERSION` in [`.env.example`](../.env.example), [`.env.template`](../.env.template), and [`deploy/operator/.env.example`](../deploy/operator/.env.example)
-- the `${BEAMPIPE_VERSION:-0.1.0}` default in [`docker-compose.yml`](../docker-compose.yml), [`deploy/operator/docker-compose.yml`](../deploy/operator/docker-compose.yml), and the header comment in [`deploy/setup-docker.sh`](../deploy/setup-docker.sh)
-- the `0.1.0` fallback in [`crates/beampipe-cli/src/setup.rs`](../crates/beampipe-cli/src/setup.rs) (`default_env_skeleton` / `ensure_beampipe_version`)
+- `[workspace.package] version` in [`Cargo.toml`](https://github.com/jbwod/beampipe-core-v2/blob/main/Cargo.toml)
+- `BEAMPIPE_VERSION` in [`.env.example`](https://github.com/jbwod/beampipe-core-v2/blob/main/.env.example), [`.env.template`](https://github.com/jbwod/beampipe-core-v2/blob/main/.env.template), and [`deploy/operator/.env.example`](https://github.com/jbwod/beampipe-core-v2/blob/main/deploy/operator/.env.example)
+- the `${BEAMPIPE_VERSION:-0.1.0}` default in [`docker-compose.yml`](https://github.com/jbwod/beampipe-core-v2/blob/main/docker-compose.yml), [`deploy/operator/docker-compose.yml`](https://github.com/jbwod/beampipe-core-v2/blob/main/deploy/operator/docker-compose.yml), and the header comment in [`deploy/setup-docker.sh`](https://github.com/jbwod/beampipe-core-v2/blob/main/deploy/setup-docker.sh)
+- the `0.1.0` fallback in [`setup.rs`](https://github.com/jbwod/beampipe-core-v2/blob/main/crates/beampipe-cli/src/setup.rs) (`default_env_skeleton` / `ensure_beampipe_version`)
 
-Tag a matching semver. Pushing `v0.1.0` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml). Rust CI must pass before binaries or the container publish. The GitHub Release is created only when every binary matrix leg succeeds. The container job only needs CI, so GHCR can publish even when a host-archive leg fails:
+Tag a matching semver. Pushing `v0.1.0` runs [`.github/workflows/release.yml`](https://github.com/jbwod/beampipe-core-v2/blob/main/.github/workflows/release.yml). Rust CI must pass before binaries or the container publish. The GitHub Release is created only when every binary matrix leg succeeds. The container job only needs CI, so GHCR can publish even when a host-archive leg fails:
 
 - `beampipe-x86_64-unknown-linux-gnu.tar.gz`
 - `beampipe-aarch64-unknown-linux-gnu.tar.gz`

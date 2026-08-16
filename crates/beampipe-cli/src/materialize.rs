@@ -14,8 +14,7 @@ pub struct MaterializeReport {
 
 pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
     let mut report = MaterializeReport::default();
-    std::fs::create_dir_all(root)
-        .with_context(|| format!("create {}", root.display()))?;
+    std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
 
     write_file(
         &root.join("docker-compose.yml"),
@@ -77,8 +76,7 @@ fn write_file(
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let existed = path.exists();
     std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
@@ -99,7 +97,10 @@ mod tests {
     fn materialize_writes_pull_only_compose_and_sample_project() {
         let dir = tempfile::tempdir().unwrap();
         let report = materialize(dir.path(), false).unwrap();
-        assert!(report.created.iter().any(|path| path.ends_with("docker-compose.yml")));
+        assert!(report
+            .created
+            .iter()
+            .any(|path| path.ends_with("docker-compose.yml")));
 
         let compose = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
         assert!(!compose.contains("build:"));
@@ -118,7 +119,10 @@ mod tests {
 
         std::fs::write(dir.path().join("docker-compose.yml"), "owned\n").unwrap();
         let second = materialize(dir.path(), false).unwrap();
-        assert!(second.skipped.iter().any(|path| path.ends_with("docker-compose.yml")));
+        assert!(second
+            .skipped
+            .iter()
+            .any(|path| path.ends_with("docker-compose.yml")));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap(),
             "owned\n"

@@ -45,7 +45,7 @@ docker context show
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker
 ```
 
-Host binary path: `install.sh | sh -s -- --yes --runtime host`, then `beampipe start` from `~/beampipe`. Slurm keys stay under `deploy/ssh/credentials/<slot>/`; use `--acl` so uid 10001 can read them. See [deploy/ssh/README.md](../../deploy/ssh/README.md).
+Host binary path: `install.sh | sh -s -- --yes --runtime host`, then `beampipe start` from `~/beampipe`. Slurm keys stay under `deploy/ssh/credentials/<slot>/`; use `--acl` so uid 10001 can read them. See [deploy/ssh/README.md](https://github.com/jbwod/beampipe-core-v2/blob/main/deploy/ssh/README.md).
 
 A checkout can still use `./deploy/setup-docker.sh --yes --skip-admin --skip-upload` (`--no-start`) and the printed recipe.
 
