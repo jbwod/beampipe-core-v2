@@ -45,6 +45,17 @@ pub fn start(context: &InstallationContext) -> Result<()> {
     compose_status(context, &["up", "-d", "--wait"], &services)
 }
 
+pub fn start_database(context: &InstallationContext) -> Result<()> {
+    if context
+        .state
+        .as_ref()
+        .is_some_and(|state| state.database_mode == "compose")
+    {
+        compose_status(context, &["up", "-d", "--wait"], &["postgres"])?;
+    }
+    Ok(())
+}
+
 pub fn stop(context: &InstallationContext) -> Result<()> {
     match runtime_mode(context)? {
         RuntimeMode::Docker => compose_status(context, &["stop"], &[]),

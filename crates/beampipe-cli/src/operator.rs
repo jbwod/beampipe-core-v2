@@ -186,17 +186,7 @@ pub async fn run_profile_command(command: ProfileCommand) -> Result<()> {
                     result.slot, profile.name
                 );
             }
-            let row = repo::create_deployment_profile(
-                &pool,
-                &profile.name,
-                profile.description.as_deref(),
-                profile.project_module.as_deref(),
-                profile.is_default,
-                profile.max_concurrent_executions,
-                serde_json::to_value(&profile.translation)?,
-                serde_json::to_value(&profile.deployment)?,
-            )
-            .await?;
+            let row = install_profile(&pool, &profile).await?;
             print_json(&row)?;
         }
         ProfileCommand::List => {
@@ -240,6 +230,50 @@ pub async fn run_profile_command(command: ProfileCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub async fn install_profile(
+    pool: &PgPool,
+    profile: &DeploymentProfile,
+) -> Result<DeploymentProfileRow> {
+    profile.validate()?;
+    let translation = serde_json::to_value(&profile.translation)?;
+    let deployment = serde_json::to_value(&profile.deployment)?;
+    if let Some(existing) = repo::get_deployment_profile_by_name(pool, &profile.name).await? {
+        if existing.description == profile.description
+            && existing.project_module == profile.project_module
+            && existing.is_default == profile.is_default
+            && existing.max_concurrent_executions == profile.max_concurrent_executions
+            && existing.translation == translation
+            && existing.deployment == deployment
+        {
+            return Ok(existing);
+        }
+        return repo::update_deployment_profile(
+            pool,
+            existing.uuid,
+            &profile.name,
+            profile.description.as_deref(),
+            profile.project_module.as_deref(),
+            profile.is_default,
+            profile.max_concurrent_executions,
+            translation,
+            deployment,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("deployment profile disappeared during update"));
+    }
+    Ok(repo::create_deployment_profile(
+        pool,
+        &profile.name,
+        profile.description.as_deref(),
+        profile.project_module.as_deref(),
+        profile.is_default,
+        profile.max_concurrent_executions,
+        translation,
+        deployment,
+    )
+    .await?)
 }
 
 fn read_profile(path: &Path) -> Result<DeploymentProfile> {

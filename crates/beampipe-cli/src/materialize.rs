@@ -10,6 +10,9 @@ use uuid::Uuid;
 const OPERATOR_COMPOSE: &str = include_str!("../../../deploy/operator/docker-compose.yml");
 const OPERATOR_ENV_EXAMPLE: &str = include_str!("../../../deploy/operator/.env.example");
 const SAMPLE_PROJECT: &str = include_str!("../../../config/wallaby_hires.v2.yaml");
+const SAMPLE_REST_PROFILE: &str = include_str!("../../../config/deployment_profile.dlg-dim.json");
+const SAMPLE_SLURM_PROFILE: &str =
+    include_str!("../../../config/deployment_profile.slurm-remote.json");
 const BUNDLE_MANIFEST: &str = ".beampipe-operator-bundle.json";
 
 #[derive(Debug, Default, Clone)]
@@ -44,6 +47,14 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
         ("docker-compose.yml", OPERATOR_COMPOSE),
         (".env.example", OPERATOR_ENV_EXAMPLE),
         ("config/wallaby_hires.v2.yaml", SAMPLE_PROJECT),
+        (
+            "config/deployment_profile.dlg-dim.json",
+            SAMPLE_REST_PROFILE,
+        ),
+        (
+            "config/deployment_profile.slurm-remote.json",
+            SAMPLE_SLURM_PROFILE,
+        ),
         ("credentials/ssh/.gitkeep", ""),
     ] {
         materialize_file(

@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use beampipe_config::Settings;
 use beampipe_db::repo;
+use beampipe_profiles::{DeploymentConfig, DeploymentProfile};
 use beampipe_project::ProjectConfig;
 use crossterm::style::Stylize;
 use sqlx::PgPool;
@@ -31,6 +32,14 @@ pub struct SetupOptions {
     pub admin_password: Option<String>,
     pub admin_email: Option<String>,
     pub project_config: Option<PathBuf>,
+    pub profile_config: Option<PathBuf>,
+    pub ssh_slot: Option<String>,
+    pub ssh_private_key: Option<PathBuf>,
+    pub ssh_public_key: Option<PathBuf>,
+    pub ssh_known_hosts: Option<PathBuf>,
+    pub ssh_passphrase_file: Option<PathBuf>,
+    pub ssh_acl: bool,
+    pub accept_host_key: bool,
     pub casda_tap_url: Option<String>,
     pub tm_url: Option<String>,
     pub worker_pool: Option<String>,
@@ -472,6 +481,12 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         compose_up_postgres(&root)?;
     }
 
+    let profile_path = select_profile_config(&opts)?;
+    let prepared_profile = profile_path
+        .as_deref()
+        .map(|path| prepare_deployment_profile(&opts, path, runtime))
+        .transpose()?;
+
     let pool = match beampipe_db::connect(&database_url).await {
         Ok(pool) => Some(pool),
         Err(error) if postgres == PostgresKind::Compose => {
@@ -532,6 +547,14 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             );
         }
 
+        if let Some(profile) = prepared_profile.as_ref() {
+            let row = crate::operator::install_profile(pool, profile).await?;
+            println!(
+                "Installed deployment profile '{}' revision {}.",
+                row.name, row.revision
+            );
+        }
+
         let settings = Settings::load()?.settings;
         let setup_context = installation::InstallationContext::from_home(root.clone())?;
         let report =
@@ -558,14 +581,22 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         project_file: project_path
             .exists()
             .then(|| display_repo_path(&root, &project_path)),
+        profile_file: profile_path
+            .as_deref()
+            .filter(|path| path.exists())
+            .map(|path| display_repo_path(&root, path)),
     });
     if opts.start {
         finish_start(&root, prepare_docker, &opts)?;
     } else {
         print_recipe(&commands);
     }
-    print_hint(
-        "When you are ready to connect REST or Slurm, use `beampipe profile add` (see Deployment profiles and SSH).",
+    print_setup_summary(
+        &root,
+        runtime,
+        postgres,
+        opts.start,
+        prepared_profile.as_ref(),
     );
     Ok(())
 }
@@ -1395,6 +1426,145 @@ fn maybe_validate_project_config(opts: &SetupOptions) -> Result<()> {
     Ok(())
 }
 
+fn select_profile_config(opts: &SetupOptions) -> Result<Option<PathBuf>> {
+    if let Some(path) = opts.profile_config.as_ref() {
+        return Ok(Some(path.clone()));
+    }
+    if opts.yes || !prompt_yes_no("Configure a deployment profile now?", false)? {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(prompt_default(
+        "Deployment profile file",
+        "config/deployment_profile.dlg-dim.json",
+    )?)))
+}
+
+fn prepare_deployment_profile(
+    opts: &SetupOptions,
+    path: &Path,
+    runtime: RuntimeKind,
+) -> Result<DeploymentProfile> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let mut profile: DeploymentProfile =
+        serde_yaml::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+
+    if let DeploymentConfig::SlurmRemote(slurm) = &mut profile.deployment {
+        if let Some(slot) = opts.ssh_slot.as_deref() {
+            beampipe_profiles::validate_ssh_credential_name(slot)?;
+            slurm.ssh_credential = Some(slot.to_string());
+        }
+        if opts.ssh_private_key.is_some() && slurm.ssh_credential.is_none() {
+            slurm.ssh_credential = Some(profile.name.clone());
+        }
+
+        if opts.ssh_private_key.is_none() && !opts.yes {
+            configure_slurm_credential_interactive(slurm, &profile.name, runtime)?;
+        }
+        if let Some(private_key) = opts.ssh_private_key.as_ref() {
+            let slot = slurm
+                .ssh_credential
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Slurm profile requires an SSH slot"))?;
+            crate::slurm_credentials::import(crate::slurm_credentials::ImportOptions {
+                slot,
+                dir: None,
+                private_key: private_key.clone(),
+                public_key: opts.ssh_public_key.clone(),
+                known_hosts: opts.ssh_known_hosts.clone(),
+                passphrase_file: opts.ssh_passphrase_file.clone(),
+                host: Some(slurm.login_node.clone()),
+                port: u16::try_from(slurm.ssh_port)
+                    .context("deployment.ssh_port is outside the supported range")?,
+                acl: opts.ssh_acl || (runtime == RuntimeKind::Docker && cfg!(target_os = "linux")),
+                force: false,
+                accept_host_key: opts.accept_host_key,
+            })?;
+        }
+    }
+
+    profile.validate()?;
+    Ok(profile)
+}
+
+fn configure_slurm_credential_interactive(
+    slurm: &mut beampipe_profiles::SlurmRemoteDeploymentConfig,
+    profile_name: &str,
+    runtime: RuntimeKind,
+) -> Result<()> {
+    let choices = [
+        ChoiceItem {
+            key: "existing",
+            label: "Use existing slot",
+            hint: "associate an already-managed credential",
+        },
+        ChoiceItem {
+            key: "import",
+            label: "Import host key",
+            hint: "copy an existing private key into this installation",
+        },
+        ChoiceItem {
+            key: "generate",
+            label: "Generate dedicated key",
+            hint: "create a new encrypted Ed25519 key",
+        },
+        ChoiceItem {
+            key: "later",
+            label: "Configure later",
+            hint: "install the profile without changing credentials",
+        },
+    ];
+    let choice = prompt_choice("SSH credentials for this profile", &choices, 3)?;
+    if choice == 3 {
+        return Ok(());
+    }
+    let default_slot = slurm.ssh_credential.as_deref().unwrap_or(profile_name);
+    let slot = prompt_default("SSH credential slot", default_slot)?;
+    beampipe_profiles::validate_ssh_credential_name(&slot)?;
+    slurm.ssh_credential = Some(slot.clone());
+    if choice == 0 {
+        crate::slurm_credentials::check(&slot, None)?;
+        return Ok(());
+    }
+    let acl = runtime == RuntimeKind::Docker && cfg!(target_os = "linux");
+    if choice == 1 {
+        let private_key =
+            PathBuf::from(prompt_default("Existing private key", "~/.ssh/id_ed25519")?);
+        let private_key = expand_home_path(&private_key)?;
+        crate::slurm_credentials::import(crate::slurm_credentials::ImportOptions {
+            slot,
+            dir: None,
+            private_key,
+            public_key: None,
+            known_hosts: None,
+            passphrase_file: None,
+            host: Some(slurm.login_node.clone()),
+            port: u16::try_from(slurm.ssh_port)?,
+            acl,
+            force: false,
+            accept_host_key: false,
+        })?;
+    } else {
+        crate::slurm_credentials::init(crate::slurm_credentials::InitOptions {
+            slot,
+            host: slurm.login_node.clone(),
+            port: u16::try_from(slurm.ssh_port)?,
+            acl,
+            ..crate::slurm_credentials::InitOptions::default()
+        })?;
+    }
+    Ok(())
+}
+
+fn expand_home_path(path: &Path) -> Result<PathBuf> {
+    let text = path.to_string_lossy();
+    if text == "~" || text.starts_with("~/") {
+        let home = std::env::var("HOME").context("HOME is not set")?;
+        let suffix = text.strip_prefix("~/").unwrap_or("");
+        return Ok(PathBuf::from(home).join(suffix));
+    }
+    Ok(path.to_path_buf())
+}
+
 #[derive(Debug, Default, Clone)]
 struct SetupNextSteps {
     runtime_docker: bool,
@@ -1404,6 +1574,7 @@ struct SetupNextSteps {
     admin_ready: bool,
     dash_dir: Option<PathBuf>,
     project_file: Option<String>,
+    profile_file: Option<String>,
 }
 
 fn display_repo_path(root: &Path, path: &Path) -> String {
@@ -1414,29 +1585,30 @@ fn display_repo_path(root: &Path, path: &Path) -> String {
 
 fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
     let mut lines = Vec::new();
-    if steps.compose_postgres {
+    if steps.compose_postgres && !steps.runtime_docker {
         lines.push("  docker compose up -d postgres".into());
     }
     if steps.runtime_docker {
         if let Some(context) = &steps.docker_context {
             lines.push(format!("  # docker context: {context}"));
         }
+        lines.push("  beampipe start".into());
         if !steps.db_applied {
-            lines.push("  docker compose run --rm api migrate".into());
+            lines.push("  beampipe migrate".into());
         }
         if !steps.admin_ready {
-            lines.push("  docker compose run --rm api admin create-user \\".into());
+            lines.push("  beampipe admin create-user \\".into());
             lines.push("    --username admin --email admin@example.test \\".into());
             lines.push("    --password 'replace-this-immediately' --superuser".into());
         }
         if !steps.db_applied {
             if let Some(project) = &steps.project_file {
-                lines.push(format!(
-                    "  docker compose run --rm api project add -f {project}"
-                ));
+                lines.push(format!("  beampipe project add -f {project}"));
+            }
+            if let Some(profile) = &steps.profile_file {
+                lines.push(format!("  beampipe profile add -f {profile}"));
             }
         }
-        lines.push("  docker compose up -d api scheduler worker".into());
         if let Some(dash_dir) = &steps.dash_dir {
             lines.push(format!(
                 "  cd {} && docker compose -f compose.yaml -f {DASH_OVERRIDE_FILE} up --build -d",
@@ -1456,10 +1628,56 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
             if let Some(project) = &steps.project_file {
                 lines.push(format!("  beampipe project add -f {project}"));
             }
+            if let Some(profile) = &steps.profile_file {
+                lines.push(format!("  beampipe profile add -f {profile}"));
+            }
         }
         lines.push("  beampipe start".into());
     }
     lines
+}
+
+fn print_setup_summary(
+    root: &Path,
+    runtime: RuntimeKind,
+    postgres: PostgresKind,
+    started: bool,
+    profile: Option<&DeploymentProfile>,
+) {
+    println!("\nBeampipe setup complete");
+    println!("  [OK] Home: {}", root.display());
+    println!("  [OK] Runtime: {}", runtime.as_str());
+    println!("  [OK] Database: {}", postgres.as_str());
+    println!(
+        "  [{}] Services: {}",
+        if started { "OK" } else { "--" },
+        if started {
+            "start requested"
+        } else {
+            "not started"
+        }
+    );
+    if let Some(profile) = profile {
+        println!("  [OK] Profile: {}", profile.name);
+        if let DeploymentConfig::SlurmRemote(slurm) = &profile.deployment {
+            println!(
+                "  [{}] SSH slot: {}",
+                if slurm.ssh_credential.is_some() {
+                    "OK"
+                } else {
+                    "--"
+                },
+                slurm.ssh_credential.as_deref().unwrap_or("configure later")
+            );
+        }
+    } else {
+        println!("  [--] Profile: configure later with `beampipe profile add`");
+    }
+    println!("\nUseful commands:");
+    println!("  beampipe status");
+    println!("  beampipe doctor");
+    println!("  beampipe logs --follow");
+    println!("  beampipe profile list");
 }
 
 #[cfg(test)]

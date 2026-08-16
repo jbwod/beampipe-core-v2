@@ -110,6 +110,25 @@ enum CliCommand {
         admin_email: Option<String>,
         #[arg(long)]
         project_config: Option<PathBuf>,
+        /// Install a REST or Slurm deployment profile during setup.
+        #[arg(long)]
+        profile_config: Option<PathBuf>,
+        /// Assign this credential slot to the setup Slurm profile.
+        #[arg(long)]
+        ssh_slot: Option<String>,
+        /// Import this private key into the setup Slurm profile slot.
+        #[arg(long, requires = "profile_config")]
+        ssh_private_key: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_public_key: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_known_hosts: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_passphrase_file: Option<PathBuf>,
+        #[arg(long, requires = "ssh_private_key")]
+        ssh_acl: bool,
+        #[arg(long, requires = "ssh_private_key")]
+        accept_host_key: bool,
         #[arg(long)]
         casda_tap_url: Option<String>,
         #[arg(long)]
@@ -621,6 +640,9 @@ async fn main() -> anyhow::Result<()> {
             if docker {
                 runtime::start(installation_context.as_ref().expect("checked above"))?;
             } else {
+                if let Some(context) = installation_context.as_ref() {
+                    runtime::start_database(context)?;
+                }
                 serve_host(worker).await?;
             }
         }
@@ -760,6 +782,14 @@ async fn main() -> anyhow::Result<()> {
             admin_password,
             admin_email,
             project_config,
+            profile_config,
+            ssh_slot,
+            ssh_private_key,
+            ssh_public_key,
+            ssh_known_hosts,
+            ssh_passphrase_file,
+            ssh_acl,
+            accept_host_key,
             casda_tap_url,
             tm_url,
             worker_pool,
@@ -789,6 +819,14 @@ async fn main() -> anyhow::Result<()> {
                     admin_password,
                     admin_email,
                     project_config,
+                    profile_config,
+                    ssh_slot,
+                    ssh_private_key,
+                    ssh_public_key,
+                    ssh_known_hosts,
+                    ssh_passphrase_file,
+                    ssh_acl,
+                    accept_host_key,
                     casda_tap_url,
                     tm_url,
                     worker_pool,
