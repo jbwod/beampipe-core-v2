@@ -1,14 +1,18 @@
 # syntax=docker/dockerfile:1
 FROM rust:1-bookworm AS builder
 WORKDIR /app
+ARG TARGETPLATFORM
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
 COPY deploy/operator/docker-compose.yml deploy/operator/.env.example ./deploy/operator/
 COPY config/wallaby_hires.v2.yaml ./config/wallaby_hires.v2.yaml
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
+# Scope caches by platform. amd64 and arm64 otherwise race on
+# registry/src/<crate>/.cargo-ok (EEXIST) during a multi-arch buildx bake.
+RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-${TARGETPLATFORM},target=/usr/local/cargo/git \
+    --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/app/target \
     cargo build --locked --release -p beampipe-cli --bin beampipe \
     && strip target/release/beampipe \
     && install -D target/release/beampipe /out/beampipe
