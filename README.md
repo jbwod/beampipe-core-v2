@@ -16,6 +16,7 @@
 </p>
 
 ### `What it does`
+<img width="1712" height="981" alt="image" src="https://github.com/user-attachments/assets/199f7eb9-48f9-4a5b-a0f4-ea7f2e6bb83e" />
 
 <img width="1712" height="981" alt="image" src="https://github.com/user-attachments/assets/6fc85d71-c1a5-47fd-8f9a-304656c95dd3" />
 
@@ -36,28 +37,8 @@
       <img width="717" height="442" alt="graphout" src="https://github.com/user-attachments/assets/45f1ff28-71e4-4c6c-8b25-2f00f9ad2441" />
     </td>
     <td>
-      <pre>
-    <code class="language-json">
-{
-  "name": "test-staging-e2e-rest-remote",
-  "description": "rest_remote",
-  "project_module": "wallaby_hires",
-  "is_default": true,
-  "translation": {
-    "algo": "metis",
-    "num_par": 1,
-    "num_islands": 0,
-    "tm_url": "http://dlg-tm.desk"
-  },
-  "deployment": {
-    "kind": "rest_remote",
-    "dim_host_for_tm": "dlg-dim",
-    "dim_port_for_tm": 8001,
-    "deploy_host": "dlg-dim.desk",
-    "deploy_port": 80,
-    "verify_ssl": false
-  }
-} </code></pre>
+<img width="1270" height="714" alt="image" src="https://github.com/user-attachments/assets/124e48f7-6598-41a2-a835-9cfabcec8ee1" />
+
   </tr>
 </table>
 
@@ -97,6 +78,8 @@ Install a deployment profile with `beampipe profile add` before setting `BEAMPIP
 Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-started/) and [first workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/).
 
 ## Runtime roles
+<img width="1713" height="981" alt="image" src="https://github.com/user-attachments/assets/f836361d-f640-4fd5-a1c2-e84d56473552" />
+
 
 | Role | Command | Scale rule |
 |---|---|---|
