@@ -1,12 +1,6 @@
 <p align="center">
   <img src="assets/brand/beampipe-terminal-logo.svg" alt="Beampipe" width="920">
 </p>
-<p align="center">
-<img width="443" height="49" alt="image" src="https://github.com/user-attachments/assets/cb7956bd-9e5c-4f6d-8b9f-a575b24b6402" />
-</p>
-
-> `beampipe-core` is a modular orchestration and triggering framework for data-driven radio astronomy workflows. It operates as an external control plane that continuously monitors scientific archives (ie; CASDA), determines when datasets are ready, and orchestrates scheduler-aware execution of distributed workflows (ie; DALiuGe) on heterogeneous HPC systems.
-
 
 <p align="center">
   <a href="https://github.com/jbwod/beampipe-core-v2/actions/workflows/rust.yml"><img src="https://github.com/jbwod/beampipe-core-v2/actions/workflows/rust.yml/badge.svg" alt="Rust CI"></a>
@@ -15,41 +9,124 @@
   <img src="https://img.shields.io/badge/config-beampipe.dev%2Fv2-a7cfa3?style=flat-square&labelColor=050505" alt="Project config v2">
 </p>
 
-### `What it does`
-<img width="1712" height="981" alt="image" src="https://github.com/user-attachments/assets/199f7eb9-48f9-4a5b-a0f4-ea7f2e6bb83e" />
 
-<img width="1712" height="981" alt="image" src="https://github.com/user-attachments/assets/6fc85d71-c1a5-47fd-8f9a-304656c95dd3" />
+> `beampipe-core` is a modular orchestration and triggering framework for data-driven radio astronomy workflows. It operates as an external control plane: archive facts come from CASDA and VizieR, durable intent lives in PostgreSQL, and scheduler-aware execution of [DALiuGE](https://daliuge.icrar.org/) graphs runs on REST DIM or Slurm.
 
 
-## `Modular Orchestration by design`
-> - **`Project-scoped automation`**: Designed from the ground-up to be Survey-Agnostic, a hotswap project based system to allow discovery and execution derrived by defined policy before enqueuing work. The example module was constructed for the [`wallaby-hires`](https://github.com/ICRAR/wallaby-hires) project and workflow, integrating ingestion with CASDA and HPC Compute on [pawsey-setonix](https://pawsey.org.au/systems/setonix/) to generate High Resolution data cubes with parameters.
+## `What it does`
 
-> - **`Shaping and admission`**: global and per-project guards (rate budgets, queue depth, in-flight discovery batches / execution runs) coordinate so automation stays within configured capacity.
+> - **`Archive-driven triggering`**: discovers newly deposited datasets through project-defined TAP queries (not hardcoded SQL) and triggers processing when metadata is complete.
 
-> - **`Execution ledger (batch runs)`**: API and workers create batch execution records over registered sources. The execution ledger validates that sources are registered, enabled, discovery-complete, and backed by archive metadata (including optional per-source filters and discovery flag checks defined dynamically by each project) before, if configured, executing a Job.
+> - **`Idempotent execution ledger`**: records each run in PostgreSQL so retries are safe, duplicates are skipped, and incomplete work can be reconciled.
 
-> - **`DALiuGE Integrated`**: Supports multiple translator and deployment configuration profiles (REST DIM, Slurm remote, compute limits) which can be assigned per-run, per-module or as global defaults. By use of a dedicated `beampipe-ingest` PyFunc Drop, `beampipe` can be adapted for use in existing Graphs to handle generated JSON manfiests upon translation. The following [beampipe.pallette]() can be downloaded and imported to [EAGLE](https://eagle.icrar.org/).
+> - **`Scheduler-aware orchestration`**: submits graphs to an existing DALiuGE DIM or through SSH to Slurm, with queue and cluster constraints taken from a pinned deployment profile.
 
-<img width="856" height="470" alt="image" src="https://github.com/user-attachments/assets/c542f64a-467a-4432-b435-ceba52d2dc8e" />
+> - **`Workflow-agnostic execution`**: treats pipelines as portable DALiuGE graphs so survey policy can change without rewriting the control plane.
+
+
+## `Core Module Features`
+
+> - **`Source registry`**: register and manage astronomical sources by common-ID over the API, including bulk registration.
+
+> - **`Run ledger enforcement`**: validates executions against registered, enabled, discovery-complete sources before any external I/O.
+
+> - **`Trigger and schedule setup`**: polls configured archives on a project cadence. Frequency, batch size, and admission caps are policy, not code.
+
+> - **`Direct-to-compute`**: deployment profiles select REST DIM or Slurm remote, translator settings, and compute limits per run, per project, or as globals.
+
 <table>
   <tr>
     <td>
-      <img width="717" height="442" alt="graphout" src="https://github.com/user-attachments/assets/45f1ff28-71e4-4c6c-8b25-2f00f9ad2441" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/beampipe-control-plane-terminal.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/readme/beampipe-control-plane-terminal.png">
+  <img src="assets/readme/beampipe-control-plane-terminal.png" alt="Control plane: archives and project config enter the API, PostgreSQL holds the ledger, workers talk to DIM or Slurm" />
+</picture>
     </td>
     <td>
-<img width="1270" height="714" alt="image" src="https://github.com/user-attachments/assets/124e48f7-6598-41a2-a835-9cfabcec8ee1" />
-
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/beampipe-execution-lifecycle-terminal.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/readme/beampipe-execution-lifecycle-terminal.png">
+  <img src="assets/readme/beampipe-execution-lifecycle-terminal.png" alt="Execution lifecycle: register, discover, ready gate, create execution, backend run" />
+</picture>
+    </td>
   </tr>
 </table>
 
 
+## `Modular Orchestration by design`
+
+> - **`Project-scoped automation`**: survey-agnostic YAML policy drives discovery and execution before work is enqueued. The reference config is [`wallaby_hires.v2.yaml`](config/wallaby_hires.v2.yaml) for [`wallaby-hires`](https://github.com/ICRAR/wallaby-hires), integrating CASDA ingestion with HPC compute on [Pawsey Setonix](https://pawsey.org.au/systems/setonix/).
+
+> - **`Shaping and admission`**: global and per-project guards (rate budgets, queue depth, in-flight discovery batches / execution runs) keep automation within configured capacity.
+
+> - **`Execution ledger (batch runs)`**: API and workers create batch records over registered sources. The ledger checks that sources are registered, enabled, discovery-complete, and backed by archive metadata (including per-source filters and discovery flags from the project) before a job is created. Each run pins a project revision and a deployment-profile snapshot.
+
+> - **`Durable workers`**: discovery and execution run under renewable fenced leases. Intent is persisted before external I/O, external IDs are recorded as soon as they are known, and ambiguity is reconciled before retry.
+
+> - **`DALiuGE integrated`**: translator and deployment profiles (REST DIM, Slurm remote, compute limits) can be assigned per-run, per-project, or as globals. A `beampipe-ingest` node receives the generated JSON manifest so existing graphs can be imported in [EAGLE](https://eagle.icrar.org/).
+
+<table>
+  <tr>
+    <td>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/graph-patch-flow-terminal-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/readme/graph-patch-flow-terminal-transparent.png">
+  <img src="assets/readme/graph-patch-flow-terminal-dark.png" alt="Manifest JSON and patch rules produce a patched graph, then Translator Manager deploys it" />
+</picture>
+    </td>
+    <td>
+      <pre><code>{
+  "name": "dlg-dim",
+  "project_module": "wallaby_hires",
+  "is_default": true,
+  "translation": {
+    "algo": "metis",
+    "num_par": 1,
+    "num_islands": 0,
+    "tm_url": "http://dlg-tm:8084"
+  },
+  "deployment": {
+    "kind": "rest_remote",
+    "dim_host_for_tm": "dlg-dim",
+    "dim_port_for_tm": 8001,
+    "deploy_host": "dlg-dim",
+    "deploy_port": 8001
+  }
+}</code></pre>
+    </td>
+  </tr>
+</table>
 
 
+### `Adding a project`
+
+Project config is immutable survey policy: source identity, TAP queries, metadata preparation, manifests, graph patches, and automation. No project query is hardcoded in the Rust worker.
+
+```yaml
+apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata: {}
+definitions: {}
+source_identity: {}
+adapters: {}
+graph: {}
+discovery: {}
+manifest: {}
+graph_patches: []
+automation: {}
+extension: {}
+```
+
+```bash
+beampipe project validate -f config/wallaby_hires.v2.yaml
+beampipe project add -f config/wallaby_hires.v2.yaml
+```
+
+`validate` returns structured diagnostics and a canonical SHA-256. `add` stores a new immutable revision and activates it. Existing executions keep their pinned revision.
 
 
-The key invariant is simple: persist deterministic intent before external I/O, record external IDs as soon as they are known, and reconcile ambiguity before retrying.
-
-## Quick start
+## `First-time setup`
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
@@ -61,25 +138,18 @@ That installs `beampipe` to `~/.local/bin`, writes `~/beampipe`, and starts Post
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker
 ```
 
-The API is at `http://127.0.0.1:8080/api/v2`. Files live in `~/beampipe`. You do not need to clone this repository. Linux host archives need glibc and OpenSSL 3 (Ubuntu 22.04 / Debian bookworm or newer).
+The API is at `http://127.0.0.1:8080/api/v2`. Files live in `~/beampipe`. You do not need to clone this repository.
 
-`--no-start` writes files and prints a recipe without starting anything. A source build is only for qualifying a commit and needs Cargo 1.78 or newer.
+Install a deployment profile with `beampipe profile add` before setting `BEAMPIPE_USE_REAL_BACKENDS=true`. Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-started/) and [first workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/).
 
-Use an override to bind API, metrics, and PostgreSQL to loopback on a workstation.
-When Dash is also containerized, attach it to the Core Compose network and use
-`http://api:8080`; the browser never needs direct API access.
 
-See [deployment topologies](https://beampipe-core.readthedocs.io/getting-started/deployment/)
-for secure bindings, Docker contexts, role configuration, system services,
-container platforms, REST/DIM, and Slurm.
+## `Runtime`
 
-Install a deployment profile with `beampipe profile add` before setting `BEAMPIPE_USE_REAL_BACKENDS=true`.
-
-Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-started/) and [first workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/).
-
-## Runtime roles
-<img width="1713" height="981" alt="image" src="https://github.com/user-attachments/assets/f836361d-f640-4fd5-a1c2-e84d56473552" />
-
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/operations-observability-terminal-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/readme/operations-observability-terminal-transparent.png">
+  <img src="assets/readme/operations-observability-terminal-dark.png" alt="Runtime roles (API, scheduler, worker, Postgres) and inspectability (readiness, metrics, events, ledger, debug fields)" />
+</picture>
 
 | Role | Command | Scale rule |
 |---|---|---|
@@ -88,21 +158,24 @@ Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-sta
 | Worker | `BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker` | scale for queue throughput |
 | Compact | `beampipe start` | local evaluation and small deployments |
 
+> - Rust workspace: API/auth/config, database/domain state, project/profile schemas, adapters/orchestration, jobs, security, metrics, CLI
+> - PostgreSQL as control-plane truth (sources, revisions, ledger, jobs, artifacts)
+> - JWT auth for `/api/v2`
+> - One-command Docker Compose or a host binary
+> - REST DIM or Slurm as the execution backend; archives and schedulers keep authority over their own facts
 
-## Documentation
+
+## `Documentation`
 
 | Task | Page |
 |---|---|
 | Install and reach a healthy system | [Quick start](https://beampipe-core.readthedocs.io/getting-started/) |
-| Choose Docker, native, system-service, or orchestrated deployment | [Deployment topologies](https://beampipe-core.readthedocs.io/getting-started/deployment/) |
 | Run one discovery and graph preparation | [First workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/) |
-| Demonstrate multiple no-download REST runs | [REST demonstration playbook](https://beampipe-core.readthedocs.io/getting-started/rest-no-downloads-demo/) |
-| Connect REST or Slurm and manage SSH keys | [Deployment profiles and SSH](https://beampipe-core.readthedocs.io/architecture/deployment-profiles/) |
-| Operate and recover work | [Operator handbook](https://beampipe-core.readthedocs.io/operations/) |
 | Author project-defined TAP and graph policy | [Project YAML](https://beampipe-core.readthedocs.io/project-configs/) |
 | Integrate over HTTP | [API workflow](https://beampipe-core.readthedocs.io/api/) |
+| Operate and recover work | [Operator handbook](https://beampipe-core.readthedocs.io/operations/) |
 
-## Development
+## `Development`
 
 ```bash
 cargo fmt --all -- --check
@@ -112,4 +185,4 @@ beampipe project validate -f config/wallaby_hires.v2.yaml
 make docs-build
 ```
 
-The workspace crates separate API/auth/config, database/domain state, project/profile schemas, adapters/orchestration, jobs, security, metrics/alerts, and the CLI. See the [architecture](https://beampipe-core.readthedocs.io/architecture/) for ownership boundaries.
+See the [architecture](https://beampipe-core.readthedocs.io/architecture/) for crate ownership boundaries.
