@@ -56,7 +56,6 @@ nav:
       - Deployment profiles and SSH: architecture/deployment-profiles.md
   - Understand:
       - Architecture: architecture/index.md
-      - Installation setup audit: architecture/installation-setup-audit.md
       - Execution state model: architecture/state-machine.md
   - Reference:
       - CLI commands: reference/cli.md
