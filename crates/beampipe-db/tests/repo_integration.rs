@@ -3,7 +3,7 @@ use beampipe_db::{
     models::{ExecutionStatePatch, WorkerRegistration},
     repo,
 };
-use beampipe_domain::{ExecutionStatus, LedgerPatch};
+use beampipe_domain::{DaliugeState, ExecutionStatus, LedgerPatch};
 use serde_json::json;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -213,6 +213,7 @@ async fn list_rest_executions_pending_poll_returns_active_daliuge() {
         exec.uuid,
         ExecutionStatePatch {
             daliuge_session_id: Some("BeampipeExecution-rest-session".into()),
+            daliuge_state: Some(DaliugeState::Running),
             ..Default::default()
         },
     )
