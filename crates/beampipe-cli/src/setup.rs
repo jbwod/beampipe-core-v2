@@ -1012,7 +1012,10 @@ fn set_private_file_permissions(_path: &Path) -> Result<()> {
 }
 
 fn default_env_skeleton() -> String {
-    "BEAMPIPE_ENV=development\nBEAMPIPE_VERSION=0.1.0\nBEAMPIPE_JWT_SECRET=change-me\nDATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe\n".into()
+    format!(
+        "BEAMPIPE_ENV=development\nBEAMPIPE_VERSION={}\nBEAMPIPE_JWT_SECRET=change-me\nDATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe\n",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn seed_env_file(root: &Path, env_path: &Path) -> Result<()> {
@@ -1054,7 +1057,7 @@ fn ensure_beampipe_version(root: &Path, env_path: &Path) -> Result<()> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| env_file_value(&root.join(".env.example"), "BEAMPIPE_VERSION"))
-        .unwrap_or_else(|| "0.1.0".into());
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
     update_env_file(env_path, "BEAMPIPE_VERSION", &version)
 }
 
@@ -1875,7 +1878,7 @@ mod tests {
         ensure_beampipe_version(empty.path(), &created).unwrap();
         assert!(std::fs::read_to_string(&created)
             .unwrap()
-            .contains("BEAMPIPE_VERSION=0.1.0\n"));
+            .contains(&format!("BEAMPIPE_VERSION={}\n", env!("CARGO_PKG_VERSION"))));
     }
 
     #[test]
