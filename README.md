@@ -1,10 +1,12 @@
 <p align="center">
-  <img src="assets/brand/beampipe-terminal-logo.png" alt="Beampipe" width="920">
+  <img src="assets/brand/beampipe-terminal-logo.svg" alt="Beampipe" width="920">
+</p>
+<p align="center">
+<img width="443" height="49" alt="image" src="https://github.com/user-attachments/assets/cb7956bd-9e5c-4f6d-8b9f-a575b24b6402" />
 </p>
 
-<h1 align="center">Beampipe Core</h1>
+> `beampipe-core` is a modular orchestration and triggering framework for data-driven radio astronomy workflows. It operates as an external control plane that continuously monitors scientific archives (ie; CASDA), determines when datasets are ready, and orchestrates scheduler-aware execution of distributed workflows (ie; DALiuGe) on heterogeneous HPC systems.
 
-<p align="center"><strong>A durable Rust control plane for archive-driven DALiuGE workflows.</strong></p>
 
 <p align="center">
   <a href="https://github.com/jbwod/beampipe-core-v2/actions/workflows/rust.yml"><img src="https://github.com/jbwod/beampipe-core-v2/actions/workflows/rust.yml/badge.svg" alt="Rust CI"></a>
@@ -13,25 +15,56 @@
   <img src="https://img.shields.io/badge/config-beampipe.dev%2Fv2-a7cfa3?style=flat-square&labelColor=050505" alt="Project config v2">
 </p>
 
-Beampipe turns project-defined archive discovery into reproducible manifests and DALiuGE graphs, then operates execution through an existing DIM or Slurm. PostgreSQL preserves intent, jobs, claims, artifacts, external observations, and provenance across process restarts.
+### `What it does`
 
-> [!IMPORTANT]
-> Beampipe is not the science workflow engine. CASDA, Slurm, and DALiuGE remain authoritative for archive facts, allocations, and graph execution.
+<img width="1712" height="981" alt="image" src="https://github.com/user-attachments/assets/6fc85d71-c1a5-47fd-8f9a-304656c95dd3" />
 
-## Architecture
 
-```mermaid
-flowchart LR
-    POLICY["Project YAML<br/>queries + transforms + graph policy"] --> API["/api/v2 API"]
-    API <--> DB[("PostgreSQL<br/>ledger + jobs")]
-    SCHED["Scheduler<br/>recurring intent"] <--> DB
-    WORKERS["Workers<br/>leased + fenced"] <--> DB
-    WORKERS --> TAP["CASDA + VizieR TAP"]
-    WORKERS --> TM["DALiuGE TM"]
-    WORKERS --> DIM["REST DIM"]
-    WORKERS --> SSH["SSH + Slurm"]
-    SSH --> RUNTIME["DALiuGE allocation"]
-```
+## `Modular Orchestration by design`
+> - **`Project-scoped automation`**: Designed from the ground-up to be Survey-Agnostic, a hotswap project based system to allow discovery and execution derrived by defined policy before enqueuing work. The example module was constructed for the [`wallaby-hires`](https://github.com/ICRAR/wallaby-hires) project and workflow, integrating ingestion with CASDA and HPC Compute on [pawsey-setonix](https://pawsey.org.au/systems/setonix/) to generate High Resolution data cubes with parameters.
+
+> - **`Shaping and admission`**: global and per-project guards (rate budgets, queue depth, in-flight discovery batches / execution runs) coordinate so automation stays within configured capacity.
+
+> - **`Execution ledger (batch runs)`**: API and workers create batch execution records over registered sources. The execution ledger validates that sources are registered, enabled, discovery-complete, and backed by archive metadata (including optional per-source filters and discovery flag checks defined dynamically by each project) before, if configured, executing a Job.
+
+> - **`DALiuGE Integrated`**: Supports multiple translator and deployment configuration profiles (REST DIM, Slurm remote, compute limits) which can be assigned per-run, per-module or as global defaults. By use of a dedicated `beampipe-ingest` PyFunc Drop, `beampipe` can be adapted for use in existing Graphs to handle generated JSON manfiests upon translation. The following [beampipe.pallette]() can be downloaded and imported to [EAGLE](https://eagle.icrar.org/).
+
+<img width="856" height="470" alt="image" src="https://github.com/user-attachments/assets/c542f64a-467a-4432-b435-ceba52d2dc8e" />
+<table>
+  <tr>
+    <td>
+      <img width="717" height="442" alt="graphout" src="https://github.com/user-attachments/assets/45f1ff28-71e4-4c6c-8b25-2f00f9ad2441" />
+    </td>
+    <td>
+      <pre>
+    <code class="language-json">
+{
+  "name": "test-staging-e2e-rest-remote",
+  "description": "rest_remote",
+  "project_module": "wallaby_hires",
+  "is_default": true,
+  "translation": {
+    "algo": "metis",
+    "num_par": 1,
+    "num_islands": 0,
+    "tm_url": "http://dlg-tm.desk"
+  },
+  "deployment": {
+    "kind": "rest_remote",
+    "dim_host_for_tm": "dlg-dim",
+    "dim_port_for_tm": 8001,
+    "deploy_host": "dlg-dim.desk",
+    "deploy_port": 80,
+    "verify_ssl": false
+  }
+} </code></pre>
+  </tr>
+</table>
+
+
+
+
+
 
 The key invariant is simple: persist deterministic intent before external I/O, record external IDs as soon as they are known, and reconcile ambiguity before retrying.
 
@@ -63,24 +96,6 @@ Install a deployment profile with `beampipe profile add` before setting `BEAMPIP
 
 Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-started/) and [first workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/).
 
-## Workflow
-
-```mermaid
-flowchart LR
-    A["Register source"] --> B["Project-defined TAP discovery"]
-    B --> C["Normalize + sign metadata"]
-    C --> D["Admission"]
-    D --> E["Manifest + graph artifacts"]
-    E --> F["TM translation"]
-    F --> G{"Deployment profile"}
-    G -->|rest_remote| H["DIM deploy + poll"]
-    G -->|slurm_remote| I["SSH/SFTP + sbatch + batched poll"]
-    H --> J["Terminal control outcome"]
-    I --> J
-```
-
-Project-specific ADQL, enrichments, metadata mappings, signatures, manifests, and graph patches live in immutable `beampipe.dev/v2` YAML. They are not hardcoded in the workers.
-
 ## Runtime roles
 
 | Role | Command | Scale rule |
@@ -90,15 +105,6 @@ Project-specific ADQL, enrichments, metadata mappings, signatures, manifests, an
 | Worker | `BEAMPIPE_WORKER_SCHEDULER_ENABLED=false beampipe worker` | scale for queue throughput |
 | Compact | `beampipe start` | local evaluation and small deployments |
 
-## Current qualification
-
-The current code has been exercised through archive discovery, manifest and graph preparation, DALiuGE translation, and REST deployment to a local cluster. A 2026-08-13 no-stage/no-download qualification reached a consistent terminal `succeeded` outcome: both DALiuGE node managers finished and reported zero error drops after the WALLABY list/pickle graph contract was aligned.
-
-That result establishes local control-plane Q0-Q3 for the pinned REST profile and graph/runtime combination. It does not establish CASDA authenticated staging, Slurm execution, or scientific-product verification. VizieR was unavailable during that particular rerun, so its execution used a narrowly scoped pinned catalog fallback rather than being presented as fresh live-VizieR evidence.
-
-The output state axis is implemented, but no worker currently verifies scientific products. Runtime completion must not be described as native scientific-output verification.
-
-See the [qualification run](https://beampipe-core.readthedocs.io/operations/end-to-end-demo/) for exact evidence and remaining gates.
 
 ## Documentation
 
