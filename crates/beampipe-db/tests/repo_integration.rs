@@ -1,4 +1,8 @@
-use beampipe_db::{connect, migrate, models::WorkerRegistration, repo};
+use beampipe_db::{
+    connect, migrate,
+    models::{ExecutionStatePatch, WorkerRegistration},
+    repo,
+};
 use beampipe_domain::{ExecutionStatus, LedgerPatch};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -134,9 +138,19 @@ async fn list_slurm_executions_pending_poll_returns_active_slurm() {
         &pool,
         exec.uuid,
         LedgerPatch {
-            status: Some(ExecutionStatus::AwaitingScheduler),
+            status: Some(ExecutionStatus::Running),
             scheduler_name: Some("slurm".into()),
             scheduler_job_id: Some("BeampipeExecution-test:4242|/tmp/session".into()),
+            ..LedgerPatch::default()
+        },
+    )
+    .await
+    .unwrap();
+    repo::apply_execution_patch(
+        &pool,
+        exec.uuid,
+        LedgerPatch {
+            status: Some(ExecutionStatus::AwaitingScheduler),
             ..LedgerPatch::default()
         },
     )
@@ -189,8 +203,17 @@ async fn list_rest_executions_pending_poll_returns_active_daliuge() {
         LedgerPatch {
             status: Some(ExecutionStatus::Running),
             scheduler_name: Some("daliuge".into()),
-            scheduler_job_id: Some("BeampipeExecution-rest-session".into()),
             ..LedgerPatch::default()
+        },
+    )
+    .await
+    .unwrap();
+    repo::apply_execution_state_patch(
+        &pool,
+        exec.uuid,
+        ExecutionStatePatch {
+            daliuge_session_id: Some("BeampipeExecution-rest-session".into()),
+            ..Default::default()
         },
     )
     .await
