@@ -38,16 +38,14 @@
   <tr>
     <td>
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/beampipe-control-plane-terminal.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/readme/beampipe-control-plane-terminal.png">
-  <img src="assets/readme/beampipe-control-plane-terminal.png" alt="Control plane: archives and project config enter the API, PostgreSQL holds the ledger, workers talk to DIM or Slurm" />
+<img alt="image" src="https://github.com/user-attachments/assets/3c28165a-9c7d-4403-a367-917be56e5c95" />
+
 </picture>
     </td>
     <td>
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/beampipe-execution-lifecycle-terminal.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/readme/beampipe-execution-lifecycle-terminal.png">
-  <img src="assets/readme/beampipe-execution-lifecycle-terminal.png" alt="Execution lifecycle: register, discover, ready gate, create execution, backend run" />
+<img alt="image" src="https://github.com/user-attachments/assets/60578417-6cad-475d-a3fa-1ca53a2dc1f8" />
+
 </picture>
     </td>
   </tr>
@@ -70,9 +68,8 @@
   <tr>
     <td>
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/graph-patch-flow-terminal-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/readme/graph-patch-flow-terminal-transparent.png">
-  <img src="assets/readme/graph-patch-flow-terminal-dark.png" alt="Manifest JSON and patch rules produce a patched graph, then Translator Manager deploys it" />
+<img alt="image" src="https://github.com/user-attachments/assets/68218d64-351c-4d5d-bfc6-91b281e17724" />
+
 </picture>
     </td>
     <td>
