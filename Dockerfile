@@ -7,6 +7,7 @@ COPY crates ./crates
 COPY migrations ./migrations
 COPY deploy/operator/docker-compose.yml deploy/operator/.env.example ./deploy/operator/
 COPY config/wallaby_hires.v2.yaml ./config/wallaby_hires.v2.yaml
+COPY config/deployment_profile.dlg-dim.json config/deployment_profile.slurm-remote.json ./config/
 
 # Scope caches by platform. amd64 and arm64 otherwise race on
 # registry/src/<crate>/.cargo-ok (EEXIST) during a multi-arch buildx bake.
