@@ -1141,15 +1141,14 @@ async fn main() -> anyhow::Result<()> {
                 host,
                 port,
             } => {
-                let public_key = slurm_credentials::copy_id_for_slot(
-                    slurm_credentials::CopyIdOptions {
+                let public_key =
+                    slurm_credentials::copy_id_for_slot(slurm_credentials::CopyIdOptions {
                         slot: slot.clone(),
                         dir,
                         user: user.clone(),
                         host: host.clone(),
                         port,
-                    },
-                )?;
+                    })?;
                 println!(
                     "Installed {} on {user}@{host} with ssh-copy-id.",
                     public_key.display()

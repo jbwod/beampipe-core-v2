@@ -1772,7 +1772,11 @@ fn dash_install_recipe_line(core_home: Option<&Path>, dash_dir: &Path) -> String
             home.display(),
             dash_dir.display()
         ),
-        None => format!("  sh {} --dash-dir {}", script.display(), dash_dir.display()),
+        None => format!(
+            "  sh {} --dash-dir {}",
+            script.display(),
+            dash_dir.display()
+        ),
     }
 }
 
@@ -2246,7 +2250,10 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
             }
         }
         if let Some(dash_dir) = &steps.dash_dir {
-            lines.push(dash_install_recipe_line(steps.core_home.as_deref(), dash_dir));
+            lines.push(dash_install_recipe_line(
+                steps.core_home.as_deref(),
+                dash_dir,
+            ));
         }
     } else {
         if !steps.db_applied {

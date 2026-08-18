@@ -477,14 +477,23 @@ pub fn format_credential_next_steps(result: &InitResult) -> String {
     if result.generated {
         out.push_str(&format!("Created SSH credential slot '{}'.\n", result.slot));
     } else {
-        out.push_str(&format!("Imported SSH credential slot '{}'.\n", result.slot));
+        out.push_str(&format!(
+            "Imported SSH credential slot '{}'.\n",
+            result.slot
+        ));
     }
-    out.push_str(&format!("  private_key  {}\n", result.private_key.display()));
+    out.push_str(&format!(
+        "  private_key  {}\n",
+        result.private_key.display()
+    ));
     out.push_str(&format!("  public_key   {}\n", result.public_key.display()));
     if let Some(path) = &result.passphrase {
         out.push_str(&format!("  passphrase   {}\n", path.display()));
     }
-    out.push_str(&format!("  known_hosts  {}\n", result.known_hosts.display()));
+    out.push_str(&format!(
+        "  known_hosts  {}\n",
+        result.known_hosts.display()
+    ));
 
     if result.public_key.is_file() {
         if let Ok(contents) = fs::read_to_string(&result.public_key) {
