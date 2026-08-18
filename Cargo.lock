@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-adapters"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "quick-xml",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-alerts"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "beampipe-db",
  "beampipe-domain",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-api"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-auth"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bcrypt",
  "chrono",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "beampipe-adapters",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-config"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "dotenvy",
  "serde",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-db"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "beampipe-domain",
  "beampipe-project",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-domain"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "schemars",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-jobs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "beampipe-adapters",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-metrics"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "axum",
  "beampipe-adapters",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-orchestration"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "beampipe-adapters",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-profiles"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "schemars",
  "serde",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-project"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "beampipe-domain",
  "jsonschema",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-security"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",

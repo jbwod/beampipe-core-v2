@@ -2,7 +2,7 @@
 # Prepare a Compose checkout without starting Postgres or the stack.
 # Usage (from the repository root):
 #   ./deploy/setup-docker.sh --yes --skip-admin --skip-upload
-# Pulls ghcr.io/jbwod/beampipe-core-v2:${BEAMPIPE_VERSION:-0.1.3} unless it is already local.
+# Pulls ghcr.io/jbwod/beampipe-core-v2:${BEAMPIPE_VERSION:-0.1.4} unless it is already local.
 # Compile from this checkout instead with:
 #   BEAMPIPE_BUILD=1 ./deploy/setup-docker.sh --yes --skip-admin --skip-upload
 set -eu
