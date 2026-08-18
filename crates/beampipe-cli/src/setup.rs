@@ -22,6 +22,7 @@ const DEFAULT_CASDA_TAP_URL: &str = "https://casda.csiro.au/casda_vo_tools/tap/s
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
 const DEFAULT_WORKER_POOL: &str = "default";
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/beampipe";
+const SETUP_LOGO: &str = include_str!("../../../assets/brand/beampipe-terminal-logo.txt");
 
 #[derive(Debug, Clone, Default)]
 pub struct SetupOptions {
@@ -50,6 +51,9 @@ pub struct SetupOptions {
     pub skip_docker: bool,
     pub runtime: Option<String>,
     pub postgres: Option<String>,
+    pub api_port: Option<u16>,
+    pub postgres_port: Option<u16>,
+    pub metrics_port: Option<u16>,
     pub dashboard: bool,
     pub skip_dashboard: bool,
     pub dash_dir: Option<PathBuf>,
@@ -57,6 +61,14 @@ pub struct SetupOptions {
     pub directory: Option<PathBuf>,
     pub credentials_dir: Option<PathBuf>,
     pub start: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UninstallOptions {
+    pub yes: bool,
+    pub purge_binary: bool,
+    pub keep_volumes: bool,
+    pub directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +86,13 @@ impl PostgresKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HostPorts {
+    api: u16,
+    postgres: u16,
+    metrics: u16,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ChoiceItem {
     key: &'static str,
@@ -89,7 +108,18 @@ fn format_step(n: usize, total: usize, title: &str) -> String {
     format!("== {n}/{total}  {title} ==")
 }
 
+fn print_setup_logo() {
+    let logo = SETUP_LOGO.trim_end();
+    if stdout_is_tty() {
+        println!("{}", logo.cyan());
+    } else {
+        println!("{logo}");
+    }
+    println!();
+}
+
 fn print_banner(start: bool) {
+    print_setup_logo();
     let title = "Beampipe setup";
     if stdout_is_tty() {
         println!("{}", title.bold());
@@ -260,7 +290,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
                 if env_existed {
-                    println!(
+        println!(
                         "Existing Compose database has no managed password setting; preserving the legacy password."
                     );
                     "postgres".into()
@@ -269,23 +299,6 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
                 }
             })
     });
-    let database_url =
-        if postgres == PostgresKind::Compose && opts.database_url.is_none() && !env_existed {
-            format!(
-                "postgres://postgres:{}@localhost:5432/beampipe",
-                postgres_password.as_deref().unwrap_or_default()
-            )
-        } else {
-            resolve_database_url(&opts, postgres)?
-        };
-    if runtime == RuntimeKind::Docker
-        && postgres == PostgresKind::Existing
-        && (database_url.contains("@localhost") || database_url.contains("@127.0.0.1"))
-    {
-        print_hint(
-            "The external database URL points at the container itself. Use a hostname reachable from Docker, such as host.docker.internal on Docker Desktop.",
-        );
-    }
     if postgres == PostgresKind::Compose {
         print_hint("Using the installation-managed PostgreSQL service.");
         if opts.start {
@@ -295,8 +308,39 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         }
     }
 
+    print_step(step, total_steps, "Host ports");
+    step += 1;
+    let host_ports = resolve_host_ports(&opts, runtime, postgres)?;
+    print_hint(&format!("API http://127.0.0.1:{}/api/v2", host_ports.api));
+    if postgres == PostgresKind::Compose {
+        print_hint(&format!("PostgreSQL 127.0.0.1:{}", host_ports.postgres));
+    }
+    if runtime == RuntimeKind::Docker {
+        print_hint(&format!("Metrics 127.0.0.1:{}", host_ports.metrics));
+    }
+
+    let database_url = if postgres == PostgresKind::Compose
+        && opts.database_url.is_none()
+        && (!env_existed || opts.postgres_port.is_some())
+    {
+        compose_host_database_url(
+            postgres_password.as_deref().unwrap_or_default(),
+            host_ports.postgres,
+        )
+    } else {
+        resolve_database_url(&opts, postgres)?
+    };
+    if runtime == RuntimeKind::Docker
+        && postgres == PostgresKind::Existing
+        && (database_url.contains("@localhost") || database_url.contains("@127.0.0.1"))
+    {
+        print_hint(
+            "The external database URL points at the container itself. Use a hostname reachable from Docker, such as host.docker.internal on Docker Desktop.",
+        );
+    }
+
     let prepare_docker = runtime == RuntimeKind::Docker;
-    preflight_after_choices(&opts, runtime, postgres)?;
+    preflight_after_choices(&opts, runtime, postgres, host_ports)?;
 
     let mut dash_dir = None;
     if decide_dashboard(&opts, prepare_docker) != Some(false) {
@@ -402,6 +446,21 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         "BEAMPIPE_SSH_CREDENTIALS_DIR",
         &credential_root.display().to_string(),
     )?;
+    persist_host_ports(&env_path, host_ports, runtime)?;
+    clear_missing_config_path(&root, &env_path)?;
+    std::env::set_var("BEAMPIPE_API_PORT", host_ports.api.to_string());
+    std::env::set_var("BEAMPIPE_POSTGRES_PORT", host_ports.postgres.to_string());
+    std::env::set_var("BEAMPIPE_METRICS_PORT", host_ports.metrics.to_string());
+    if runtime == RuntimeKind::Host {
+        std::env::set_var(
+            "BEAMPIPE_BIND_ADDR",
+            format!("127.0.0.1:{}", host_ports.api),
+        );
+        std::env::set_var(
+            "BEAMPIPE_METRICS_BIND_ADDR",
+            format!("127.0.0.1:{}", host_ports.metrics),
+        );
+    }
     if env_existed {
         ensure_beampipe_version(&root, &env_path)?;
     } else {
@@ -517,7 +576,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         db_applied = true;
 
         if !opts.skip_admin {
-            create_admin_user(pool, &opts).await?;
+            create_admin_user(pool, &opts, host_ports.api).await?;
             admin_ready = true;
         }
 
@@ -593,7 +652,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             .map(|path| display_repo_path(&root, path)),
     });
     if opts.start {
-        finish_start(&root, prepare_docker, &opts)?;
+        finish_start(&root, prepare_docker, &opts, host_ports)?;
     } else {
         print_recipe(&commands);
     }
@@ -601,9 +660,125 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         &root,
         runtime,
         postgres,
+        host_ports,
         opts.start,
         prepared_profile.as_ref(),
     );
+    Ok(())
+}
+
+pub fn run_uninstall(opts: UninstallOptions) -> Result<()> {
+    let home = installation::resolve_home(opts.directory.as_deref())?;
+    let context = installation::InstallationContext::from_home(home)?;
+    if !context.exists() {
+        bail!("no Beampipe installation at {}", context.home.display());
+    }
+    let home = context
+        .home
+        .canonicalize()
+        .with_context(|| format!("resolve {}", context.home.display()))?;
+    assert_safe_to_delete(&home)?;
+    let context = installation::InstallationContext::from_home(home.clone())?;
+
+    let title = "Beampipe uninstall";
+    if stdout_is_tty() {
+        println!("{}", title.bold());
+    } else {
+        println!("{title}");
+    }
+    print_hint(&format!("Installation: {}", home.display()));
+    match context.state.as_ref().map(|state| state.runtime) {
+        Some(RuntimeKind::Docker) => {
+            print_hint("Stops Compose services and deletes the operator directory.");
+        }
+        Some(RuntimeKind::Host) => {
+            print_hint("Does not stop a host `beampipe start` process. Stop that yourself first.");
+        }
+        None => print_hint("Deletes the operator directory."),
+    }
+    if !opts.keep_volumes {
+        print_hint("Compose volumes, including managed PostgreSQL data, are deleted.");
+    }
+    let credential_root = context
+        .credential_root
+        .canonicalize()
+        .unwrap_or_else(|_| context.credential_root.clone());
+    if !credential_root.starts_with(&home) {
+        print_hint(&format!(
+            "SSH credential root {} is outside the installation and will be kept.",
+            credential_root.display()
+        ));
+    }
+    if opts.purge_binary {
+        print_hint("Also removes ~/.local/bin/beampipe.");
+    }
+
+    if !opts.yes && !prompt_yes_no("Delete this installation?", false)? {
+        bail!("uninstall aborted");
+    }
+
+    if context.home.join("docker-compose.yml").is_file() {
+        match runtime::down(&context, !opts.keep_volumes) {
+            Ok(()) => println!("Stopped Compose project."),
+            Err(error) => println!("Compose teardown skipped: {error}"),
+        }
+    }
+
+    std::fs::remove_dir_all(&home).with_context(|| format!("remove {}", home.display()))?;
+    println!("Removed {}", home.display());
+
+    if opts.purge_binary {
+        purge_release_binary()?;
+    } else {
+        print_hint(
+            "The beampipe binary was kept. Pass --purge-binary to remove ~/.local/bin/beampipe.",
+        );
+    }
+    Ok(())
+}
+
+fn assert_safe_to_delete(home: &Path) -> Result<()> {
+    if !home.is_absolute() {
+        bail!("installation home must be an absolute path");
+    }
+    if home.parent().is_none() {
+        bail!("refusing to delete {}", home.display());
+    }
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    if home.parent().is_none() {
+        bail!("refusing to delete {}", home.display());
+    }
+    if let Some(user_home) = std::env::var_os("HOME") {
+        let user_home = PathBuf::from(user_home);
+        let user_home = user_home.canonicalize().unwrap_or(user_home);
+        if home == user_home {
+            bail!("refusing to delete the user home directory");
+        }
+        if user_home.starts_with(&home) {
+            bail!("refusing to delete a parent of the user home directory");
+        }
+    }
+    Ok(())
+}
+
+fn default_release_binary() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin/beampipe"))
+}
+
+fn purge_release_binary() -> Result<()> {
+    let Some(path) = default_release_binary() else {
+        println!("HOME is unset; skipped binary removal.");
+        return Ok(());
+    };
+    if path.file_name().and_then(|name| name.to_str()) != Some("beampipe") {
+        bail!("refusing to delete {}", path.display());
+    }
+    if !path.is_file() {
+        println!("No {} to remove.", path.display());
+        return Ok(());
+    }
+    std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    println!("Removed {}", path.display());
     Ok(())
 }
 
@@ -766,9 +941,9 @@ fn require_docker_compose() -> Result<()> {
 
 fn setup_step_total(opts: &SetupOptions, docker: bool) -> usize {
     if decide_dashboard(opts, docker) == Some(false) {
-        3
-    } else {
         4
+    } else {
+        5
     }
 }
 
@@ -793,23 +968,209 @@ fn require_bind_ports_free(ports: &[(u16, &str)]) -> Result<()> {
     Ok(())
 }
 
+fn parse_required_port(raw: &str, label: &str) -> Result<u16> {
+    installation::parse_host_port(raw)
+        .ok_or_else(|| anyhow::anyhow!("{label} must be an integer 1-65535"))
+}
+
+fn port_from_sources(
+    flag: Option<u16>,
+    env_value: Option<&str>,
+    default: u16,
+    label: &str,
+) -> Result<u16> {
+    if let Some(port) = flag {
+        return parse_required_port(&port.to_string(), label);
+    }
+    if let Some(value) = env_value.map(str::trim).filter(|value| !value.is_empty()) {
+        return parse_required_port(value, label);
+    }
+    Ok(default)
+}
+
+fn port_from_flag_or_env(
+    flag: Option<u16>,
+    env_key: &str,
+    default: u16,
+    label: &str,
+) -> Result<u16> {
+    port_from_sources(flag, std::env::var(env_key).ok().as_deref(), default, label)
+}
+
+fn validate_host_ports(ports: HostPorts) -> Result<()> {
+    if ports.api == ports.postgres {
+        bail!(
+            "API port and PostgreSQL port must be different (both {})",
+            ports.api
+        );
+    }
+    if ports.api == ports.metrics {
+        bail!(
+            "API port and metrics port must be different (both {})",
+            ports.api
+        );
+    }
+    if ports.postgres == ports.metrics {
+        bail!(
+            "PostgreSQL port and metrics port must be different (both {})",
+            ports.postgres
+        );
+    }
+    Ok(())
+}
+
+fn resolved_host_ports(opts: &SetupOptions) -> Result<HostPorts> {
+    let ports = HostPorts {
+        api: port_from_flag_or_env(
+            opts.api_port,
+            "BEAMPIPE_API_PORT",
+            installation::DEFAULT_API_PORT,
+            "API port",
+        )?,
+        postgres: port_from_flag_or_env(
+            opts.postgres_port,
+            "BEAMPIPE_POSTGRES_PORT",
+            installation::DEFAULT_POSTGRES_PORT,
+            "PostgreSQL port",
+        )?,
+        metrics: port_from_flag_or_env(
+            opts.metrics_port,
+            "BEAMPIPE_METRICS_PORT",
+            installation::DEFAULT_METRICS_PORT,
+            "metrics port",
+        )?,
+    };
+    validate_host_ports(ports)?;
+    Ok(ports)
+}
+
+fn prompt_port(label: &str, default: u16) -> Result<u16> {
+    loop {
+        let raw = prompt_default(label, &default.to_string())?;
+        match parse_required_port(&raw, label) {
+            Ok(port) => return Ok(port),
+            Err(error) => print_hint(&error.to_string()),
+        }
+    }
+}
+
+fn resolve_host_ports(
+    opts: &SetupOptions,
+    runtime: RuntimeKind,
+    postgres: PostgresKind,
+) -> Result<HostPorts> {
+    let mut ports = resolved_host_ports(opts)?;
+    if !opts.yes {
+        ports.api = prompt_port("API port", ports.api)?;
+        if postgres == PostgresKind::Compose {
+            ports.postgres = prompt_port("PostgreSQL port", ports.postgres)?;
+        }
+        if runtime == RuntimeKind::Docker {
+            ports.metrics = prompt_port("Metrics port", ports.metrics)?;
+        }
+        validate_host_ports(ports)?;
+    }
+    Ok(ports)
+}
+
+fn compose_host_database_url(password: &str, postgres_port: u16) -> String {
+    format!("postgres://postgres:{password}@localhost:{postgres_port}/beampipe")
+}
+
+fn persist_host_ports(env_path: &Path, ports: HostPorts, runtime: RuntimeKind) -> Result<()> {
+    update_env_file(env_path, "BEAMPIPE_API_PORT", &ports.api.to_string())?;
+    update_env_file(
+        env_path,
+        "BEAMPIPE_POSTGRES_PORT",
+        &ports.postgres.to_string(),
+    )?;
+    update_env_file(
+        env_path,
+        "BEAMPIPE_METRICS_PORT",
+        &ports.metrics.to_string(),
+    )?;
+    if runtime == RuntimeKind::Host {
+        update_env_file(
+            env_path,
+            "BEAMPIPE_BIND_ADDR",
+            &format!("127.0.0.1:{}", ports.api),
+        )?;
+        update_env_file(
+            env_path,
+            "BEAMPIPE_METRICS_BIND_ADDR",
+            &format!("127.0.0.1:{}", ports.metrics),
+        )?;
+    }
+    Ok(())
+}
+
+fn clear_missing_config_path(root: &Path, env_path: &Path) -> Result<()> {
+    let Some(value) = env_file_value(env_path, "BEAMPIPE_CONFIG") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(&value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    if path.is_file() {
+        return Ok(());
+    }
+    update_env_file(env_path, "BEAMPIPE_CONFIG", "")?;
+    println!(
+        "Cleared BEAMPIPE_CONFIG; {} is not present.",
+        path.display()
+    );
+    Ok(())
+}
+
+fn bind_ports_for_start(
+    ports: HostPorts,
+    runtime: RuntimeKind,
+    postgres: PostgresKind,
+) -> Vec<(u16, &'static str)> {
+    let mut out = Vec::new();
+    if postgres == PostgresKind::Compose {
+        out.push((ports.postgres, "PostgreSQL"));
+    }
+    out.push((ports.api, "API"));
+    if runtime == RuntimeKind::Docker {
+        out.push((ports.metrics, "metrics"));
+    }
+    out
+}
+
+fn guessed_postgres_for_preflight(opts: &SetupOptions, runtime: RuntimeKind) -> PostgresKind {
+    match opts.postgres.as_deref() {
+        Some("existing") => PostgresKind::Existing,
+        Some("compose") => PostgresKind::Compose,
+        _ if runtime == RuntimeKind::Docker => PostgresKind::Compose,
+        _ => PostgresKind::Existing,
+    }
+}
+
 fn preflight_before_materialize(opts: &SetupOptions) -> Result<()> {
     match decide_runtime(opts)? {
         Some(RuntimeKind::Docker) => {
             require_docker_compose()?;
-            if opts.start {
-                require_bind_ports_free(&[(5432, "PostgreSQL"), (8080, "API"), (9090, "metrics")])?;
+            if opts.yes && opts.start {
+                require_bind_ports_free(&bind_ports_for_start(
+                    resolved_host_ports(opts)?,
+                    RuntimeKind::Docker,
+                    guessed_postgres_for_preflight(opts, RuntimeKind::Docker),
+                ))?;
             }
         }
-        Some(RuntimeKind::Host) if opts.start => {
-            let mut ports = vec![(8080, "API")];
-            if matches!(opts.postgres.as_deref(), Some("compose")) {
-                ports.insert(0, (5432, "PostgreSQL"));
-            }
-            require_bind_ports_free(&ports)?;
+        Some(RuntimeKind::Host) if opts.yes && opts.start => {
+            require_bind_ports_free(&bind_ports_for_start(
+                resolved_host_ports(opts)?,
+                RuntimeKind::Host,
+                guessed_postgres_for_preflight(opts, RuntimeKind::Host),
+            ))?;
         }
         None if opts.start => {
-            require_bind_ports_free(&[(8080, "API")])?;
+            require_bind_ports_free(&[(resolved_host_ports(opts)?.api, "API")])?;
         }
         _ => {}
     }
@@ -820,6 +1181,7 @@ fn preflight_after_choices(
     opts: &SetupOptions,
     runtime: RuntimeKind,
     postgres: PostgresKind,
+    ports: HostPorts,
 ) -> Result<()> {
     if runtime == RuntimeKind::Docker {
         require_docker_compose()?;
@@ -827,35 +1189,27 @@ fn preflight_after_choices(
     if !opts.start {
         return Ok(());
     }
-    let mut ports = Vec::new();
-    if postgres == PostgresKind::Compose {
-        ports.push((5432, "PostgreSQL"));
-    }
-    ports.push((8080, "API"));
-    if runtime == RuntimeKind::Docker {
-        ports.push((9090, "metrics"));
-    }
-    require_bind_ports_free(&ports)
+    require_bind_ports_free(&bind_ports_for_start(ports, runtime, postgres))
 }
 
 fn host_start_command(root: &Path) -> String {
     format!("  beampipe --home {} start", root.display())
 }
 
-fn login_snippet_lines(username: &str) -> Vec<String> {
+fn login_snippet_lines(username: &str, api_port: u16) -> Vec<String> {
     vec![
         format!("  export ADMIN_USER={username}"),
         "  export ADMIN_PASSWORD=\"${ADMIN_PASSWORD:?set to the password setup printed}\"".into(),
-        "  curl -fsS -X POST http://127.0.0.1:8080/api/v2/login \\".into(),
+        format!("  curl -fsS -X POST http://127.0.0.1:{api_port}/api/v2/login \\"),
         "    -H 'Content-Type: application/json' \\".into(),
         "    -d \"{\\\"username\\\":\\\"${ADMIN_USER}\\\",\\\"password\\\":\\\"${ADMIN_PASSWORD}\\\"}\""
             .into(),
     ]
 }
 
-fn print_login_snippet(username: &str) {
+fn print_login_snippet(username: &str, api_port: u16) {
     println!("Login once the API is up:");
-    for line in login_snippet_lines(username) {
+    for line in login_snippet_lines(username, api_port) {
         println!("{line}");
     }
 }
@@ -892,25 +1246,29 @@ fn compose_up_postgres(root: &Path) -> Result<()> {
     compose_cmd(root, &["up", "-d", "--wait", "postgres"])
 }
 
-fn check_api_health() {
-    let result = Command::new("curl")
-        .args(["-fsS", "http://127.0.0.1:8080/api/v2/health"])
-        .status();
+fn check_api_health(api_port: u16) {
+    let url = format!("http://127.0.0.1:{api_port}/api/v2/health");
+    let result = Command::new("curl").args(["-fsS", &url]).status();
     match result {
         Ok(status) if status.success() => {
-            println!("API is up at http://127.0.0.1:8080/api/v2");
+            println!("API is up at http://127.0.0.1:{api_port}/api/v2");
         }
         _ => {
-            println!("Check http://127.0.0.1:8080/api/v2/health when the API is ready.");
+            println!("Check {url} when the API is ready.");
         }
     }
 }
 
-fn finish_start(root: &Path, runtime_docker: bool, opts: &SetupOptions) -> Result<()> {
+fn finish_start(
+    root: &Path,
+    runtime_docker: bool,
+    opts: &SetupOptions,
+    ports: HostPorts,
+) -> Result<()> {
     if runtime_docker {
         let context = installation::InstallationContext::from_home(root.to_path_buf())?;
         runtime::start(&context)?;
-        check_api_health();
+        check_api_health(ports.api);
         println!("Beampipe is running from {}.", root.display());
         return Ok(());
     }
@@ -1392,7 +1750,7 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
     Ok(dash_dir)
 }
 
-async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
+async fn create_admin_user(pool: &PgPool, opts: &SetupOptions, api_port: u16) -> Result<()> {
     let username = if opts.yes {
         opts.admin_user.clone().unwrap_or_else(|| "admin".into())
     } else {
@@ -1401,7 +1759,7 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
 
     if repo::get_user_by_username(pool, &username).await?.is_some() {
         println!("Admin user '{username}' already exists; skipped.");
-        print_login_snippet(&username);
+        print_login_snippet(&username, api_port);
         return Ok(());
     }
 
@@ -1445,7 +1803,7 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions) -> Result<()> {
     let hash = beampipe_auth::hash_password(&password)?;
     repo::create_user(pool, "Admin", &username, &email, &hash, true).await?;
     println!("Created admin user '{username}'.");
-    print_login_snippet(&username);
+    print_login_snippet(&username, api_port);
     Ok(())
 }
 
@@ -1691,6 +2049,7 @@ fn print_setup_summary(
     root: &Path,
     runtime: RuntimeKind,
     postgres: PostgresKind,
+    ports: HostPorts,
     started: bool,
     profile: Option<&DeploymentProfile>,
 ) {
@@ -1698,6 +2057,7 @@ fn print_setup_summary(
     println!("  [OK] Home: {}", root.display());
     println!("  [OK] Runtime: {}", runtime.as_str());
     println!("  [OK] Database: {}", postgres.as_str());
+    println!("  [OK] API: http://127.0.0.1:{}/api/v2", ports.api);
     println!(
         "  [{}] Services: {}",
         if started { "OK" } else { "--" },
@@ -1774,24 +2134,24 @@ mod tests {
             runtime: Some("docker".into()),
             ..Default::default()
         };
-        assert_eq!(setup_step_total(&yes_docker, true), 3);
+        assert_eq!(setup_step_total(&yes_docker, true), 4);
 
         let host = SetupOptions {
             yes: true,
             runtime: Some("host".into()),
             ..Default::default()
         };
-        assert_eq!(setup_step_total(&host, false), 3);
+        assert_eq!(setup_step_total(&host, false), 4);
 
         let with_dash = SetupOptions {
             yes: true,
             dashboard: true,
             ..Default::default()
         };
-        assert_eq!(setup_step_total(&with_dash, true), 4);
+        assert_eq!(setup_step_total(&with_dash, true), 5);
 
         let interactive = SetupOptions::default();
-        assert_eq!(setup_step_total(&interactive, true), 4);
+        assert_eq!(setup_step_total(&interactive, true), 5);
     }
 
     #[test]
@@ -1802,9 +2162,10 @@ mod tests {
 
     #[test]
     fn login_snippet_reads_password_from_the_environment() {
-        let joined = login_snippet_lines("admin").join("\n");
+        let joined = login_snippet_lines("admin", installation::DEFAULT_API_PORT).join("\n");
         assert!(joined.contains("export ADMIN_USER=admin"));
         assert!(joined.contains("ADMIN_PASSWORD:?set to the password setup printed"));
+        assert!(joined.contains("http://127.0.0.1:18080/api/v2/login"));
         assert!(joined.contains("/api/v2/login"));
         assert!(!joined.contains("replace-this-local-password"));
     }
@@ -2101,5 +2462,189 @@ mod tests {
         let contents = dash_override_contents("beampipe-core-v2_default");
         assert!(contents.contains("127.0.0.1:3000:3000"));
         assert!(!contents.contains("0.0.0.0:3000:3000"));
+    }
+
+    #[test]
+    fn host_ports_default_to_operator_api_18080() {
+        assert_eq!(
+            port_from_sources(None, None, installation::DEFAULT_API_PORT, "API port").unwrap(),
+            18080
+        );
+        assert_eq!(
+            port_from_sources(
+                None,
+                None,
+                installation::DEFAULT_POSTGRES_PORT,
+                "PostgreSQL port"
+            )
+            .unwrap(),
+            5432
+        );
+        assert_eq!(
+            port_from_sources(
+                None,
+                None,
+                installation::DEFAULT_METRICS_PORT,
+                "metrics port"
+            )
+            .unwrap(),
+            9090
+        );
+    }
+
+    #[test]
+    fn host_ports_prefer_flags_over_defaults() {
+        let ports = resolved_host_ports(&SetupOptions {
+            api_port: Some(18181),
+            postgres_port: Some(15432),
+            metrics_port: Some(19090),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ports.api, 18181);
+        assert_eq!(ports.postgres, 15432);
+        assert_eq!(ports.metrics, 19090);
+    }
+
+    #[test]
+    fn host_ports_reject_zero_and_collisions() {
+        assert!(port_from_sources(Some(0), None, 18080, "API port").is_err());
+        assert!(port_from_sources(None, Some("not-a-port"), 18080, "API port").is_err());
+        assert_eq!(
+            port_from_sources(None, Some("18100"), 18080, "API port").unwrap(),
+            18100
+        );
+        let error = validate_host_ports(HostPorts {
+            api: 18080,
+            postgres: 18080,
+            metrics: 9090,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("API port and PostgreSQL port"));
+    }
+
+    #[test]
+    fn compose_database_url_uses_the_postgres_port() {
+        assert_eq!(
+            compose_host_database_url("secret", 5433),
+            "postgres://postgres:secret@localhost:5433/beampipe"
+        );
+    }
+
+    #[test]
+    fn bind_ports_for_start_uses_configured_api_port() {
+        let ports = HostPorts {
+            api: 18181,
+            postgres: 15432,
+            metrics: 19090,
+        };
+        assert_eq!(
+            bind_ports_for_start(ports, RuntimeKind::Docker, PostgresKind::Compose),
+            vec![(15432, "PostgreSQL"), (18181, "API"), (19090, "metrics"),]
+        );
+        assert_eq!(
+            bind_ports_for_start(ports, RuntimeKind::Host, PostgresKind::Existing),
+            vec![(18181, "API")]
+        );
+    }
+
+    #[test]
+    fn persist_host_ports_writes_env_and_host_bind_addrs() {
+        let root = tempfile::tempdir().unwrap();
+        let env = root.path().join(".env");
+        std::fs::write(&env, "BEAMPIPE_ENV=development\n").unwrap();
+        persist_host_ports(
+            &env,
+            HostPorts {
+                api: 18181,
+                postgres: 15432,
+                metrics: 19090,
+            },
+            RuntimeKind::Host,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&env).unwrap();
+        assert!(content.contains("BEAMPIPE_API_PORT=18181\n"));
+        assert!(content.contains("BEAMPIPE_POSTGRES_PORT=15432\n"));
+        assert!(content.contains("BEAMPIPE_METRICS_PORT=19090\n"));
+        assert!(content.contains("BEAMPIPE_BIND_ADDR=127.0.0.1:18181\n"));
+        assert!(content.contains("BEAMPIPE_METRICS_BIND_ADDR=127.0.0.1:19090\n"));
+    }
+
+    #[test]
+    fn clear_missing_config_path_blanks_absent_yaml() {
+        let root = tempfile::tempdir().unwrap();
+        let env = root.path().join(".env");
+        std::fs::write(&env, "BEAMPIPE_CONFIG=beampipe.yaml\n").unwrap();
+        clear_missing_config_path(root.path(), &env).unwrap();
+        assert!(std::fs::read_to_string(&env)
+            .unwrap()
+            .contains("BEAMPIPE_CONFIG=\n"));
+    }
+
+    #[test]
+    fn setup_logo_is_embedded_block_art() {
+        assert!(!SETUP_LOGO.trim().is_empty());
+        assert!(SETUP_LOGO.contains('█'));
+    }
+
+    #[test]
+    fn uninstall_removes_installation_home_and_keeps_siblings() {
+        let parent = tempfile::tempdir().unwrap();
+        let home = parent.path().join("beampipe");
+        let sibling = parent.path().join("beampipe-dash");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(home.join(".env"), "BEAMPIPE_ENV=development\n").unwrap();
+        std::fs::write(sibling.join("package.json"), "{}\n").unwrap();
+
+        run_uninstall(UninstallOptions {
+            yes: true,
+            purge_binary: false,
+            keep_volumes: false,
+            directory: Some(home.clone()),
+        })
+        .unwrap();
+
+        assert!(!home.exists());
+        assert!(sibling.join("package.json").is_file());
+    }
+
+    #[test]
+    fn uninstall_refuses_missing_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = run_uninstall(UninstallOptions {
+            yes: true,
+            directory: Some(directory.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no Beampipe installation"));
+    }
+
+    #[test]
+    fn assert_safe_to_delete_refuses_root_and_user_home() {
+        let error = assert_safe_to_delete(Path::new("/"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing to delete"), "{error}");
+
+        let Some(user_home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let user_home = PathBuf::from(user_home);
+        if !user_home.is_absolute() || user_home.parent().is_none() {
+            return;
+        }
+        let error = assert_safe_to_delete(&user_home).unwrap_err().to_string();
+        assert!(error.contains("user home"), "{error}");
+        if let Some(parent) = user_home.parent() {
+            if parent.parent().is_some() {
+                let error = assert_safe_to_delete(parent).unwrap_err().to_string();
+                assert!(error.contains("parent of the user home"), "{error}");
+            }
+        }
     }
 }

@@ -78,6 +78,47 @@ pub fn restart(context: &InstallationContext) -> Result<()> {
     }
 }
 
+pub fn down(context: &InstallationContext, volumes: bool) -> Result<()> {
+    let compose_file = context.home.join("docker-compose.yml");
+    if !compose_file.is_file() {
+        return Ok(());
+    }
+    if require_docker().is_err() {
+        println!("Docker Compose is unavailable; skipping compose down.");
+        return Ok(());
+    }
+    let project = context
+        .state
+        .as_ref()
+        .map(|state| state.compose_project.clone())
+        .unwrap_or_else(|| crate::installation::compose_project_name(&context.home));
+    let mut command = Command::new("docker");
+    command
+        .arg("compose")
+        .arg("--project-directory")
+        .arg(&context.home)
+        .arg("--file")
+        .arg(&compose_file)
+        .arg("--project-name")
+        .arg(&project);
+    if context.environment_file.is_file() {
+        command.arg("--env-file").arg(&context.environment_file);
+    }
+    command.arg("down").arg("--remove-orphans");
+    if volumes {
+        command.arg("--volumes");
+    }
+    println!(
+        "  docker compose down{}",
+        if volumes { " --volumes" } else { "" }
+    );
+    let status = command.status().context("docker compose down")?;
+    if !status.success() {
+        bail!("docker compose down failed with {status}");
+    }
+    Ok(())
+}
+
 fn restart_services(context: &InstallationContext) -> Vec<&'static str> {
     let mut services = Vec::with_capacity(4);
     if context
@@ -328,5 +369,13 @@ mod tests {
     fn compose_ps_parser_accepts_json_lines() {
         let value = parse_compose_ps(b"{\"Service\":\"api\"}\n{\"Service\":\"worker\"}\n");
         assert_eq!(value.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn down_is_noop_without_compose_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap();
+        let context = InstallationContext::from_home(home).unwrap();
+        down(&context, true).unwrap();
     }
 }

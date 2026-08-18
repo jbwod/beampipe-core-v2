@@ -147,6 +147,15 @@ enum CliCommand {
         /// PostgreSQL source: compose (Compose postgres service) or existing DATABASE_URL.
         #[arg(long, value_parser = ["compose", "existing"])]
         postgres: Option<String>,
+        /// Host port published for the API (default 18080).
+        #[arg(long, value_name = "PORT")]
+        api_port: Option<u16>,
+        /// Host port published for Compose PostgreSQL (default 5432).
+        #[arg(long, value_name = "PORT")]
+        postgres_port: Option<u16>,
+        /// Host port published for API metrics (default 9090).
+        #[arg(long, value_name = "PORT")]
+        metrics_port: Option<u16>,
         /// Alias for --runtime docker.
         #[arg(long, conflicts_with = "skip_docker")]
         docker: bool,
@@ -177,6 +186,18 @@ enum CliCommand {
         /// Write files and print a recipe without starting anything.
         #[arg(long = "no-start")]
         no_start: bool,
+    },
+    /// Remove a Beampipe installation (Compose stack, volumes, and files).
+    Uninstall {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Also delete ~/.local/bin/beampipe.
+        #[arg(long)]
+        purge_binary: bool,
+        /// Keep Compose volumes, including managed PostgreSQL data.
+        #[arg(long)]
+        keep_volumes: bool,
     },
     /// Health and configuration preflight checks.
     Doctor {
@@ -812,6 +833,9 @@ async fn main() -> anyhow::Result<()> {
             skip_upload,
             runtime,
             postgres,
+            api_port,
+            postgres_port,
+            metrics_port,
             docker,
             skip_docker,
             dashboard,
@@ -852,6 +876,9 @@ async fn main() -> anyhow::Result<()> {
                     skip_docker,
                     runtime,
                     postgres,
+                    api_port,
+                    postgres_port,
+                    metrics_port,
                     dashboard,
                     skip_dashboard,
                     dash_dir,
@@ -862,6 +889,18 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
             }
+        }
+        CliCommand::Uninstall {
+            yes,
+            purge_binary,
+            keep_volumes,
+        } => {
+            setup::run_uninstall(setup::UninstallOptions {
+                yes,
+                purge_binary,
+                keep_volumes,
+                directory: cli.home,
+            })?;
         }
         CliCommand::Doctor { json, profile, fix } => {
             setup::run_setup_check(json, profile.as_deref(), fix).await?;

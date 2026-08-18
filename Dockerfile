@@ -5,6 +5,7 @@ ARG TARGETPLATFORM
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
+COPY assets/brand/beampipe-terminal-logo.txt ./assets/brand/beampipe-terminal-logo.txt
 # Operator sample files are compiled from crates/beampipe-cli/embedded via include_str!.
 
 # Scope caches by platform. amd64 and arm64 otherwise race on
