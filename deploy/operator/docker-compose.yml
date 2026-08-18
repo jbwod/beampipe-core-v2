@@ -32,7 +32,7 @@ x-beampipe-config-volume: &beampipe-config-volume
   read_only: true
 
 x-beampipe-image: &beampipe-image
-  image: ${BEAMPIPE_IMAGE:-ghcr.io/jbwod/beampipe-core-v2:${BEAMPIPE_VERSION:-0.1.1}}
+  image: ${BEAMPIPE_IMAGE:-ghcr.io/jbwod/beampipe-core-v2:${BEAMPIPE_VERSION:-0.1.2}}
   pull_policy: ${BEAMPIPE_PULL_POLICY:-missing}
 
 services:
