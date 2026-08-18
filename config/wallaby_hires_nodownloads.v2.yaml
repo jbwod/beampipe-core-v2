@@ -101,9 +101,8 @@ manifest:
     dec_string: "{flags.dec_string}"
     vsys: "{flags.vsys}"
 
+# Example of a graph patch; DALiuGE uses this to set the output_parser for the CSV node.
 graph_patches:
-  # The current WALLABY runtime returns a Python list here; DALIUGE must
-  # serialize it as pickle before GenericScatterApp reads the array.
   - match:
       kind: node_name
       equals: process_CSV_str
@@ -117,10 +116,8 @@ graph_patches:
 
 automation:
   execution:
-    # Keep admission manual for this local qualification run.
     enabled: false
     archive_name: casda
-    # Wallaby Slurm graph expects one source per run.
     max_sources_per_execution: 1
     tick_execution_source_limit: 1000
     tick_execution_run_limit: 50

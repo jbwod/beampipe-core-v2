@@ -546,7 +546,8 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         compose_up_postgres(&root)?;
     }
 
-    let (profile_path, prepared_profile) = match select_and_prepare_profile(&opts, &root, runtime)? {
+    let (profile_path, prepared_profile) = match select_and_prepare_profile(&opts, &root, runtime)?
+    {
         Some((path, profile)) => (Some(path), Some(profile)),
         None => (None, None),
     };
@@ -1927,10 +1928,7 @@ fn select_and_prepare_profile(
     let default = root.join("config/deployment_profile.dlg-dim.json");
     let default_display = default.display().to_string();
     loop {
-        let raw = prompt_default(
-            "Deployment profile file (or skip)",
-            &default_display,
-        )?;
+        let raw = prompt_default("Deployment profile file (or skip)", &default_display)?;
         if raw.trim().eq_ignore_ascii_case("skip") {
             return Ok(None);
         }
