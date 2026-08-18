@@ -23,6 +23,8 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, creates the first administrator, and uploads the reference project.
 
+The installer writes `~/.local/bin/beampipe` and appends that directory to `~/.bashrc` and `~/.profile`. The current terminal still needs `export PATH="$HOME/.local/bin:$PATH"` (or a new terminal) before `beampipe` is found.
+
 Unattended equivalent:
 
 ```bash

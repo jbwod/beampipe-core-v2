@@ -92,11 +92,9 @@ install_beampipe() {
     *)
       PATH="${bindir}:${PATH}"
       export PATH
-      echo "This session can run beampipe. For new terminals:"
-      echo "  echo 'export PATH=\"${bindir}:\$PATH\"' >> ~/.profile && export PATH=\"${bindir}:\$PATH\""
-      beampipe_offer_persist_path "$bindir"
       ;;
   esac
+  beampipe_persist_path "$bindir"
 }
 
 beampipe_has_flag() {
@@ -119,42 +117,103 @@ beampipe_has_runtime_flag() {
   return 1
 }
 
-beampipe_offer_persist_path() {
-  bindir=$1
-  if [ ! -t 1 ] || [ ! -c /dev/tty ]; then
+beampipe_path_export() {
+  printf 'export PATH="%s:$PATH"\n' "$1"
+}
+
+beampipe_rc_mentions_bindir() {
+  file=$1
+  bindir=$2
+  [ -f "$file" ] || return 1
+  if grep -Fq "$bindir" "$file"; then
     return 0
   fi
-  printf "Append that line to ~/.profile now? [y/N] " > /dev/tty
-  ans=
-  IFS= read -r ans < /dev/tty || return 0
-  case $ans in
-    y|Y|yes|YES)
-      if [ -f "$HOME/.profile" ] && grep -F "export PATH=\"${bindir}:\$PATH\"" "$HOME/.profile" >/dev/null 2>&1; then
-        echo "PATH line already in ~/.profile"
+  case "$bindir" in
+    "$HOME/.local/bin"|*/.local/bin)
+      if grep -Eq '(^|[^[:alnum:]_])(\$HOME|~)/\.local/bin' "$file"; then
         return 0
       fi
-      echo "export PATH=\"${bindir}:\$PATH\"" >> "$HOME/.profile"
-      echo "Wrote ~/.profile"
+      ;;
+  esac
+  return 1
+}
+
+beampipe_append_path_rc() {
+  file=$1
+  bindir=$2
+  if beampipe_rc_mentions_bindir "$file" "$bindir"; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$file")"
+  if [ -f "$file" ] && [ -s "$file" ]; then
+    printf '\n' >> "$file"
+  fi
+  {
+    echo "# Added by Beampipe installer"
+    beampipe_path_export "$bindir"
+  } >> "$file"
+  echo "Added ${bindir} to PATH in ${file}"
+}
+
+beampipe_persist_path() {
+  bindir=$1
+  beampipe_append_path_rc "${HOME}/.profile" "$bindir"
+  shellname=$(basename "${SHELL:-}")
+  case "$shellname" in
+    zsh)
+      beampipe_append_path_rc "${HOME}/.zprofile" "$bindir"
+      beampipe_append_path_rc "${HOME}/.zshrc" "$bindir"
+      ;;
+    fish)
+      fish_file="${HOME}/.config/fish/config.fish"
+      if [ -f "$fish_file" ] && grep -Fq "$bindir" "$fish_file"; then
+        return 0
+      fi
+      mkdir -p "$(dirname "$fish_file")"
+      printf 'fish_add_path %s\n' "$bindir" >> "$fish_file"
+      echo "Added ${bindir} to PATH in ${fish_file}"
+      ;;
+    *)
+      beampipe_append_path_rc "${HOME}/.bashrc" "$bindir"
+      if [ -f "${HOME}/.bash_profile" ]; then
+        beampipe_append_path_rc "${HOME}/.bash_profile" "$bindir"
+      fi
       ;;
   esac
 }
 
+beampipe_print_path_hint() {
+  bindir="${BEAMPIPE_BIN:-$HOME/.local/bin}"
+  echo
+  echo "The beampipe command is ${bindir}/beampipe"
+  echo "This installer already updated PATH for its own process. This terminal may still need:"
+  echo "  export PATH=\"${bindir}:\$PATH\""
+}
+
+beampipe_run_cli_setup() {
+  home=$1
+  shift
+  beampipe --home "$home" setup "$@"
+}
+
 run_setup() {
   home="${BEAMPIPE_HOME:-$HOME/beampipe}"
+  status=0
   if [ -t 0 ] || beampipe_has_flag --yes "$@"; then
-    exec beampipe --home "$home" setup "$@"
-  fi
-  if [ -t 1 ] && [ -c /dev/tty ]; then
+    beampipe_run_cli_setup "$home" "$@" || status=$?
+  elif [ -t 1 ] && [ -c /dev/tty ]; then
     echo "stdin is a pipe; reading setup prompts from the terminal."
-    exec beampipe --home "$home" setup "$@" </dev/tty
-  fi
-  if ! beampipe_has_runtime_flag "$@"; then
+    beampipe_run_cli_setup "$home" "$@" </dev/tty || status=$?
+  elif ! beampipe_has_runtime_flag "$@"; then
     echo "stdin is not a terminal; running non-interactive Docker setup."
     echo "  curl -fsSL ${RELEASES}/latest/download/install.sh | sh -s -- --yes --runtime docker"
-    exec beampipe --home "$home" setup --yes --runtime docker "$@"
+    beampipe_run_cli_setup "$home" --yes --runtime docker "$@" || status=$?
+  else
+    echo "stdin is not a terminal; adding --yes."
+    beampipe_run_cli_setup "$home" --yes "$@" || status=$?
   fi
-  echo "stdin is not a terminal; adding --yes."
-  exec beampipe --home "$home" setup --yes "$@"
+  beampipe_print_path_hint
+  return "$status"
 }
 
 main() {

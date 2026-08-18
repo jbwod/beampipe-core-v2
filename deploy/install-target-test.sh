@@ -69,3 +69,30 @@ if ! beampipe_has_runtime_flag --skip-docker; then
   exit 1
 fi
 echo "install target mapping ok"
+
+HOME_TMP=$(mktemp -d)
+trap 'rm -rf "$tmp" "$HOME_TMP"' EXIT
+HOME=$HOME_TMP
+SHELL=/bin/bash
+beampipe_persist_path "$HOME_TMP/.local/bin"
+if ! grep -Fq "$HOME_TMP/.local/bin" "$HOME_TMP/.profile"; then
+  echo "PATH was not added to .profile" >&2
+  exit 1
+fi
+if ! grep -Fq "$HOME_TMP/.local/bin" "$HOME_TMP/.bashrc"; then
+  echo "PATH was not added to .bashrc" >&2
+  exit 1
+fi
+beampipe_persist_path "$HOME_TMP/.local/bin"
+if [ "$(grep -c 'Added by Beampipe installer' "$HOME_TMP/.bashrc")" -ne 1 ]; then
+  echo "PATH line was duplicated in .bashrc" >&2
+  exit 1
+fi
+printf '%s\n' 'if [ -d "$HOME/.local/bin" ] ; then PATH="$HOME/.local/bin:$PATH"; fi' > "$HOME_TMP/.zshrc"
+SHELL=/bin/zsh
+beampipe_persist_path "$HOME_TMP/.local/bin"
+if grep -Fq 'Added by Beampipe installer' "$HOME_TMP/.zshrc"; then
+  echo "PATH line was added despite existing \$HOME/.local/bin" >&2
+  exit 1
+fi
+echo "install PATH persistence ok"

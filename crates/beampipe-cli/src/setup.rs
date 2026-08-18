@@ -546,11 +546,10 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         compose_up_postgres(&root)?;
     }
 
-    let profile_path = select_profile_config(&opts)?;
-    let prepared_profile = profile_path
-        .as_deref()
-        .map(|path| prepare_deployment_profile(&opts, path, runtime))
-        .transpose()?;
+    let (profile_path, prepared_profile) = match select_and_prepare_profile(&opts, &root, runtime)? {
+        Some((path, profile)) => (Some(path), Some(profile)),
+        None => (None, None),
+    };
 
     let pool = match beampipe_db::connect(&database_url).await {
         Ok(pool) => Some(pool),
@@ -580,10 +579,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             admin_ready = true;
         }
 
-        let project_path = opts
-            .project_config
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("config/wallaby_hires.v2.yaml"));
+        let project_path = project_config_path(&root, &opts);
 
         if project_path.exists() {
             let bytes = std::fs::read(&project_path)
@@ -629,13 +625,10 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             bail!("setup completed with doctor failures; fix checks above");
         }
     } else {
-        maybe_validate_project_config(&opts)?;
+        maybe_validate_project_config(&root, &opts)?;
     }
 
-    let project_path = opts
-        .project_config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("config/wallaby_hires.v2.yaml"));
+    let project_path = project_config_path(&root, &opts);
     let commands = next_steps_lines(&SetupNextSteps {
         runtime_docker: prepare_docker,
         compose_postgres: postgres == PostgresKind::Compose,
@@ -1060,7 +1053,10 @@ fn resolve_host_ports(
     postgres: PostgresKind,
 ) -> Result<HostPorts> {
     let mut ports = resolved_host_ports(opts)?;
-    if !opts.yes {
+    if opts.yes {
+        return Ok(ports);
+    }
+    loop {
         ports.api = prompt_port("API port", ports.api)?;
         if postgres == PostgresKind::Compose {
             ports.postgres = prompt_port("PostgreSQL port", ports.postgres)?;
@@ -1068,9 +1064,11 @@ fn resolve_host_ports(
         if runtime == RuntimeKind::Docker {
             ports.metrics = prompt_port("Metrics port", ports.metrics)?;
         }
-        validate_host_ports(ports)?;
+        match validate_host_ports(ports) {
+            Ok(()) => return Ok(ports),
+            Err(error) => print_hint(&error.to_string()),
+        }
     }
-    Ok(ports)
 }
 
 fn compose_host_database_url(password: &str, postgres_port: u16) -> String {
@@ -1751,11 +1749,30 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
 }
 
 async fn create_admin_user(pool: &PgPool, opts: &SetupOptions, api_port: u16) -> Result<()> {
+    if opts.yes {
+        return create_admin_user_once(pool, opts, api_port).await;
+    }
+    loop {
+        match create_admin_user_once(pool, opts, api_port).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_retryable_admin_error(&error) => {
+                print_hint(&error.to_string());
+                print_hint("Try a different username, email, or password.");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn create_admin_user_once(pool: &PgPool, opts: &SetupOptions, api_port: u16) -> Result<()> {
     let username = if opts.yes {
         opts.admin_user.clone().unwrap_or_else(|| "admin".into())
     } else {
         prompt_default("Admin username", "admin")?
     };
+    if username.trim().is_empty() {
+        bail!("admin username cannot be empty");
+    }
 
     if repo::get_user_by_username(pool, &username).await?.is_some() {
         println!("Admin user '{username}' already exists; skipped.");
@@ -1786,8 +1803,15 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions, api_port: u16) ->
             }
         }
     } else {
-        rpassword::prompt_password("Admin password (12+ characters): ")?
+        loop {
+            let password = rpassword::prompt_password("Admin password (12+ characters): ")?;
+            match validate_admin_password(&password) {
+                Ok(()) => break password,
+                Err(error) => print_hint(&error.to_string()),
+            }
+        }
     };
+    validate_admin_password(&password)?;
     let email = if opts.yes {
         opts.admin_email
             .clone()
@@ -1795,9 +1819,8 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions, api_port: u16) ->
     } else {
         prompt_default("Admin email", "admin@example.test")?
     };
-
-    if password.len() < 12 {
-        bail!("admin password must be at least 12 characters");
+    if email.trim().is_empty() {
+        bail!("admin email cannot be empty");
     }
 
     let hash = beampipe_auth::hash_password(&password)?;
@@ -1807,11 +1830,23 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions, api_port: u16) ->
     Ok(())
 }
 
-fn maybe_validate_project_config(opts: &SetupOptions) -> Result<()> {
-    let project_path = opts
-        .project_config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("config/wallaby_hires.v2.yaml"));
+fn validate_admin_password(password: &str) -> Result<()> {
+    if password.len() < 12 {
+        bail!("admin password must be at least 12 characters");
+    }
+    Ok(())
+}
+
+fn is_retryable_admin_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    text.contains("must be at least 12 characters")
+        || text.contains("cannot be empty")
+        || text.contains("duplicate key")
+        || text.contains("unique constraint")
+}
+
+fn maybe_validate_project_config(root: &Path, opts: &SetupOptions) -> Result<()> {
+    let project_path = project_config_path(root, opts);
     if !project_path.exists() {
         println!(
             "Project config not found at {}; skipped validate/upload.",
@@ -1834,17 +1869,80 @@ fn maybe_validate_project_config(opts: &SetupOptions) -> Result<()> {
     Ok(())
 }
 
-fn select_profile_config(opts: &SetupOptions) -> Result<Option<PathBuf>> {
+fn project_config_path(root: &Path, opts: &SetupOptions) -> PathBuf {
+    match opts.project_config.as_ref() {
+        Some(path) => resolve_explicit_path(path),
+        None => root.join("config/wallaby_hires.v2.yaml"),
+    }
+}
+
+fn resolve_explicit_path(path: &Path) -> PathBuf {
+    let path = expand_user_path(path);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
+fn expand_user_path(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if text == "~" {
+        return PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "~".into()));
+    }
+    if let Some(rest) = text.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn resolve_under_root(root: &Path, raw: &str) -> PathBuf {
+    let path = expand_user_path(Path::new(raw));
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn select_and_prepare_profile(
+    opts: &SetupOptions,
+    root: &Path,
+    runtime: RuntimeKind,
+) -> Result<Option<(PathBuf, DeploymentProfile)>> {
     if let Some(path) = opts.profile_config.as_ref() {
-        return Ok(Some(path.clone()));
+        let path = resolve_explicit_path(path);
+        let profile = prepare_deployment_profile(opts, &path, runtime)?;
+        return Ok(Some((path, profile)));
     }
     if opts.yes || !prompt_yes_no("Configure a deployment profile now?", false)? {
         return Ok(None);
     }
-    Ok(Some(PathBuf::from(prompt_default(
-        "Deployment profile file",
-        "config/deployment_profile.dlg-dim.json",
-    )?)))
+    let default = root.join("config/deployment_profile.dlg-dim.json");
+    let default_display = default.display().to_string();
+    loop {
+        let raw = prompt_default(
+            "Deployment profile file (or skip)",
+            &default_display,
+        )?;
+        if raw.trim().eq_ignore_ascii_case("skip") {
+            return Ok(None);
+        }
+        let path = resolve_under_root(root, &raw);
+        match prepare_deployment_profile(opts, &path, runtime) {
+            Ok(profile) => return Ok(Some((path, profile))),
+            Err(error) => {
+                print_hint(&error.to_string());
+                print_hint("Enter another path, or type skip to continue without a profile.");
+            }
+        }
+    }
 }
 
 fn prepare_deployment_profile(
@@ -2088,6 +2186,10 @@ fn print_setup_summary(
     println!("  beampipe doctor");
     println!("  beampipe logs --follow");
     println!("  beampipe profile list");
+    if let Some(binary) = default_release_binary() {
+        println!("  Binary: {}", binary.display());
+    }
+    println!("  If `beampipe` is not found: export PATH=\"$HOME/.local/bin:$PATH\"");
 }
 
 #[cfg(test)]
@@ -2247,6 +2349,35 @@ mod tests {
         let password = generate_admin_password();
         assert!(password.len() >= 12);
         assert!(password.starts_with("bp-"));
+    }
+
+    #[test]
+    fn admin_password_rejects_short_secrets() {
+        assert!(validate_admin_password("short").is_err());
+        assert!(validate_admin_password("12345678901").is_err());
+        assert!(validate_admin_password("123456789012").is_ok());
+    }
+
+    #[test]
+    fn resolve_under_root_joins_relative_profile_paths() {
+        let root = Path::new("/home/op/beampipe");
+        assert_eq!(
+            resolve_under_root(root, "config/deployment_profile.dlg-dim.json"),
+            PathBuf::from("/home/op/beampipe/config/deployment_profile.dlg-dim.json")
+        );
+        assert_eq!(
+            resolve_under_root(root, "/tmp/custom.json"),
+            PathBuf::from("/tmp/custom.json")
+        );
+    }
+
+    #[test]
+    fn project_config_path_defaults_to_installation_home() {
+        let root = Path::new("/home/op/beampipe");
+        assert_eq!(
+            project_config_path(root, &SetupOptions::default()),
+            PathBuf::from("/home/op/beampipe/config/wallaby_hires.v2.yaml")
+        );
     }
 
     #[test]
