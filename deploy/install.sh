@@ -3,6 +3,8 @@
 # Usage:
 #   curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --yes --runtime docker
+#   curl -fsSL .../install.sh | sh -s -- --yes --runtime docker --postgres compose \
+#     --api-port 18080 --postgres-port 5432 --metrics-port 9090
 # Linux archives need glibc and OpenSSL 3 (Ubuntu 22.04 / Debian bookworm or newer).
 set -eu
 
