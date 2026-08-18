@@ -1,0 +1,133 @@
+# Pull-only operator Compose. Written by `beampipe setup` / `beampipe init`.
+# No build context and no observability host binds — those stay in the git checkout.
+x-beampipe-shaping: &beampipe-shaping
+  BEAMPIPE_SCHEDULER_INTERVAL_SECONDS: "30"
+  BEAMPIPE_SHAPING_DISCOVERY_MAX_IN_FLIGHT_BATCHES: "24"
+  BEAMPIPE_SHAPING_DISCOVERY_MAX_BATCHES_PER_TICK: "100"
+  BEAMPIPE_SHAPING_EXECUTION_MAX_IN_FLIGHT_RUNS: "10"
+  BEAMPIPE_SHAPING_QUEUE_MAX_DEPTH: "5000"
+  BEAMPIPE_WORKER_LOCK_SECONDS: "600"
+
+x-beampipe-backend-env: &beampipe-backend-env
+  BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-false}
+  BEAMPIPE_CASDA_TAP_URL: ${BEAMPIPE_CASDA_TAP_URL:-https://casda.csiro.au/casda_vo_tools/tap/sync}
+  BEAMPIPE_VIZIER_TAP_URL: ${BEAMPIPE_VIZIER_TAP_URL:-https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync}
+  CASDA_LOGIN_URL: ${CASDA_LOGIN_URL:-https://data.csiro.au/casda_vo_proxy/vo/tap/availability}
+
+x-beampipe-worker-env-file: &beampipe-worker-env-file
+  env_file:
+    - path: .env
+      required: false
+
+x-beampipe-slurm-ssh-volume: &beampipe-slurm-ssh-volume
+  type: bind
+  source: ${BEAMPIPE_SSH_CREDENTIALS_HOST:-./credentials/ssh}
+  target: /run/beampipe/ssh
+  read_only: true
+
+x-beampipe-config-volume: &beampipe-config-volume
+  type: bind
+  source: ./config
+  target: /var/lib/beampipe/config
+  read_only: true
+
+x-beampipe-image: &beampipe-image
+  image: ${BEAMPIPE_IMAGE:-ghcr.io/jbwod/beampipe-core-v2:${BEAMPIPE_VERSION:-0.1.1}}
+  pull_policy: ${BEAMPIPE_PULL_POLICY:-missing}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${BEAMPIPE_POSTGRES_PASSWORD:?set by beampipe setup}
+      POSTGRES_DB: beampipe
+    ports:
+      - "127.0.0.1:${BEAMPIPE_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - beampipe_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    <<: [*beampipe-image, *beampipe-worker-env-file]
+    command: ["serve", "--worker", "false"]
+    environment:
+      DATABASE_URL: ${BEAMPIPE_DATABASE_URL_DOCKER:?set by beampipe setup}
+      BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:-local-dev-jwt-secret-change-me}
+      BEAMPIPE_BIND_ADDR: 0.0.0.0:8080
+      BEAMPIPE_METRICS_BIND_ADDR: 0.0.0.0:9090
+      BEAMPIPE_METRICS_SERVER_ENABLED: "true"
+      BEAMPIPE_DB_MAX_CONNECTIONS: "20"
+      BEAMPIPE_WORKER_SCHEDULER_ENABLED: "false"
+      BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: ${BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS:-true}
+      <<: *beampipe-backend-env
+    volumes:
+      - *beampipe-slurm-ssh-volume
+      - *beampipe-config-volume
+    ports:
+      - "127.0.0.1:${BEAMPIPE_API_PORT:-8080}:8080"
+      - "127.0.0.1:${BEAMPIPE_METRICS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/api/v2/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    init: true
+    restart: unless-stopped
+
+  scheduler:
+    <<: [*beampipe-image, *beampipe-worker-env-file]
+    command: ["serve", "--worker", "true"]
+    environment:
+      DATABASE_URL: ${BEAMPIPE_DATABASE_URL_DOCKER:?set by beampipe setup}
+      BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:-local-dev-jwt-secret-change-me}
+      BEAMPIPE_BIND_ADDR: 0.0.0.0:8081
+      BEAMPIPE_METRICS_BIND_ADDR: 0.0.0.0:9090
+      BEAMPIPE_METRICS_SERVER_ENABLED: "true"
+      BEAMPIPE_WORKER_CONCURRENCY: "2"
+      BEAMPIPE_WORKER_SCHEDULER_ENABLED: "true"
+      BEAMPIPE_DB_MAX_CONNECTIONS: "20"
+      BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: ${BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS:-true}
+      <<: [*beampipe-shaping, *beampipe-backend-env]
+    volumes:
+      - *beampipe-slurm-ssh-volume
+    expose:
+      - "9090"
+    init: true
+    restart: unless-stopped
+
+  worker:
+    <<: [*beampipe-image, *beampipe-worker-env-file]
+    command: ["worker"]
+    environment:
+      DATABASE_URL: ${BEAMPIPE_DATABASE_URL_DOCKER:?set by beampipe setup}
+      BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:-local-dev-jwt-secret-change-me}
+      BEAMPIPE_METRICS_BIND_ADDR: 0.0.0.0:9090
+      BEAMPIPE_METRICS_SERVER_ENABLED: "true"
+      BEAMPIPE_WORKER_CONCURRENCY: ${BEAMPIPE_WORKER_CONCURRENCY:-4}
+      BEAMPIPE_WORKER_SCHEDULER_ENABLED: "false"
+      BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY: ${BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY:-5}
+      BEAMPIPE_DB_MAX_CONNECTIONS: "25"
+      BEAMPIPE_WORKER_POLL_INTERVAL_MS: "200"
+      BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
+      BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
+      BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: ${BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS:-true}
+      <<: [*beampipe-shaping, *beampipe-backend-env]
+    volumes:
+      - *beampipe-slurm-ssh-volume
+    expose:
+      - "9090"
+    init: true
+    restart: unless-stopped
+
+volumes:
+  beampipe_pgdata:

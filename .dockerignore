@@ -6,16 +6,10 @@ beampipe-core/
 
 target/
 
-deploy/**
-!deploy/operator/
-!deploy/operator/docker-compose.yml
-!deploy/operator/.env.example
+deploy/
 docs/
 scripts/
-config/**
-!config/wallaby_hires.v2.yaml
-!config/deployment_profile.dlg-dim.json
-!config/deployment_profile.slurm-remote.json
+config/
 .github/
 .cursor/
 agent-transcripts/

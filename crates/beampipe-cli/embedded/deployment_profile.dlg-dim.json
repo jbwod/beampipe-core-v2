@@ -1,0 +1,22 @@
+{
+  "name": "dlg-dim",
+  "description": "Local DALiuGE Translator Manager and Data Island Manager over the shared Docker network",
+  "project_module": "wallaby_hires",
+  "is_default": true,
+  "max_concurrent_executions": 1,
+  "translation": {
+    "algo": "metis",
+    "num_par": 1,
+    "num_islands": 0,
+    "tm_url": "http://dlg-tm:8084"
+  },
+  "deployment": {
+    "kind": "rest_remote",
+    "dim_host_for_tm": "dlg-dim",
+    "dim_port_for_tm": 8001,
+    "deploy_host": "dlg-dim",
+    "deploy_port": 8001,
+    "use_https": false,
+    "verify_ssl": true
+  }
+}

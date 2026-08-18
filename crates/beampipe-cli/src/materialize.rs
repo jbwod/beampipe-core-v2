@@ -7,12 +7,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const OPERATOR_COMPOSE: &str = include_str!("../../../deploy/operator/docker-compose.yml");
-const OPERATOR_ENV_EXAMPLE: &str = include_str!("../../../deploy/operator/.env.example");
-const SAMPLE_PROJECT: &str = include_str!("../../../config/wallaby_hires.v2.yaml");
-const SAMPLE_REST_PROFILE: &str = include_str!("../../../config/deployment_profile.dlg-dim.json");
-const SAMPLE_SLURM_PROFILE: &str =
-    include_str!("../../../config/deployment_profile.slurm-remote.json");
+// Keep these copies inside the crate so `COPY crates` is enough for Docker
+// builds. `embedded_bundle_tracks_repo_sources` fails CI if they drift.
+const OPERATOR_COMPOSE: &str = include_str!("../embedded/docker-compose.yml");
+const OPERATOR_ENV_EXAMPLE: &str = include_str!("../embedded/env.example");
+const SAMPLE_PROJECT: &str = include_str!("../embedded/wallaby_hires.v2.yaml");
+const SAMPLE_REST_PROFILE: &str = include_str!("../embedded/deployment_profile.dlg-dim.json");
+const SAMPLE_SLURM_PROFILE: &str = include_str!("../embedded/deployment_profile.slurm-remote.json");
 const BUNDLE_MANIFEST: &str = ".beampipe-operator-bundle.json";
 
 #[derive(Debug, Default, Clone)]
@@ -176,6 +177,30 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap(),
             "operator-owned\n"
+        );
+    }
+
+    #[test]
+    fn embedded_bundle_tracks_repo_sources() {
+        assert_eq!(
+            OPERATOR_COMPOSE,
+            include_str!("../../../deploy/operator/docker-compose.yml")
+        );
+        assert_eq!(
+            OPERATOR_ENV_EXAMPLE,
+            include_str!("../../../deploy/operator/.env.example")
+        );
+        assert_eq!(
+            SAMPLE_PROJECT,
+            include_str!("../../../config/wallaby_hires.v2.yaml")
+        );
+        assert_eq!(
+            SAMPLE_REST_PROFILE,
+            include_str!("../../../config/deployment_profile.dlg-dim.json")
+        );
+        assert_eq!(
+            SAMPLE_SLURM_PROFILE,
+            include_str!("../../../config/deployment_profile.slurm-remote.json")
         );
     }
 
