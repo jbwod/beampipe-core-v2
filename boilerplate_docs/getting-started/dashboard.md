@@ -48,6 +48,20 @@ ledger tabs retain the raw evidence needed for diagnosis.
 Use the Core [execution state model](../architecture/state-machine.md) when
 interpreting failed, uncertain, cancelled, or externally running work.
 
+## Alerts
+
+Dash **Alerts** (`/alerts`) is the operator UI for Core's in-app notification
+channels and rules. Superusers can create a webhook (generic, Slack, or
+PagerDuty template), bind it to a trigger such as execution failure, discovery
+change, or the 24h digest, and send a test payload. The test result is the
+redacted delivery row, not the upstream HTTP body. Other authenticated users
+can list channels, rules, and deliveries. Secrets stay in Core; Dash omits
+redacted fields on save unless a new value is typed.
+
+Prometheus/Alertmanager remains a separate infra-health path. See
+[Observability](../operations/observability.md) for trigger kinds and the
+headless `curl` equivalents.
+
 ## Connect Dash to Core
 
 For a single Docker engine, attach Dash to Core's private Compose network and

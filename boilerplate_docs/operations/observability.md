@@ -59,7 +59,34 @@ Prometheus rules live in `deploy/prometheus/alerts.yml`. Alertmanager is availab
 docker compose --profile observability --profile alerting up -d
 ```
 
-Beampipe also manages notification channels, alert rules, and redacted deliveries through `/api/v2`. Test a channel before enabling its rules.
+Beampipe also manages notification channels, alert rules, and redacted deliveries through `/api/v2`. Dash operators configure and test these on **Alerts** (`/alerts`). Prometheus/Alertmanager is a separate infra-health path and does not write in-app deliveries.
+
+### In-app trigger kinds
+
+| `trigger_kind` | When it fires | Notes |
+|---|---|---|
+| `execution_terminal` | Immediate, on execution failure | Uses the rule's `severity` and `cooldown_minutes` |
+| `discovery_changed` | Immediate, after a discovery batch records `discovery.changed` | One webhook per cooldown window; payload lists at most 20 source IDs plus `changed_count` |
+| `pending_backlog` | Scheduler tick | `trigger_config.threshold` (default 50) pending sources |
+| `pending_stale` | Scheduler tick | `trigger_config.max_age_seconds` (default 21600) |
+| `discovery_stall` | Scheduler tick | `trigger_config.window_minutes` (default 120) with zero `discovery.changed` events |
+| `dependency_down` | Scheduler tick | `trigger_config.dependency` (Postgres only today) |
+| `daily_summary` | Scheduler tick | `trigger_config.window_hours` (default 24). Set `cooldown_minutes` to 1440 to match. Digest counts discoveries changed, executions completed/failed/uncertain, and remaining pending sources. Unknown `trigger_kind` values are rejected on create/update. |
+
+Webhook channel `config` is `{ "url": "https://...", "template": "generic"|"slack"|"pagerduty" }` plus optional `headers`. Test a channel before enabling its rules:
+
+```bash
+# Create a Slack webhook channel (superuser)
+curl -fsS -X POST "$BEAMPIPE_API/api/v2/notification-channels" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"ops-slack","kind":"webhook","config":{"url":"https://hooks.slack.com/services/...","template":"slack"}}'
+
+# Send a test payload
+curl -fsS -X POST "$BEAMPIPE_API/api/v2/notification-channels/$CHANNEL_ID/test" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+The test endpoint returns `{ "delivery_id": "...", "status": "sent_or_failed" }`. Inspect the redacted row at `GET /api/v2/alert-deliveries` (or Dash **Alerts**) for the actual send result.
 
 ## Debug order
 

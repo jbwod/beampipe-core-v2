@@ -6,7 +6,7 @@ use axum::{
 };
 use beampipe_db::{models::*, repo};
 use beampipe_security::{
-    redact_string, redact_value, secret_paths, unsafe_inline_secret_paths, SecretPolicy,
+    redact_string, redact_value, secret_paths, unsafe_inline_secret_paths, SecretPolicy, REDACTED,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -77,10 +77,16 @@ pub struct AlertRuleCreate {
     pub channel_ids: Vec<Uuid>,
     #[serde(default = "default_cooldown")]
     pub cooldown_minutes: i32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AlertRuleUpdate {
+    pub name: Option<String>,
+    pub project_module: Option<String>,
+    pub severity: Option<String>,
+    pub trigger_kind: Option<String>,
     pub enabled: Option<bool>,
     pub trigger_config: Option<Value>,
     pub channel_ids: Option<Vec<Uuid>>,
@@ -147,6 +153,44 @@ impl From<ProvenanceEventRow> for ProvenanceEventResponse {
 pub struct ProjectEventsQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+fn validate_trigger_kind(kind: &str) -> Result<(), ApiError> {
+    if beampipe_alerts::is_known_trigger_kind(kind) {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            beampipe_alerts::unknown_trigger_kind_message(kind),
+        ))
+    }
+}
+
+fn merge_notification_config(existing: &Value, patch: &Value) -> Value {
+    let Some(patch_obj) = patch.as_object() else {
+        return patch.clone();
+    };
+    let mut merged = match existing {
+        Value::Object(map) => Value::Object(map.clone()),
+        _ => json!({}),
+    };
+    let Some(out) = merged.as_object_mut() else {
+        return patch.clone();
+    };
+    for (key, value) in patch_obj {
+        if value.as_str() == Some(REDACTED) {
+            continue;
+        }
+        if key == "headers" {
+            let existing_headers = out.get(key).cloned().unwrap_or_else(|| json!({}));
+            out.insert(
+                key.clone(),
+                merge_notification_config(&existing_headers, value),
+            );
+            continue;
+        }
+        out.insert(key.clone(), value.clone());
+    }
+    merged
 }
 
 fn default_true() -> bool {
@@ -263,23 +307,29 @@ pub async fn update_notification_channel(
 ) -> Result<Json<NotificationChannelResponse>, ApiError> {
     user.require_superuser()?;
     if let Some(config) = req.config.as_ref() {
-        let kind = repo::get_notification_channel(&state.pool, id)
+        let row = repo::get_notification_channel(&state.pool, id)
             .await?
-            .map(|row| row.kind)
             .ok_or(ApiError::NotFound)?;
-        validate_notification_config(&kind, config)?;
+        let merged = merge_notification_config(&row.config, config);
+        validate_notification_config(&row.kind, &merged)?;
+        repo::update_notification_channel(
+            &state.pool,
+            id,
+            req.name.as_deref(),
+            Some(&merged),
+            req.enabled,
+        )
+        .await?
+        .map(NotificationChannelResponse::from)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+    } else {
+        repo::update_notification_channel(&state.pool, id, req.name.as_deref(), None, req.enabled)
+            .await?
+            .map(NotificationChannelResponse::from)
+            .map(Json)
+            .ok_or(ApiError::NotFound)
     }
-    repo::update_notification_channel(
-        &state.pool,
-        id,
-        req.name.as_deref(),
-        req.config.as_ref(),
-        req.enabled,
-    )
-    .await?
-    .map(NotificationChannelResponse::from)
-    .map(Json)
-    .ok_or(ApiError::NotFound)
 }
 
 #[utoipa::path(
@@ -351,6 +401,7 @@ pub async fn create_alert_rule(
     Json(req): Json<AlertRuleCreate>,
 ) -> Result<(StatusCode, Json<AlertRuleRow>), ApiError> {
     user.require_superuser()?;
+    validate_trigger_kind(&req.trigger_kind)?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -363,6 +414,7 @@ pub async fn create_alert_rule(
                 &req.trigger_config,
                 &req.channel_ids,
                 req.cooldown_minutes,
+                req.enabled,
             )
             .await?,
         ),
@@ -384,9 +436,16 @@ pub async fn update_alert_rule(
     Json(req): Json<AlertRuleUpdate>,
 ) -> Result<Json<AlertRuleRow>, ApiError> {
     user.require_superuser()?;
+    if let Some(kind) = req.trigger_kind.as_deref() {
+        validate_trigger_kind(kind)?;
+    }
     repo::update_alert_rule(
         &state.pool,
         id,
+        req.name.as_deref(),
+        req.project_module.as_deref(),
+        req.severity.as_deref(),
+        req.trigger_kind.as_deref(),
         req.enabled,
         req.trigger_config.as_ref(),
         req.channel_ids.as_deref(),
@@ -553,5 +612,25 @@ mod tests {
         });
         assert!(validate_notification_config("email", &config).is_err());
         std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    #[test]
+    fn merge_keeps_existing_redacted_and_omitted_secrets() {
+        let existing = json!({
+            "url": "https://hooks.slack.com/services/secret",
+            "template": "slack",
+            "headers": { "Authorization": "Bearer old", "X-Trace": "keep" }
+        });
+        let patch = json!({
+            "url": REDACTED,
+            "template": "generic",
+            "headers": { "Authorization": REDACTED, "X-New": "1" }
+        });
+        let merged = merge_notification_config(&existing, &patch);
+        assert_eq!(merged["url"], "https://hooks.slack.com/services/secret");
+        assert_eq!(merged["template"], "generic");
+        assert_eq!(merged["headers"]["Authorization"], "Bearer old");
+        assert_eq!(merged["headers"]["X-Trace"], "keep");
+        assert_eq!(merged["headers"]["X-New"], "1");
     }
 }

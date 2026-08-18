@@ -338,7 +338,7 @@ fn apply_operation_docs(spec: &mut Value) {
         ("post", "/api/v2/notification-channels/{id}/test", "Test notification channel", "Send a test alert delivery."),
         ("get", "/api/v2/alert-rules", "List alert rules", "Configured alert rules."),
         ("post", "/api/v2/alert-rules", "Create alert rule", "Create a new alert rule."),
-        ("patch", "/api/v2/alert-rules/{id}", "Update alert rule", "Patch alert rule trigger or channels."),
+        ("patch", "/api/v2/alert-rules/{id}", "Update alert rule", "Patch alert rule name, trigger, severity, or channels."),
         ("delete", "/api/v2/alert-rules/{id}", "Delete alert rule", "Remove an alert rule."),
         ("get", "/api/v2/alert-deliveries", "List alert deliveries", "Audit log of alert deliveries."),
         ("get", "/api/v2/executions/{id}/events", "List execution events", "Provenance timeline for one execution."),

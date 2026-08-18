@@ -1596,6 +1596,14 @@ async fn run_discover_batch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
         }
     }
     refresh_pool_gauges(pool).await?;
+    if !stats.changed_source_identifiers.is_empty() {
+        let _ = beampipe_alerts::fire_batched_discovery_changed(
+            pool,
+            project_module,
+            &stats.changed_source_identifiers,
+        )
+        .await;
+    }
     Ok(())
 }
 

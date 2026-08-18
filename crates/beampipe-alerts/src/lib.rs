@@ -9,6 +9,29 @@ use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub const KNOWN_TRIGGER_KINDS: &[&str] = &[
+    "execution_terminal",
+    "discovery_changed",
+    "pending_backlog",
+    "pending_stale",
+    "discovery_stall",
+    "dependency_down",
+    "daily_summary",
+];
+
+pub const DISCOVERY_CHANGED_SOURCE_CAP: usize = 20;
+
+pub fn is_known_trigger_kind(kind: &str) -> bool {
+    KNOWN_TRIGGER_KINDS.contains(&kind)
+}
+
+pub fn unknown_trigger_kind_message(kind: &str) -> String {
+    format!(
+        "unknown trigger_kind '{kind}'; expected one of: {}",
+        KNOWN_TRIGGER_KINDS.join(", ")
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum AlertError {
     #[error("delivery failed: {0}")]
@@ -144,10 +167,51 @@ pub async fn fire_immediate_for_trigger(
             {
                 continue;
             }
-            fire_alert(pool, &rule, &payload).await?;
+            let mut rule_payload = payload.clone();
+            rule_payload.severity = rule.severity.clone();
+            fire_alert(pool, &rule, &rule_payload).await?;
         }
     }
     Ok(())
+}
+
+pub async fn fire_batched_discovery_changed(
+    pool: &PgPool,
+    project_module: &str,
+    source_identifiers: &[String],
+) -> Result<(), AlertError> {
+    if source_identifiers.is_empty() {
+        return Ok(());
+    }
+    let listed = cap_source_identifiers(source_identifiers, DISCOVERY_CHANGED_SOURCE_CAP);
+    let count = source_identifiers.len();
+    let listed_note = if count > listed.len() {
+        format!(" (listing {})", listed.len())
+    } else {
+        String::new()
+    };
+    let payload = AlertPayload {
+        alert: "discovery_changed".into(),
+        severity: "info".into(),
+        project_module: project_module.to_string(),
+        summary: format!(
+            "{count} source{} changed discovery metadata for {project_module}{listed_note}",
+            if count == 1 { "" } else { "s" }
+        ),
+        execution_id: None,
+        source_identifiers: listed,
+        discovery_signature: None,
+        links: json!({
+            "sources": format!("/api/v2/sources?project_module={project_module}"),
+            "changed_count": count,
+        }),
+        fired_at: Utc::now().to_rfc3339(),
+    };
+    fire_immediate_for_trigger(pool, "discovery_changed", project_module, payload).await
+}
+
+fn cap_source_identifiers(ids: &[String], cap: usize) -> Vec<String> {
+    ids.iter().take(cap).cloned().collect()
 }
 
 async fn deliver_webhook(config: &Value, body: &Value) -> Result<(), AlertError> {
@@ -408,9 +472,58 @@ pub async fn evaluate_scheduled_rules(pool: &PgPool) -> Result<(), AlertError> {
                     fire_alert(pool, &rule, &payload).await?;
                 }
             }
+            "daily_summary" => {
+                fire_daily_summary(pool, &rule, &module).await?;
+            }
             _ => {}
         }
     }
+    Ok(())
+}
+
+async fn fire_daily_summary(
+    pool: &PgPool,
+    rule: &AlertRuleRow,
+    module: &str,
+) -> Result<(), AlertError> {
+    let window_hours = rule
+        .trigger_config
+        .get("window_hours")
+        .and_then(Value::as_i64)
+        .filter(|hours| *hours > 0)
+        .unwrap_or(24);
+    let window = Duration::hours(window_hours);
+    if let Some(last) = rule.last_fired_at {
+        if Utc::now() - last < window {
+            return Ok(());
+        }
+    }
+    let since = Utc::now() - window;
+    let discoveries = repo::count_discovery_changed_since(pool, module, since).await?;
+    let executions = repo::execution_window_counts(pool, module, since).await?;
+    let (pending, _) = repo::get_workflow_pending_stats(pool, module).await?;
+    let payload = AlertPayload {
+        alert: "daily_summary".into(),
+        severity: rule.severity.clone(),
+        project_module: module.to_string(),
+        summary: format!(
+            "{module} {window_hours}h: {discoveries} discoveries changed, {} completed, {} failed, {} uncertain, {pending} pending",
+            executions.completed, executions.failed, executions.uncertain
+        ),
+        execution_id: None,
+        source_identifiers: vec![],
+        discovery_signature: None,
+        links: json!({
+            "window_hours": window_hours,
+            "discoveries_changed": discoveries,
+            "executions_completed": executions.completed,
+            "executions_failed": executions.failed,
+            "executions_uncertain": executions.uncertain,
+            "pending": pending,
+        }),
+        fired_at: Utc::now().to_rfc3339(),
+    };
+    fire_alert(pool, rule, &payload).await?;
     Ok(())
 }
 
@@ -452,5 +565,31 @@ mod tests {
     fn slack_text_formats() {
         let body = json!({"severity": "critical", "project_module": "wallaby", "summary": "fail"});
         assert!(format_slack_text(&body).contains("critical"));
+    }
+
+    #[test]
+    fn known_trigger_kinds_cover_new_and_existing() {
+        for kind in [
+            "execution_terminal",
+            "discovery_changed",
+            "pending_backlog",
+            "pending_stale",
+            "discovery_stall",
+            "dependency_down",
+            "daily_summary",
+        ] {
+            assert!(is_known_trigger_kind(kind), "{kind}");
+        }
+        assert!(!is_known_trigger_kind("not_a_real_trigger"));
+        assert!(unknown_trigger_kind_message("nope").contains("discovery_changed"));
+    }
+
+    #[test]
+    fn discovery_changed_payload_caps_source_list() {
+        let ids: Vec<String> = (0..25).map(|i| format!("src-{i}")).collect();
+        let listed = cap_source_identifiers(&ids, DISCOVERY_CHANGED_SOURCE_CAP);
+        assert_eq!(listed.len(), DISCOVERY_CHANGED_SOURCE_CAP);
+        assert_eq!(listed[0], "src-0");
+        assert_eq!(listed[19], "src-19");
     }
 }

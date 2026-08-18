@@ -88,6 +88,8 @@ pub struct DiscoveryBatchStats {
     pub timeout_count: usize,
     pub failed_sources: Vec<String>,
     pub missing_registry_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_source_identifiers: Vec<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

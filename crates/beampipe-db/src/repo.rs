@@ -918,6 +918,9 @@ pub async fn persist_discovery_results(
                         stats.changed_count += 1;
                         stats.total_sbids += sbids;
                         stats.total_datasets += datasets;
+                        stats
+                            .changed_source_identifiers
+                            .push(source_identifier.clone());
                     }
                     PersistOutcome::Unchanged {
                         sbids, datasets, ..
@@ -4161,6 +4164,40 @@ pub async fn count_discovery_changed_since(
     .await
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutionWindowCounts {
+    pub completed: i64,
+    pub failed: i64,
+    pub uncertain: i64,
+}
+
+pub async fn execution_window_counts(
+    pool: &PgPool,
+    project_module: &str,
+    since: DateTime<Utc>,
+) -> Result<ExecutionWindowCounts, sqlx::Error> {
+    let row: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'completed')::bigint,
+            COUNT(*) FILTER (WHERE status = 'failed')::bigint,
+            COUNT(*) FILTER (WHERE terminal_outcome = 'inconsistent')::bigint
+        FROM batch_execution_record
+        WHERE project_module = $1
+          AND COALESCE(completed_at, updated_at, created_at) >= $2
+        "#,
+    )
+    .bind(project_module)
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+    Ok(ExecutionWindowCounts {
+        completed: row.0,
+        failed: row.1,
+        uncertain: row.2,
+    })
+}
+
 pub async fn create_notification_channel(
     pool: &PgPool,
     name: &str,
@@ -4246,12 +4283,13 @@ pub async fn create_alert_rule(
     trigger_config: &serde_json::Value,
     channel_ids: &[Uuid],
     cooldown_minutes: i32,
+    enabled: bool,
 ) -> Result<crate::models::AlertRuleRow, sqlx::Error> {
     sqlx::query_as(
         r#"
         INSERT INTO alert_rules
-            (uuid, name, project_module, severity, trigger_kind, trigger_config, channel_ids, cooldown_minutes)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (uuid, name, project_module, severity, trigger_kind, trigger_config, channel_ids, cooldown_minutes, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
         "#,
     )
@@ -4263,6 +4301,7 @@ pub async fn create_alert_rule(
     .bind(trigger_config)
     .bind(channel_ids)
     .bind(cooldown_minutes)
+    .bind(enabled)
     .fetch_one(pool)
     .await
 }
@@ -4298,9 +4337,14 @@ pub async fn get_alert_rule(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_alert_rule(
     pool: &PgPool,
     id: Uuid,
+    name: Option<&str>,
+    project_module: Option<&str>,
+    severity: Option<&str>,
+    trigger_kind: Option<&str>,
     enabled: Option<bool>,
     trigger_config: Option<&serde_json::Value>,
     channel_ids: Option<&[Uuid]>,
@@ -4309,16 +4353,24 @@ pub async fn update_alert_rule(
     sqlx::query_as(
         r#"
         UPDATE alert_rules
-        SET enabled = COALESCE($2, enabled),
-            trigger_config = COALESCE($3, trigger_config),
-            channel_ids = COALESCE($4, channel_ids),
-            cooldown_minutes = COALESCE($5, cooldown_minutes),
+        SET name = COALESCE($2, name),
+            project_module = COALESCE($3, project_module),
+            severity = COALESCE($4, severity),
+            trigger_kind = COALESCE($5, trigger_kind),
+            enabled = COALESCE($6, enabled),
+            trigger_config = COALESCE($7, trigger_config),
+            channel_ids = COALESCE($8, channel_ids),
+            cooldown_minutes = COALESCE($9, cooldown_minutes),
             updated_at = now()
         WHERE uuid = $1
         RETURNING *
         "#,
     )
     .bind(id)
+    .bind(name)
+    .bind(project_module)
+    .bind(severity)
+    .bind(trigger_kind)
     .bind(enabled)
     .bind(trigger_config)
     .bind(channel_ids)
