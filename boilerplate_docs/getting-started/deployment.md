@@ -60,7 +60,7 @@ beampipe stop
 Verify the public process, authenticated dependency readiness, and role health:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/v2/health
+curl -fsS http://127.0.0.1:18080/api/v2/health
 beampipe status
 beampipe doctor
 ```

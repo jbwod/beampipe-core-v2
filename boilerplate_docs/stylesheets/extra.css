@@ -2039,7 +2039,8 @@ body:has(#redoc-frame) .md-main {
 .md-typeset .bp-install-builder__toggle:has(input:focus-visible),
 .md-typeset .bp-install-builder input[type="text"]:focus,
 .md-typeset .bp-install-builder input[type="email"]:focus,
-.md-typeset .bp-install-builder input[type="password"]:focus {
+.md-typeset .bp-install-builder input[type="password"]:focus,
+.md-typeset .bp-install-builder input[type="number"]:focus {
   outline: 1px solid var(--bp-code-name);
   outline-offset: 2px;
 }
@@ -2063,6 +2064,17 @@ body:has(#redoc-frame) .md-main {
   margin-top: 0;
 }
 
+.bp-install-builder__ports {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.7rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.bp-install-builder__ports .bp-install-builder__field {
+  margin-top: 0;
+}
+
 .md-typeset .bp-install-builder__field label {
   display: block;
   margin: 0 0 0.28rem;
@@ -2072,7 +2084,8 @@ body:has(#redoc-frame) .md-main {
 
 .md-typeset .bp-install-builder input[type="text"],
 .md-typeset .bp-install-builder input[type="email"],
-.md-typeset .bp-install-builder input[type="password"] {
+.md-typeset .bp-install-builder input[type="password"],
+.md-typeset .bp-install-builder input[type="number"] {
   width: 100%;
   margin: 0;
   padding: 0.38rem 0.5rem;
@@ -2170,6 +2183,10 @@ body:has(#redoc-frame) .md-main {
   }
 
   .bp-install-builder__body {
+    grid-template-columns: 1fr;
+  }
+
+  .bp-install-builder__ports {
     grid-template-columns: 1fr;
   }
 

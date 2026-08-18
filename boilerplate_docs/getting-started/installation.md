@@ -21,13 +21,14 @@ Use this path for a workstation or a single-host service. It downloads the relea
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback, migrates the database, creates the first administrator, and uploads the reference project.
+Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, creates the first administrator, and uploads the reference project.
 
 Unattended equivalent:
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh \
-  | sh -s -- --yes --runtime docker --postgres compose
+  | sh -s -- --yes --runtime docker --postgres compose \
+      --api-port 18080 --postgres-port 5432 --metrics-port 9090
 ```
 
 Manage it from any directory:
@@ -39,7 +40,10 @@ beampipe logs --follow
 beampipe restart
 beampipe stop
 beampipe start
+beampipe uninstall
 ```
+
+`beampipe uninstall` stops Compose services, deletes the installation directory, and by default removes managed PostgreSQL volumes. Confirmation is required unless `--yes` is passed. `--keep-volumes` retains Compose volumes. `--purge-binary` also removes `~/.local/bin/beampipe`. Sibling checkouts such as `~/beampipe-dash` are not deleted.
 
 Use an existing PostgreSQL server instead:
 
@@ -139,7 +143,7 @@ beampipe setup
 beampipe doctor
 ```
 
-There is no implicit reset. Back up PostgreSQL before removing an installation or its Compose volume.
+There is no implicit reset. Back up PostgreSQL before `beampipe uninstall` or before deleting a Compose volume.
 
 ## Configuration and production checks
 

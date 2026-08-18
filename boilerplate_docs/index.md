@@ -52,6 +52,20 @@ Run the API, durable job system, and console locally. External execution stays m
           <label for="bp-install-directory">Directory</label>
           <input id="bp-install-directory" name="directory" type="text" spellcheck="false" placeholder="~/beampipe" autocomplete="off">
         </div>
+        <div class="bp-install-builder__ports">
+          <div class="bp-install-builder__field">
+            <label for="bp-install-api-port">API port</label>
+            <input id="bp-install-api-port" name="api-port" type="number" min="1" max="65535" placeholder="18080" inputmode="numeric">
+          </div>
+          <div class="bp-install-builder__field">
+            <label for="bp-install-postgres-port">PostgreSQL</label>
+            <input id="bp-install-postgres-port" name="postgres-port" type="number" min="1" max="65535" placeholder="5432" inputmode="numeric">
+          </div>
+          <div class="bp-install-builder__field">
+            <label for="bp-install-metrics-port">Metrics</label>
+            <input id="bp-install-metrics-port" name="metrics-port" type="number" min="1" max="65535" placeholder="9090" inputmode="numeric">
+          </div>
+        </div>
       </div>
       <div class="bp-install-builder__section">
         <p class="bp-install-builder__kicker">02 / flags</p>
@@ -96,12 +110,12 @@ Run the API, durable job system, and console locally. External execution stays m
       <pre><code id="bp-install-command" aria-live="polite">curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker</code></pre>
       <button type="button" class="terminal-button bp-install-builder__copy" id="bp-install-copy">Copy</button>
     </div>
-    <p class="bp-install-builder__hint">API at <code>http://127.0.0.1:8080/api/v2</code>. Files in <code>~/beampipe</code> unless you set a directory. Dash stays opt-in.</p>
+    <p class="bp-install-builder__hint">API at <code id="bp-install-api-url">http://127.0.0.1:18080/api/v2</code>. Files in <code>~/beampipe</code> unless you set a directory. Dash stays opt-in.</p>
     <p class="bp-install-builder__status" id="bp-install-status" aria-live="polite"></p>
   </div>
   <noscript>
     <pre><code>curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
-curl -fsS http://127.0.0.1:8080/api/v2/health</code></pre>
+curl -fsS http://127.0.0.1:18080/api/v2/health</code></pre>
   </noscript>
 </section>
 

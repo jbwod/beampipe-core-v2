@@ -1,6 +1,6 @@
 # Quick start
 
-The recommended installation needs Docker with Compose v2 and ports `5432`, `8080`, and `9090` available on loopback. It does not need a Git checkout or Rust.
+The recommended installation needs Docker with Compose v2 and ports `5432`, `18080`, and `9090`. Override host ports with `--api-port`, `--postgres-port`, and `--metrics-port`.
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
@@ -22,7 +22,7 @@ Verify without changing directories:
 ```bash
 beampipe status
 beampipe doctor
-curl -fsS http://127.0.0.1:8080/api/v2/health
+curl -fsS http://127.0.0.1:18080/api/v2/health
 ```
 
 Common operations:
@@ -32,6 +32,7 @@ beampipe logs --follow
 beampipe restart
 beampipe stop
 beampipe start
+beampipe uninstall
 ```
 
 External execution remains disabled until a typed deployment profile is installed and checked:
