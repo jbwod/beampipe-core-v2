@@ -87,10 +87,9 @@ The release operator bundle binds PostgreSQL, API, and metrics to `127.0.0.1` by
 
 ## Core and Dash on one Docker engine
 
-`beampipe setup --dashboard` prepares a sibling Dash checkout and writes `compose.beampipe-local.yml` with `BEAMPIPE_API_URL=http://api:8080` and the recorded Core Compose network. It does not start Dash.
+`beampipe setup --dashboard` clones a sibling Dash checkout if needed, then runs Dash `scripts/install.sh`. That script writes `compose.beampipe-local.yml` with `BEAMPIPE_API_URL=http://api:8080` and the recorded Core Compose network. After Core is up, setup starts Dash on that network.
 
-Compose creates project-scoped networks. Attach Dash to the Core network with
-that override, or write it by hand:
+Compose creates project-scoped networks. The installer attaches Dash to the Core network (operator installs are usually `beampipe_default`):
 
 ```yaml
 services:
@@ -104,7 +103,15 @@ services:
 networks:
   beampipe-core:
     external: true
-    name: beampipe-core-v2_default
+    name: beampipe_default
+```
+
+Standalone:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jbwod/beampipe-dash/main/scripts/install.sh | sh
+# or:
+./scripts/install.sh --core-home ~/beampipe
 ```
 
 This keeps bearer-token traffic and the Core API private. Publish only Dash to

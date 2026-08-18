@@ -162,7 +162,7 @@ enum CliCommand {
         /// Alias for --runtime host.
         #[arg(long)]
         skip_docker: bool,
-        /// Prepare optional Beampipe Dash (clone if missing; does not start containers).
+        /// Prepare Beampipe Dash and start it after Core is up (Docker only).
         #[arg(long, conflicts_with = "skip_dashboard")]
         dashboard: bool,
         /// Skip Beampipe Dash preparation.
@@ -444,14 +444,21 @@ enum SlurmCommand {
 
 #[derive(Debug, Subcommand)]
 enum SlurmCredentialsCommand {
-    /// Create a credential slot directory, ed25519 key, optional passphrase, and known_hosts.
+    /// Generate a new Ed25519 key into a credential slot.
+    ///
+    /// Do not also run ssh-keygen. Beampipe creates the key; you must still
+    /// install private_key.pub on the login node (`copy-id` or the site's
+    /// key-registration process). The slot name is only a directory name, not
+    /// a hostname.
     Init {
-        #[arg(long, default_value = "setonix")]
+        /// Credential directory name under the SSH credentials root. Not a hostname.
+        #[arg(long)]
         slot: String,
         #[arg(long)]
         dir: Option<PathBuf>,
-        #[arg(long, default_value = "setonix.pawsey.org.au")]
-        host: String,
+        /// Login node for ssh-keyscan and optional ssh-copy-id. Required unless --skip-keyscan.
+        #[arg(long, required_unless_present = "skip_keyscan")]
+        host: Option<String>,
         #[arg(long, default_value_t = 22)]
         port: u16,
         #[arg(long)]
@@ -460,6 +467,7 @@ enum SlurmCredentialsCommand {
         passphrase_file: Option<PathBuf>,
         #[arg(long)]
         no_passphrase: bool,
+        /// Install the new public key with ssh-copy-id (requires --user and --host).
         #[arg(long)]
         copy_id: bool,
         #[arg(long)]
@@ -468,11 +476,19 @@ enum SlurmCredentialsCommand {
         force: bool,
         #[arg(long)]
         yes: bool,
+        /// Generate the slot without scanning host keys.
+        #[arg(long)]
+        skip_keyscan: bool,
         #[arg(long)]
         accept_host_key: bool,
     },
-    /// Import an existing host SSH key into a managed credential slot.
+    /// Import an existing private key into a credential slot.
+    ///
+    /// Use this when the key already exists (including a key created with
+    /// ssh-keygen). Skip uploading the public key if the cluster already has
+    /// it in authorized_keys. Do not run init for the same key.
     Import {
+        /// Credential directory name under the SSH credentials root. Not a hostname.
         #[arg(long)]
         slot: String,
         #[arg(long)]
@@ -503,14 +519,14 @@ enum SlurmCredentialsCommand {
     },
     /// Show redacted file status for a slot.
     Show {
-        #[arg(long, default_value = "setonix")]
+        #[arg(long)]
         slot: String,
         #[arg(long)]
         dir: Option<PathBuf>,
     },
     /// Resolve and load the slot key (optional live ping via --profile).
     Check {
-        #[arg(long, default_value = "setonix")]
+        #[arg(long)]
         slot: String,
         #[arg(long)]
         dir: Option<PathBuf>,
@@ -521,6 +537,24 @@ enum SlurmCredentialsCommand {
     Sync {
         #[arg(long)]
         slot: Option<String>,
+    },
+    /// Install the slot public key on the login node with ssh-copy-id.
+    ///
+    /// Requires password SSH (or equivalent) to still work. Sites that only
+    /// accept portal or helpdesk key registration should follow that process
+    /// instead. ssh-copy-id appends; existing authorized_keys entries are kept.
+    #[command(name = "copy-id")]
+    CopyId {
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
     },
     /// Remove a managed credential slot after profiles have been reassigned.
     Remove {
@@ -1022,12 +1056,13 @@ async fn main() -> anyhow::Result<()> {
                 acl,
                 force,
                 yes,
+                skip_keyscan,
                 accept_host_key,
             } => {
                 let result = slurm_credentials::init(slurm_credentials::InitOptions {
                     slot,
                     dir,
-                    host,
+                    host: host.unwrap_or_default(),
                     port,
                     user,
                     passphrase_file,
@@ -1036,7 +1071,7 @@ async fn main() -> anyhow::Result<()> {
                     acl,
                     force,
                     yes,
-                    skip_keyscan: false,
+                    skip_keyscan,
                     accept_host_key,
                 })?;
                 slurm_credentials::print_init_next_steps(&result);
@@ -1098,6 +1133,27 @@ async fn main() -> anyhow::Result<()> {
                     slot.as_deref(),
                 )?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            SlurmCredentialsCommand::CopyId {
+                slot,
+                dir,
+                user,
+                host,
+                port,
+            } => {
+                let public_key = slurm_credentials::copy_id_for_slot(
+                    slurm_credentials::CopyIdOptions {
+                        slot: slot.clone(),
+                        dir,
+                        user: user.clone(),
+                        host: host.clone(),
+                        port,
+                    },
+                )?;
+                println!(
+                    "Installed {} on {user}@{host} with ssh-copy-id.",
+                    public_key.display()
+                );
             }
             SlurmCredentialsCommand::Remove { slot, dir, yes } => {
                 slurm_credentials::remove(&slot, dir.as_deref(), yes)?;

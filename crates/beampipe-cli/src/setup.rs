@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::io::{self, IsTerminal, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -301,6 +301,9 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     });
     if postgres == PostgresKind::Compose {
         print_hint("Using the installation-managed PostgreSQL service.");
+        if !env_existed {
+            refuse_stale_compose_postgres_volume(&root)?;
+        }
         if opts.start {
             print_hint("Starting Compose Postgres next.");
         } else {
@@ -349,10 +352,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         if resolve_prepare_dashboard(&opts, prepare_docker)? {
             match prepare_dashboard(&root, &opts, &compose_network_name(&root)) {
                 Ok(prepared) => {
-                    println!(
-                        "Prepared Beampipe Dash at {} (not started).",
-                        prepared.display()
-                    );
+                    println!("Prepared Beampipe Dash at {}.", prepared.display());
                     dash_dir = Some(prepared);
                 }
                 Err(error) => {
@@ -558,7 +558,17 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             println!(
                 "PostgreSQL is not reachable ({error}). Skipping migrate, admin, upload, and doctor."
             );
-            println!("PostgreSQL is not up. Seed is in the recipe.");
+            if database_error_is_password_auth(&error) {
+                println!(
+                    "Compose Postgres kept an older password in its volume. Reset it, then re-run setup:"
+                );
+                println!(
+                    "  docker compose --project-directory {} down --volumes",
+                    root.display()
+                );
+            } else {
+                println!("PostgreSQL is not up. Seed is in the recipe.");
+            }
             None
         }
         Err(error) => {
@@ -636,7 +646,8 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         docker_context,
         db_applied,
         admin_ready,
-        dash_dir,
+        core_home: Some(root.clone()),
+        dash_dir: dash_dir.clone(),
         project_file: project_path
             .exists()
             .then(|| display_repo_path(&root, &project_path)),
@@ -647,6 +658,9 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     });
     if opts.start {
         finish_start(&root, prepare_docker, &opts, host_ports)?;
+        if let Some(dash) = dash_dir.as_ref() {
+            start_dashboard(&root, dash);
+        }
     } else {
         print_recipe(&commands);
     }
@@ -955,7 +969,7 @@ fn require_bind_ports_free(ports: &[(u16, &str)]) -> Result<()> {
     }
     if !busy.is_empty() {
         bail!(
-            "bind ports already in use: {}. Stop the other process or pass --no-start.",
+            "bind ports already in use: {}. If this is leftover Beampipe Compose from a failed setup, stop it with `docker compose down --volumes` in the install home, then retry. Or pass --no-start.",
             busy.join(", ")
         );
     }
@@ -1245,6 +1259,41 @@ fn compose_up_postgres(root: &Path) -> Result<()> {
     compose_cmd(root, &["up", "-d", "--wait", "postgres"])
 }
 
+fn compose_postgres_volume_name(root: &Path) -> String {
+    format!(
+        "{}_beampipe_pgdata",
+        installation::compose_project_name(root)
+    )
+}
+
+fn docker_volume_exists(name: &str) -> bool {
+    Command::new("docker")
+        .args(["volume", "inspect", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn refuse_stale_compose_postgres_volume(root: &Path) -> Result<()> {
+    let volume = compose_postgres_volume_name(root);
+    if !docker_volume_exists(&volume) {
+        return Ok(());
+    }
+    bail!(
+        "Compose PostgreSQL volume `{volume}` already exists from a previous install. Postgres keeps the original password in that volume, so a new .env will not authenticate. Reset it, then re-run setup:\n  docker compose --project-directory {} down --volumes",
+        root.display()
+    );
+}
+
+fn database_error_is_password_auth(error: &impl std::fmt::Display) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("password authentication failed")
+}
+
 fn check_api_health(api_port: u16) {
     let url = format!("http://127.0.0.1:{api_port}/api/v2/health");
     let result = Command::new("curl").args(["-fsS", &url]).status();
@@ -1420,6 +1469,7 @@ fn ensure_beampipe_version(root: &Path, env_path: &Path) -> Result<()> {
 
 const DEFAULT_DASH_REPO: &str = "https://github.com/jbwod/beampipe-dash";
 const DASH_OVERRIDE_FILE: &str = "compose.beampipe-local.yml";
+const DASH_INSTALL_SCRIPT: &str = "scripts/install.sh";
 
 fn env_value_empty(path: &Path, key: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -1571,7 +1621,7 @@ fn decide_dashboard(opts: &SetupOptions, docker: bool) -> Option<bool> {
 fn resolve_prepare_dashboard(opts: &SetupOptions, docker: bool) -> Result<bool> {
     match decide_dashboard(opts, docker) {
         Some(value) => Ok(value),
-        None => prompt_yes_no("Prepare Beampipe Dash?", false),
+        None => prompt_yes_no("Install and start Beampipe Dash?", false),
     }
 }
 
@@ -1709,6 +1759,79 @@ fn git_clone_dash(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+fn dash_install_script(dash_dir: &Path) -> PathBuf {
+    dash_dir.join(DASH_INSTALL_SCRIPT)
+}
+
+fn dash_install_recipe_line(core_home: Option<&Path>, dash_dir: &Path) -> String {
+    let script = dash_install_script(dash_dir);
+    match core_home {
+        Some(home) => format!(
+            "  sh {} --core-home {} --dash-dir {}",
+            script.display(),
+            home.display(),
+            dash_dir.display()
+        ),
+        None => format!("  sh {} --dash-dir {}", script.display(), dash_dir.display()),
+    }
+}
+
+fn run_dash_install(root: &Path, dash_dir: &Path, start: bool) -> Result<()> {
+    let script = dash_install_script(dash_dir);
+    let mut command = Command::new("sh");
+    command
+        .arg(&script)
+        .arg("--core-home")
+        .arg(root)
+        .arg("--dash-dir")
+        .arg(dash_dir)
+        .arg("--yes");
+    if !start {
+        command.arg("--no-start");
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("run {}", script.display()))?;
+    if !status.success() {
+        bail!("{} failed with {status}", script.display());
+    }
+    Ok(())
+}
+
+fn try_start_dashboard(root: &Path, dash_dir: &Path) -> Result<()> {
+    if dash_install_script(dash_dir).is_file() {
+        return run_dash_install(root, dash_dir, true);
+    }
+    let status = Command::new("docker")
+        .current_dir(dash_dir)
+        .args([
+            "compose",
+            "-f",
+            "compose.yaml",
+            "-f",
+            DASH_OVERRIDE_FILE,
+            "up",
+            "--build",
+            "-d",
+            "--wait",
+        ])
+        .status()
+        .context("docker compose up dash")?;
+    if !status.success() {
+        bail!("docker compose up dash failed with {status}");
+    }
+    println!("Dash is up at http://127.0.0.1:3000");
+    Ok(())
+}
+
+fn start_dashboard(root: &Path, dash_dir: &Path) {
+    if let Err(error) = try_start_dashboard(root, dash_dir) {
+        println!("Dash start skipped: {error}");
+        println!("Retry with:");
+        println!("{}", dash_install_recipe_line(Some(root), dash_dir));
+    }
+}
+
 fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<PathBuf> {
     let dash_dir = opts
         .dash_dir
@@ -1728,6 +1851,11 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
                 dash_dir.display()
             );
         }
+    }
+
+    if dash_install_script(&dash_dir).is_file() {
+        run_dash_install(root, &dash_dir, false)?;
+        return Ok(dash_dir);
     }
 
     let dash_env = dash_dir.join(".env");
@@ -2003,13 +2131,13 @@ fn configure_slurm_credential_interactive(
         },
         ChoiceItem {
             key: "import",
-            label: "Import host key",
-            hint: "copy an existing private key into this installation",
+            label: "Import an existing key",
+            hint: "skip upload if the cluster already has this public key",
         },
         ChoiceItem {
             key: "generate",
-            label: "Generate dedicated key",
-            hint: "create a new encrypted Ed25519 key",
+            label: "Generate a new Beampipe key",
+            hint: "you must still install the public key on the login node",
         },
         ChoiceItem {
             key: "later",
@@ -2034,7 +2162,7 @@ fn configure_slurm_credential_interactive(
         let private_key =
             PathBuf::from(prompt_default("Existing private key", "~/.ssh/id_ed25519")?);
         let private_key = expand_home_path(&private_key)?;
-        crate::slurm_credentials::import(crate::slurm_credentials::ImportOptions {
+        let imported = crate::slurm_credentials::import(crate::slurm_credentials::ImportOptions {
             slot,
             dir: None,
             private_key,
@@ -2047,14 +2175,17 @@ fn configure_slurm_credential_interactive(
             force: false,
             accept_host_key: false,
         })?;
+        crate::slurm_credentials::print_init_next_steps(&imported);
     } else {
-        crate::slurm_credentials::init(crate::slurm_credentials::InitOptions {
+        let generated = crate::slurm_credentials::init(crate::slurm_credentials::InitOptions {
             slot,
             host: slurm.login_node.clone(),
             port: u16::try_from(slurm.ssh_port)?,
+            user: slurm.remote_user.clone(),
             acl,
             ..crate::slurm_credentials::InitOptions::default()
         })?;
+        crate::slurm_credentials::print_init_next_steps(&generated);
     }
     Ok(())
 }
@@ -2076,6 +2207,7 @@ struct SetupNextSteps {
     docker_context: Option<String>,
     db_applied: bool,
     admin_ready: bool,
+    core_home: Option<PathBuf>,
     dash_dir: Option<PathBuf>,
     project_file: Option<String>,
     profile_file: Option<String>,
@@ -2114,10 +2246,7 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
             }
         }
         if let Some(dash_dir) = &steps.dash_dir {
-            lines.push(format!(
-                "  cd {} && docker compose -f compose.yaml -f {DASH_OVERRIDE_FILE} up --build -d",
-                dash_dir.display()
-            ));
+            lines.push(dash_install_recipe_line(steps.core_home.as_deref(), dash_dir));
         }
     } else {
         if !steps.db_applied {
@@ -2279,6 +2408,23 @@ mod tests {
         assert!(message.contains("API"));
         assert!(message.contains(&port.to_string()));
         assert!(message.contains("--no-start"));
+        assert!(message.contains("down --volumes"));
+    }
+
+    #[test]
+    fn compose_postgres_volume_name_uses_install_home() {
+        assert_eq!(
+            compose_postgres_volume_name(Path::new("/home/jack/beampipe")),
+            "beampipe_beampipe_pgdata"
+        );
+    }
+
+    #[test]
+    fn database_error_is_password_auth_matches_postgres() {
+        assert!(database_error_is_password_auth(
+            &"error returned from database: password authentication failed for user \"postgres\""
+        ));
+        assert!(!database_error_is_password_auth(&"connection refused"));
     }
 
     #[test]
@@ -2485,6 +2631,57 @@ mod tests {
     }
 
     #[test]
+    fn yes_dashboard_prefers_install_script_when_present() {
+        let workspace = tempfile::tempdir().unwrap();
+        let core = workspace.path().join("operator-core");
+        let dash = workspace.path().join("beampipe-dash");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::create_dir_all(dash.join("scripts")).unwrap();
+        std::fs::write(
+            dash.join("scripts/install.sh"),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/../install-args\"\n",
+        )
+        .unwrap();
+
+        let opts = SetupOptions {
+            yes: true,
+            dashboard: true,
+            dash_dir: Some(dash.clone()),
+            ..Default::default()
+        };
+        prepare_dashboard(&core, &opts, &compose_network_name(&core)).unwrap();
+        let args = std::fs::read_to_string(dash.join("install-args")).unwrap();
+        assert!(args.contains("--core-home"));
+        assert!(args.contains(&core.display().to_string()));
+        assert!(args.contains("--dash-dir"));
+        assert!(args.contains(&dash.display().to_string()));
+        assert!(args.contains("--no-start"));
+        assert!(args.contains("--yes"));
+        assert!(!dash.join("compose.beampipe-local.yml").exists());
+    }
+
+    #[test]
+    fn try_start_dashboard_runs_install_script() {
+        let workspace = tempfile::tempdir().unwrap();
+        let core = workspace.path().join("operator-core");
+        let dash = workspace.path().join("beampipe-dash");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::create_dir_all(dash.join("scripts")).unwrap();
+        std::fs::write(
+            dash.join("scripts/install.sh"),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/../start-args\"\n",
+        )
+        .unwrap();
+
+        try_start_dashboard(&core, &dash).unwrap();
+        let args = std::fs::read_to_string(dash.join("start-args")).unwrap();
+        assert!(args.contains("--core-home"));
+        assert!(args.contains("--dash-dir"));
+        assert!(args.contains("--yes"));
+        assert!(!args.contains("--no-start"));
+    }
+
+    #[test]
     fn dash_override_patches_existing_network_name() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("compose.beampipe-local.yml");
@@ -2558,6 +2755,26 @@ mod tests {
         assert!(!joined.contains("docker compose up -d postgres"));
         assert!(joined.contains("beampipe start"));
         assert!(!joined.contains("profile add"));
+    }
+
+    #[test]
+    fn docker_recipe_starts_dash_via_install_script() {
+        let lines = next_steps_lines(&SetupNextSteps {
+            runtime_docker: true,
+            compose_postgres: true,
+            db_applied: true,
+            admin_ready: true,
+            core_home: Some(PathBuf::from("/home/op/beampipe")),
+            dash_dir: Some(PathBuf::from("/home/op/beampipe-dash")),
+            ..Default::default()
+        });
+        let joined = lines.join("\n");
+        assert!(joined.contains("beampipe start"));
+        assert!(joined.contains("scripts/install.sh"));
+        assert!(joined.contains("--core-home /home/op/beampipe"));
+        assert!(joined.contains("--dash-dir /home/op/beampipe-dash"));
+        assert!(!joined.contains("compose.beampipe-local.yml"));
+        assert!(!joined.contains("docker compose -f compose.yaml"));
     }
 
     #[test]

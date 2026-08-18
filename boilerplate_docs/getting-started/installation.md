@@ -120,21 +120,21 @@ beampipe profile validate dlg-dim
 beampipe doctor --profile dlg-dim
 ```
 
-Import and associate a Slurm key in the same operation:
+Import and associate a Slurm key in the same operation (skip the public-key upload if the cluster already has this key):
 
 ```bash
 beampipe profile add \
   -f "$HOME/beampipe/config/deployment_profile.slurm-remote.json" \
-  --ssh-slot setonix \
+  --ssh-slot hpc \
   --ssh-private-key "$HOME/.ssh/id_ed25519" \
   --ssh-known-hosts "$HOME/.ssh/known_hosts" \
   --ssh-acl
 
-beampipe slurm credentials sync --slot setonix
+beampipe slurm credentials sync --slot hpc
 beampipe doctor --profile slurm-remote
 ```
 
-The source key is never modified. Beampipe stores a private managed copy under the selected installation and mounts the credential root read-only into Docker services. See [Deployment profiles and SSH](../architecture/deployment-profiles.md).
+To generate a new Beampipe-owned key instead, run `beampipe slurm credentials init --slot hpc --host LOGIN_NODE` and then install `private_key.pub` with `copy-id` or the site's key-registration process. The source key is never modified on import. Beampipe stores a private managed copy under the selected installation and mounts the credential root read-only into Docker services. See [Deployment profiles and SSH](../architecture/deployment-profiles.md).
 
 ## Upgrade and rerun setup
 

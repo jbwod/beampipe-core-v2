@@ -80,7 +80,7 @@ Run the API, durable job system, and console locally. External execution stays m
           </label>
           <label class="bp-install-builder__toggle" id="bp-install-dashboard-label">
             <input id="bp-install-dashboard" name="dashboard" type="checkbox">
-            <span>Prepare Dash <small>Docker only</small></span>
+            <span>Install Dash <small>Docker only</small></span>
           </label>
         </div>
       </div>

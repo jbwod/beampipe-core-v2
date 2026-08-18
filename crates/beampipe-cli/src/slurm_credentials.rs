@@ -36,9 +36,9 @@ pub struct InitOptions {
 impl Default for InitOptions {
     fn default() -> Self {
         Self {
-            slot: "setonix".into(),
+            slot: String::new(),
             dir: None,
-            host: "setonix.pawsey.org.au".into(),
+            host: String::new(),
             port: 22,
             user: None,
             passphrase_file: None,
@@ -76,6 +76,22 @@ pub struct InitResult {
     pub public_key: PathBuf,
     pub passphrase: Option<PathBuf>,
     pub known_hosts: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    pub port: u16,
+    pub copied_id: bool,
+    pub generated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CopyIdOptions {
+    pub slot: String,
+    pub dir: Option<PathBuf>,
+    pub user: String,
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,8 +155,15 @@ fn validate_slot(slot: &str) -> Result<()> {
 
 pub fn init(opts: InitOptions) -> Result<InitResult> {
     validate_slot(&opts.slot)?;
+    if !opts.skip_keyscan && opts.host.trim().is_empty() {
+        bail!("--host is required unless --skip-keyscan");
+    }
     if opts.yes && !opts.no_passphrase && opts.passphrase_file.is_none() {
         bail!("--yes requires --no-passphrase or --passphrase-file (do not pass the passphrase on the command line)");
+    }
+    if opts.copy_id {
+        require_copy_id_user(opts.user.as_deref())?;
+        require_copy_id_host(&opts.host)?;
     }
 
     let root = resolve_root(opts.dir.as_deref());
@@ -196,13 +219,7 @@ pub fn init(opts: InitOptions) -> Result<InitResult> {
             apply_container_acl(&passphrase_path)?;
         }
     }
-    if opts.copy_id {
-        let user = opts.user.as_deref().unwrap_or("");
-        if user.is_empty() {
-            bail!("--copy-id requires --user");
-        }
-        copy_id(&public_key, user, &opts.host, opts.port)?;
-    }
+    let (copied_id, copy_user) = maybe_copy_id(&opts, &public_key)?;
 
     Ok(InitResult {
         root,
@@ -211,6 +228,13 @@ pub fn init(opts: InitOptions) -> Result<InitResult> {
         public_key,
         passphrase: wrote_passphrase.then_some(passphrase_path),
         known_hosts,
+        host: nonempty_opt(&opts.host),
+        user: copy_user
+            .or_else(|| opts.user.clone())
+            .and_then(|value| nonempty_opt(&value)),
+        port: opts.port,
+        copied_id,
+        generated: true,
     })
 }
 
@@ -278,7 +302,33 @@ pub fn import(opts: ImportOptions) -> Result<InitResult> {
         public_key,
         passphrase: passphrase_path.is_file().then_some(passphrase_path),
         known_hosts: slot_known_hosts,
+        host: opts.host.as_deref().and_then(nonempty_opt),
+        user: None,
+        port: opts.port,
+        copied_id: false,
+        generated: false,
     })
+}
+
+pub fn copy_id_for_slot(opts: CopyIdOptions) -> Result<PathBuf> {
+    validate_slot(&opts.slot)?;
+    if opts.user.trim().is_empty() {
+        bail!("--copy-id requires --user");
+    }
+    if opts.host.trim().is_empty() {
+        bail!("--copy-id requires --host");
+    }
+    let public_key = resolve_root(opts.dir.as_deref())
+        .join(&opts.slot)
+        .join("private_key.pub");
+    if !public_key.is_file() {
+        bail!(
+            "public key missing at {}; run `beampipe slurm credentials init` or `import` first",
+            public_key.display()
+        );
+    }
+    copy_id(&public_key, &opts.user, &opts.host, opts.port)?;
+    Ok(public_key)
 }
 
 pub fn sync(context: &InstallationContext, slot: Option<&str>) -> Result<SyncResult> {
@@ -419,17 +469,104 @@ pub fn check(slot: &str, dir: Option<&Path>) -> Result<SlotStatus> {
 }
 
 pub fn print_init_next_steps(result: &InitResult) {
-    println!("Created SSH credential slot '{}'.", result.slot);
-    println!("  private_key  {}", result.private_key.display());
-    if let Some(path) = &result.passphrase {
-        println!("  passphrase   {}", path.display());
+    print!("{}", format_credential_next_steps(result));
+}
+
+pub fn format_credential_next_steps(result: &InitResult) -> String {
+    let mut out = String::new();
+    if result.generated {
+        out.push_str(&format!("Created SSH credential slot '{}'.\n", result.slot));
+    } else {
+        out.push_str(&format!("Imported SSH credential slot '{}'.\n", result.slot));
     }
-    println!("  known_hosts  {}", result.known_hosts.display());
-    println!("\nNext:");
-    println!("  set deployment.ssh_credential to \"{}\"", result.slot);
-    println!("  beampipe slurm credentials check --slot {}", result.slot);
-    println!("  beampipe slurm credentials sync --slot {}", result.slot);
-    println!("  beampipe slurm ping --profile slurm-remote");
+    out.push_str(&format!("  private_key  {}\n", result.private_key.display()));
+    out.push_str(&format!("  public_key   {}\n", result.public_key.display()));
+    if let Some(path) = &result.passphrase {
+        out.push_str(&format!("  passphrase   {}\n", path.display()));
+    }
+    out.push_str(&format!("  known_hosts  {}\n", result.known_hosts.display()));
+
+    if result.public_key.is_file() {
+        if let Ok(contents) = fs::read_to_string(&result.public_key) {
+            let line = contents.trim();
+            if !line.is_empty() {
+                out.push_str("\nPublic key:\n");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+
+    let host = result.host.as_deref().unwrap_or("login.example.org");
+    let user = result.user.as_deref().unwrap_or("USER");
+    if result.copied_id {
+        out.push_str("\nPublic key installed on the login node via ssh-copy-id.\n");
+    } else if result.generated {
+        out.push_str(
+            "\nThis slot cannot log in until the public key is in ~/.ssh/authorized_keys on the login node.\n",
+        );
+        out.push_str(
+            "Beampipe generated this key; do not also run ssh-keygen for the same slot.\n",
+        );
+        out.push_str(
+            "Beampipe does not use ssh-agent; workers unlock private_key plus an optional passphrase file.\n",
+        );
+        out.push_str("\nIf password SSH still works:\n");
+        out.push_str(&format!("  {}\n", copy_id_example(result, user, host)));
+        out.push_str("\nOr append manually (use >> so existing keys are kept):\n");
+        out.push_str(&format!(
+            "  cat {} | ssh {user}@{host} \"mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys\"\n",
+            result.public_key.display()
+        ));
+        out.push_str(
+            "\nSome sites require a portal or helpdesk key-registration process instead of ssh-copy-id.\n",
+        );
+    } else {
+        out.push_str(
+            "\nIf this public key is already in the login node's authorized_keys, skip the upload.\n",
+        );
+        out.push_str(
+            "If not, install it the same way as after init (copy-id, append, or facility process).\n",
+        );
+        out.push_str("Do not run init for this slot unless you intend to replace the key.\n");
+        out.push_str(&format!("  {}\n", copy_id_example(result, user, host)));
+    }
+
+    out.push_str("\nThen:\n");
+    out.push_str(&format!(
+        "  set deployment.ssh_credential to \"{}\"\n",
+        result.slot
+    ));
+    out.push_str(&format!(
+        "  beampipe slurm credentials check --slot {}\n",
+        result.slot
+    ));
+    out.push_str(&format!(
+        "  beampipe slurm credentials sync --slot {}\n",
+        result.slot
+    ));
+    out.push_str("  beampipe slurm ping --profile PROFILE\n");
+    out
+}
+
+fn copy_id_example(result: &InitResult, user: &str, host: &str) -> String {
+    let mut cmd = format!(
+        "beampipe slurm credentials copy-id --slot {} --user {user} --host {host}",
+        result.slot
+    );
+    if result.port != 22 {
+        cmd.push_str(&format!(" --port {}", result.port));
+    }
+    cmd
+}
+
+fn nonempty_opt(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn resolve_passphrase_input(opts: &InitOptions) -> Result<Option<Zeroizing<String>>> {
@@ -565,6 +702,61 @@ fn acquire_known_hosts(
     }
     atomic_write(path, existing.as_bytes(), 0o600)?;
     Ok(())
+}
+
+fn maybe_copy_id(opts: &InitOptions, public_key: &Path) -> Result<(bool, Option<String>)> {
+    if opts.copy_id {
+        let user = require_copy_id_user(opts.user.as_deref())?;
+        require_copy_id_host(&opts.host)?;
+        copy_id(public_key, &user, &opts.host, opts.port)?;
+        return Ok((true, Some(user)));
+    }
+    if opts.yes || !stdin_is_tty() || opts.host.trim().is_empty() {
+        return Ok((false, None));
+    }
+    let prompt = format!(
+        "Install this public key on {} now with ssh-copy-id (password SSH must still work)?",
+        opts.host
+    );
+    if !prompt_yes_no(&prompt, false)? {
+        return Ok((false, None));
+    }
+    let user = if let Some(user) = opts.user.as_deref().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }) {
+        user
+    } else {
+        prompt_remote_user()?
+    };
+    copy_id(public_key, &user, &opts.host, opts.port)?;
+    Ok((true, Some(user)))
+}
+
+fn require_copy_id_user(user: Option<&str>) -> Result<String> {
+    match user.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(user) => Ok(user.to_string()),
+        None => bail!("--copy-id requires --user"),
+    }
+}
+
+fn require_copy_id_host(host: &str) -> Result<()> {
+    if host.trim().is_empty() {
+        bail!("--copy-id requires --host");
+    }
+    Ok(())
+}
+
+fn prompt_remote_user() -> Result<String> {
+    print!("Remote SSH user: ");
+    io::stdout().flush()?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    let user = value.trim().to_string();
+    if user.is_empty() {
+        bail!("--copy-id requires --user");
+    }
+    Ok(user)
 }
 
 fn copy_id(public_key: &Path, user: &str, host: &str, port: u16) -> Result<()> {
@@ -874,5 +1066,116 @@ mod tests {
         assert!(!status.private_key.present);
         assert!(!status.passphrase.present);
         assert_eq!(status.slot, "setonix");
+    }
+
+    #[test]
+    fn init_requires_host_unless_skip_keyscan() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = init(InitOptions {
+            slot: "hpc".into(),
+            dir: Some(dir.path().to_path_buf()),
+            host: String::new(),
+            skip_keyscan: false,
+            no_passphrase: true,
+            yes: true,
+            ..InitOptions::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--host is required"));
+    }
+
+    #[test]
+    fn copy_id_requires_user() {
+        let err = copy_id_for_slot(CopyIdOptions {
+            slot: "hpc".into(),
+            dir: None,
+            user: String::new(),
+            host: "login.example.org".into(),
+            port: 22,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--user"));
+    }
+
+    #[test]
+    fn copy_id_requires_host() {
+        let err = copy_id_for_slot(CopyIdOptions {
+            slot: "hpc".into(),
+            dir: None,
+            user: "alice".into(),
+            host: String::new(),
+            port: 22,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--host"));
+    }
+
+    #[test]
+    fn init_copy_id_requires_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = init(InitOptions {
+            slot: "hpc".into(),
+            dir: Some(dir.path().to_path_buf()),
+            skip_keyscan: true,
+            no_passphrase: true,
+            yes: true,
+            copy_id: true,
+            host: "login.example.org".into(),
+            ..InitOptions::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--user"));
+    }
+
+    fn sample_result(generated: bool) -> InitResult {
+        InitResult {
+            root: PathBuf::from("/tmp/creds"),
+            slot: "hpc".into(),
+            private_key: PathBuf::from("/tmp/creds/hpc/private_key"),
+            public_key: PathBuf::from("/tmp/creds/hpc/private_key.pub"),
+            passphrase: None,
+            known_hosts: PathBuf::from("/tmp/creds/known_hosts"),
+            host: Some("login.example.org".into()),
+            user: Some("alice".into()),
+            port: 22,
+            copied_id: false,
+            generated,
+        }
+    }
+
+    #[test]
+    fn next_steps_mention_public_key_and_authorized_keys() {
+        let text = format_credential_next_steps(&sample_result(true));
+        assert!(text.contains("public_key"));
+        assert!(text.contains("authorized_keys"));
+        assert!(text.contains("copy-id"));
+        assert!(text.contains("do not also run ssh-keygen"));
+        assert!(text.contains(">>"));
+        assert!(text.contains("--slot hpc --user alice --host login.example.org"));
+    }
+
+    #[test]
+    fn import_next_steps_say_skip_upload_when_already_authorized() {
+        let text = format_credential_next_steps(&sample_result(false));
+        assert!(text.contains("Imported SSH credential slot"));
+        assert!(text.contains("already"));
+        assert!(text.contains("authorized_keys"));
+        assert!(text.contains("Do not run init"));
+    }
+
+    #[test]
+    fn generated_slot_records_public_key_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = init(temp_opts(dir.path(), "hpc")).unwrap();
+        assert!(result.generated);
+        assert!(!result.copied_id);
+        assert!(result.public_key.is_file());
+        let text = format_credential_next_steps(&result);
+        assert!(text.contains("ssh-ed25519"));
+        assert!(text.contains("authorized_keys"));
     }
 }

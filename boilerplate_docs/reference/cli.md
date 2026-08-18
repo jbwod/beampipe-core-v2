@@ -32,7 +32,7 @@ beampipe --home ~/beampipe setup --no-start --yes --runtime host --postgres exis
 
 PostgreSQL is the managed Compose service or an existing URL. Both Docker and host runtimes support either selection. Fresh managed databases receive a random password.
 
-Setup can install a deployment profile with `--profile-config` and can assign/import a Slurm SSH slot. Dash remains Docker-only and opt-in (`--dashboard`). `./deploy/setup-docker.sh` is the checkout developer path.
+Setup can install a deployment profile with `--profile-config` and can assign/import a Slurm SSH slot. Dash remains Docker-only and opt-in (`--dashboard`); setup starts it after Core is up. `./deploy/setup-docker.sh` is the checkout developer path.
 
 `beampipe init --directory` writes the pull-only Compose file, project/profile examples, and SSH directories. `start` dispatches to the recorded Docker or host runtime; `serve` remains the low-level foreground API command.
 
@@ -71,18 +71,19 @@ beampipe graph diff --execution "$EXECUTION_ID"
 ## Live checks
 
 ```bash
-beampipe slurm credentials init --slot setonix
-beampipe slurm credentials import --slot setonix \
+beampipe slurm credentials init --slot hpc --host login.example.org
+beampipe slurm credentials copy-id --slot hpc --user USER --host login.example.org
+beampipe slurm credentials import --slot hpc \
   --private-key ~/.ssh/id_ed25519 --known-hosts ~/.ssh/known_hosts --acl
-beampipe slurm credentials sync --slot setonix
-beampipe slurm credentials check --slot setonix
+beampipe slurm credentials sync --slot hpc
+beampipe slurm credentials check --slot hpc
 beampipe doctor --profile PROFILE_NAME
 beampipe slurm ping --profile PROFILE_NAME
 beampipe daliuge ping --profile PROFILE_NAME
 beampipe scheduler status --profile PROFILE_NAME
 ```
 
-Credential commands resolve the active installation's canonical root. They never accept a passphrase on the command line; use a TTY prompt or `--passphrase-file`. `sync` checks the recorded read-only Docker bind and live container readability without copying key material.
+Credential commands resolve the active installation's canonical root. `--slot` is a directory name, not a hostname. `init` generates a key; `import` copies an existing key; neither logs you in until the public key is in the login node's `authorized_keys` (skip that upload when importing a key the cluster already has). They never accept a passphrase on the command line; use a TTY prompt or `--passphrase-file`. `sync` checks the recorded read-only Docker bind and live container readability without copying key material.
 
 After reassigning every profile that references a slot, remove it explicitly with `beampipe slurm credentials remove --slot SLOT --yes`.
 

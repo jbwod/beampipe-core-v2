@@ -99,8 +99,9 @@ Do not apply it blindly. Pin the DALiuGE and WALLABY package versions and docume
 === "Slurm"
 
     ```bash
-    beampipe slurm credentials init --slot setonix --acl
-    beampipe profile add -f config/deployment_profile.slurm-remote.json
+    beampipe slurm credentials init --slot hpc --host login.example.org --acl
+    beampipe slurm credentials copy-id --slot hpc --user USER --host login.example.org
+    beampipe profile add -f config/deployment_profile.slurm-remote.json --ssh-slot hpc
     beampipe security check
     beampipe doctor --profile slurm-remote
     beampipe slurm ping --profile slurm-remote
