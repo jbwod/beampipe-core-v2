@@ -2,20 +2,6 @@
 
 Project config is immutable, dynamically loaded survey policy. It defines source identity, TAP queries, metadata preparation, manifests, graph preparation, and scheduler automation. No project query is hardcoded in the Rust worker.
 
-## Data flow
-
-<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Project YAML drives query rendering metadata normalization manifest generation graph patches and automation">
-  <div class="bp-flow-node" data-tone="cyan"><span>YAML</span><strong>identity + queries</strong><small>survey policy</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>TAP</span><strong>rows</strong><small>CASDA + VizieR</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>PREPARE</span><strong>metadata</strong><small>map + flag + sign</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>BUILD</span><strong>manifest + graph</strong><small>immutable artifacts</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>POLICY</span><strong>automation</strong><small>admit + execute</small></div>
-</div>
-
 ## Start from an example
 
 - `config/wallaby_hires.v2.yaml`: production-shaped WALLABY discovery and Slurm automation.

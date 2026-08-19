@@ -2,20 +2,6 @@
 
 Graph preparation combines a generated manifest with a logical DALiuGE graph, applies deterministic patches, and stores checksummed source and patched artifacts before translation.
 
-## Preparation path
-
-<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Manifest and logical graph combine in a validated patch step before translation">
-  <div class="bp-flow-node" data-tone="cyan"><span>INPUT</span><strong>manifest</strong><small>project-shaped JSON</small></div>
-  <span class="bp-flow-link" aria-hidden="true">+</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>INPUT</span><strong>logical graph</strong><small>URL or path</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>VALIDATE</span><strong>patch</strong><small>match + evaluate + set</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>ARTIFACT</span><strong>patched graph</strong><small>diff + SHA-256</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>EXTERNAL</span><strong>TM</strong><small>translate later</small></div>
-</div>
-
 ## Patch a node
 
 ```yaml

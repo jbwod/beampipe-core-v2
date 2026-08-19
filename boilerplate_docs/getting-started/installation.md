@@ -149,13 +149,3 @@ beampipe doctor
 ```
 
 There is no implicit reset. Back up PostgreSQL before `beampipe uninstall` or before deleting a Compose volume.
-
-## Configuration and production checks
-
-```bash
-beampipe config explain
-BEAMPIPE_ENV=production beampipe security check
-beampipe doctor --json
-```
-
-Settings resolve from defaults, `beampipe.yaml`, the installation `.env`, then process environment. Secret values are redacted by diagnostics. Production credentials should use mounted files or external secret injection rather than project/profile documents.

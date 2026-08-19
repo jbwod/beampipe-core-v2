@@ -2,18 +2,6 @@
 
 Use metrics to find the affected subsystem, then use execution/source events and immutable artifacts to explain one run. Logs alone are not the ledger.
 
-## Signal path
-
-<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="API and workers expose metrics to Prometheus while PostgreSQL provides per-execution evidence">
-  <div class="bp-flow-node" data-tone="cyan"><span>TRAFFIC</span><strong>API</strong><small>requests + latency</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>SCRAPE</span><strong>Prometheus</strong><small>time series + alerts</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>VIEW</span><strong>Grafana</strong><small>operator overview</small></div>
-  <span class="bp-flow-link" aria-hidden="true">+</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>FORENSICS</span><strong>events</strong><small>ledger + artifacts</small></div>
-</div>
-
 Grafana is not currently included in Compose and no dashboard JSON is tracked in this repository. Connect an external Grafana to Prometheus at `http://prometheus:9090`. A useful overview should put API traffic first, followed by queue health, workers, dependencies, discovery, and executions.
 
 ## Endpoints

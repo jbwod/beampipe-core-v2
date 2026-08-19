@@ -5,35 +5,6 @@ hide:
 
 # Operator handbook
 
-Operate from durable state outward: PostgreSQL first, then worker ownership, then the scheduler or DALiuGE observation. Never infer external success from a control-plane status alone.
-
-## Start a shift
-
-```bash
-beampipe doctor
-beampipe status
-beampipe worker list
-beampipe console
-```
-
-For a live profile, add:
-
-```bash
-beampipe doctor --profile PROFILE
-beampipe scheduler status --profile PROFILE
-beampipe daliuge inspect --profile PROFILE
-```
-
-<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Operator inspection order from readiness through durable state to external systems">
-  <div class="bp-flow-node" data-tone="cyan"><span>01</span><strong>readiness</strong><small>process + dependencies</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>02</span><strong>ledger</strong><small>intent + exact axes</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>03</span><strong>worker</strong><small>claim + heartbeat</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>04</span><strong>external</strong><small>Slurm + DALiuGE</small></div>
-</div>
-
 ## Process roles
 
 | Role | Command | Scale rule |
