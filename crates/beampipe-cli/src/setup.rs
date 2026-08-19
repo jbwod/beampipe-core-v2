@@ -711,16 +711,16 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         prepared_profile.as_ref(),
         &use_real_backends,
     );
-    offer_next_actions(
-        &opts,
-        &root,
-        &env_path,
+    offer_next_actions(&mut NextActions {
+        opts: &opts,
+        root: &root,
+        env_path: &env_path,
         runtime,
-        opts.start,
-        pool.as_ref(),
-        &mut prepared_profile,
-        &mut use_real_backends,
-    )
+        started: opts.start,
+        pool: pool.as_ref(),
+        prepared_profile: &mut prepared_profile,
+        use_real_backends: &mut use_real_backends,
+    })
     .await?;
     print_access_summary(&root, runtime, host_ports, opts.start, dash_dir.as_deref());
     Ok(())
@@ -2360,18 +2360,20 @@ fn next_actions_should_prompt(opts: &SetupOptions) -> bool {
     !opts.yes && stdin_is_tty()
 }
 
-async fn offer_next_actions(
-    opts: &SetupOptions,
-    root: &Path,
-    env_path: &Path,
+struct NextActions<'a> {
+    opts: &'a SetupOptions,
+    root: &'a Path,
+    env_path: &'a Path,
     runtime: RuntimeKind,
     started: bool,
-    pool: Option<&PgPool>,
-    prepared_profile: &mut Option<DeploymentProfile>,
-    use_real_backends: &mut String,
-) -> Result<()> {
-    if !next_actions_should_prompt(opts) {
-        print_next_action_recipe(root, use_real_backends == "true");
+    pool: Option<&'a PgPool>,
+    prepared_profile: &'a mut Option<DeploymentProfile>,
+    use_real_backends: &'a mut String,
+}
+
+async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
+    if !next_actions_should_prompt(ctx.opts) {
+        print_next_action_recipe(ctx.root, ctx.use_real_backends.as_str() == "true");
         return Ok(());
     }
 
@@ -2382,7 +2384,7 @@ async fn offer_next_actions(
         println!("Next actions");
     }
     print_hint("Mock submissions finish immediately and never create a DIM session.");
-    print_hint(&format!("BEAMPIPE_USE_REAL_BACKENDS={use_real_backends}"));
+    print_hint(&format!("BEAMPIPE_USE_REAL_BACKENDS={}", ctx.use_real_backends));
     print_hint("Enable live backends only after `beampipe doctor --profile NAME` passes.");
 
     let items = next_action_choices();
@@ -2391,48 +2393,55 @@ async fn offer_next_actions(
         match choice {
             0 => {
                 if let Err(error) = enable_live_backends(
-                    root,
-                    env_path,
-                    runtime,
-                    started,
-                    prepared_profile.as_ref(),
-                    use_real_backends,
+                    ctx.root,
+                    ctx.env_path,
+                    ctx.runtime,
+                    ctx.started,
+                    ctx.prepared_profile.as_ref(),
+                    ctx.use_real_backends,
                 ) {
                     print_hint(&error.to_string());
                 }
             }
-            1 => match prompt_profile_file(opts, root, runtime) {
+            1 => match prompt_profile_file(ctx.opts, ctx.root, ctx.runtime) {
                 Ok(Some((_, profile))) => {
-                    if let Err(error) = install_prepared_profile(pool, &profile).await {
+                    if let Err(error) = install_prepared_profile(ctx.pool, &profile).await {
                         print_hint(&error.to_string());
                     }
-                    *prepared_profile = Some(profile);
+                    *ctx.prepared_profile = Some(profile);
                 }
                 Ok(None) => {}
                 Err(error) => print_hint(&error.to_string()),
             },
             2 => {
-                if let Err(error) =
-                    next_action_slurm_credentials(opts, runtime, prepared_profile.as_mut())
-                {
+                if let Err(error) = next_action_slurm_credentials(
+                    ctx.opts,
+                    ctx.runtime,
+                    ctx.prepared_profile.as_mut(),
+                ) {
                     print_hint(&error.to_string());
                     continue;
                 }
-                if let Some(profile) = prepared_profile.as_ref() {
-                    if let Err(error) = install_prepared_profile(pool, profile).await {
+                if let Some(profile) = ctx.prepared_profile.as_ref() {
+                    if let Err(error) = install_prepared_profile(ctx.pool, profile).await {
                         print_hint(&error.to_string());
                     }
                 }
             }
             3 => {
-                if let Err(error) = next_action_casda_credentials(root, env_path, runtime, started)
-                {
+                if let Err(error) = next_action_casda_credentials(
+                    ctx.root,
+                    ctx.env_path,
+                    ctx.runtime,
+                    ctx.started,
+                ) {
                     print_hint(&error.to_string());
                 }
             }
             4 => {
                 if let Err(error) =
-                    next_action_doctor_profile(root, pool, prepared_profile.as_ref()).await
+                    next_action_doctor_profile(ctx.root, ctx.pool, ctx.prepared_profile.as_ref())
+                        .await
                 {
                     print_hint(&error.to_string());
                 }
