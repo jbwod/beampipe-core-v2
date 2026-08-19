@@ -722,13 +722,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         &mut use_real_backends,
     )
     .await?;
-    print_access_summary(
-        &root,
-        runtime,
-        host_ports,
-        opts.start,
-        dash_dir.as_deref(),
-    );
+    print_access_summary(&root, runtime, host_ports, opts.start, dash_dir.as_deref());
     Ok(())
 }
 
@@ -2336,13 +2330,12 @@ fn next_action_recipe_lines(root: &Path, live_already: bool) -> Vec<String> {
         lines.push("  Live backends are on (BEAMPIPE_USE_REAL_BACKENDS=true).".into());
     } else {
         lines.push("  Enable live TM/DIM or Slurm only after doctor --profile passes:".into());
-        lines.push(format!("    set BEAMPIPE_USE_REAL_BACKENDS=true in {home}/.env"));
+        lines.push(format!(
+            "    set BEAMPIPE_USE_REAL_BACKENDS=true in {home}/.env"
+        ));
         lines.push("    beampipe restart".into());
     }
-    lines.push(format!(
-        "  beampipe profile add -f {}",
-        dlg.display()
-    ));
+    lines.push(format!("  beampipe profile add -f {}", dlg.display()));
     lines.push("  beampipe doctor --profile dlg-dim".into());
     lines.push("  beampipe slurm credentials init --slot hpc --host LOGIN_NODE".into());
     lines.push(format!(
@@ -2389,9 +2382,7 @@ async fn offer_next_actions(
         println!("Next actions");
     }
     print_hint("Mock submissions finish immediately and never create a DIM session.");
-    print_hint(&format!(
-        "BEAMPIPE_USE_REAL_BACKENDS={use_real_backends}"
-    ));
+    print_hint(&format!("BEAMPIPE_USE_REAL_BACKENDS={use_real_backends}"));
     print_hint("Enable live backends only after `beampipe doctor --profile NAME` passes.");
 
     let items = next_action_choices();
@@ -2434,8 +2425,7 @@ async fn offer_next_actions(
                 }
             }
             3 => {
-                if let Err(error) =
-                    next_action_casda_credentials(root, env_path, runtime, started)
+                if let Err(error) = next_action_casda_credentials(root, env_path, runtime, started)
                 {
                     print_hint(&error.to_string());
                 }
@@ -2618,12 +2608,7 @@ fn env_file_encode(value: &str) -> Result<String> {
     Ok(format!("\"{value}\""))
 }
 
-fn apply_casda_process_env(
-    runtime: RuntimeKind,
-    username: &str,
-    password: &str,
-    file_path: &Path,
-) {
+fn apply_casda_process_env(runtime: RuntimeKind, username: &str, password: &str, file_path: &Path) {
     std::env::set_var("CASDA_USERNAME", username);
     match runtime {
         RuntimeKind::Docker => {
@@ -2653,8 +2638,7 @@ fn write_casda_credentials(
     }
     let file_path = casda_password_file_path(root);
     if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(&file_path, format!("{password}\n"))
         .with_context(|| format!("write {}", file_path.display()))?;
@@ -2773,8 +2757,14 @@ async fn next_action_doctor_profile(
     }
     let settings = Settings::load()?.settings;
     let context = installation::InstallationContext::from_home(root.to_path_buf())?;
-    let report =
-        doctor::run_doctor(pool, &settings, Some(name.trim()), Vec::new(), Some(&context)).await;
+    let report = doctor::run_doctor(
+        pool,
+        &settings,
+        Some(name.trim()),
+        Vec::new(),
+        Some(&context),
+    )
+    .await;
     doctor::print_human(&report);
     Ok(())
 }
@@ -3044,10 +3034,7 @@ mod tests {
             resolve_use_real_backends(false, Some("0"), Some("true")),
             "false"
         );
-        assert_eq!(
-            resolve_use_real_backends(false, None, Some("yes")),
-            "true"
-        );
+        assert_eq!(resolve_use_real_backends(false, None, Some("yes")), "true");
         assert_eq!(resolve_use_real_backends(false, None, None), "false");
         assert_eq!(
             resolve_use_real_backends(false, Some("maybe"), Some("no")),
@@ -3127,10 +3114,7 @@ mod tests {
         let env = std::fs::read_to_string(&env_path).unwrap();
         assert!(env.contains("CASDA_USERNAME=casda.user@example.test\n"));
         assert!(env.contains("CASDA_PASSWORD=\n"));
-        assert!(env.contains(&format!(
-            "CASDA_PASSWORD_FILE={}\n",
-            file_path.display()
-        )));
+        assert!(env.contains(&format!("CASDA_PASSWORD_FILE={}\n", file_path.display())));
         assert!(!env.contains("old-inline-password"));
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
