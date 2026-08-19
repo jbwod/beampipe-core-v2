@@ -44,4 +44,9 @@ The container user is uid `10001`. `--acl` grants that uid read access on the
 setfacl -m u:10001:r credentials/hpc/private_key credentials/hpc/passphrase
 ```
 
+After `--acl`, `ls -l` often shows `0640` because the group bits are the POSIX
+ACL mask, not group access. Leave that in place; `chmod 0600` afterward zeros
+the mask and hides the container ACL. Beampipe accepts the mask when the
+owning group and other still have no read or write.
+
 Do not commit `private_key`, `passphrase`, or live `known_hosts` files.
