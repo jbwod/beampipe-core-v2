@@ -3,7 +3,7 @@ use crate::daliuge::{
     DaliugeManager, DaliugeManagerInfo, DaliugeSessionObservation, DaliugeSessionSummary,
     DaliugeTranslator, DaliugeTranslatorInfo,
 };
-use crate::dim::get_roots;
+use crate::dim::{get_roots, prepare_physical_graph};
 use crate::http_client::{build_http_client, HttpClientOptions};
 use crate::slurm_deploy::{resolve_remote_user, submit_slurm_session, SlurmSubmitParams};
 use crate::slurm_ssh::{query_slurm_states_batch, SlurmSshSession, SlurmTarget};
@@ -156,7 +156,7 @@ impl HttpTranslatorClient {
         let pg_spec: Value =
             checked_json(response, DaliugeComponent::Translator, "map", &endpoint).await?;
         let spec_vec = match pg_spec {
-            Value::Array(items) => items,
+            Value::Array(items) => prepare_physical_graph(items),
             _ => {
                 return Err(DaliugeClientError::invalid_response(
                     DaliugeComponent::Translator,
@@ -303,11 +303,12 @@ impl DimClient for HttpDimClient {
         )
         .await?;
 
+        let pg_spec = prepare_physical_graph(pg_spec.to_vec());
         let append_endpoint = format!("{}/api/sessions/{sid}/graph/append", self.base_url);
         let response = self
             .client
             .post(&append_endpoint)
-            .json(pg_spec)
+            .json(&pg_spec)
             .timeout(Duration::from_secs(DIM_TIMEOUT_APPEND_SECS))
             .send()
             .await

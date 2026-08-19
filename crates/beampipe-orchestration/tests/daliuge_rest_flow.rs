@@ -28,7 +28,9 @@ async fn rest_translate_and_deploy_against_mock_tm_dim() {
         .and(path("/map"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
             "oid": "root_app",
+            "iid": "0",
             "categoryType": "Application",
+            "dropclass": "dlg.apps.pyfunc.PyFuncApp",
             "outputs": [],
         }])))
         .mount(&tm)
@@ -77,6 +79,9 @@ async fn rest_translate_and_deploy_against_mock_tm_dim() {
     let translated = translator.translate(graph, &config).await.unwrap();
     assert!(!translated.pg_spec.is_empty());
     assert_eq!(get_roots(&translated.pg_spec), vec!["root_app".to_string()]);
+    assert_eq!(translated.pg_spec[0]["type"], "app");
+    assert_eq!(translated.pg_spec[0]["app"], "dlg.apps.pyfunc.PyFuncApp");
+    assert_eq!(translated.pg_spec[0]["humanReadableKey"], "1_0");
 
     let dim_client = HttpDimClient::new(dim.uri());
     dim_client
