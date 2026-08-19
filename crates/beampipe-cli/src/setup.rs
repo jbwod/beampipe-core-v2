@@ -2384,7 +2384,10 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
         println!("Next actions");
     }
     print_hint("Mock submissions finish immediately and never create a DIM session.");
-    print_hint(&format!("BEAMPIPE_USE_REAL_BACKENDS={}", ctx.use_real_backends));
+    print_hint(&format!(
+        "BEAMPIPE_USE_REAL_BACKENDS={}",
+        ctx.use_real_backends
+    ));
     print_hint("Enable live backends only after `beampipe doctor --profile NAME` passes.");
 
     let items = next_action_choices();
@@ -2429,12 +2432,9 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
                 }
             }
             3 => {
-                if let Err(error) = next_action_casda_credentials(
-                    ctx.root,
-                    ctx.env_path,
-                    ctx.runtime,
-                    ctx.started,
-                ) {
+                if let Err(error) =
+                    next_action_casda_credentials(ctx.root, ctx.env_path, ctx.runtime, ctx.started)
+                {
                     print_hint(&error.to_string());
                 }
             }
