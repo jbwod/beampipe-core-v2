@@ -14,8 +14,8 @@ pub mod wasm;
 
 pub use expressions::evaluate_expression;
 pub use transforms::{
-    apply_field_transform, apply_transform_spec, build_template_context, validate_transform_refs,
-    TransformRegistry,
+    apply_field_transform, apply_transform_spec, build_template_context, select_eval_file_row,
+    validate_transform_refs, TransformRegistry,
 };
 pub use wasm::{shared_host, HookKind, WasmHost, WasmHostError};
 

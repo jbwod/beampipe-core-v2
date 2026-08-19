@@ -445,51 +445,58 @@ pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<ValidationDiagnost
 }
 
 fn select_eval_file_by_size(value: &Value) -> Option<Value> {
+    let row = select_eval_file_row(value)?;
+    row.get("filename")
+        .cloned()
+        .or_else(|| row.get("file_name").cloned())
+        .or_else(|| value_string(row.get("filename")).map(Value::String))
+        .or_else(|| value_string(row.get("file_name")).map(Value::String))
+}
+
+/// Pick the largest CASDA evaluation-file row by `filesize` (or `access_estsize`).
+pub fn select_eval_file_row(value: &Value) -> Option<Map<String, Value>> {
     if let Some(obj) = value.as_object() {
-        if obj.contains_key("filename") {
-            return Some(Value::String(
-                obj.get("filename")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            ));
+        if obj.contains_key("filename") || obj.contains_key("file_name") {
+            return Some(obj.clone());
         }
     }
     let rows = value.as_array()?;
     let mut best: Option<(i64, &Map<String, Value>)> = None;
-    let has_calibration = rows.iter().any(|r| {
-        r.get("format")
-            .and_then(Value::as_str)
-            .is_some_and(|f| f.eq_ignore_ascii_case("calibration"))
-    });
     for row in rows {
         let Some(obj) = row.as_object() else {
             continue;
         };
-        let format = obj
-            .get("format")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if has_calibration && format != "calibration" {
-            continue;
-        }
-        let size = obj
-            .get("filesize")
-            .and_then(|v| {
-                v.as_i64()
-                    .or_else(|| value_string(Some(v)).and_then(|s| s.parse().ok()))
-            })
-            .unwrap_or(0);
-        if best.map(|(s, _)| size > s).unwrap_or(true) {
+        let size = row_byte_size(obj);
+        if best.map(|(best_size, _)| size > best_size).unwrap_or(true) {
             best = Some((size, obj));
         }
     }
-    best.and_then(|(_, obj)| {
-        obj.get("filename")
-            .cloned()
-            .or_else(|| value_string(obj.get("filename")).map(Value::String))
-    })
+    best.map(|(_, obj)| obj.clone())
+}
+
+fn row_byte_size(obj: &Map<String, Value>) -> i64 {
+    const KEYS: [&str; 4] = ["filesize", "file_size", "access_estsize", "size"];
+    for key in KEYS {
+        if let Some(value) = obj.get(key).or_else(|| obj.get(&key.to_ascii_uppercase())) {
+            if let Some(size) = json_byte_size(value) {
+                return size;
+            }
+        }
+    }
+    0
+}
+
+fn json_byte_size(value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    if let Some(n) = value.as_u64() {
+        return Some(i64::try_from(n).unwrap_or(i64::MAX));
+    }
+    if let Some(n) = value.as_f64() {
+        return Some(n as i64);
+    }
+    value_string(Some(value))?.parse().ok()
 }
 
 pub fn value_string(value: Option<&Value>) -> Option<String> {
@@ -714,6 +721,16 @@ mod tests {
                 &json!([{"filename": "small", "filesize": 1}, {"filename": "large", "filesize": 2}])
             ),
             Some(json!("large"))
+        );
+        assert_eq!(
+            apply_transform_spec(
+                &spec(TransformKind::SelectEvalFileBySize),
+                &json!([
+                    {"filename": "cal.fits", "format": "calibration", "filesize": 10},
+                    {"filename": "beam.fits", "format": "fits", "filesize": 999}
+                ])
+            ),
+            Some(json!("beam.fits"))
         );
         let mut regex = spec(TransformKind::RegexExtract);
         regex.pattern = Some("SB([0-9]+)".into());

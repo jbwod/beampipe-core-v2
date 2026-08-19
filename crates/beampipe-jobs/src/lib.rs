@@ -37,8 +37,8 @@ use beampipe_profiles::{
     DeploymentConfig, RestRemoteDeploymentConfig, SlurmRemoteDeploymentConfig,
 };
 use beampipe_project::{
-    apply_field_transform, build_template_context, ExecutionAutomationConfig, HookKind,
-    ProjectConfig, TransformRegistry, WasmHost,
+    apply_field_transform, build_template_context, select_eval_file_row, ExecutionAutomationConfig,
+    HookKind, ProjectConfig, TransformRegistry, WasmHost,
 };
 use chrono::Utc;
 use serde_json::{json, Map, Value};
@@ -1117,8 +1117,8 @@ impl ConfigDiscoveryRunner {
                     .await
                 {
                     Ok(rows) => {
-                        if let Some(first) = rows.first() {
-                            by_sbid.insert(sbid.clone(), Value::Object(first.clone()));
+                        if let Some(row) = sbid_enrichment_row(&query.name, &rows) {
+                            by_sbid.insert(sbid.clone(), Value::Object(row));
                         }
                     }
                     Err(err) => {
@@ -1838,6 +1838,16 @@ fn flatten_eval_enrichment(out: &mut Map<String, Value>) {
     {
         out.entry("evaluation_file".to_string()).or_insert(filename);
     }
+}
+
+fn sbid_enrichment_row(query_name: &str, rows: &[TapRow]) -> Option<TapRow> {
+    if query_name == "sbid_to_eval_file" {
+        let as_value = Value::Array(rows.iter().cloned().map(Value::Object).collect());
+        if let Some(best) = select_eval_file_row(&as_value) {
+            return Some(best);
+        }
+    }
+    rows.first().cloned()
 }
 
 fn insert_flag_from_row(
@@ -4903,7 +4913,20 @@ mod tests {
         );
         casda.insert_rows(
             "observation_evaluation_file",
-            vec![json!({"sbid": "123", "access_url": "https://x"})],
+            vec![
+                json!({
+                    "sbid": "123",
+                    "filename": "small.fits",
+                    "filesize": 10,
+                    "access_url": "https://x/small"
+                }),
+                json!({
+                    "sbid": "123",
+                    "filename": "beam.fits",
+                    "filesize": 9999,
+                    "access_url": "https://x/beam"
+                }),
+            ],
         );
         let vizier = MockTapClient::with_rows(
             "VIII/73/hicat",
@@ -4926,6 +4949,8 @@ mod tests {
             } => {
                 assert_eq!(metadata[0]["sbid"], "123");
                 assert_eq!(metadata[0]["dataset_id"], "HIPASSJ1.ms");
+                assert_eq!(metadata[0]["evaluation_file"], "beam.fits");
+                assert_eq!(metadata[0]["evaluation_file_access_url"], "https://x/beam");
                 assert_eq!(discovery_flags["ra_dec_vsys_complete"], true);
             }
             other => panic!("unexpected result: {other:?}"),

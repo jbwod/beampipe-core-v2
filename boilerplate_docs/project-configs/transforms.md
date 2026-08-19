@@ -50,7 +50,7 @@ For `HIPASSJ1313-15`, `{source_name}` becomes `J1313-15`. For `ASKAP-72962`, `sb
 | `split_last` | `separators` | extract a final path/DID segment |
 | `is_present` | none | turn non-empty enrichment data into a flag |
 | `regex_extract` | `pattern`, optional `group` | parse structured filenames |
-| `select_eval_file_by_size` | none | choose a CASDA evaluation-file row |
+| `select_eval_file_by_size` | none | choose the largest CASDA evaluation-file row by `filesize` |
 
 ## Where they run
 
