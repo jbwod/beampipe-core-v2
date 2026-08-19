@@ -350,10 +350,7 @@ fn private_key_mode_too_open(path: &Path, mode: u32) -> bool {
     if mode & 0o070 == 0 {
         return false;
     }
-    match linux_posix_acl_access(path) {
-        Some(acl) if !posix_acl_grants_group_or_other(&acl) => false,
-        _ => true,
-    }
+    linux_posix_acl_access(path).is_none_or(|acl| posix_acl_grants_group_or_other(&acl))
 }
 
 #[cfg(not(unix))]
