@@ -115,7 +115,31 @@ async fn hello_universe_translates_deploys_and_finishes() {
             .is_some_and(|drops| !drops.is_empty()),
         "Translator Manager must return a non-empty physical graph"
     );
+    let mapped = submitted
+        .physical_graph
+        .as_ref()
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap();
+    assert_dim_ui_fields(&mapped, "translator physical graph");
     println!("deployed DALiuGE session {session_id}");
+
+    let stored: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/api/sessions/{}/graph",
+            dim_url.trim_end_matches('/'),
+            session_id
+        ))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("GET DIM graph for {session_id}: {error}"))
+        .json()
+        .await
+        .expect("parse DIM graph");
+    assert_dim_ui_fields(
+        &drop_list_from_dim_graph(stored),
+        &format!("DIM stored {session_id}"),
+    );
 
     let mut terminal = None;
     for round in 1..=120 {
