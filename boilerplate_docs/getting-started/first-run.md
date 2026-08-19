@@ -102,4 +102,4 @@ curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 
 ## Next boundary
 
-To submit real work, replace the local mock profile with a validated `rest_remote` or `slurm_remote` profile, run `beampipe doctor --profile NAME`, then enable `BEAMPIPE_USE_REAL_BACKENDS=true`. Follow [Deployment profiles and SSH](../architecture/deployment-profiles.md); do not reuse a mock profile for live submission.
+Interactive setup already offers these as Next actions. To submit real work later, install a validated `rest_remote` or `slurm_remote` profile, set CASDA credentials for staging, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Follow [Deployment profiles and SSH](../architecture/deployment-profiles.md); do not reuse a mock profile for live submission.

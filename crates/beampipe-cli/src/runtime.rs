@@ -31,6 +31,56 @@ pub struct DockerStatus {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoleCounts {
+    pub api: usize,
+    pub scheduler: usize,
+    pub worker: usize,
+}
+
+pub fn running_role_counts(context: &InstallationContext) -> RoleCounts {
+    match status(context).docker {
+        Some(docker) if docker.available && docker.error.is_none() => {
+            running_role_counts_from_services(&docker.services)
+        }
+        _ => RoleCounts::default(),
+    }
+}
+
+pub fn running_role_counts_from_services(services: &Value) -> RoleCounts {
+    let mut counts = RoleCounts::default();
+    let Some(entries) = services.as_array() else {
+        return counts;
+    };
+    for entry in entries {
+        if !compose_entry_is_running(entry) {
+            continue;
+        }
+        match compose_entry_service(entry) {
+            Some("api") => counts.api += 1,
+            Some("scheduler") => counts.scheduler += 1,
+            Some("worker") => counts.worker += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+fn compose_entry_service(entry: &Value) -> Option<&str> {
+    entry
+        .get("Service")
+        .or_else(|| entry.get("service"))
+        .and_then(Value::as_str)
+}
+
+fn compose_entry_is_running(entry: &Value) -> bool {
+    entry
+        .get("State")
+        .or_else(|| entry.get("state"))
+        .and_then(Value::as_str)
+        .is_some_and(|state| state.eq_ignore_ascii_case("running"))
+}
+
 pub fn start(context: &InstallationContext) -> Result<()> {
     require_runtime(context, RuntimeMode::Docker)?;
     let mut services = Vec::with_capacity(4);
@@ -369,6 +419,30 @@ mod tests {
     fn compose_ps_parser_accepts_json_lines() {
         let value = parse_compose_ps(b"{\"Service\":\"api\"}\n{\"Service\":\"worker\"}\n");
         assert_eq!(value.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn running_role_counts_ignore_stopped_and_other_services() {
+        let services = serde_json::json!([
+            {"Service": "api", "State": "running"},
+            {"Service": "api", "State": "running"},
+            {"Service": "scheduler", "State": "running"},
+            {"Service": "worker", "State": "exited"},
+            {"Service": "worker", "State": "running"},
+            {"Service": "postgres", "State": "running"}
+        ]);
+        assert_eq!(
+            running_role_counts_from_services(&services),
+            RoleCounts {
+                api: 2,
+                scheduler: 1,
+                worker: 1
+            }
+        );
+        assert_eq!(
+            running_role_counts_from_services(&serde_json::json!([])),
+            RoleCounts::default()
+        );
     }
 
     #[test]

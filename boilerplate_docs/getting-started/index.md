@@ -35,11 +35,13 @@ beampipe start
 beampipe uninstall
 ```
 
-External execution remains disabled until a typed deployment profile is installed and checked:
+External execution remains disabled until a typed deployment profile is installed and checked. Interactive `install.sh` / `beampipe setup` prompts those Next actions after the stack is up. With `--yes`, do them afterwards:
 
 ```bash
 beampipe profile add -f "$HOME/beampipe/config/deployment_profile.dlg-dim.json"
 beampipe doctor --profile dlg-dim
+# set CASDA credentials for staging (Next actions, or CASDA_USERNAME in ~/beampipe/.env)
+# then set BEAMPIPE_USE_REAL_BACKENDS=true in ~/beampipe/.env and run beampipe restart
 ```
 
 Continue with:

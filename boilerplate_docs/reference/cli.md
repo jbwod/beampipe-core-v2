@@ -22,7 +22,7 @@ Prefer the installer (no clone):
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-`beampipe setup` writes the selected installation (`--home`, then `BEAMPIPE_HOME`, then `~/beampipe`) and starts the configured runtime. Current working directory never selects an installation. `--yes` requires `--runtime docker` or `--runtime host`. `--no-start` writes files and prints a recipe only. Existing secrets and data are preserved on rerun. Host publish ports default to API `18080`, PostgreSQL `5432`, and metrics `9090`; override with `--api-port`, `--postgres-port`, and `--metrics-port`.
+`beampipe setup` writes the selected installation (`--home`, then `BEAMPIPE_HOME`, then `~/beampipe`) and starts the configured runtime. Current working directory never selects an installation. `--yes` requires `--runtime docker` or `--runtime host`. `--no-start` writes files and prints a recipe only. Existing secrets and data are preserved on rerun. Host publish ports default to API `18080`, PostgreSQL `5432`, and metrics `9090`; override with `--api-port`, `--postgres-port`, and `--metrics-port`. Interactive setup then prompts Next actions (live backends, a deployment profile, Slurm SSH credentials, CASDA credentials, `doctor --profile`). `--yes` prints that recipe. `--use-real-backends` writes `BEAMPIPE_USE_REAL_BACKENDS=true` during setup.
 
 ```bash
 beampipe --home ~/beampipe setup --yes --runtime docker --postgres compose

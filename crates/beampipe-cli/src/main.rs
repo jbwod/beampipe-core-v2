@@ -137,6 +137,9 @@ enum CliCommand {
         tm_url: Option<String>,
         #[arg(long)]
         worker_pool: Option<String>,
+        /// Write BEAMPIPE_USE_REAL_BACKENDS=true (live TM/DIM or Slurm). Interactive setup also offers this as a Next action.
+        #[arg(long)]
+        use_real_backends: bool,
         #[arg(long)]
         skip_admin: bool,
         #[arg(long)]
@@ -863,6 +866,7 @@ async fn main() -> anyhow::Result<()> {
             casda_tap_url,
             tm_url,
             worker_pool,
+            use_real_backends,
             skip_admin,
             skip_upload,
             runtime,
@@ -920,6 +924,7 @@ async fn main() -> anyhow::Result<()> {
                     directory: directory.or(cli.home),
                     credentials_dir,
                     start: start && !no_start,
+                    use_real_backends,
                 })
                 .await?;
             }

@@ -8,6 +8,7 @@ $BEAMPIPE_HOME/                  default: ~/beampipe
 |-- .env                        private runtime configuration, mode 0600
 |-- docker-compose.yml          version-managed operator bundle
 |-- config/                     project and profile examples
+|-- credentials/casda/password  CASDA staging password, mode 0600
 `-- credentials/ssh/<slot>/     managed SSH credential copies
 ```
 
@@ -32,6 +33,8 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
   | sh -s -- --yes --runtime docker --postgres compose \
       --api-port 18080 --postgres-port 5432 --metrics-port 9090
 ```
+
+`--yes` skips the Next actions prompt and prints the recipe instead: add a REST or Slurm profile, run `beampipe doctor --profile NAME`, set CASDA credentials for staging, then set `BEAMPIPE_USE_REAL_BACKENDS=true` in the install `.env` and `beampipe restart`. Pass `--use-real-backends` only after that profile doctor is known to pass. Interactive setup offers those steps after the stack is up (live backends, profile file, Slurm SSH credentials, CASDA credentials, profile doctor).
 
 Manage it from any directory:
 

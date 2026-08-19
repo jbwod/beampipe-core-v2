@@ -61,6 +61,8 @@ pub struct SetupOptions {
     pub directory: Option<PathBuf>,
     pub credentials_dir: Option<PathBuf>,
     pub start: bool,
+    /// Write `BEAMPIPE_USE_REAL_BACKENDS=true` during setup.
+    pub use_real_backends: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -118,7 +120,7 @@ fn print_setup_logo() {
     println!();
 }
 
-fn print_banner(start: bool) {
+fn print_banner(start: bool, yes: bool) {
     print_setup_logo();
     let title = "Beampipe setup";
     if stdout_is_tty() {
@@ -131,7 +133,13 @@ fn print_banner(start: bool) {
     } else {
         print_hint("Writes files. Does not start Postgres or the stack (--no-start).");
     }
-    print_hint("Deployment profiles are configured later with beampipe profile add.");
+    if yes {
+        print_hint("Non-interactive (--yes): Next actions are printed as a recipe.");
+    } else {
+        print_hint(
+            "After the stack is up, setup prompts Next actions (live backends, profiles, Slurm, CASDA).",
+        );
+    }
 }
 
 fn print_step(n: usize, total: usize, title: &str) {
@@ -186,7 +194,7 @@ fn prompt_choice(label: &str, items: &[ChoiceItem], default_index: usize) -> Res
         if let Some(index) = parse_choice(&line, items, default_index) {
             return Ok(index);
         }
-        print_hint("Enter 1, 2, or the option name.");
+        print_hint("Enter a number or the option name.");
     }
 }
 
@@ -211,6 +219,35 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
                 .filter(|value| !value.trim().is_empty())
         })
         .unwrap_or_else(|| default.to_string())
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn resolve_use_real_backends(
+    flag: bool,
+    process_env: Option<&str>,
+    file_env: Option<&str>,
+) -> &'static str {
+    if flag {
+        return "true";
+    }
+    if let Some(value) = process_env.and_then(parse_env_bool) {
+        return if value { "true" } else { "false" };
+    }
+    if let Some(value) = file_env.and_then(parse_env_bool) {
+        return if value { "true" } else { "false" };
+    }
+    "false"
+}
+
+fn stdin_is_tty() -> bool {
+    io::stdin().is_terminal()
 }
 
 pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
@@ -239,7 +276,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         );
     }
 
-    print_banner(opts.start);
+    print_banner(opts.start, opts.yes);
     preflight_before_materialize(&opts)?;
     std::env::set_current_dir(&root).with_context(|| format!("chdir {}", root.display()))?;
     let env_path = existing_context.environment_file.clone();
@@ -408,11 +445,12 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         "BEAMPIPE_WORKER_POOL",
         DEFAULT_WORKER_POOL,
     );
-    let use_real_backends = std::env::var("BEAMPIPE_USE_REAL_BACKENDS")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "false".into());
+    let mut use_real_backends = resolve_use_real_backends(
+        opts.use_real_backends,
+        std::env::var("BEAMPIPE_USE_REAL_BACKENDS").ok().as_deref(),
+        env_file_value(&env_path, "BEAMPIPE_USE_REAL_BACKENDS").as_deref(),
+    )
+    .to_string();
 
     update_env_file(&env_path, "DATABASE_URL", &database_url)?;
     if let Some(password) = postgres_password.as_deref() {
@@ -546,11 +584,11 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         compose_up_postgres(&root)?;
     }
 
-    let (profile_path, prepared_profile) = match select_and_prepare_profile(&opts, &root, runtime)?
-    {
-        Some((path, profile)) => (Some(path), Some(profile)),
-        None => (None, None),
-    };
+    let (profile_path, mut prepared_profile) =
+        match select_and_prepare_profile(&opts, &root, runtime)? {
+            Some((path, profile)) => (Some(path), Some(profile)),
+            None => (None, None),
+        };
 
     let pool = match beampipe_db::connect(&database_url).await {
         Ok(pool) => Some(pool),
@@ -671,6 +709,25 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         host_ports,
         opts.start,
         prepared_profile.as_ref(),
+        &use_real_backends,
+    );
+    offer_next_actions(
+        &opts,
+        &root,
+        &env_path,
+        runtime,
+        opts.start,
+        pool.as_ref(),
+        &mut prepared_profile,
+        &mut use_real_backends,
+    )
+    .await?;
+    print_access_summary(
+        &root,
+        runtime,
+        host_ports,
+        opts.start,
+        dash_dir.as_deref(),
     );
     Ok(())
 }
@@ -2057,6 +2114,14 @@ fn select_and_prepare_profile(
     if opts.yes || !prompt_yes_no("Configure a deployment profile now?", false)? {
         return Ok(None);
     }
+    prompt_profile_file(opts, root, runtime)
+}
+
+fn prompt_profile_file(
+    opts: &SetupOptions,
+    root: &Path,
+    runtime: RuntimeKind,
+) -> Result<Option<(PathBuf, DeploymentProfile)>> {
     let default = root.join("config/deployment_profile.dlg-dim.json");
     let default_display = default.display().to_string();
     loop {
@@ -2223,6 +2288,497 @@ fn display_repo_path(root: &Path, path: &Path) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
+fn next_action_choices() -> [ChoiceItem; 6] {
+    [
+        ChoiceItem {
+            key: "live",
+            label: "Enable live backends",
+            hint: "BEAMPIPE_USE_REAL_BACKENDS=true after doctor --profile",
+        },
+        ChoiceItem {
+            key: "profile",
+            label: "Add a deployment profile",
+            hint: "REST DIM or Slurm JSON from the install config dir",
+        },
+        ChoiceItem {
+            key: "slurm",
+            label: "Set up Slurm SSH credentials",
+            hint: "generate or import a managed key slot",
+        },
+        ChoiceItem {
+            key: "casda",
+            label: "Set CASDA credentials",
+            hint: "username and password for staging downloads",
+        },
+        ChoiceItem {
+            key: "doctor",
+            label: "Run doctor for a profile",
+            hint: "beampipe doctor --profile NAME",
+        },
+        ChoiceItem {
+            key: "done",
+            label: "Done",
+            hint: "finish setup",
+        },
+    ]
+}
+
+fn next_action_recipe_lines(root: &Path, live_already: bool) -> Vec<String> {
+    let home = root.display();
+    let dlg = root.join("config/deployment_profile.dlg-dim.json");
+    let slurm = root.join("config/deployment_profile.slurm-remote.json");
+    let mut lines = vec![
+        String::new(),
+        "Next actions".into(),
+        "  Mock submissions finish immediately and never create a DIM session.".into(),
+    ];
+    if live_already {
+        lines.push("  Live backends are on (BEAMPIPE_USE_REAL_BACKENDS=true).".into());
+    } else {
+        lines.push("  Enable live TM/DIM or Slurm only after doctor --profile passes:".into());
+        lines.push(format!("    set BEAMPIPE_USE_REAL_BACKENDS=true in {home}/.env"));
+        lines.push("    beampipe restart".into());
+    }
+    lines.push(format!(
+        "  beampipe profile add -f {}",
+        dlg.display()
+    ));
+    lines.push("  beampipe doctor --profile dlg-dim".into());
+    lines.push("  beampipe slurm credentials init --slot hpc --host LOGIN_NODE".into());
+    lines.push(format!(
+        "  beampipe profile add -f {} --ssh-slot hpc",
+        slurm.display()
+    ));
+    lines.push("  beampipe doctor --profile slurm-remote".into());
+    lines.push(format!(
+        "  set CASDA_USERNAME in {home}/.env (Docker: CASDA_PASSWORD; host: CASDA_PASSWORD_FILE={home}/credentials/casda/password)"
+    ));
+    lines.push("  beampipe restart".into());
+    lines
+}
+
+fn print_next_action_recipe(root: &Path, live_already: bool) {
+    for line in next_action_recipe_lines(root, live_already) {
+        println!("{line}");
+    }
+}
+
+fn next_actions_should_prompt(opts: &SetupOptions) -> bool {
+    !opts.yes && stdin_is_tty()
+}
+
+async fn offer_next_actions(
+    opts: &SetupOptions,
+    root: &Path,
+    env_path: &Path,
+    runtime: RuntimeKind,
+    started: bool,
+    pool: Option<&PgPool>,
+    prepared_profile: &mut Option<DeploymentProfile>,
+    use_real_backends: &mut String,
+) -> Result<()> {
+    if !next_actions_should_prompt(opts) {
+        print_next_action_recipe(root, use_real_backends == "true");
+        return Ok(());
+    }
+
+    println!();
+    if stdout_is_tty() {
+        println!("{}", "Next actions".bold());
+    } else {
+        println!("Next actions");
+    }
+    print_hint("Mock submissions finish immediately and never create a DIM session.");
+    print_hint(&format!(
+        "BEAMPIPE_USE_REAL_BACKENDS={use_real_backends}"
+    ));
+    print_hint("Enable live backends only after `beampipe doctor --profile NAME` passes.");
+
+    let items = next_action_choices();
+    loop {
+        let choice = prompt_choice("Next action", &items, 5)?;
+        match choice {
+            0 => {
+                if let Err(error) = enable_live_backends(
+                    root,
+                    env_path,
+                    runtime,
+                    started,
+                    prepared_profile.as_ref(),
+                    use_real_backends,
+                ) {
+                    print_hint(&error.to_string());
+                }
+            }
+            1 => match prompt_profile_file(opts, root, runtime) {
+                Ok(Some((_, profile))) => {
+                    if let Err(error) = install_prepared_profile(pool, &profile).await {
+                        print_hint(&error.to_string());
+                    }
+                    *prepared_profile = Some(profile);
+                }
+                Ok(None) => {}
+                Err(error) => print_hint(&error.to_string()),
+            },
+            2 => {
+                if let Err(error) =
+                    next_action_slurm_credentials(opts, runtime, prepared_profile.as_mut())
+                {
+                    print_hint(&error.to_string());
+                    continue;
+                }
+                if let Some(profile) = prepared_profile.as_ref() {
+                    if let Err(error) = install_prepared_profile(pool, profile).await {
+                        print_hint(&error.to_string());
+                    }
+                }
+            }
+            3 => {
+                if let Err(error) =
+                    next_action_casda_credentials(root, env_path, runtime, started)
+                {
+                    print_hint(&error.to_string());
+                }
+            }
+            4 => {
+                if let Err(error) =
+                    next_action_doctor_profile(root, pool, prepared_profile.as_ref()).await
+                {
+                    print_hint(&error.to_string());
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+async fn install_prepared_profile(
+    pool: Option<&PgPool>,
+    profile: &DeploymentProfile,
+) -> Result<()> {
+    let Some(pool) = pool else {
+        print_hint(&format!(
+            "Database is not reachable; install later with `beampipe profile add` ({})",
+            profile.name
+        ));
+        return Ok(());
+    };
+    let row = crate::operator::install_profile(pool, profile).await?;
+    println!(
+        "Installed deployment profile '{}' revision {}.",
+        row.name, row.revision
+    );
+    Ok(())
+}
+
+fn enable_live_backends(
+    root: &Path,
+    env_path: &Path,
+    runtime: RuntimeKind,
+    started: bool,
+    profile: Option<&DeploymentProfile>,
+    use_real_backends: &mut String,
+) -> Result<()> {
+    if use_real_backends == "true" {
+        print_hint("Live backends are already enabled.");
+        return Ok(());
+    }
+    print_hint("Workers will submit to real TM/DIM or Slurm instead of completing locally.");
+    if profile.is_none() {
+        print_hint(
+            "No profile is loaded yet. Run `beampipe doctor --profile NAME` before enabling live submission.",
+        );
+    } else {
+        print_hint("Do this only after `beampipe doctor --profile NAME` is clean.");
+    }
+    if !prompt_yes_no("Set BEAMPIPE_USE_REAL_BACKENDS=true?", false)? {
+        return Ok(());
+    }
+    update_env_file(env_path, "BEAMPIPE_USE_REAL_BACKENDS", "true")?;
+    std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", "true");
+    *use_real_backends = "true".into();
+    println!("Wrote BEAMPIPE_USE_REAL_BACKENDS=true");
+    restart_stack_if_needed(root, runtime, started, "the new setting")?;
+    Ok(())
+}
+
+fn restart_stack_if_needed(
+    root: &Path,
+    runtime: RuntimeKind,
+    started: bool,
+    what: &str,
+) -> Result<()> {
+    if started && runtime == RuntimeKind::Docker {
+        let context = installation::InstallationContext::from_home(root.to_path_buf())?;
+        match runtime::restart(&context) {
+            Ok(()) => println!("Recreated API, scheduler, and worker so they load {what}."),
+            Err(error) => print_hint(&format!(
+                "Could not recreate the stack ({error}). Run `beampipe restart`."
+            )),
+        }
+    } else if runtime == RuntimeKind::Docker {
+        print_hint("When the stack is up: beampipe restart");
+    } else {
+        print_hint("Restart the host `beampipe start` process to load the new setting.");
+    }
+    Ok(())
+}
+
+fn next_action_slurm_credentials(
+    opts: &SetupOptions,
+    runtime: RuntimeKind,
+    profile: Option<&mut DeploymentProfile>,
+) -> Result<()> {
+    if let Some(profile) = profile {
+        if let DeploymentConfig::SlurmRemote(slurm) = &mut profile.deployment {
+            return configure_slurm_credential_interactive(slurm, &profile.name, runtime);
+        }
+    }
+    print_hint(
+        "No Slurm profile is loaded. This only creates a managed SSH slot; add a Slurm profile afterwards.",
+    );
+    standalone_slurm_credentials(opts, runtime)
+}
+
+fn standalone_slurm_credentials(opts: &SetupOptions, runtime: RuntimeKind) -> Result<()> {
+    let choices = [
+        ChoiceItem {
+            key: "generate",
+            label: "Generate a new Beampipe key",
+            hint: "you must still install the public key on the login node",
+        },
+        ChoiceItem {
+            key: "import",
+            label: "Import an existing key",
+            hint: "skip upload if the cluster already has this public key",
+        },
+        ChoiceItem {
+            key: "later",
+            label: "Configure later",
+            hint: "leave credentials unchanged",
+        },
+    ];
+    let choice = prompt_choice("SSH credentials", &choices, 2)?;
+    if choice == 2 {
+        return Ok(());
+    }
+    let slot = prompt_default("SSH credential slot", "hpc")?;
+    beampipe_profiles::validate_ssh_credential_name(&slot)?;
+    let host = prompt_nonempty("Login node", "")?;
+    let acl = opts.ssh_acl || (runtime == RuntimeKind::Docker && cfg!(target_os = "linux"));
+    if choice == 1 {
+        let private_key =
+            PathBuf::from(prompt_default("Existing private key", "~/.ssh/id_ed25519")?);
+        let private_key = expand_home_path(&private_key)?;
+        let imported = crate::slurm_credentials::import(crate::slurm_credentials::ImportOptions {
+            slot,
+            dir: None,
+            private_key,
+            public_key: None,
+            known_hosts: None,
+            passphrase_file: None,
+            host: Some(host),
+            port: 22,
+            acl,
+            force: false,
+            accept_host_key: false,
+        })?;
+        crate::slurm_credentials::print_init_next_steps(&imported);
+    } else {
+        let generated = crate::slurm_credentials::init(crate::slurm_credentials::InitOptions {
+            slot,
+            host,
+            port: 22,
+            acl,
+            ..crate::slurm_credentials::InitOptions::default()
+        })?;
+        crate::slurm_credentials::print_init_next_steps(&generated);
+    }
+    Ok(())
+}
+
+fn casda_password_file_path(root: &Path) -> PathBuf {
+    root.join("credentials/casda/password")
+}
+
+fn env_file_encode(value: &str) -> Result<String> {
+    if value.contains(['\n', '\r']) {
+        bail!("environment variable value must be a single line");
+    }
+    let needs_quotes = value
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '#' | '"' | '\''));
+    if !needs_quotes {
+        return Ok(value.to_string());
+    }
+    if value.contains(['"', '\\']) {
+        bail!("value cannot be written to .env because it contains a quote or backslash");
+    }
+    Ok(format!("\"{value}\""))
+}
+
+fn apply_casda_process_env(
+    runtime: RuntimeKind,
+    username: &str,
+    password: &str,
+    file_path: &Path,
+) {
+    std::env::set_var("CASDA_USERNAME", username);
+    match runtime {
+        RuntimeKind::Docker => {
+            std::env::set_var("CASDA_PASSWORD", password);
+            std::env::remove_var("CASDA_PASSWORD_FILE");
+        }
+        RuntimeKind::Host => {
+            std::env::set_var("CASDA_PASSWORD_FILE", file_path.display().to_string());
+            std::env::remove_var("CASDA_PASSWORD");
+        }
+    }
+}
+
+fn write_casda_credentials(
+    root: &Path,
+    env_path: &Path,
+    runtime: RuntimeKind,
+    username: &str,
+    password: &str,
+) -> Result<PathBuf> {
+    let username = username.trim();
+    if username.is_empty() {
+        bail!("CASDA username cannot be empty");
+    }
+    if password.is_empty() {
+        bail!("CASDA password cannot be empty");
+    }
+    let file_path = casda_password_file_path(root);
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(&file_path, format!("{password}\n"))
+        .with_context(|| format!("write {}", file_path.display()))?;
+    set_private_file_permissions(&file_path)?;
+
+    update_env_file(env_path, "CASDA_USERNAME", username)?;
+    match runtime {
+        RuntimeKind::Docker => {
+            // Compose env_file cannot see a host CASDA_PASSWORD_FILE path.
+            update_env_file(env_path, "CASDA_PASSWORD", &env_file_encode(password)?)?;
+            update_env_file(env_path, "CASDA_PASSWORD_FILE", "")?;
+        }
+        RuntimeKind::Host => {
+            update_env_file(
+                env_path,
+                "CASDA_PASSWORD_FILE",
+                &file_path.display().to_string(),
+            )?;
+            update_env_file(env_path, "CASDA_PASSWORD", "")?;
+        }
+    }
+    Ok(file_path)
+}
+
+fn next_action_casda_credentials(
+    root: &Path,
+    env_path: &Path,
+    runtime: RuntimeKind,
+    started: bool,
+) -> Result<()> {
+    print_hint("Staging downloads need a CSIRO CASDA username and password.");
+    print_hint("Discovery TAP stays public. The password is not printed.");
+    if runtime == RuntimeKind::Docker {
+        print_hint(
+            "Docker workers read CASDA_PASSWORD from .env; a host password-file path is not visible in the container.",
+        );
+    } else {
+        print_hint(
+            "Host runtime uses CASDA_PASSWORD_FILE pointing at a private file under the install home.",
+        );
+    }
+
+    let existing_user = env_file_value(env_path, "CASDA_USERNAME").unwrap_or_default();
+    if !existing_user.is_empty() {
+        print_hint(&format!("CASDA_USERNAME is already set ({existing_user})."));
+        if !prompt_yes_no("Replace CASDA credentials?", false)? {
+            return Ok(());
+        }
+    }
+
+    let username = prompt_default("CASDA username", &existing_user)?;
+    let username = username.trim().to_string();
+    if username.is_empty() {
+        print_hint("Skipped CASDA credentials (empty username).");
+        return Ok(());
+    }
+
+    let password_file = prompt_default("Existing password file (empty to type)", "")?;
+    let password = if password_file.trim().is_empty() {
+        let first = rpassword::prompt_password("CASDA password: ")?;
+        if first.is_empty() {
+            bail!("CASDA password cannot be empty");
+        }
+        let second = rpassword::prompt_password("Confirm CASDA password: ")?;
+        if first != second {
+            bail!("CASDA passwords do not match");
+        }
+        first
+    } else {
+        let path = expand_home_path(&PathBuf::from(password_file.trim()))?;
+        read_secret_file(&path, "CASDA password")?
+    };
+
+    let stored = write_casda_credentials(root, env_path, runtime, &username, &password)?;
+    apply_casda_process_env(runtime, &username, &password, &stored);
+    println!("Wrote CASDA username '{username}'.");
+    println!("Password file: {}", stored.display());
+    restart_stack_if_needed(root, runtime, started, "CASDA credentials")?;
+    Ok(())
+}
+
+fn prompt_nonempty(label: &str, default: &str) -> Result<String> {
+    loop {
+        let value = prompt_default(label, default)?;
+        if !value.trim().is_empty() {
+            return Ok(value.trim().to_string());
+        }
+        print_hint("This value is required.");
+    }
+}
+
+async fn next_action_doctor_profile(
+    root: &Path,
+    pool: Option<&PgPool>,
+    prepared_profile: Option<&DeploymentProfile>,
+) -> Result<()> {
+    let Some(pool) = pool else {
+        print_hint("Database is not reachable; run `beampipe doctor --profile NAME` later.");
+        return Ok(());
+    };
+    let profiles = repo::list_deployment_profiles(pool, None, 500, 0).await?;
+    if profiles.is_empty() {
+        print_hint("No deployment profiles are installed yet. Add one first.");
+        return Ok(());
+    }
+    print_hint("Installed profiles:");
+    for profile in &profiles {
+        print_hint(&profile.name);
+    }
+    let default = prepared_profile
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| profiles[0].name.clone());
+    let name = prompt_default("Profile name", &default)?;
+    if name.trim().is_empty() {
+        return Ok(());
+    }
+    let settings = Settings::load()?.settings;
+    let context = installation::InstallationContext::from_home(root.to_path_buf())?;
+    let report =
+        doctor::run_doctor(pool, &settings, Some(name.trim()), Vec::new(), Some(&context)).await;
+    doctor::print_human(&report);
+    Ok(())
+}
+
 fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
     let mut lines = Vec::new();
     if steps.compose_postgres && !steps.runtime_docker {
@@ -2277,6 +2833,100 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
     lines
 }
 
+const DEFAULT_DASH_PORT: u16 = 3000;
+
+fn dashboard_listen_url(dash_dir: Option<&Path>) -> Option<String> {
+    let dir = dash_dir?;
+    if !dir.exists() {
+        return None;
+    }
+    let port = env_file_value(&dir.join(".env"), "BEAMPIPE_DASH_PORT")
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_DASH_PORT);
+    Some(format!("http://127.0.0.1:{port}"))
+}
+
+fn collect_role_counts(
+    root: &Path,
+    runtime: RuntimeKind,
+    started: bool,
+    api_port: u16,
+) -> runtime::RoleCounts {
+    if !started {
+        return runtime::RoleCounts::default();
+    }
+    match runtime {
+        RuntimeKind::Docker => {
+            match installation::InstallationContext::from_home(root.to_path_buf()) {
+                Ok(context) => runtime::running_role_counts(&context),
+                Err(_) => runtime::RoleCounts::default(),
+            }
+        }
+        RuntimeKind::Host => {
+            if port_in_use(api_port) {
+                runtime::RoleCounts {
+                    api: 1,
+                    scheduler: 1,
+                    worker: 1,
+                }
+            } else {
+                runtime::RoleCounts::default()
+            }
+        }
+    }
+}
+
+fn access_summary_lines(
+    api_port: u16,
+    dashboard: Option<&str>,
+    counts: runtime::RoleCounts,
+    started: bool,
+) -> Vec<String> {
+    let api = format!("http://127.0.0.1:{api_port}/api/v2");
+    let docs = format!("{api}/docs");
+    let dashboard = dashboard
+        .map(str::to_string)
+        .unwrap_or_else(|| "not installed".into());
+    let status = if started && (counts.api + counts.scheduler + counts.worker) > 0 {
+        format!(
+            "Beampipe is now up with {} scheduler, {} worker, {} API",
+            counts.scheduler, counts.worker, counts.api
+        )
+    } else if started {
+        format!(
+            "Beampipe start was requested ({} scheduler, {} worker, {} API)",
+            counts.scheduler, counts.worker, counts.api
+        )
+    } else {
+        format!(
+            "Beampipe is not started ({} scheduler, {} worker, {} API)",
+            counts.scheduler, counts.worker, counts.api
+        )
+    };
+    vec![
+        String::new(),
+        "Summary".into(),
+        format!("  API available here:       {api}"),
+        format!("  API docs here:            {docs}"),
+        format!("  Dashboard available here: {dashboard}"),
+        format!("  {status}"),
+    ]
+}
+
+fn print_access_summary(
+    root: &Path,
+    runtime: RuntimeKind,
+    ports: HostPorts,
+    started: bool,
+    dash_dir: Option<&Path>,
+) {
+    let counts = collect_role_counts(root, runtime, started, ports.api);
+    let dashboard = dashboard_listen_url(dash_dir);
+    for line in access_summary_lines(ports.api, dashboard.as_deref(), counts, started) {
+        println!("{line}");
+    }
+}
+
 fn print_setup_summary(
     root: &Path,
     runtime: RuntimeKind,
@@ -2284,6 +2934,7 @@ fn print_setup_summary(
     ports: HostPorts,
     started: bool,
     profile: Option<&DeploymentProfile>,
+    use_real_backends: &str,
 ) {
     println!("\nBeampipe setup complete");
     println!("  [OK] Home: {}", root.display());
@@ -2297,6 +2948,19 @@ fn print_setup_summary(
             "start requested"
         } else {
             "not started"
+        }
+    );
+    println!(
+        "  [{}] Live backends: {}",
+        if use_real_backends == "true" {
+            "OK"
+        } else {
+            "--"
+        },
+        if use_real_backends == "true" {
+            "BEAMPIPE_USE_REAL_BACKENDS=true"
+        } else {
+            "mock (enable after doctor --profile)"
         }
     );
     if let Some(profile) = profile {
@@ -2353,6 +3017,187 @@ mod tests {
         assert_eq!(parse_choice("", &postgres, 0), Some(0));
         assert_eq!(parse_choice("compose", &postgres, 1), Some(0));
         assert_eq!(parse_choice("existing", &postgres, 0), Some(1));
+
+        let next = next_action_choices();
+        assert_eq!(parse_choice("", &next, 5), Some(5));
+        assert_eq!(parse_choice("done", &next, 0), Some(5));
+        assert_eq!(parse_choice("live", &next, 5), Some(0));
+        assert_eq!(parse_choice("profile", &next, 5), Some(1));
+        assert_eq!(parse_choice("slurm", &next, 5), Some(2));
+        assert_eq!(parse_choice("casda", &next, 5), Some(3));
+        assert_eq!(parse_choice("doctor", &next, 5), Some(4));
+        assert_eq!(parse_choice("5", &next, 5), Some(4));
+        assert_eq!(parse_choice("6", &next, 5), Some(5));
+    }
+
+    #[test]
+    fn resolve_use_real_backends_prefers_flag_then_env_then_file() {
+        assert_eq!(
+            resolve_use_real_backends(true, Some("false"), Some("false")),
+            "true"
+        );
+        assert_eq!(
+            resolve_use_real_backends(false, Some("true"), Some("false")),
+            "true"
+        );
+        assert_eq!(
+            resolve_use_real_backends(false, Some("0"), Some("true")),
+            "false"
+        );
+        assert_eq!(
+            resolve_use_real_backends(false, None, Some("yes")),
+            "true"
+        );
+        assert_eq!(resolve_use_real_backends(false, None, None), "false");
+        assert_eq!(
+            resolve_use_real_backends(false, Some("maybe"), Some("no")),
+            "false"
+        );
+    }
+
+    #[test]
+    fn next_action_recipe_mentions_live_backends_and_slurm() {
+        let root = Path::new("/home/op/beampipe");
+        let mock = next_action_recipe_lines(root, false).join("\n");
+        assert!(mock.contains("BEAMPIPE_USE_REAL_BACKENDS=true"));
+        assert!(mock.contains("beampipe restart"));
+        assert!(mock.contains("deployment_profile.dlg-dim.json"));
+        assert!(mock.contains("beampipe doctor --profile dlg-dim"));
+        assert!(mock.contains("beampipe slurm credentials init"));
+        assert!(mock.contains("deployment_profile.slurm-remote.json"));
+        assert!(mock.contains("CASDA_USERNAME"));
+        assert!(mock.contains("CASDA_PASSWORD_FILE"));
+        assert!(!mock.contains("Live backends are on"));
+
+        let live = next_action_recipe_lines(root, true).join("\n");
+        assert!(live.contains("Live backends are on"));
+        assert!(!live.contains("set BEAMPIPE_USE_REAL_BACKENDS=true"));
+    }
+
+    #[test]
+    fn write_casda_credentials_uses_env_password_for_docker() {
+        let root = tempfile::tempdir().unwrap();
+        let env_path = root.path().join(".env");
+        std::fs::write(&env_path, "CASDA_PASSWORD_FILE=/old/host/path\n").unwrap();
+        let password = "unit-test-casda-secret";
+        let file_path = write_casda_credentials(
+            root.path(),
+            &env_path,
+            RuntimeKind::Docker,
+            "casda.user@example.test",
+            password,
+        )
+        .unwrap();
+
+        let env = std::fs::read_to_string(&env_path).unwrap();
+        assert!(env.contains("CASDA_USERNAME=casda.user@example.test\n"));
+        assert!(env.contains(&format!("CASDA_PASSWORD={password}\n")));
+        assert!(env.contains("CASDA_PASSWORD_FILE=\n"));
+        assert!(!env.contains("/old/host/path"));
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            format!("{password}\n")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn write_casda_credentials_uses_password_file_for_host() {
+        let root = tempfile::tempdir().unwrap();
+        let env_path = root.path().join(".env");
+        std::fs::write(&env_path, "CASDA_PASSWORD=old-inline-password\n").unwrap();
+        let password = "unit-test-casda-secret";
+        let file_path = write_casda_credentials(
+            root.path(),
+            &env_path,
+            RuntimeKind::Host,
+            "casda.user@example.test",
+            password,
+        )
+        .unwrap();
+
+        let env = std::fs::read_to_string(&env_path).unwrap();
+        assert!(env.contains("CASDA_USERNAME=casda.user@example.test\n"));
+        assert!(env.contains("CASDA_PASSWORD=\n"));
+        assert!(env.contains(&format!(
+            "CASDA_PASSWORD_FILE={}\n",
+            file_path.display()
+        )));
+        assert!(!env.contains("old-inline-password"));
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            format!("{password}\n")
+        );
+    }
+
+    #[test]
+    fn env_file_encode_quotes_hash_and_rejects_quotes() {
+        assert_eq!(env_file_encode("plain").unwrap(), "plain");
+        assert_eq!(env_file_encode("hash#value").unwrap(), "\"hash#value\"");
+        assert!(env_file_encode("has\"quote").is_err());
+    }
+
+    #[test]
+    fn next_actions_are_printed_not_prompted_with_yes() {
+        let opts = SetupOptions {
+            yes: true,
+            ..Default::default()
+        };
+        assert!(!next_actions_should_prompt(&opts));
+    }
+
+    #[test]
+    fn access_summary_lists_api_docs_dashboard_and_role_counts() {
+        let lines = access_summary_lines(
+            18080,
+            Some("http://127.0.0.1:3000"),
+            runtime::RoleCounts {
+                api: 1,
+                scheduler: 1,
+                worker: 2,
+            },
+            true,
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("API available here:       http://127.0.0.1:18080/api/v2"));
+        assert!(joined.contains("API docs here:            http://127.0.0.1:18080/api/v2/docs"));
+        assert!(joined.contains("Dashboard available here: http://127.0.0.1:3000"));
+        assert!(joined.contains("Beampipe is now up with 1 scheduler, 2 worker, 1 API"));
+    }
+
+    #[test]
+    fn access_summary_without_dashboard_or_start() {
+        let lines = access_summary_lines(18080, None, runtime::RoleCounts::default(), false);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Dashboard available here: not installed"));
+        assert!(joined.contains("Beampipe is not started (0 scheduler, 0 worker, 0 API)"));
+    }
+
+    #[test]
+    fn dashboard_listen_url_reads_dash_env_port() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(dashboard_listen_url(None), None);
+        assert_eq!(
+            dashboard_listen_url(Some(&root.path().join("missing"))),
+            None
+        );
+        assert_eq!(
+            dashboard_listen_url(Some(root.path())).as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+        std::fs::write(root.path().join(".env"), "BEAMPIPE_DASH_PORT=3100\n").unwrap();
+        assert_eq!(
+            dashboard_listen_url(Some(root.path())).as_deref(),
+            Some("http://127.0.0.1:3100")
+        );
     }
 
     #[test]

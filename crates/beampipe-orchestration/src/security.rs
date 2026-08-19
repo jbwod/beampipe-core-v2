@@ -4,8 +4,9 @@ use crate::slurm_credentials::{
     beampipe_env, has_global_ssh_key_config, is_production_env, list_credential_slots,
     SlurmSshCredentials,
 };
+use crate::staging::casda_password_from_env;
 use beampipe_config::Settings;
-use beampipe_security::{bool_env, resolve_secret, SecretPolicy, SecretRef};
+use beampipe_security::bool_env;
 
 const DEV_JWT_SECRETS: &[&str] = &["secret-key", "local-dev-jwt-secret-change-me"];
 
@@ -83,18 +84,7 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
         let casda_user = std::env::var("CASDA_USERNAME")
             .ok()
             .filter(|s| !s.is_empty());
-        let casda_pass_ok = if let Ok(path) = std::env::var("CASDA_PASSWORD_FILE") {
-            resolve_secret(
-                &SecretRef::File { file: path },
-                SecretPolicy::from_process_env(),
-            )
-            .is_ok()
-        } else {
-            std::env::var("CASDA_PASSWORD")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .is_some()
-        };
+        let casda_pass_ok = casda_password_from_env().is_some();
         if casda_user.is_none() || !casda_pass_ok {
             errors.push(
                 "CASDA_USERNAME and CASDA_PASSWORD or CASDA_PASSWORD_FILE are required when BEAMPIPE_USE_REAL_BACKENDS=true (staging)"

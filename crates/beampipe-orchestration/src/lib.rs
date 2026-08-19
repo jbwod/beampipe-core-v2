@@ -50,7 +50,7 @@ pub use slurm_credentials::{
 };
 pub use slurm_deploy::probe_slurm_login;
 pub use slurm_ssh::{query_slurm_states_batch, SlurmSshPool, SlurmSshSession, SlurmTarget};
-pub use staging::CasdaStagingClient;
+pub use staging::{casda_password_from_env, CasdaStagingClient};
 pub use tm_health::{
     dim_unreachable_message, format_service_request_error, probe_dim_reachable, probe_tm_reachable,
     tm_unreachable_message, TmProbeResult,

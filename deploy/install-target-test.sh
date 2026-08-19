@@ -96,3 +96,24 @@ if grep -Fq 'Added by Beampipe installer' "$HOME_TMP/.zshrc"; then
   exit 1
 fi
 echo "install PATH persistence ok"
+
+HOME_NEXT=$(mktemp -d)
+beampipe_print_next_actions "$HOME_NEXT" > "$HOME_NEXT/out"
+if ! grep -Fq "BEAMPIPE_USE_REAL_BACKENDS=true" "$HOME_NEXT/out"; then
+  echo "next actions omitted live backends" >&2
+  exit 1
+fi
+if ! grep -Fq "beampipe slurm credentials init" "$HOME_NEXT/out"; then
+  echo "next actions omitted Slurm credentials" >&2
+  exit 1
+fi
+if ! grep -Fq "$HOME_NEXT/config/deployment_profile.dlg-dim.json" "$HOME_NEXT/out"; then
+  echo "next actions omitted DIM profile path" >&2
+  exit 1
+fi
+if ! grep -Fq "CASDA_USERNAME" "$HOME_NEXT/out"; then
+  echo "next actions omitted CASDA credentials" >&2
+  exit 1
+fi
+rm -rf "$HOME_NEXT"
+echo "install next-actions recipe ok"

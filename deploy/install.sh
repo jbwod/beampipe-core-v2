@@ -5,7 +5,12 @@
 #   curl -fsSL .../install.sh | sh -s -- --yes --runtime docker
 #   curl -fsSL .../install.sh | sh -s -- --yes --runtime docker --postgres compose \
 #     --api-port 18080 --postgres-port 5432 --metrics-port 9090
+#   curl -fsSL .../install.sh | sh -s -- --yes --runtime docker --use-real-backends
 # Linux archives need glibc and OpenSSL 3 (Ubuntu 22.04 / Debian bookworm or newer).
+# After the binary is installed this runs `beampipe setup`. Interactive setup
+# starts the stack and prompts Next actions (live backends, profiles, Slurm
+# credentials, CASDA credentials, doctor --profile). --yes prints that recipe
+# instead of prompting.
 set -eu
 
 REPO="${BEAMPIPE_REPO:-jbwod/beampipe-core-v2}"
@@ -190,6 +195,21 @@ beampipe_print_path_hint() {
   echo "  export PATH=\"${bindir}:\$PATH\""
 }
 
+beampipe_print_next_actions() {
+  home=$1
+  echo
+  echo "Next actions (not applied with --yes):"
+  echo "  Mock submissions finish immediately and never create a DIM session."
+  echo "  After beampipe doctor --profile NAME:"
+  echo "    set BEAMPIPE_USE_REAL_BACKENDS=true in ${home}/.env"
+  echo "    beampipe restart"
+  echo "  beampipe profile add -f ${home}/config/deployment_profile.dlg-dim.json"
+  echo "  beampipe doctor --profile dlg-dim"
+  echo "  beampipe slurm credentials init --slot hpc --host LOGIN_NODE"
+  echo "  beampipe profile add -f ${home}/config/deployment_profile.slurm-remote.json --ssh-slot hpc"
+  echo "  set CASDA_USERNAME in ${home}/.env (Docker: CASDA_PASSWORD; host: ${home}/credentials/casda/password)"
+}
+
 beampipe_run_cli_setup() {
   home=$1
   shift
@@ -199,8 +219,12 @@ beampipe_run_cli_setup() {
 run_setup() {
   home="${BEAMPIPE_HOME:-$HOME/beampipe}"
   status=0
+  print_next_recipe=0
   if [ -t 0 ] || beampipe_has_flag --yes "$@"; then
     beampipe_run_cli_setup "$home" "$@" || status=$?
+    if beampipe_has_flag --yes "$@"; then
+      print_next_recipe=1
+    fi
   elif [ -t 1 ] && [ -c /dev/tty ]; then
     echo "stdin is a pipe; reading setup prompts from the terminal."
     beampipe_run_cli_setup "$home" "$@" </dev/tty || status=$?
@@ -208,11 +232,16 @@ run_setup() {
     echo "stdin is not a terminal; running non-interactive Docker setup."
     echo "  curl -fsSL ${RELEASES}/latest/download/install.sh | sh -s -- --yes --runtime docker"
     beampipe_run_cli_setup "$home" --yes --runtime docker "$@" || status=$?
+    print_next_recipe=1
   else
     echo "stdin is not a terminal; adding --yes."
     beampipe_run_cli_setup "$home" --yes "$@" || status=$?
+    print_next_recipe=1
   fi
   beampipe_print_path_hint
+  if [ "$print_next_recipe" -eq 1 ]; then
+    beampipe_print_next_actions "$home"
+  fi
   return "$status"
 }
 

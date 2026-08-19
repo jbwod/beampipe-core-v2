@@ -22,20 +22,28 @@ pub struct CasdaStagingClient {
     pub stage_by_sbid: bool,
 }
 
+/// Password from `CASDA_PASSWORD_FILE` when that path is non-empty, else `CASDA_PASSWORD`.
+/// An empty `CASDA_PASSWORD_FILE=` in Compose `env_file` is treated as unset.
+pub fn casda_password_from_env() -> Option<String> {
+    match std::env::var("CASDA_PASSWORD_FILE") {
+        Ok(path) if !path.trim().is_empty() => resolve_secret(
+            &SecretRef::File { file: path },
+            SecretPolicy::from_process_env(),
+        )
+        .ok()
+        .map(|secret| secret.expose().to_string()),
+        _ => std::env::var("CASDA_PASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    }
+}
+
 impl CasdaStagingClient {
     pub fn from_env() -> Option<Self> {
-        let username = std::env::var("CASDA_USERNAME").ok()?;
-        let password = if let Ok(path) = std::env::var("CASDA_PASSWORD_FILE") {
-            resolve_secret(
-                &SecretRef::File { file: path },
-                SecretPolicy::from_process_env(),
-            )
-            .ok()?
-            .expose()
-            .to_string()
-        } else {
-            std::env::var("CASDA_PASSWORD").ok()?
-        };
+        let username = std::env::var("CASDA_USERNAME")
+            .ok()
+            .filter(|value| !value.is_empty())?;
+        let password = casda_password_from_env()?;
         let login_url = std::env::var("CASDA_LOGIN_URL")
             .unwrap_or_else(|_| DEFAULT_CASDA_LOGIN_URL.to_string());
         Some(Self {
