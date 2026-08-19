@@ -64,6 +64,5 @@ headless `curl` equivalents.
 
 ## Connect Dash to Core
 
-For a single Docker engine, run Dash `scripts/install.sh` (or `beampipe setup --dashboard`). It attaches Dash to Core's private Compose network and sets `BEAMPIPE_API_URL=http://api:8080`. Publish Dash—not the Core API—to the operator LAN or reverse proxy. See [Deployment topologies](deployment.md#core-and-dash-on-one-docker-engine)
-for the complete Compose override and security boundary.
+For a single Docker engine, run Dash `scripts/install.sh` (or `beampipe setup --dashboard`). It attaches Dash to Core's private Compose network and sets `BEAMPIPE_API_URL=http://api:8080`. Publish Dash—not the Core API—to the operator LAN or reverse proxy. See [Install and configure](installation.md) for the setup flags.
 

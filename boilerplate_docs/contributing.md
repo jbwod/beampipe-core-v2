@@ -24,7 +24,7 @@ make docs-build
 | API type or route | generated OpenAPI and API workflow if task order changes |
 | Execution transition | architecture state model and recovery procedure |
 | Metric or alert | observability dashboard order and alert guidance |
-| Backend behavior | deployment profiles and qualification run |
+| Backend behavior | deployment profiles |
 
 ## Writing rules
 

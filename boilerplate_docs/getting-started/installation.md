@@ -78,7 +78,7 @@ beampipe setup --yes --runtime host --postgres compose --no-start
 beampipe start
 ```
 
-`beampipe start` starts the managed PostgreSQL container when required, then runs the compact API/scheduler process in the foreground. Production native deployments should run separate API, singleton scheduler, and worker units under systemd or another process supervisor; see [Deployment topologies](deployment.md).
+`beampipe start` starts the managed PostgreSQL container when required, then runs the compact API/scheduler process in the foreground. Production native deployments should run separate API, singleton scheduler, and worker units under systemd or another process supervisor; see [Process roles](../operations/index.md).
 
 ## 3. Build from source
 

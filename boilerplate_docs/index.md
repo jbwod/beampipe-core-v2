@@ -147,5 +147,3 @@ Beampipe owns durable intent, preparation artifacts, admission, submission recor
 ## Current qualification
 
 The implementation has been exercised through real CASDA/VizieR discovery, automatic admission, manifest and graph preparation, DALiuGE translation, and REST deployment to a local cluster. That run exposed and fixed manifest flag resolution. A graph/runtime package mismatch then prevented terminal graph success, and CASDA staging plus Slurm have not yet been qualified end to end.
-
-Use the [qualification run](operations/end-to-end-demo.md) for the exact evidence required before calling a release production-ready.

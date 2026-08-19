@@ -46,7 +46,7 @@ beampipe worker leases --include-expired
 beampipe scheduler jobs --limit 100
 ```
 
-Use [Recovery and cancellation](recovery.md) before retrying failed work and [Production runbook](production-runbook.md) before changing binaries, project revisions, profiles, or secrets.
+Use [Recovery and cancellation](recovery.md) before retrying failed work. Back up PostgreSQL before changing binaries, project revisions, profiles, or secrets, and before `beampipe uninstall`.
 
 <div class="terminal-note" data-tone="amber">
 <strong>When external state is uncertain, reconcile.</strong><br>
