@@ -1185,13 +1185,30 @@ body:has(#redoc-frame) .md-main {
   font-size: 0.66rem;
 }
 
+.bp-docs-hero .bp-hero-logo,
+.bp-docs-hero .bp-hero-logo img {
+  width: min(32rem, 92%);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.bp-docs-hero .bp-hero-logo {
+  margin-bottom: 0.85rem;
+}
+
+.bp-docs-hero .bp-hero-logo img {
+  height: auto;
+  margin-bottom: 0;
+}
+
 .md-typeset .bp-docs-hero h1 {
-  max-width: 12ch;
-  margin: 0;
+  max-width: none;
+  margin: 0 auto;
   color: #f4f7f9;
   font-size: 3rem;
   font-weight: 500;
   line-height: 1;
+  text-align: center;
   text-shadow: 0 2px 0 #000, 0 0 1rem #000;
 }
 
@@ -1204,6 +1221,7 @@ body:has(#redoc-frame) .md-main {
   margin: 0 0 0.7rem !important;
   color: var(--bp-code-key) !important;
   font-size: 0.72rem;
+  text-align: center;
 }
 
 .md-typeset .bp-docs-hero .bp-tagline {

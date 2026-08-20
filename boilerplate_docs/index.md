@@ -7,6 +7,10 @@ hide:
 
 <p class="bp-hero-kicker">[ RUST V2 / DURABLE CONTROL PLANE ]</p>
 
+<p class="bp-hero-logo">
+<img alt="Beampipe" src="assets/brand/beampipe-terminal-logo.svg" width="920">
+</p>
+
 # beampipe
 
 <p class="bp-tagline">Discover archive data, prepare reproducible DALiuGE graphs, and operate REST or Slurm execution from one PostgreSQL-backed control plane.</p>
