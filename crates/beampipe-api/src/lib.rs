@@ -81,6 +81,7 @@ pub struct AppState {
         enqueue_job_handler,
         create_deployment_profile, list_deployment_profiles, get_deployment_profile,
         update_deployment_profile, delete_deployment_profile,
+        list_slurm_credentials, get_slurm_credential,
         observability::list_notification_channels, observability::create_notification_channel,
         observability::update_notification_channel, observability::delete_notification_channel,
         observability::test_notification_channel, observability::list_alert_rules,
@@ -130,6 +131,7 @@ pub struct AppState {
         beampipe_project::TransformRef,
         beampipe_project::MappingSpec,
         DeploymentProfile, DeploymentProfileResponse,
+        SlurmCredentialListResponse, SlurmCredentialSlot,
         beampipe_profiles::DaliugeTranslationConfig,
         beampipe_profiles::DaliugeAlgo,
         beampipe_profiles::DeploymentConfig,
@@ -159,6 +161,7 @@ pub struct AppState {
         (name = "project-configs", description = "Registered project modules and versioned survey configuration."),
         (name = "jobs", description = "Postgres-backed async jobs."),
         (name = "deployment-profiles", description = "DALiuGE deployment profiles (translation + REST/Slurm remote deployment configuration)."),
+        (name = "slurm-credentials", description = "Read-only inventory of installed Slurm SSH credential slots (names and file presence, no key material)."),
         (name = "alerts", description = "Notification channels and alert rules."),
         (name = "provenance", description = "Audit event stream."),
         (name = "operators", description = "System overview and Beampipe control-plane workers."),
@@ -264,6 +267,8 @@ pub fn router(state: AppState) -> Router {
                 .patch(update_deployment_profile)
                 .delete(delete_deployment_profile),
         )
+        .route("/api/v2/slurm/credentials", get(list_slurm_credentials))
+        .route("/api/v2/slurm/credentials/:slot", get(get_slurm_credential))
         .route(
             "/api/v2/notification-channels",
             get(observability::list_notification_channels)
@@ -3315,6 +3320,74 @@ async fn delete_deployment_profile(
         return Err(ApiError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SlurmCredentialSlot {
+    /// Directory name under `BEAMPIPE_SSH_CREDENTIALS_DIR`.
+    pub name: String,
+    pub private_key: bool,
+    pub public_key: bool,
+    pub passphrase: bool,
+    pub known_hosts: bool,
+}
+
+impl From<beampipe_orchestration::SlotPresence> for SlurmCredentialSlot {
+    fn from(slot: beampipe_orchestration::SlotPresence) -> Self {
+        Self {
+            name: slot.name,
+            private_key: slot.private_key,
+            public_key: slot.public_key,
+            passphrase: slot.passphrase,
+            known_hosts: slot.known_hosts,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SlurmCredentialListResponse {
+    pub slots: Vec<SlurmCredentialSlot>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/slurm/credentials",
+    tag = "slurm-credentials",
+    responses((status = 200, body = SlurmCredentialListResponse))
+)]
+async fn list_slurm_credentials(
+    AuthUser(_user): AuthUser,
+) -> Result<Json<SlurmCredentialListResponse>, ApiError> {
+    Ok(Json(SlurmCredentialListResponse {
+        slots: beampipe_orchestration::list_credential_slot_presence()
+            .into_iter()
+            .map(SlurmCredentialSlot::from)
+            .collect(),
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/slurm/credentials/{slot}",
+    tag = "slurm-credentials",
+    params(("slot" = String, Path, description = "Credential slot directory name")),
+    responses((status = 200, body = SlurmCredentialSlot), (status = 400), (status = 404))
+)]
+async fn get_slurm_credential(
+    AuthUser(_user): AuthUser,
+    Path(slot): Path<String>,
+) -> Result<Json<SlurmCredentialSlot>, ApiError> {
+    beampipe_profiles::validate_ssh_credential_name(&slot)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if !beampipe_orchestration::list_credential_slots()
+        .iter()
+        .any(|name| name == &slot)
+    {
+        return Err(ApiError::NotFound);
+    }
+    let presence = beampipe_orchestration::inspect_credential_slot(&slot)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(presence.into()))
 }
 
 fn source_identifiers_from_values(values: &[Value]) -> Vec<String> {

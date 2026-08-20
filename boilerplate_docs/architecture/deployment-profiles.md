@@ -142,6 +142,8 @@ $BEAMPIPE_HOME/credentials/ssh/
 
 The host runtime reads this tree directly. The release Compose bundle mounts the same absolute host path read-only at `/run/beampipe/ssh` in API, scheduler, and worker services. Keys are never copied into images or containers.
 
+`GET /api/v2/slurm/credentials` (and Dash's profile picker) lists slot names and whether `private_key`, `private_key.pub`, `passphrase`, and `known_hosts` files are present. The responses never include key material. Init, import, and `copy-id` remain CLI.
+
 Beampipe does not use `ssh-agent`. Workers unlock `private_key` plus an optional `passphrase` file. Choose **one** path: generate a Beampipe-owned key, or import a key you already have. Do not run `ssh-keygen` and `init` for the same slot.
 
 ### Generate a Beampipe-owned key

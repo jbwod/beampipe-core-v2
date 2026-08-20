@@ -111,6 +111,9 @@
             "format": "int32",
             "type": "integer"
           },
+          "enabled": {
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
           },
@@ -215,8 +218,24 @@
             "nullable": true,
             "type": "boolean"
           },
+          "name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "project_module": {
+            "nullable": true,
+            "type": "string"
+          },
+          "severity": {
+            "nullable": true,
+            "type": "string"
+          },
           "trigger_config": {
             "nullable": true
+          },
+          "trigger_kind": {
+            "nullable": true,
+            "type": "string"
           }
         },
         "type": "object"
@@ -2465,6 +2484,48 @@
         },
         "type": "object"
       },
+      "SlurmCredentialListResponse": {
+        "properties": {
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/SlurmCredentialSlot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "slots"
+        ],
+        "type": "object"
+      },
+      "SlurmCredentialSlot": {
+        "properties": {
+          "known_hosts": {
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Directory name under `BEAMPIPE_SSH_CREDENTIALS_DIR`.",
+            "type": "string"
+          },
+          "passphrase": {
+            "type": "boolean"
+          },
+          "private_key": {
+            "type": "boolean"
+          },
+          "public_key": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "private_key",
+          "public_key",
+          "passphrase",
+          "known_hosts"
+        ],
+        "type": "object"
+      },
       "SlurmRemoteDeploymentConfig": {
         "additionalProperties": false,
         "properties": {
@@ -2530,11 +2591,6 @@
             "nullable": true,
             "type": "string"
           },
-          "ssh_credential": {
-            "description": "Non-secret slot name for the SSH private key and known_hosts files. Profiles never store key material; workers resolve files from `BEAMPIPE_SSH_CREDENTIALS_DIR/<ssh_credential>/`.",
-            "nullable": true,
-            "type": "string"
-          },
           "resources": {
             "$ref": "#/components/schemas/SlurmResourceConfig"
           },
@@ -2542,6 +2598,11 @@
             "type": "boolean"
           },
           "slurm_template": {
+            "nullable": true,
+            "type": "string"
+          },
+          "ssh_credential": {
+            "description": "Non-secret slot name for the SSH private key and known_hosts files.\nProfiles never store key material; workers resolve files from\n`BEAMPIPE_SSH_CREDENTIALS_DIR/<ssh_credential>/`.",
             "nullable": true,
             "type": "string"
           },
@@ -3778,7 +3839,7 @@
         ]
       },
       "patch": {
-        "description": "Patch alert rule trigger or channels.",
+        "description": "Patch alert rule name, trigger, severity, or channels.",
         "operationId": "update_alert_rule",
         "parameters": [
           {
@@ -6358,6 +6419,117 @@
         ]
       }
     },
+    "/api/v2/slurm/credentials": {
+      "get": {
+        "description": "Names and file presence for slots under BEAMPIPE_SSH_CREDENTIALS_DIR. Never returns key material.",
+        "operationId": "list_slurm_credentials",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlurmCredentialListResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List Slurm SSH credential slots",
+        "tags": [
+          "slurm-credentials"
+        ]
+      }
+    },
+    "/api/v2/slurm/credentials/{slot}": {
+      "get": {
+        "description": "File presence for one installed credential slot. 404 if the slot directory is not listed.",
+        "operationId": "get_slurm_credential",
+        "parameters": [
+          {
+            "description": "Credential slot directory name",
+            "in": "path",
+            "name": "slot",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlurmCredentialSlot"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get Slurm SSH credential slot",
+        "tags": [
+          "slurm-credentials"
+        ]
+      }
+    },
     "/api/v2/sources": {
       "get": {
         "description": "Paginated source registry for a project module.",
@@ -7498,6 +7670,10 @@
       "name": "deployment-profiles"
     },
     {
+      "description": "Read-only inventory of installed Slurm SSH credential slots (names and file presence, no key material).",
+      "name": "slurm-credentials"
+    },
+    {
       "description": "Notification channels and alert rules.",
       "name": "alerts"
     },
@@ -7545,6 +7721,7 @@
         "operators",
         "scheduler",
         "daliuge",
+        "slurm-credentials",
         "health",
         "provenance",
         "alerts"

@@ -49,6 +49,15 @@ curl -fsS -X POST "$BASE/api/v2/deployment-profiles" \
 
 Project uploads create immutable versions. Profile responses are redacted and future executions pin the selected revision.
 
+List installed Slurm SSH credential slots (names and file presence only; never key material) before choosing `deployment.ssh_credential`:
+
+```bash
+curl -fsS "$BASE/api/v2/slurm/credentials" -H "$AUTH" | jq .
+curl -fsS "$BASE/api/v2/slurm/credentials/hpc" -H "$AUTH" | jq .
+```
+
+Init, import, and `copy-id` remain CLI. Empty credential roots return `{ "slots": [] }`.
+
 ## Source and discovery
 
 ```bash

@@ -14,10 +14,8 @@
 
 use beampipe_domain::ExecutionStatus;
 use beampipe_orchestration::{
-    clients::TranslateConfig,
-    dim::prepare_physical_graph,
-    DaliugeManager, DaliugeTranslator, DimClient, ExecutionBackend, HttpDimClient,
-    HttpTranslatorClient, RestExecutionBackend,
+    clients::TranslateConfig, dim::prepare_physical_graph, DaliugeManager, DaliugeTranslator,
+    DimClient, ExecutionBackend, HttpDimClient, HttpTranslatorClient, RestExecutionBackend,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -336,8 +334,7 @@ async fn prepared_graph_roundtrips_dim_ui_fields() {
     let mut prepared = prepare_physical_graph(raw);
     for drop in &mut prepared {
         if let Some(obj) = drop.as_object_mut() {
-            obj.entry("node".to_string())
-                .or_insert_with(|| json!(node));
+            obj.entry("node".to_string()).or_insert_with(|| json!(node));
             obj.entry("island".to_string())
                 .or_insert_with(|| json!(node));
         }

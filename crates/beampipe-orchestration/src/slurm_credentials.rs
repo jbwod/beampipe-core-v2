@@ -1,14 +1,26 @@
 //! Resolve Slurm SSH private keys and known-hosts policy from environment.
 
 use crate::OrchestrationError;
+use beampipe_profiles::ProfileValidationError;
 use beampipe_security::{
     allow_inline_secrets_override, bool_env, is_process_production, process_env_name,
 };
 use russh::keys::{decode_secret_key, load_secret_key, PrivateKey};
+use serde::Serialize;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
+
+/// Presence of files in a named SSH credential slot. Never includes key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SlotPresence {
+    pub name: String,
+    pub private_key: bool,
+    pub public_key: bool,
+    pub passphrase: bool,
+    pub known_hosts: bool,
+}
 
 /// Resolved SSH material for Slurm login nodes (process-wide from env).
 #[derive(Clone)]
@@ -207,6 +219,40 @@ pub fn list_credential_slots() -> Vec<String> {
         .collect::<Vec<_>>();
     names.sort();
     names
+}
+
+/// File presence for every listed credential slot. Empty or missing root yields `[]`.
+pub fn list_credential_slot_presence() -> Vec<SlotPresence> {
+    list_credential_slots()
+        .into_iter()
+        .filter_map(|name| inspect_credential_slot(&name).ok())
+        .collect()
+}
+
+/// Presence of files for `name`. Invalid names fail; a missing directory is all-false.
+pub fn inspect_credential_slot(name: &str) -> Result<SlotPresence, ProfileValidationError> {
+    beampipe_profiles::validate_ssh_credential_name(name)?;
+    let Some(root) = ssh_credentials_dir() else {
+        return Ok(empty_slot_presence(name));
+    };
+    let slot_dir = root.join(name);
+    Ok(SlotPresence {
+        name: name.to_string(),
+        private_key: slot_dir.join("private_key").is_file(),
+        public_key: slot_dir.join("private_key.pub").is_file(),
+        passphrase: slot_dir.join("passphrase").is_file(),
+        known_hosts: slot_dir.join("known_hosts").is_file() || root.join("known_hosts").is_file(),
+    })
+}
+
+fn empty_slot_presence(name: &str) -> SlotPresence {
+    SlotPresence {
+        name: name.to_string(),
+        private_key: false,
+        public_key: false,
+        passphrase: false,
+        known_hosts: false,
+    }
 }
 
 pub fn has_global_ssh_key_config() -> bool {
@@ -1063,5 +1109,91 @@ mod tests {
         std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
         std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
         std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    #[test]
+    fn inspect_reports_presence_without_serializing_key_material() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("hpc");
+        std::fs::create_dir(&slot).unwrap();
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----\n";
+        write_mode600(&slot.join("private_key"), pem);
+        std::fs::write(slot.join("private_key.pub"), "ssh-ed25519 AAAA demo").unwrap();
+        write_mode600(&slot.join("passphrase"), "super-secret-passphrase");
+        std::fs::write(
+            slot.join("known_hosts"),
+            "login.example.org ssh-ed25519 AAAA",
+        )
+        .unwrap();
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+
+        let listed = list_credential_slot_presence();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "hpc");
+        assert!(listed[0].private_key);
+        assert!(listed[0].public_key);
+        assert!(listed[0].passphrase);
+        assert!(listed[0].known_hosts);
+
+        let json = serde_json::to_string(&listed[0]).unwrap();
+        assert!(!json.contains("BEGIN"));
+        assert!(!json.contains("super-secret-passphrase"));
+        assert!(!json.contains("not-a-real-key"));
+        assert!(json.contains("\"private_key\":true"));
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
+    }
+
+    #[test]
+    fn inspect_missing_slot_is_all_false_and_empty_root_lists_nothing() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+
+        assert!(list_credential_slots().is_empty());
+        assert!(list_credential_slot_presence().is_empty());
+        let missing = inspect_credential_slot("hpc").unwrap();
+        assert_eq!(
+            missing,
+            SlotPresence {
+                name: "hpc".into(),
+                private_key: false,
+                public_key: false,
+                passphrase: false,
+                known_hosts: false,
+            }
+        );
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
+    }
+
+    #[test]
+    fn inspect_rejects_unsafe_slot_names() {
+        assert!(inspect_credential_slot("../etc").is_err());
+        assert!(inspect_credential_slot("hpc/../root").is_err());
+        assert!(inspect_credential_slot("").is_err());
+    }
+
+    #[test]
+    fn inspect_known_hosts_falls_back_to_root_file() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("hpc");
+        std::fs::create_dir(&slot).unwrap();
+        write_mode600(&slot.join("private_key"), "slot-key");
+        std::fs::write(
+            dir.path().join("known_hosts"),
+            "login.example.org ssh-ed25519 AAAA",
+        )
+        .unwrap();
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+
+        let presence = inspect_credential_slot("hpc").unwrap();
+        assert!(presence.private_key);
+        assert!(!presence.public_key);
+        assert!(presence.known_hosts);
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
     }
 }

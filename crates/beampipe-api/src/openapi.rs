@@ -104,7 +104,7 @@ fn tag_groups() -> Value {
         },
         {
             "name": "Operations",
-            "tags": ["operators", "scheduler", "daliuge", "health", "provenance", "alerts"]
+            "tags": ["operators", "scheduler", "daliuge", "slurm-credentials", "health", "provenance", "alerts"]
         }
     ])
 }
@@ -325,6 +325,8 @@ fn apply_operation_docs(spec: &mut Value) {
         ("get", "/api/v2/deployment-profiles/{id}", "Get deployment profile", "Fetch one deployment profile."),
         ("patch", "/api/v2/deployment-profiles/{id}", "Update deployment profile", "Patch profile translation or deployment settings."),
         ("delete", "/api/v2/deployment-profiles/{id}", "Delete deployment profile", "Remove a deployment profile."),
+        ("get", "/api/v2/slurm/credentials", "List Slurm SSH credential slots", "Names and file presence for slots under BEAMPIPE_SSH_CREDENTIALS_DIR. Never returns key material."),
+        ("get", "/api/v2/slurm/credentials/{slot}", "Get Slurm SSH credential slot", "File presence for one installed credential slot. 404 if the slot directory is not listed."),
         ("post", "/api/v2/project-configs", "Upload project config", "Upload and validate a versioned survey YAML/JSON config."),
         ("get", "/api/v2/project-configs/{id}", "Get project config", "Fetch active or historical project configuration."),
         ("get", "/api/v2/project-configs/{id}/versions", "List config versions", "Version history for a project module."),
@@ -426,5 +428,9 @@ mod tests {
         let missing = collect_unresolved_schema_refs(&spec);
         assert!(missing.is_empty(), "unresolved $ref targets: {missing:?}");
         assert!(spec["components"]["schemas"]["ReadyResponse"].is_object());
+        assert!(spec["paths"]["/api/v2/slurm/credentials"]["get"].is_object());
+        assert!(spec["paths"]["/api/v2/slurm/credentials/{slot}"]["get"].is_object());
+        assert!(spec["components"]["schemas"]["SlurmCredentialSlot"].is_object());
+        assert!(spec["components"]["schemas"]["SlurmCredentialListResponse"].is_object());
     }
 }
