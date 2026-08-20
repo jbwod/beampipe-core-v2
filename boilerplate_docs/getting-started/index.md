@@ -8,15 +8,6 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 Choose Docker and the managed PostgreSQL service. Setup writes `~/beampipe`, creates private random credentials, seeds the reference project, and starts API, scheduler, and worker services.
 
-```mermaid
-flowchart LR
-    INSTALL["install release binary"] --> SETUP["beampipe setup"]
-    SETUP --> HOME["installation home"]
-    HOME --> DB["PostgreSQL ledger"]
-    HOME --> ROLES["API + scheduler + worker"]
-    ROLES --> CHECK["beampipe doctor"]
-```
-
 Verify without changing directories:
 
 ```bash
