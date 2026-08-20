@@ -182,4 +182,4 @@ beampipe project validate -f config/wallaby_hires.v2.yaml
 make docs-build
 ```
 
-See the [architecture](https://beampipe-core.readthedocs.io/architecture/) for crate ownership boundaries.
+See the [operator docs](https://beampipe-core.readthedocs.io/) and [contributing guide](https://beampipe-core.readthedocs.io/contributing/).

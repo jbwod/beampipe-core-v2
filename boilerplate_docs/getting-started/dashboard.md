@@ -45,7 +45,7 @@ control, submission, scheduler, DALiuGE, output, and terminal states alongside
 phase timestamps and pinned inputs. Timeline, artifact, graph, manifest, and
 ledger tabs retain the raw evidence needed for diagnosis.
 
-Use the Core [execution state model](../architecture/state-machine.md) when
+Use [Recovery and cancellation](../operations/recovery.md) when
 interpreting failed, uncertain, cancelled, or externally running work.
 
 ## Alerts

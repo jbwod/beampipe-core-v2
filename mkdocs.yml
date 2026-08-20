@@ -50,9 +50,6 @@ nav:
       - Transforms: project-configs/transforms.md
       - Graph preparation: project-configs/graph-patches.md
       - Deployment profiles and SSH: architecture/deployment-profiles.md
-  - Understand:
-      - Architecture: architecture/index.md
-      - Execution state model: architecture/state-machine.md
   - Reference:
       - CLI commands: reference/cli.md
       - API workflow: api/index.md

@@ -22,7 +22,7 @@ make docs-build
 | Environment setting or security policy | install/configuration and deployment profiles |
 | Project schema | project YAML, transforms, graph preparation |
 | API type or route | generated OpenAPI and API workflow if task order changes |
-| Execution transition | architecture state model and recovery procedure |
+| Execution transition | recovery procedure |
 | Metric or alert | observability dashboard order and alert guidance |
 | Backend behavior | deployment profiles |
 

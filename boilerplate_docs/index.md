@@ -144,7 +144,7 @@ Beampipe owns durable intent, preparation artifacts, admission, submission recor
 <a href="operations/"><strong>[02] Operate</strong><span>Watch queues and workers, investigate failures, and recover safely.</span></a>
 <a href="project-configs/"><strong>[03] Configure</strong><span>Define TAP queries, metadata, manifests, graph patches, and automation.</span></a>
 <a href="architecture/deployment-profiles/"><strong>[04] Deploy</strong><span>Connect an existing DALiuGE DIM or a Slurm facility with strict SSH trust.</span></a>
-<a href="architecture/"><strong>[05] Understand</strong><span>Follow durable state through discovery, preparation, submission, and polling.</span></a>
+<a href="operations/"><strong>[05] Understand</strong><span>Follow durable state through discovery, preparation, submission, and polling.</span></a>
 <a href="api/"><strong>[06] Integrate</strong><span>Use the authenticated API workflow and generated schema.</span></a>
 </div>
 
