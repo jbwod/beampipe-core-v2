@@ -757,7 +757,7 @@ async fn ready(
         "vizier",
         tap_report.vizier.reachable || !tap_report.vizier.configured,
     );
-    let queue_depth = repo::queue_depth(&state.pool).await?;
+    let queue_depth = repo::runnable_queue_depth(&state.pool).await?;
     let jobs_running = repo::jobs_running_count(&state.pool).await?;
     metrics::set_jobs_queue_depth(queue_depth);
     metrics::set_jobs_running(jobs_running);

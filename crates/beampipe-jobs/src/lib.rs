@@ -1608,7 +1608,7 @@ async fn run_discover_batch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
 }
 
 async fn refresh_pool_gauges(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let depth = repo::queue_depth(pool).await?;
+    let depth = repo::runnable_queue_depth(pool).await?;
     let running = repo::jobs_running_count(pool).await?;
     metrics::set_jobs_queue_depth(depth);
     metrics::set_jobs_running(running);

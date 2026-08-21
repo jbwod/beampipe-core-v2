@@ -4,6 +4,7 @@ use beampipe_db::{
     repo,
 };
 use beampipe_domain::{DaliugeState, ExecutionStatus, LedgerPatch};
+use chrono::{Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -89,6 +90,63 @@ async fn job_queue_deferred_enqueue() {
     .unwrap();
     assert_eq!(job.kind, "scheduler_tick");
     assert_eq!(job.status, "queued");
+}
+
+#[tokio::test]
+async fn queue_gauges_only_include_runnable_jobs() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let future_kind = format!("future_tick_{}", Uuid::now_v7());
+    let overdue_kind = format!("overdue_tick_{}", Uuid::now_v7());
+    let future = repo::enqueue_job_with_options(
+        &pool,
+        &future_kind,
+        json!({}),
+        repo::JobEnqueueOptions {
+            next_run_at: Some(Utc::now() + Duration::hours(1)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let overdue = repo::enqueue_job_with_options(
+        &pool,
+        &overdue_kind,
+        json!({}),
+        repo::JobEnqueueOptions {
+            next_run_at: Some(Utc::now() - Duration::seconds(30)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let by_kind = repo::queue_depth_by_kind(&pool).await.unwrap();
+    assert!(!by_kind.iter().any(|(kind, _)| kind == &future_kind));
+    assert_eq!(
+        by_kind
+            .iter()
+            .find(|(kind, _)| kind == &overdue_kind)
+            .map(|(_, count)| *count),
+        Some(1)
+    );
+
+    let ages = repo::oldest_queued_job_age_by_kind(&pool).await.unwrap();
+    assert!(!ages.iter().any(|(kind, _)| kind == &future_kind));
+    let overdue_age = ages
+        .iter()
+        .find(|(kind, _)| kind == &overdue_kind)
+        .map(|(_, age)| *age)
+        .expect("overdue job has an age gauge");
+    assert!(
+        overdue_age >= 29,
+        "age should be measured from next_run_at, got {overdue_age} seconds"
+    );
+
+    repo::complete_job(&pool, future.uuid).await.unwrap();
+    repo::complete_job(&pool, overdue.uuid).await.unwrap();
 }
 
 #[tokio::test]

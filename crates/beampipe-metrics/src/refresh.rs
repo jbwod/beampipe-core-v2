@@ -103,7 +103,7 @@ pub async fn refresh_dependencies(pool: &PgPool) {
 pub async fn refresh_gauges_from_pool(pool: &PgPool) {
     refresh_dependencies(pool).await;
 
-    if let Ok(depth) = beampipe_db::repo::queue_depth(pool).await {
+    if let Ok(depth) = beampipe_db::repo::runnable_queue_depth(pool).await {
         crate::set_jobs_queue_depth(depth);
     }
     if let Ok(running) = beampipe_db::repo::jobs_running_count(pool).await {

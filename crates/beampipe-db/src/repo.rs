@@ -506,12 +506,21 @@ pub async fn queue_depth(pool: &PgPool) -> Result<i64, sqlx::Error> {
         .await
 }
 
+/// Queued jobs that are eligible to be claimed now, excluding deferred and recurring work
+/// whose scheduled time has not arrived.
+pub async fn runnable_queue_depth(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'queued' AND next_run_at <= now()")
+        .fetch_one(pool)
+        .await
+}
+
 pub async fn queue_depth_by_kind(pool: &PgPool) -> Result<Vec<(String, i64)>, sqlx::Error> {
     sqlx::query_as::<_, (String, i64)>(
         r#"
         SELECT kind, COUNT(*)::bigint
         FROM jobs
         WHERE status = 'queued'
+          AND next_run_at <= now()
         GROUP BY kind
         ORDER BY kind ASC
         "#,
@@ -526,9 +535,10 @@ pub async fn oldest_queued_job_age_by_kind(
     sqlx::query_as::<_, (String, i64)>(
         r#"
         SELECT kind,
-               COALESCE(EXTRACT(EPOCH FROM (now() - MIN(created_at)))::bigint, 0)
+               COALESCE(EXTRACT(EPOCH FROM (now() - MIN(next_run_at)))::bigint, 0)
         FROM jobs
         WHERE status = 'queued'
+          AND next_run_at <= now()
         GROUP BY kind
         ORDER BY kind ASC
         "#,
