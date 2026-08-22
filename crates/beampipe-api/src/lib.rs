@@ -3529,6 +3529,23 @@ fn default_true() -> bool {
     true
 }
 
+fn execute_job_replayable(status: &str) -> bool {
+    matches!(status, "queued" | "running" | "completed")
+}
+
+fn execute_job_options(payload: &Value) -> (bool, bool) {
+    (
+        payload
+            .get("do_stage")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        payload
+            .get("do_submit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    )
+}
+
 #[utoipa::path(post, path = "/api/v2/executions/{id}/execute", tag = "executions", responses((status = 202)))]
 async fn execute_execution(
     State(state): State<Arc<AppState>>,
@@ -3542,22 +3559,13 @@ async fn execute_execution(
         .ok_or(ApiError::NotFound)?;
     let idempotency_key = format!("execute:{id}");
     if let Some(existing) = repo::get_job_by_idempotency_key(&state.pool, &idempotency_key).await? {
-        let existing_stage = existing
-            .payload
-            .get("do_stage")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let existing_submit = existing
-            .payload
-            .get("do_submit")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        let (existing_stage, existing_submit) = execute_job_options(&existing.payload);
         if (existing_stage, existing_submit) != (req.do_stage, req.do_submit) {
             return Err(ApiError::Conflict(
                 "execution was already queued with different do_stage/do_submit options".into(),
             ));
         }
-        if matches!(existing.status.as_str(), "queued" | "running") {
+        if execute_job_replayable(&existing.status) {
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(ExecuteResponse {
@@ -3598,22 +3606,13 @@ async fn execute_execution(
         },
     )
     .await?;
-    let queued_stage = job
-        .payload
-        .get("do_stage")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let queued_submit = job
-        .payload
-        .get("do_submit")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let (queued_stage, queued_submit) = execute_job_options(&job.payload);
     if (queued_stage, queued_submit) != (req.do_stage, req.do_submit) {
         return Err(ApiError::Conflict(
             "a concurrent start request queued different do_stage/do_submit options".into(),
         ));
     }
-    if !matches!(job.status.as_str(), "queued" | "running") {
+    if !execute_job_replayable(&job.status) {
         return Err(ApiError::Conflict(format!(
             "execution start request already finished with job status '{}'; use the retry endpoint before starting again",
             job.status
@@ -4416,6 +4415,17 @@ adapters:
             execution_create_request_sha256(&request),
             execution_create_request_sha256(&equivalent)
         );
+    }
+
+    #[test]
+    fn completed_execute_job_is_replayed_only_for_identical_options() {
+        let payload = json!({"do_stage": false, "do_submit": true});
+
+        assert!(execute_job_replayable("completed"));
+        assert_eq!(execute_job_options(&payload), (false, true));
+        assert_ne!(execute_job_options(&payload), (true, true));
+        assert!(!execute_job_replayable("failed"));
+        assert!(!execute_job_replayable("cancelled"));
     }
 
     #[test]
