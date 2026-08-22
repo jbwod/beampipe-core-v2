@@ -58,7 +58,8 @@ pub fn render_generated_ini(
     lines.join("\n")
 }
 
-const FORWARDED_ENVIRONMENT: [&str; 2] = ["BEAMPIPE_SLURM_ACCOUNT", "BEAMPIPE_ASKAPSOFT_SIF"];
+const SLURM_ACCOUNT_ENV: &str = "BEAMPIPE_SLURM_ACCOUNT";
+const OPTIONAL_FORWARDED_ENVIRONMENT: [&str; 1] = ["BEAMPIPE_ASKAPSOFT_SIF"];
 
 pub fn env_prelude(deployment: &SlurmRemoteDeploymentConfig) -> Result<String, OrchestrationError> {
     env_prelude_with(deployment, |name| std::env::var(name).ok())
@@ -71,7 +72,13 @@ fn env_prelude_with<F>(
 where
     F: FnMut(&str) -> Option<String>,
 {
-    let mut parts = vec!["set -euo pipefail".to_string()];
+    let mut parts = vec![
+        "set -euo pipefail".to_string(),
+        format!(
+            "export {SLURM_ACCOUNT_ENV}={}",
+            shell_quote(&deployment.account)
+        ),
+    ];
     if let Some(modules) = deployment.modules.as_deref() {
         parts.push("set +u".into());
         for line in modules.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -85,7 +92,7 @@ where
         parts.push("set -u".into());
     }
     if let Some(setup) = deployment.environment_setup.as_deref() {
-        for name in FORWARDED_ENVIRONMENT {
+        for name in OPTIONAL_FORWARDED_ENVIRONMENT {
             if setup.contains(name) {
                 let value = read_environment(name)
                     .filter(|value| !value.trim().is_empty())
@@ -101,7 +108,51 @@ where
             parts.push(line.to_string());
         }
     }
+    // The profile account is authoritative for both the outer DALiuGE
+    // allocation and nested Slurm jobs. Re-assert it after operator setup so
+    // an ambient process variable or setup command cannot make them drift.
+    parts.push(format!(
+        "export {SLURM_ACCOUNT_ENV}={}",
+        shell_quote(&deployment.account)
+    ));
     Ok(parts.join("\n"))
+}
+
+fn sbatch_command_with<F>(
+    deployment: &SlurmRemoteDeploymentConfig,
+    session_id: &str,
+    jobsub_path: &str,
+    read_environment: F,
+) -> Result<String, OrchestrationError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut exported = vec![SLURM_ACCOUNT_ENV];
+    if deployment
+        .environment_setup
+        .as_deref()
+        .is_some_and(|setup| setup.contains("BEAMPIPE_ASKAPSOFT_SIF"))
+    {
+        exported.push("BEAMPIPE_ASKAPSOFT_SIF");
+    }
+    let inner = format!(
+        "{}\nsbatch --export={} --parsable --job-name={} {}",
+        env_prelude_with(deployment, read_environment)?,
+        exported.join(","),
+        shell_quote(session_id),
+        shell_quote(jobsub_path)
+    );
+    Ok(format!("bash -lc {}", shell_quote(&inner)))
+}
+
+fn sbatch_command(
+    deployment: &SlurmRemoteDeploymentConfig,
+    session_id: &str,
+    jobsub_path: &str,
+) -> Result<String, OrchestrationError> {
+    sbatch_command_with(deployment, session_id, jobsub_path, |name| {
+        std::env::var(name).ok()
+    })
 }
 
 pub fn create_dlg_job_argv(
@@ -229,11 +280,7 @@ pub async fn submit_slurm_session(
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
     let sbatch_out = session
-        .run_command(&format!(
-            "sbatch --parsable --job-name={} {}",
-            shell_quote(&session_id),
-            shell_quote(&jobsub_path)
-        ))
+        .run_command(&sbatch_command(&deployment, &session_id, &jobsub_path)?)
         .await?;
     let _ = session.close().await;
 
@@ -324,14 +371,15 @@ mod tests {
                 .into(),
         );
         let prelude = env_prelude_with(&dep, |name| match name {
-            "BEAMPIPE_SLURM_ACCOUNT" => Some("science-account".into()),
             "BEAMPIPE_ASKAPSOFT_SIF" => Some("/images/askap soft's.sif".into()),
             _ => None,
         })
         .unwrap();
-        assert!(prelude.contains("export BEAMPIPE_SLURM_ACCOUNT=science-account"));
+        assert!(prelude.contains("export BEAMPIPE_SLURM_ACCOUNT=myacct"));
+        assert!(!prelude.contains("science-account"));
         assert!(prelude.contains("export BEAMPIPE_ASKAPSOFT_SIF='/images/askap soft'\\''s.sif'"));
         assert!(prelude.contains("export BEAMPIPE_SLURM_ACCOUNT=\"$BEAMPIPE_SLURM_ACCOUNT\""));
+        assert!(prelude.ends_with("export BEAMPIPE_SLURM_ACCOUNT=myacct"));
     }
 
     #[test]
@@ -340,6 +388,26 @@ mod tests {
         dep.environment_setup = Some("echo $BEAMPIPE_ASKAPSOFT_SIF".into());
         let error = env_prelude_with(&dep, |_| None).unwrap_err();
         assert!(error.to_string().contains("BEAMPIPE_ASKAPSOFT_SIF"));
+    }
+
+    #[test]
+    fn sbatch_runs_with_exports_in_the_same_remote_shell() {
+        let mut dep = deployment();
+        dep.environment_setup = Some("test -n \"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
+        let command = sbatch_command_with(&dep, "session id", "/dlg/job sub.sh", |name| {
+            (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into())
+        })
+        .unwrap();
+
+        assert!(command.starts_with("bash -lc "));
+        assert!(command.contains("export BEAMPIPE_SLURM_ACCOUNT=myacct"));
+        assert!(command.contains("export BEAMPIPE_ASKAPSOFT_SIF="));
+        assert!(command
+            .contains("sbatch --export=BEAMPIPE_SLURM_ACCOUNT,BEAMPIPE_ASKAPSOFT_SIF --parsable"));
+        assert!(
+            command.find("export BEAMPIPE_ASKAPSOFT_SIF").unwrap()
+                < command.find("sbatch --export=").unwrap()
+        );
     }
 
     fn deployment() -> SlurmRemoteDeploymentConfig {

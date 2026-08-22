@@ -106,7 +106,7 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
   "dlg_root": "/scratch/project_account/operator/dlg",
   "modules": "module load singularity",
   "venv": "source /software/project/venv/bin/activate",
-  "environment_setup": "export BEAMPIPE_SLURM_ACCOUNT=\"$BEAMPIPE_SLURM_ACCOUNT\"\nexport BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"",
+  "environment_setup": "export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"",
   "exec_prefix": "srun -l",
   "facility": "hpc",
   "resources": {
@@ -128,13 +128,15 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
 `beampipe profile render PROFILE_NAME` shows effective `#SBATCH` directives and DALiuGE settings before submission.
 
 `environment_setup` runs on the remote login node before DALiuGE creates the
-job script. When it references `BEAMPIPE_SLURM_ACCOUNT` or
-`BEAMPIPE_ASKAPSOFT_SIF`, the worker safely exports their local process values
-into the remote shell first. Set both in the installation `.env`; the example
-WALLABY graph uses them for its nested Slurm jobs and immutable ASKAPsoft image.
-Submission fails before `sbatch` when either referenced value is empty. The
-bundled Slurm profile is deliberately not a default: edit and qualify its
-account, paths, credentials, and SIF before selecting it.
+job script and again in the same remote shell that invokes `sbatch`. Named
+runtime inputs are explicitly propagated into the allocation. Beampipe always
+derives `BEAMPIPE_SLURM_ACCOUNT` from the profile's `deployment.account`, so
+outer and nested allocations cannot drift. Set `BEAMPIPE_ASKAPSOFT_SIF` in the
+installation `.env` when the setup references it; submission fails before
+`sbatch` when it is empty. The bundled WALLABY graph uses these values for its
+nested Slurm jobs and immutable ASKAPsoft image. The bundled Slurm profile is
+deliberately not a default: edit and qualify its account, paths, credentials,
+and SIF before selecting it.
 
 ## Preferred SSH key model
 

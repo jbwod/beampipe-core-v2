@@ -22,7 +22,7 @@
     "log_dir": "/scratch/pawsey0411/jblackwood/dlg/log",
     "modules": "module load singularity/4.1.0-askap && module load py-numpy/1.26.4 && module use /group/askap/modulefiles",
     "venv": "source /software/projects/pawsey0411/jblackwood/venv/bin/activate",
-    "environment_setup": "export BEAMPIPE_SLURM_ACCOUNT=\"$BEAMPIPE_SLURM_ACCOUNT\"\nexport BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"",
+    "environment_setup": "export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"",
     "exec_prefix": "srun -l",
     "job_duration_minutes": 50,
     "num_nodes": 1,
