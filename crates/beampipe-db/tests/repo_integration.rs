@@ -472,6 +472,24 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     let config = repo::insert_project_config(&pool, &module, spec, &"c".repeat(64))
         .await
         .unwrap();
+    repo::upsert_source(&pool, &module, "source-1", true)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE source_registry
+        SET discovery_signature = $3,
+            workflow_run_pending = true,
+            workflow_run_pending_at = now()
+        WHERE project_module = $1 AND source_identifier = $2
+        "#,
+    )
+    .bind(&module)
+    .bind("source-1")
+    .bind("1".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
     let execution = repo::create_execution(
         &pool,
         &module,
@@ -505,6 +523,17 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     assert_eq!(held.output_state.as_deref(), Some("pending"));
     assert!(held.terminal_outcome.is_none());
     assert!(held.completed_at.is_none());
+
+    let direct_completion = sqlx::query(
+        "UPDATE batch_execution_record SET status = 'completed' WHERE uuid = $1",
+    )
+    .bind(execution.uuid)
+    .execute(&pool)
+    .await;
+    assert!(
+        direct_completion.is_err(),
+        "the database must reject required, unverified completion"
+    );
 
     let inventory_sha256 = "a".repeat(64);
     let artifact = ExecutionArtifactInput {
@@ -540,6 +569,39 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     assert_eq!(completed.terminal_outcome.as_deref(), Some("succeeded"));
     assert!(completed.completed_at.is_some());
     assert_eq!(stored.uri, artifact.uri);
+    assert_eq!(
+        completed.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]
+            ["output_verification"]["artifact_id"],
+        stored.uuid.to_string()
+    );
+    let source = repo::get_source_by_identifier(&pool, &module, "source-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!source.workflow_run_pending);
+    assert_eq!(
+        source.last_executed_discovery_signature,
+        source.discovery_signature
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE source_registry
+        SET discovery_signature = $3,
+            workflow_run_pending = true,
+            workflow_run_pending_at = now(),
+            workflow_claim_token = 'newer-claim',
+            workflow_claimed_at = now(),
+            workflow_claim_expires_at = now() + interval '5 minutes'
+        WHERE project_module = $1 AND source_identifier = $2
+        "#,
+    )
+    .bind(&module)
+    .bind("source-1")
+    .bind("2".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let (replayed, replayed_artifact) = repo::verify_execution_outputs(
         &pool,
@@ -552,6 +614,19 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     .unwrap();
     assert_eq!(replayed.status, "completed");
     assert_eq!(replayed_artifact.uuid, stored.uuid);
+    let source_after_replay = repo::get_source_by_identifier(&pool, &module, "source-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(source_after_replay.workflow_run_pending);
+    assert_eq!(
+        source_after_replay.workflow_claim_token.as_deref(),
+        Some("newer-claim")
+    );
+    assert_ne!(
+        source_after_replay.last_executed_discovery_signature,
+        source_after_replay.discovery_signature
+    );
 
     let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
         .await
@@ -563,6 +638,135 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
             .count(),
         1
     );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "execution.completed")
+            .count(),
+        1
+    );
+    let verified_event = events
+        .iter()
+        .find(|event| event.event_type == "execution.outputs_verified")
+        .unwrap();
+    assert_eq!(
+        verified_event.payload["inventory_schema"],
+        "wallaby-hires-output-inventory/v1"
+    );
+}
+
+#[tokio::test]
+async fn output_verification_preserves_discovery_that_changed_after_admission() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("output_changed_{}", Uuid::now_v7().simple());
+    let spec = json!({
+        "apiVersion": "beampipe.dev/v2",
+        "kind": "ProjectConfig",
+        "metadata": {"id": module},
+        "output_verification": {
+            "required": true,
+            "inventory_schema": "wallaby-hires-output-inventory/v1"
+        }
+    });
+    let config = repo::insert_project_config(&pool, &module, spec, &"d".repeat(64))
+        .await
+        .unwrap();
+    repo::upsert_source(&pool, &module, "source-1", true)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE source_registry SET discovery_signature = $3, workflow_run_pending = true WHERE project_module = $1 AND source_identifier = $2",
+    )
+    .bind(&module)
+    .bind("source-1")
+    .bind("3".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "local",
+        None,
+        Some(config.uuid),
+        None,
+    )
+    .await
+    .unwrap();
+    repo::apply_execution_state_patch(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            daliuge_state: Some(DaliugeState::Finished),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE source_registry
+        SET discovery_signature = $3,
+            workflow_run_pending = true,
+            workflow_claim_token = 'changed-claim',
+            workflow_claimed_at = now(),
+            workflow_claim_expires_at = now() + interval '5 minutes'
+        WHERE project_module = $1 AND source_identifier = $2
+        "#,
+    )
+    .bind(&module)
+    .bind("source-1")
+    .bind("4".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let artifact = ExecutionArtifactInput {
+        kind: "output_inventory".into(),
+        storage_kind: "remote".into(),
+        uri: Some("file:///durable/wallaby/run-changed".into()),
+        inline_json: Some(json!({"inventory_sha256": "5".repeat(64)})),
+        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        sha256: "6".repeat(64),
+        size_bytes: Some(512),
+        producer_phase: "publication_acknowledged".into(),
+        metadata: json!({
+            "inventory_schema": "wallaby-hires-output-inventory/v1",
+            "inventory_sha256": "5".repeat(64),
+        }),
+    };
+    let (completed, _) = repo::verify_execution_outputs(
+        &pool,
+        execution.uuid,
+        artifact,
+        "trusted-publisher:test",
+        Some("outputs:changed"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed.status_enum(), Some(ExecutionStatus::Completed));
+    let source = repo::get_source_by_identifier(&pool, &module, "source-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(source.workflow_run_pending);
+    assert_eq!(source.workflow_claim_token.as_deref(), Some("changed-claim"));
+    assert_ne!(
+        source.last_executed_discovery_signature,
+        source.discovery_signature
+    );
+    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
+        .await
+        .unwrap();
+    let completed_event = events
+        .iter()
+        .find(|event| event.event_type == "execution.completed")
+        .unwrap();
+    assert_eq!(completed_event.payload["source_signatures_finalized"], false);
 }
 
 #[tokio::test]
@@ -663,6 +867,27 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
         .unwrap()
         .is_none());
 
+    let stale_success = repo::apply_execution_state_patch_with_transition(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::OutputVerification),
+            scheduler_state: Some(beampipe_domain::SchedulerState::Succeeded),
+            daliuge_state: Some(DaliugeState::Finished),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!stale_success.entered_terminal);
+    assert_eq!(stale_success.row.status, "cancelled");
+    assert_eq!(stale_success.row.control_phase.as_deref(), Some("terminal"));
+    assert_eq!(
+        stale_success.row.terminal_outcome.as_deref(),
+        Some("cancelled")
+    );
+
     let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
         .await
         .unwrap();
@@ -673,6 +898,53 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     assert_eq!(event.actor.as_deref(), Some("user:test"));
     assert_eq!(event.correlation_id.as_deref(), Some("cancel:test"));
     assert_eq!(event.payload["invalidated_execute_jobs"], 1);
+}
+
+#[tokio::test]
+async fn terminal_failure_is_not_reopened_by_a_metadata_state_patch() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("failed_patch_{}", Uuid::now_v7());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::apply_execution_patch(
+        &pool,
+        execution.uuid,
+        LedgerPatch {
+            status: Some(ExecutionStatus::Failed),
+            error: Some("DIM poll timeout".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let patched = repo::apply_execution_state_patch_with_transition(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::Terminal),
+            terminal_outcome: Some(beampipe_domain::TerminalOutcome::Failed),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!patched.entered_terminal);
+    assert_eq!(patched.row.status, "failed");
+    assert_eq!(patched.row.control_phase.as_deref(), Some("terminal"));
+    assert!(patched.row.completed_at.is_some());
 }
 
 #[tokio::test]
@@ -916,14 +1188,20 @@ async fn list_slurm_executions_pending_poll_returns_active_slurm() {
         pending.iter().any(|row| row.uuid == exec.uuid),
         "expected slurm execution in pending poll list"
     );
-    repo::apply_execution_patch(
-        &pool,
-        exec.uuid,
-        LedgerPatch {
-            status: Some(ExecutionStatus::Completed),
-            ..LedgerPatch::default()
-        },
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET status = 'running',
+            output_verification_required = true,
+            output_state = 'pending',
+            scheduler_state = 'succeeded',
+            daliuge_state = 'finished',
+            terminal_outcome = NULL
+        WHERE uuid = $1
+        "#,
     )
+    .bind(exec.uuid)
+    .execute(&pool)
     .await
     .unwrap();
     let after = repo::list_slurm_executions_pending_poll(&pool)
@@ -979,14 +1257,20 @@ async fn list_rest_executions_pending_poll_returns_active_daliuge() {
         pending.iter().any(|row| row.uuid == exec.uuid),
         "expected daliuge execution in pending poll list"
     );
-    repo::apply_execution_patch(
-        &pool,
-        exec.uuid,
-        LedgerPatch {
-            status: Some(ExecutionStatus::Completed),
-            ..LedgerPatch::default()
-        },
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET status = 'running',
+            output_verification_required = true,
+            output_state = 'pending',
+            scheduler_state = 'not_submitted',
+            daliuge_state = 'finished',
+            terminal_outcome = NULL
+        WHERE uuid = $1
+        "#,
     )
+    .bind(exec.uuid)
+    .execute(&pool)
     .await
     .unwrap();
     let after = repo::list_rest_executions_pending_poll(&pool)

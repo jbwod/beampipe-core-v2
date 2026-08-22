@@ -19,8 +19,8 @@ use beampipe_domain::{
     can_admit_by_in_flight,
     discovery::{should_skip_tap, DiscoverySourceResult, SignatureOptions},
     discovery_admission_budget, execute_admission_budget, is_non_retryable_job_error, ControlPhase,
-    DaliugeState, ExecutionPhase, ExecutionStatus, FailureClass, LedgerPatch, SchedulerState,
-    SchedulerTickResult, SkipReason, SubmissionState, TerminalOutcome,
+    DaliugeState, ExecutionPhase, ExecutionStatus, FailureClass, LedgerPatch, OutputState,
+    SchedulerState, SchedulerTickResult, SkipReason, SubmissionState, TerminalOutcome,
 };
 use beampipe_metrics as metrics;
 use beampipe_orchestration::slurm_deploy::resolve_remote_user;
@@ -1669,9 +1669,9 @@ async fn finalize_execution_source_pending(
             repo::mark_sources_pending_workflow_run(pool, project_module, sources).await?;
         }
         ExecutionStatus::Completed | ExecutionStatus::NotSubmitted => {
-            repo::clear_workflow_pending_for_sources(pool, project_module, sources).await?;
-            repo::set_last_executed_discovery_signature_for_sources(pool, project_module, sources)
-                .await?;
+            if let Some(execution_id) = execution_id {
+                repo::finalize_successful_execution_sources(pool, execution_id).await?;
+            }
         }
         ExecutionStatus::Cancelled => {
             repo::clear_workflow_pending_for_sources(pool, project_module, sources).await?;
@@ -3210,20 +3210,9 @@ async fn run_execute_body(
         )
         .await
         .map_err(|e| e.to_string())?;
-        repo::clear_workflow_pending_for_sources(
-            pool,
-            &execution.project_module,
-            &source_identifiers,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        repo::set_last_executed_discovery_signature_for_sources(
-            pool,
-            &execution.project_module,
-            &source_identifiers,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        repo::finalize_successful_execution_sources(pool, execution_id)
+            .await
+            .map_err(|e| e.to_string())?;
         info!(event = "execute_complete", execution_id = %execution_id, status = "not_submitted");
         metrics::record_execute_terminal(&execution.project_module, "not_submitted");
         return Ok(());
@@ -3787,16 +3776,18 @@ async fn apply_dim_poll_update(
         .clone()
         .unwrap_or_else(|| execution_id.to_string());
     let poll_summary = poll.poll_summary;
-    let daliuge_state = poll_summary
-        .get("normalized_session_state")
-        .and_then(Value::as_str)
-        .and_then(DaliugeState::parse)
-        .unwrap_or(match poll.status {
-            ExecutionStatus::Completed => DaliugeState::Finished,
-            ExecutionStatus::Failed => DaliugeState::Failed,
-            ExecutionStatus::Cancelled => DaliugeState::Cancelled,
-            _ => DaliugeState::Running,
-        });
+    let daliuge_state = match poll.status {
+        ExecutionStatus::Failed => DaliugeState::Failed,
+        ExecutionStatus::Cancelled => DaliugeState::Cancelled,
+        _ => poll_summary
+            .get("normalized_session_state")
+            .and_then(Value::as_str)
+            .and_then(DaliugeState::parse)
+            .unwrap_or(match poll.status {
+                ExecutionStatus::Completed => DaliugeState::Finished,
+                _ => DaliugeState::Running,
+            }),
+    };
     repo::record_execution_observation(
         pool,
         execution_id,
@@ -3814,11 +3805,22 @@ async fn apply_dim_poll_update(
         },
     )
     .await?;
-    repo::apply_execution_state_patch(
+    let transition = repo::apply_execution_state_patch_with_transition(
         pool,
         execution_id,
         ExecutionStatePatch {
-            control_phase: Some(ControlPhase::Monitoring),
+            control_phase: Some(poll_control_phase(
+                execution.output_verification_required,
+                execution.output_state.as_deref(),
+                daliuge_state == DaliugeState::Finished
+                    && matches!(
+                        execution
+                            .scheduler_state
+                            .as_deref()
+                            .and_then(SchedulerState::parse),
+                        Some(SchedulerState::Succeeded | SchedulerState::NotSubmitted)
+                    ),
+            )),
             submission_state: matches!(
                 execution
                     .submission_state
@@ -3833,19 +3835,25 @@ async fn apply_dim_poll_update(
             ..Default::default()
         },
     )
-    .await?;
+    .await?
+    .ok_or_else(|| sqlx::Error::Protocol("execution disappeared during DIM poll".into()))?;
+    let entered_terminal = transition.entered_terminal;
+    let reconciled = transition.row;
     metrics::record_reconciliation_result("daliuge", "observed");
+    let aggregate_status = reconciled
+        .status_enum()
+        .ok_or_else(|| sqlx::Error::Protocol("reconciled execution has unknown status".into()))?;
     let mut manifest = if poll.status.is_terminal() {
         merge_terminal_dim_poll_into_manifest(
-            execution.workflow_manifest.clone(),
+            reconciled.workflow_manifest.clone(),
             &session_id,
             daliuge_state,
-            poll.status,
+            terminal_ledger_status(aggregate_status),
             &poll_summary,
         )
     } else {
         merge_poll_summary(
-            execution.workflow_manifest.clone(),
+            reconciled.workflow_manifest.clone(),
             "dim_poll",
             poll_summary,
         )
@@ -3868,23 +3876,27 @@ async fn apply_dim_poll_update(
             pool,
             execution_id,
             LedgerPatch {
-                status: Some(poll.status),
                 workflow_manifest: Some(manifest),
                 ..LedgerPatch::default()
             },
             correlation_id,
         )
         .await?;
-        let sources = source_identifiers_from_json(&execution.sources);
-        finalize_execution_source_pending(
-            pool,
-            &execution.project_module,
-            &sources,
-            poll.status,
-            Some(execution_id),
-        )
-        .await?;
-        metrics::record_execute_terminal(&execution.project_module, poll.status.as_str());
+        if entered_terminal {
+            let sources = source_identifiers_from_json(&execution.sources);
+            finalize_execution_source_pending(
+                pool,
+                &execution.project_module,
+                &sources,
+                aggregate_status,
+                Some(execution_id),
+            )
+            .await?;
+            metrics::record_execute_terminal(
+                &execution.project_module,
+                aggregate_status.as_str(),
+            );
+        }
         return Ok(());
     }
     if poll_round + 1 >= max_rounds {
@@ -3926,7 +3938,6 @@ async fn apply_dim_poll_update(
         pool,
         execution_id,
         LedgerPatch {
-            status: Some(poll.status),
             workflow_manifest: Some(manifest),
             ..LedgerPatch::default()
         },
@@ -3963,7 +3974,7 @@ fn merge_terminal_dim_poll_into_manifest(
     existing: Option<Value>,
     session_id: &str,
     daliuge_state: DaliugeState,
-    status: ExecutionStatus,
+    terminal_ledger_status: Option<&str>,
     poll_summary: &Value,
 ) -> Value {
     merge_dim_poll_into_manifest(
@@ -3971,18 +3982,32 @@ fn merge_terminal_dim_poll_into_manifest(
         session_id,
         daliuge_state.as_str(),
         true,
-        Some(match status {
-            ExecutionStatus::Completed => "completed",
-            ExecutionStatus::Failed => "failed",
-            ExecutionStatus::Cancelled => "cancelled",
-            _ => "unknown",
-        }),
+        terminal_ledger_status,
         None,
         poll_summary
             .get("error_drop_uids")
             .and_then(Value::as_array)
             .map(|items| items.len() as i64),
     )
+}
+
+fn poll_control_phase(
+    output_verification_required: bool,
+    output_state: Option<&str>,
+    external_succeeded: bool,
+) -> ControlPhase {
+    if external_succeeded
+        && output_verification_required
+        && output_state.and_then(OutputState::parse) != Some(OutputState::Verified)
+    {
+        ControlPhase::OutputVerification
+    } else {
+        ControlPhase::Monitoring
+    }
+}
+
+fn terminal_ledger_status(status: ExecutionStatus) -> Option<&'static str> {
+    status.is_terminal().then(|| status.as_str())
 }
 
 async fn record_dim_reconciliation_error(
@@ -4116,24 +4141,13 @@ fn slurm_poll_is_unknown(result: &SlurmJobPollResult) -> bool {
     result.normalized_state == "UNKNOWN" && result.source == "none"
 }
 
-fn execution_status_for_slurm_state(state: &str) -> ExecutionStatus {
+fn terminal_reason(state: &str) -> Option<&'static str> {
     match state {
-        "COMPLETED" => ExecutionStatus::Completed,
-        "FAILED" | "TIMEOUT" => ExecutionStatus::Failed,
-        "CANCELLED" => ExecutionStatus::Cancelled,
-        "RUNNING" => ExecutionStatus::Running,
-        "PENDING" => ExecutionStatus::AwaitingScheduler,
-        _ => ExecutionStatus::AwaitingScheduler,
-    }
-}
-
-fn terminal_ledger_and_reason(state: &str) -> (&'static str, Option<&'static str>) {
-    match state {
-        "COMPLETED" => ("completed", None),
-        "CANCELLED" => ("cancelled", Some("scheduler_cancelled")),
-        "TIMEOUT" => ("failed", Some("timeout")),
-        "FAILED" => ("failed", Some("failed")),
-        _ => ("failed", Some("unknown")),
+        "COMPLETED" => None,
+        "CANCELLED" => Some("scheduler_cancelled"),
+        "TIMEOUT" => Some("timeout"),
+        "FAILED" => Some("failed"),
+        _ => Some("unknown"),
     }
 }
 
@@ -4221,11 +4235,15 @@ async fn apply_slurm_poll_update(
         },
     )
     .await?;
-    repo::apply_execution_state_patch(
+    let transition = repo::apply_execution_state_patch_with_transition(
         pool,
         execution_id,
         ExecutionStatePatch {
-            control_phase: Some(ControlPhase::Monitoring),
+            control_phase: Some(poll_control_phase(
+                execution.output_verification_required,
+                execution.output_state.as_deref(),
+                scheduler_state == SchedulerState::Succeeded,
+            )),
             scheduler_state: Some(scheduler_state),
             scheduler_raw_state: Some(result.raw_state.clone()),
             scheduler_reason,
@@ -4234,7 +4252,10 @@ async fn apply_slurm_poll_update(
             ..Default::default()
         },
     )
-    .await?;
+    .await?
+    .ok_or_else(|| sqlx::Error::Protocol("execution disappeared during Slurm poll".into()))?;
+    let entered_terminal = transition.entered_terminal;
+    let reconciled = transition.row;
     metrics::record_reconciliation_result("slurm", scheduler_state.as_str());
 
     if slurm_poll_is_unknown(result) {
@@ -4244,7 +4265,7 @@ async fn apply_slurm_poll_update(
             "event=slurm_poll_state_unknown"
         );
         let manifest =
-            manifest_for_slurm_poll(execution, result, &scheduler_job_id, false, None, None);
+            manifest_for_slurm_poll(&reconciled, result, &scheduler_job_id, false, None, None);
         repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
@@ -4267,10 +4288,8 @@ async fn apply_slurm_poll_update(
             source = result.source,
             "event=slurm_poll_active"
         );
-        let mut next_status = None;
         if state == "RUNNING" && execution.status_enum() == Some(ExecutionStatus::AwaitingScheduler)
         {
-            next_status = Some(ExecutionStatus::Running);
             info!(
                 execution_id = %execution_id,
                 slurm_job_id = %parsed.slurm_job_id,
@@ -4278,7 +4297,7 @@ async fn apply_slurm_poll_update(
             );
         }
         let mut manifest =
-            manifest_for_slurm_poll(execution, result, &scheduler_job_id, false, None, None);
+            manifest_for_slurm_poll(&reconciled, result, &scheduler_job_id, false, None, None);
         let next_round = poll_round + 1;
         if slurm_active_poll_budget_reached(next_round, max_rounds) {
             warn!(
@@ -4294,7 +4313,6 @@ async fn apply_slurm_poll_update(
             pool,
             execution_id,
             LedgerPatch {
-                status: next_status,
                 workflow_manifest: Some(manifest),
                 ..LedgerPatch::default()
             },
@@ -4304,18 +4322,20 @@ async fn apply_slurm_poll_update(
         return Ok(());
     }
 
-    let status = execution_status_for_slurm_state(state);
-    let (ledger_status, reason) = terminal_ledger_and_reason(state);
+    let aggregate_status = reconciled
+        .status_enum()
+        .ok_or_else(|| sqlx::Error::Protocol("reconciled execution has unknown status".into()))?;
+    let reason = terminal_reason(state);
     let manifest = manifest_for_slurm_poll(
-        execution,
+        &reconciled,
         result,
         &scheduler_job_id,
         true,
-        Some(ledger_status),
+        terminal_ledger_status(aggregate_status),
         reason,
     );
     let mut error = None;
-    if status == ExecutionStatus::Failed {
+    if aggregate_status == ExecutionStatus::Failed {
         let reason_str = reason.unwrap_or(state);
         let mut msg = format!(
             "SLURM job {} finished in state={state} reason={reason_str}",
@@ -4341,24 +4361,25 @@ async fn apply_slurm_poll_update(
         pool,
         execution_id,
         LedgerPatch {
-            status: Some(status),
             workflow_manifest: Some(manifest),
             error,
             ..LedgerPatch::default()
         },
-        None,
+        correlation_id,
     )
     .await?;
-    let sources = source_identifiers_from_json(&execution.sources);
-    finalize_execution_source_pending(
-        pool,
-        &execution.project_module,
-        &sources,
-        status,
-        Some(execution_id),
-    )
-    .await?;
-    metrics::record_execute_terminal(&execution.project_module, status.as_str());
+    if entered_terminal {
+        let sources = source_identifiers_from_json(&execution.sources);
+        finalize_execution_source_pending(
+            pool,
+            &execution.project_module,
+            &sources,
+            aggregate_status,
+            Some(execution_id),
+        )
+        .await?;
+        metrics::record_execute_terminal(&execution.project_module, aggregate_status.as_str());
+    }
     Ok(())
 }
 
@@ -4939,6 +4960,13 @@ mod tests {
     use beampipe_adapters::MockTapClient;
     use serde_json::json;
 
+    async fn test_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = beampipe_db::connect(&url).await.ok()?;
+        beampipe_db::migrate(&pool).await.ok()?;
+        Some(pool)
+    }
+
     #[test]
     fn slurm_unknown_does_not_map_to_terminal() {
         let result = SlurmJobPollResult {
@@ -4949,19 +4977,20 @@ mod tests {
             raw_line: None,
         };
         assert!(slurm_poll_is_unknown(&result));
-        assert!(!execution_status_for_slurm_state(&result.normalized_state).is_terminal());
+        assert_eq!(
+            SchedulerState::from_normalized(&result.normalized_state),
+            SchedulerState::Unknown
+        );
     }
 
     #[test]
     fn slurm_timeout_maps_to_failed_status() {
         assert_eq!(
-            execution_status_for_slurm_state("TIMEOUT"),
-            ExecutionStatus::Failed
+            SchedulerState::from_normalized("TIMEOUT"),
+            SchedulerState::TimedOut
         );
-        assert_eq!(
-            terminal_ledger_and_reason("TIMEOUT"),
-            ("failed", Some("timeout"))
-        );
+        assert_eq!(terminal_reason("TIMEOUT"), Some("timeout"));
+        assert_eq!(terminal_ledger_status(ExecutionStatus::Failed), Some("failed"));
     }
 
     #[test]
@@ -4981,11 +5010,228 @@ mod tests {
     #[test]
     fn active_slurm_job_remains_nonterminal_at_poll_budget() {
         assert!(slurm_active_poll_budget_reached(480, 480));
+        assert!(SchedulerState::from_normalized("RUNNING").is_active());
+    }
+
+    #[test]
+    fn required_outputs_keep_success_out_of_the_terminal_ledger() {
+        let decision = beampipe_domain::ExecutionAxes {
+            control_phase: ControlPhase::OutputVerification,
+            submission: SubmissionState::Submitted,
+            scheduler: SchedulerState::Succeeded,
+            daliuge: DaliugeState::Finished,
+            outputs: OutputState::Pending,
+            output_verification_required: true,
+        }
+        .reconcile();
+
+        assert_eq!(decision.status, ExecutionStatus::Running);
+        assert!(decision.terminal_outcome.is_none());
+        assert_eq!(terminal_ledger_status(decision.status), None);
         assert_eq!(
-            execution_status_for_slurm_state("RUNNING"),
-            ExecutionStatus::Running
+            poll_control_phase(true, Some("pending"), true),
+            ControlPhase::OutputVerification
         );
-        assert!(!execution_status_for_slurm_state("RUNNING").is_terminal());
+    }
+
+    #[tokio::test]
+    async fn slurm_success_waits_for_required_output_verification() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let module = format!("jobs_slurm_gate_{}", uuid::Uuid::now_v7().simple());
+        let execution = repo::create_execution(
+            &pool,
+            &module,
+            json!([{"source_identifier": "source-1"}]),
+            "local",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'running',
+                scheduler_name = 'slurm',
+                scheduler_job_id = '4242',
+                submission_state = 'submitted',
+                scheduler_state = 'running',
+                daliuge_state = 'running',
+                output_verification_required = true,
+                output_verification_policy = '{"required":true,"inventory_schema":"wallaby-hires-output-inventory/v1"}'::jsonb,
+                output_state = 'pending'
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(execution.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let execution = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        apply_slurm_poll_update(
+            &pool,
+            execution.uuid,
+            &execution,
+            &SlurmJobPollResult {
+                raw_state: "COMPLETED".into(),
+                normalized_state: "COMPLETED".into(),
+                source: "sacct",
+                exit_code: Some(0),
+                raw_line: Some("4242|COMPLETED|0:0".into()),
+            },
+            0,
+            &PollPolicy::default(),
+        )
+        .await
+        .unwrap();
+
+        let held = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.status_enum(), Some(ExecutionStatus::Running));
+        assert_eq!(held.control_phase.as_deref(), Some("output_verification"));
+        assert_eq!(held.scheduler_state.as_deref(), Some("succeeded"));
+        assert_eq!(held.daliuge_state.as_deref(), Some("finished"));
+        assert!(held.terminal_outcome.is_none());
+        assert!(held.completed_at.is_none());
+        let terminal =
+            &held.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["slurm"]["terminal"];
+        assert_eq!(terminal["state"], "COMPLETED");
+        assert!(terminal.get("ledger_status").is_none());
+        assert!(!repo::list_slurm_executions_pending_poll(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.uuid == execution.uuid));
+    }
+
+    #[tokio::test]
+    async fn dim_success_waits_for_outputs_but_finished_graph_errors_fail() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let module = format!("jobs_dim_gate_{}", uuid::Uuid::now_v7().simple());
+
+        for (suffix, poll) in [
+            (
+                "success",
+                BackendPoll {
+                    status: ExecutionStatus::Completed,
+                    poll_summary: json!({
+                        "status": 3,
+                        "normalized_session_state": "finished",
+                        "error_drop_uids": [],
+                    }),
+                },
+            ),
+            (
+                "graph-error",
+                BackendPoll {
+                    status: ExecutionStatus::Failed,
+                    poll_summary: json!({
+                        "status": 3,
+                        "normalized_session_state": "finished",
+                        "error_drop_uids": ["drop-7"],
+                    }),
+                },
+            ),
+        ] {
+            let execution = repo::create_execution(
+                &pool,
+                &module,
+                json!([{"source_identifier": suffix}]),
+                "local",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                r#"
+                UPDATE batch_execution_record
+                SET status = 'running',
+                    scheduler_name = 'daliuge',
+                    daliuge_session_id = $2,
+                    submission_state = 'submitted',
+                    scheduler_state = 'not_submitted',
+                    daliuge_state = 'running',
+                    output_verification_required = true,
+                    output_verification_policy = '{"required":true,"inventory_schema":"wallaby-hires-output-inventory/v1"}'::jsonb,
+                    output_state = 'pending'
+                WHERE uuid = $1
+                "#,
+            )
+            .bind(execution.uuid)
+            .bind(format!("session-{suffix}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let execution = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            apply_dim_poll_update(
+                &pool,
+                execution.uuid,
+                &execution,
+                poll,
+                0,
+                &PollPolicy::default(),
+                None,
+                None,
+                true,
+                false,
+                false,
+                "test",
+            )
+            .await
+            .unwrap();
+            let updated = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            if suffix == "success" {
+                assert_eq!(updated.status_enum(), Some(ExecutionStatus::Running));
+                assert_eq!(
+                    updated.control_phase.as_deref(),
+                    Some("output_verification")
+                );
+                assert_eq!(updated.daliuge_state.as_deref(), Some("finished"));
+                assert!(updated.terminal_outcome.is_none());
+                assert!(updated.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["dim"]
+                    ["terminal"]
+                    .get("ledger_status")
+                    .is_none());
+                assert!(!repo::list_rest_executions_pending_poll(&pool)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|row| row.uuid == execution.uuid));
+            } else {
+                assert_eq!(updated.status_enum(), Some(ExecutionStatus::Failed));
+                assert_eq!(updated.control_phase.as_deref(), Some("terminal"));
+                assert_ne!(
+                    updated.control_phase.as_deref(),
+                    Some("output_verification")
+                );
+                assert_eq!(updated.daliuge_state.as_deref(), Some("failed"));
+                assert_eq!(
+                    updated.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["dim"]
+                        ["terminal"]["ledger_status"],
+                    "failed"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4994,7 +5240,7 @@ mod tests {
             None,
             "BeampipeExecution-run-1",
             DaliugeState::Finished,
-            ExecutionStatus::Completed,
+            Some("completed"),
             &json!({
                 "status": {"status": 3},
                 "normalized_session_state": "finished",

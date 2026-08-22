@@ -15,16 +15,18 @@ use beampipe_domain::{
     readiness::{
         parsed_source_readiness_error, ArchiveMetadataReadiness, RegisteredSourceReadiness,
     },
+    run_record::merge_output_verification_into_manifest,
     DaliugeState, ExecutionPhase, ExecutionRetryContext, ExecutionRetryPlan, ExecutionStatus,
-    LedgerPatch, LedgerState, OutputState, SchedulerState, SubmissionState, TerminalOutcome,
+    LedgerPatch, LedgerState, OutputState, ReconciliationAction, SchedulerState, SubmissionState,
+    TerminalOutcome,
 };
 use beampipe_project::{ProjectConfig, SignatureConfig, WALLABY_OUTPUT_INVENTORY_SCHEMA};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, QueryBuilder};
-use std::collections::BTreeMap;
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -2152,11 +2154,28 @@ pub async fn retry_execution(
     })
 }
 
+#[derive(Debug, Clone)]
+pub struct ExecutionStateApplyResult {
+    pub row: ExecutionRow,
+    pub previous_status: ExecutionStatus,
+    pub entered_terminal: bool,
+}
+
 pub async fn apply_execution_state_patch(
     pool: &PgPool,
     id: Uuid,
     patch: ExecutionStatePatch,
 ) -> Result<Option<ExecutionRow>, sqlx::Error> {
+    Ok(apply_execution_state_patch_with_transition(pool, id, patch)
+        .await?
+        .map(|result| result.row))
+}
+
+pub async fn apply_execution_state_patch_with_transition(
+    pool: &PgPool,
+    id: Uuid,
+    patch: ExecutionStatePatch,
+) -> Result<Option<ExecutionStateApplyResult>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let Some(locked) = sqlx::query_as::<_, ExecutionRow>(
         "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
@@ -2231,7 +2250,8 @@ pub async fn apply_execution_state_patch(
 
     let decision = projected.axes().reconcile();
     let current_status = locked.status_enum().unwrap_or(ExecutionStatus::Pending);
-    let aggregate_status = if current_status.is_locked_terminal()
+    let preserve_terminal = current_status.is_terminal();
+    let aggregate_status = if preserve_terminal
         || (decision.status == ExecutionStatus::Pending
             && current_status != ExecutionStatus::Pending)
     {
@@ -2239,8 +2259,16 @@ pub async fn apply_execution_state_patch(
     } else {
         decision.status
     };
-    let decision_outcome = decision.terminal_outcome.map(|value| value.as_str());
-    let terminal = decision.terminal_outcome.is_some();
+    let aggregate_outcome = if preserve_terminal {
+        projected
+            .terminal_outcome
+            .as_deref()
+            .and_then(TerminalOutcome::parse)
+    } else {
+        decision.terminal_outcome
+    };
+    let decision_outcome = aggregate_outcome.map(|value| value.as_str());
+    let terminal = aggregate_status.is_terminal();
     let row = sqlx::query_as::<_, ExecutionRow>(
         r#"
         UPDATE batch_execution_record
@@ -2297,8 +2325,13 @@ pub async fn apply_execution_state_patch(
         )
         .await?;
     }
+    let entered_terminal = !current_status.is_terminal() && aggregate_status.is_terminal();
     tx.commit().await?;
-    Ok(Some(row))
+    Ok(Some(ExecutionStateApplyResult {
+        row,
+        previous_status: current_status,
+        entered_terminal,
+    }))
 }
 
 pub async fn apply_execution_provenance_patch(
@@ -2475,6 +2508,216 @@ fn validate_artifact(artifact: &ExecutionArtifactInput) -> Result<(), sqlx::Erro
     Ok(())
 }
 
+#[derive(Debug)]
+struct SuccessfulSourceFinalization {
+    source_identifiers: Vec<String>,
+    finalized_current_signatures: bool,
+}
+
+async fn finalize_successful_sources(
+    tx: &mut Transaction<'_, Postgres>,
+    execution: &ExecutionRow,
+) -> Result<SuccessfulSourceFinalization, sqlx::Error> {
+    let source_identifiers = execution
+        .sources
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|source| source.get("source_identifier").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if source_identifiers.is_empty() {
+        return Ok(SuccessfulSourceFinalization {
+            source_identifiers,
+            finalized_current_signatures: false,
+        });
+    }
+
+    let current: Vec<(String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT source_identifier, discovery_signature
+        FROM source_registry
+        WHERE project_module = $1 AND source_identifier = ANY($2)
+        ORDER BY source_identifier
+        FOR UPDATE
+        "#,
+    )
+    .bind(&execution.project_module)
+    .bind(&source_identifiers)
+    .fetch_all(&mut **tx)
+    .await?;
+    let all_current_signatures_present = current.iter().all(|(_, signature)| signature.is_some());
+    let signature_values = current
+        .iter()
+        .map(|(source, signature)| {
+            (
+                source.clone(),
+                Value::String(signature.clone().unwrap_or_default()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let current_signature = (!signature_values.is_empty())
+        .then(|| discovery_signature(&signature_values));
+    let finalized_current_signatures = current.len() == source_identifiers.len()
+        && all_current_signatures_present
+        && execution.discovery_signature.as_deref() == current_signature.as_deref();
+
+    if finalized_current_signatures {
+        sqlx::query(
+            r#"
+            UPDATE source_registry
+            SET workflow_run_pending = false,
+                workflow_run_pending_at = NULL,
+                last_executed_discovery_signature = discovery_signature,
+                workflow_claim_token = NULL,
+                workflow_claimed_at = NULL,
+                workflow_claim_expires_at = NULL
+            WHERE project_module = $1
+              AND source_identifier = ANY($2)
+              AND discovery_signature IS NOT NULL
+            "#,
+        )
+        .bind(&execution.project_module)
+        .bind(&source_identifiers)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        // A discovery that arrived after this execution was admitted is new work.
+        // Preserve any newer claim and force the changed selection back into the
+        // scheduler rather than stamping it as completed by this older run.
+        sqlx::query(
+            r#"
+            UPDATE source_registry
+            SET workflow_run_pending = true,
+                workflow_run_pending_at = COALESCE(workflow_run_pending_at, now())
+            WHERE project_module = $1 AND source_identifier = ANY($2)
+            "#,
+        )
+        .bind(&execution.project_module)
+        .bind(&source_identifiers)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(SuccessfulSourceFinalization {
+        source_identifiers,
+        finalized_current_signatures,
+    })
+}
+
+/// Finalize source readiness for a successful execution without allowing a newer
+/// discovery signature to be consumed by an older run.
+pub async fn finalize_successful_execution_sources(
+    pool: &PgPool,
+    execution_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let Some(execution) = sqlx::query_as::<_, ExecutionRow>(
+        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    if !matches!(
+        execution.status_enum(),
+        Some(ExecutionStatus::Completed | ExecutionStatus::NotSubmitted)
+    ) {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let result = finalize_successful_sources(&mut tx, &execution).await?;
+    tx.commit().await?;
+    Ok(result.finalized_current_signatures)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_execution_provenance_once(
+    tx: &mut Transaction<'_, Postgres>,
+    event_type: &str,
+    execution: &ExecutionRow,
+    source_identifier: Option<&str>,
+    actor: &str,
+    correlation_id: Option<&str>,
+    payload: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO provenance_events (
+            id, event_type, project_module, source_identifier,
+            execution_id, actor, correlation_id, payload
+        )
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM provenance_events
+            WHERE execution_id = $5 AND event_type = $2
+        )
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(event_type)
+    .bind(&execution.project_module)
+    .bind(source_identifier)
+    .bind(execution.uuid)
+    .bind(actor)
+    .bind(correlation_id)
+    .bind(payload)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn finalize_verified_execution_side_effects(
+    tx: &mut Transaction<'_, Postgres>,
+    execution: &ExecutionRow,
+    artifact: &ExecutionArtifactRow,
+    inventory_sha256: &str,
+    inventory_schema: &str,
+    actor: &str,
+    correlation_id: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let sources = finalize_successful_sources(tx, execution).await?;
+    let first_source = sources.source_identifiers.first().cloned();
+    insert_execution_provenance_once(
+        tx,
+        "execution.outputs_verified",
+        execution,
+        first_source.as_deref(),
+        actor,
+        correlation_id,
+        &json!({
+            "artifact_id": artifact.uuid,
+            "inventory_sha256": inventory_sha256,
+            "report_sha256": &artifact.sha256,
+            "destination_uri": &artifact.uri,
+            "inventory_schema": inventory_schema,
+        }),
+    )
+    .await?;
+    insert_execution_provenance_once(
+        tx,
+        beampipe_domain::provenance::ProvenanceEventType::ExecutionCompleted.as_str(),
+        execution,
+        first_source.as_deref(),
+        actor,
+        correlation_id,
+        &json!({
+            "source_identifiers": sources.source_identifiers,
+            "status": ExecutionStatus::Completed.as_str(),
+            "completion_gate": "output_verification",
+            "output_inventory_artifact_id": artifact.uuid,
+            "source_signatures_finalized": sources.finalized_current_signatures,
+        }),
+    )
+    .await
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyExecutionOutputsError {
     #[error("execution not found")]
@@ -2589,15 +2832,11 @@ pub async fn verify_execution_outputs(
             execution.status
         )));
     }
-    let axes = execution.axes();
-    let external_complete = axes.daliuge == DaliugeState::Finished
-        && matches!(
-            axes.scheduler,
-            SchedulerState::Succeeded | SchedulerState::NotSubmitted
-        );
-    if !external_complete {
+    let decision = execution.axes().reconcile();
+    if decision.next_action != ReconciliationAction::VerifyOutputs {
         return Err(VerifyExecutionOutputsError::Rejected(
-            "external execution has not completed successfully".into(),
+            "execution is not waiting for output verification after successful external completion"
+                .into(),
         ));
     }
     let inserted = sqlx::query_as::<_, ExecutionArtifactRow>(
@@ -2646,11 +2885,20 @@ pub async fn verify_execution_outputs(
             stored
         }
     };
+    let workflow_manifest = merge_output_verification_into_manifest(
+        execution.workflow_manifest.clone(),
+        &stored.uuid.to_string(),
+        &inventory_sha256,
+        &stored.sha256,
+        stored.uri.as_deref(),
+    );
     let updated = sqlx::query_as::<_, ExecutionRow>(
         r#"
         UPDATE batch_execution_record
-        SET output_state = 'verified',
+        SET workflow_manifest = $2,
+            output_state = 'verified',
             status = 'completed',
+            execution_phase = NULL,
             control_phase = 'terminal',
             terminal_outcome = 'succeeded',
             failure_class = NULL,
@@ -2667,6 +2915,7 @@ pub async fn verify_execution_outputs(
         "#,
     )
     .bind(execution_id)
+    .bind(workflow_manifest)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
@@ -2690,21 +2939,14 @@ pub async fn verify_execution_outputs(
     .bind(expected_schema)
     .execute(&mut *tx)
     .await?;
-    insert_provenance_event(
-        &mut *tx,
-        "execution.outputs_verified",
-        &updated.project_module,
-        None,
-        Some(execution_id),
-        Some(actor),
+    finalize_verified_execution_side_effects(
+        &mut tx,
+        &updated,
+        &stored,
+        &inventory_sha256,
+        expected_schema,
+        actor,
         correlation_id,
-        &json!({
-            "artifact_id": stored.uuid,
-            "inventory_sha256": inventory_sha256,
-            "report_sha256": stored.sha256,
-            "destination_uri": stored.uri,
-            "inventory_schema": expected_schema,
-        }),
     )
     .await?;
     tx.commit().await?;
@@ -4666,6 +4908,9 @@ pub async fn list_slurm_executions_pending_poll(
         WHERE scheduler_name = 'slurm'
           AND scheduler_job_id IS NOT NULL
           AND status IN ('awaiting_scheduler', 'running')
+          AND COALESCE(scheduler_state, 'unknown') NOT IN (
+              'succeeded', 'failed', 'cancelled', 'timed_out'
+          )
         ORDER BY created_at ASC
         "#,
     )
@@ -4707,6 +4952,7 @@ pub async fn list_rest_executions_pending_poll(
               OR submission_state IN ('in_flight', 'uncertain')
           )
           AND terminal_outcome IS NULL
+          AND COALESCE(daliuge_state, 'unknown') NOT IN ('finished', 'failed', 'cancelled')
         ORDER BY created_at ASC
         "#,
     )

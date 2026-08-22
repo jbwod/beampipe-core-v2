@@ -3452,7 +3452,9 @@ async fn patch_execution(
     if execution_cancel_requires_external(
         current,
         execution.scheduler_job_id.as_deref(),
+        execution.scheduler_state.as_deref(),
         execution.daliuge_session_id.as_deref(),
+        execution.daliuge_state.as_deref(),
     ) {
         cancel_execution_scheduler(&state.pool, id).await?;
     }
@@ -3477,13 +3479,38 @@ async fn patch_execution(
 fn execution_cancel_requires_external(
     status: ExecutionStatus,
     scheduler_job_id: Option<&str>,
+    scheduler_state: Option<&str>,
     daliuge_session_id: Option<&str>,
+    daliuge_state: Option<&str>,
 ) -> bool {
-    matches!(
+    if !matches!(
         status,
         ExecutionStatus::AwaitingScheduler | ExecutionStatus::Running
-    ) && (scheduler_job_id.is_some_and(|id| !id.trim().is_empty())
-        || daliuge_session_id.is_some_and(|id| !id.trim().is_empty()))
+    ) {
+        return false;
+    }
+    let scheduler_active = scheduler_job_id.is_some_and(|id| !id.trim().is_empty())
+        && !matches!(
+            scheduler_state.and_then(SchedulerState::parse),
+            Some(
+                SchedulerState::NotSubmitted
+                    | SchedulerState::Succeeded
+                    | SchedulerState::Failed
+                    | SchedulerState::Cancelled
+                    | SchedulerState::TimedOut
+            )
+        );
+    let daliuge_active = daliuge_session_id.is_some_and(|id| !id.trim().is_empty())
+        && !matches!(
+            daliuge_state.and_then(DaliugeState::parse),
+            Some(
+                DaliugeState::NotCreated
+                    | DaliugeState::Finished
+                    | DaliugeState::Failed
+                    | DaliugeState::Cancelled
+            )
+        );
+    scheduler_active || daliuge_active
 }
 
 async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
@@ -4491,21 +4518,36 @@ adapters:
             ExecutionStatus::Running,
             None,
             None,
+            None,
+            None,
         ));
         assert!(execution_cancel_requires_external(
             ExecutionStatus::Running,
             Some("12345"),
+            Some("running"),
+            None,
             None,
         ));
         assert!(execution_cancel_requires_external(
             ExecutionStatus::AwaitingScheduler,
             None,
+            None,
             Some("session-1"),
+            Some("deploying"),
         ));
         assert!(!execution_cancel_requires_external(
             ExecutionStatus::Pending,
             Some("unexpected"),
             None,
+            None,
+            None,
+        ));
+        assert!(!execution_cancel_requires_external(
+            ExecutionStatus::Running,
+            Some("12345"),
+            Some("succeeded"),
+            Some("session-1"),
+            Some("finished"),
         ));
     }
 
