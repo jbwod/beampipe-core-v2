@@ -3070,9 +3070,10 @@ async fn patch_execution(
             current.as_str()
         )));
     }
-    if matches!(
+    if execution_cancel_requires_external(
         current,
-        ExecutionStatus::AwaitingScheduler | ExecutionStatus::Running
+        execution.scheduler_job_id.as_deref(),
+        execution.daliuge_session_id.as_deref(),
     ) {
         cancel_execution_scheduler(&state.pool, id).await?;
     }
@@ -3092,6 +3093,18 @@ async fn patch_execution(
     })?
     .ok_or(ApiError::NotFound)?;
     Ok(Json(enrich_execution(&state.pool, row).await?))
+}
+
+fn execution_cancel_requires_external(
+    status: ExecutionStatus,
+    scheduler_job_id: Option<&str>,
+    daliuge_session_id: Option<&str>,
+) -> bool {
+    matches!(
+        status,
+        ExecutionStatus::AwaitingScheduler | ExecutionStatus::Running
+    ) && (scheduler_job_id.is_some_and(|id| !id.trim().is_empty())
+        || daliuge_session_id.is_some_and(|id| !id.trim().is_empty()))
 }
 
 async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
@@ -4029,5 +4042,29 @@ adapters:
             execution_create_request_sha256(&request),
             execution_create_request_sha256(&equivalent)
         );
+    }
+
+    #[test]
+    fn staging_execution_without_external_session_cancels_locally() {
+        assert!(!execution_cancel_requires_external(
+            ExecutionStatus::Running,
+            None,
+            None,
+        ));
+        assert!(execution_cancel_requires_external(
+            ExecutionStatus::Running,
+            Some("12345"),
+            None,
+        ));
+        assert!(execution_cancel_requires_external(
+            ExecutionStatus::AwaitingScheduler,
+            None,
+            Some("session-1"),
+        ));
+        assert!(!execution_cancel_requires_external(
+            ExecutionStatus::Pending,
+            Some("unexpected"),
+            None,
+        ));
     }
 }
