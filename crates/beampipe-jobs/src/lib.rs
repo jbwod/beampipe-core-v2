@@ -59,6 +59,17 @@ use uuid::Uuid;
 
 static SLURM_SSH_POOL: LazyLock<SlurmSshPool> = LazyLock::new(SlurmSshPool::new_from_env);
 static SINGLE_TICK_WORKER_ID: LazyLock<Uuid> = LazyLock::new(Uuid::now_v7);
+const SLURM_TARGET_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn within_slurm_target_timeout<F>(
+    duration: Duration,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(duration, future).await
+}
 
 fn trace_context_for_job(job: &JobRow) -> metrics::TraceContext {
     let fallback = job
@@ -4377,6 +4388,10 @@ fn slurm_poll_is_unknown(result: &SlurmJobPollResult) -> bool {
     result.normalized_state == "UNKNOWN"
 }
 
+fn slurm_poll_has_scheduler_observation(result: &SlurmJobPollResult) -> bool {
+    matches!(result.source, "squeue" | "sacct" | "mock")
+}
+
 fn terminal_reason(state: &str) -> Option<&'static str> {
     match state {
         "COMPLETED" => None,
@@ -4520,6 +4535,7 @@ async fn apply_slurm_poll_update(
             scheduler_raw_state: Some(result.raw_state.clone()),
             scheduler_reason,
             daliuge_state: inferred_daliuge_state,
+            clear_failure_context: slurm_poll_has_scheduler_observation(result),
             last_reconciled_at: Some(Utc::now()),
             ..Default::default()
         },
@@ -4721,24 +4737,13 @@ async fn record_slurm_poll_failure(
     let policy = poll_policy_for_execution(pool, execution).await?;
     let max_rounds = policy.slurm_max_rounds.unwrap_or(480);
     let poll_round = slurm_poll_round_from_manifest(execution.workflow_manifest.as_ref());
-    let scheduler_job_id = execution.scheduler_job_id.clone().unwrap_or_default();
-    let result = SlurmJobPollResult {
-        raw_state: error_kind.into(),
-        normalized_state: "UNKNOWN".into(),
-        source: "poll_error",
-        exit_code: None,
-        raw_line: None,
-    };
-    let manifest = manifest_for_slurm_poll(
-        execution,
-        &result,
-        &scheduler_job_id,
-        false,
-        None,
-        Some(error_kind),
-    );
+    let scheduler_state = execution
+        .scheduler_state
+        .as_deref()
+        .and_then(SchedulerState::parse)
+        .unwrap_or_default();
     let progress = advance_slurm_poll_progress(
-        Some(manifest),
+        execution.workflow_manifest.clone(),
         poll_round,
         max_rounds,
         "scheduler_poll_error",
@@ -4749,7 +4754,7 @@ async fn record_slurm_poll_failure(
         execution.uuid,
         ExecutionObservationInput {
             kind: "scheduler".into(),
-            normalized_state: SchedulerState::Unknown.as_str().into(),
+            normalized_state: scheduler_state.as_str().into(),
             raw_state: Some(error_kind.into()),
             reason: Some(detail.clone()),
             payload: json!({
@@ -4759,6 +4764,9 @@ async fn record_slurm_poll_failure(
                 "failure_class": failure_class.as_str(),
                 "poll_round": progress.next_round,
                 "operator_escalated": progress.operator_escalated,
+                "scheduler_state_preserved": true,
+                "preserved_scheduler_raw_state": execution.scheduler_raw_state.as_deref(),
+                "preserved_scheduler_reason": execution.scheduler_reason.as_deref(),
             }),
             source_version: None,
             observed_at: Some(Utc::now()),
@@ -4769,9 +4777,6 @@ async fn record_slurm_poll_failure(
         pool,
         execution.uuid,
         ExecutionStatePatch {
-            scheduler_state: Some(SchedulerState::Unknown),
-            scheduler_raw_state: Some(error_kind.into()),
-            scheduler_reason: Some(detail.clone()),
             failure_class: Some(failure_class),
             last_error: Some(detail),
             last_reconciled_at: Some(Utc::now()),
@@ -4794,7 +4799,7 @@ async fn record_slurm_poll_failure(
         record_slurm_poll_escalation(
             pool,
             execution.uuid,
-            SchedulerState::Unknown,
+            scheduler_state,
             progress.next_round,
             max_rounds,
             "scheduler_poll_error",
@@ -4936,25 +4941,44 @@ async fn run_slurm_poll_tick(
         );
         let job_ids: Vec<String> = group.iter().map(|e| e.slurm_job_id.clone()).collect();
         let poll_map: HashMap<String, SlurmJobPollResult> = if use_real {
-            match SLURM_SSH_POOL.query_slurm_states(&target, &job_ids).await {
-                Ok(poll_map) => poll_map,
-                Err(error) => {
-                    metrics::record_slurm_poll_error("ssh_batch_failed");
-                    let detail = error.to_string();
+            match within_slurm_target_timeout(
+                SLURM_TARGET_WALL_CLOCK_TIMEOUT,
+                SLURM_SSH_POOL.query_slurm_states(&target, &job_ids),
+            )
+            .await
+            {
+                Ok(Ok(poll_map)) => poll_map,
+                outcome => {
+                    let (error_kind, detail, failure_class) = match outcome {
+                        Ok(Err(error)) => {
+                            let detail = error.to_string();
+                            let failure_class = classify_slurm_poll_failure(&detail);
+                            ("target_query_failed", detail, failure_class)
+                        }
+                        Err(_) => (
+                            "target_query_timeout",
+                            format!(
+                                "Slurm target status query exceeded the {} second wall-clock limit",
+                                SLURM_TARGET_WALL_CLOCK_TIMEOUT.as_secs()
+                            ),
+                            FailureClass::Timeout,
+                        ),
+                        Ok(Ok(_)) => unreachable!("successful poll handled above"),
+                    };
+                    metrics::record_slurm_poll_error(error_kind);
                     let redacted = beampipe_security::redact_string(&detail);
-                    let failure_class = classify_slurm_poll_failure(&detail);
                     warn!(
                         login_node = %target.login_node,
                         error = %redacted,
                         affected_executions = group.len(),
                         "event=slurm_poll_target_failed"
                     );
-                    for item in group {
+                    for item in &group {
                         record_slurm_poll_failure(
                             pool,
                             &item.execution,
                             "status_batch",
-                            "target_query_failed",
+                            error_kind,
                             &detail,
                             failure_class,
                             true,
@@ -5095,41 +5119,42 @@ async fn reconcile_uncertain_slurm_submissions(
             }
         }
         let client = slurm_backend_from_profile(Some(&profile), true, execution.created_at).slurm;
-        let matches = match client.find_by_name(&session_id).await {
-            Ok(matches) => matches,
-            Err(error) => {
-                let detail = beampipe_security::redact_string(&error.to_string());
-                repo::record_execution_observation(
+        let matches = match within_slurm_target_timeout(
+            SLURM_TARGET_WALL_CLOCK_TIMEOUT,
+            client.find_by_name(&session_id),
+        )
+        .await
+        {
+            Ok(Ok(matches)) => matches,
+            Ok(Err(error)) => {
+                record_slurm_poll_failure(
                     pool,
-                    execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: SchedulerState::Unknown.as_str().into(),
-                        raw_state: Some(format!("{:?}", error.kind).to_ascii_lowercase()),
-                        reason: Some(detail.clone()),
-                        payload: json!({
-                            "daliuge_session_id": &session_id,
-                            "operation": "find_by_name",
-                            "retryable": error.retryable,
-                        }),
-                        source_version: None,
-                        observed_at: Some(Utc::now()),
-                    },
-                )
-                .await?;
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        scheduler_state: Some(SchedulerState::Unknown),
-                        failure_class: Some(error.failure_class()),
-                        last_error: Some(detail),
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
-                    },
+                    &execution,
+                    "find_by_name",
+                    "submission_reconciliation_failed",
+                    &error.to_string(),
+                    error.failure_class(),
+                    error.retryable,
                 )
                 .await?;
                 metrics::record_reconciliation_result("slurm_submission", "lookup_error");
+                continue;
+            }
+            Err(_) => {
+                record_slurm_poll_failure(
+                    pool,
+                    &execution,
+                    "find_by_name",
+                    "find_by_name_timeout",
+                    &format!(
+                        "Slurm submission reconciliation exceeded the {} second wall-clock limit",
+                        SLURM_TARGET_WALL_CLOCK_TIMEOUT.as_secs()
+                    ),
+                    FailureClass::Timeout,
+                    true,
+                )
+                .await?;
+                metrics::record_reconciliation_result("slurm_submission", "lookup_timeout");
                 continue;
             }
         };
@@ -5194,6 +5219,7 @@ async fn reconcile_uncertain_slurm_submissions(
                         scheduler_state: Some(observation.state),
                         scheduler_raw_state: Some(observation.raw_state.clone()),
                         scheduler_reason: observation.reason.clone(),
+                        clear_failure_context: true,
                         last_reconciled_at: Some(Utc::now()),
                         ..Default::default()
                     },
@@ -5567,7 +5593,8 @@ mod tests {
         pool: &sqlx::PgPool,
         suffix: &str,
     ) -> beampipe_db::models::ExecutionRow {
-        let module = format!("jobs_slurm_poll_{suffix}_{}", Uuid::now_v7().simple());
+        let unique = Uuid::now_v7().simple().to_string();
+        let module = format!("jobs_slurm_poll_{suffix}_{}", &unique[..16]);
         let execution = repo::create_execution(
             pool,
             &module,
@@ -5829,6 +5856,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn slurm_target_wall_clock_timeout_bounds_a_stalled_query() {
+        let result = within_slurm_target_timeout(
+            Duration::from_millis(1),
+            std::future::pending::<()>(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(SLURM_TARGET_WALL_CLOCK_TIMEOUT, Duration::from_secs(60));
+    }
+
     #[test]
     fn unknown_scheduler_state_does_not_false_terminalize() {
         let decision = beampipe_domain::ExecutionAxes {
@@ -5914,12 +5953,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slurm_poll_failure_is_redacted_and_persisted_as_unknown() {
+    async fn slurm_transport_failure_preserves_running_then_success_clears_context() {
         let Some(pool) = test_pool().await else {
             eprintln!("DATABASE_URL not set; skipping integration test");
             return;
         };
         let execution = slurm_poll_execution(&pool, "failure").await;
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'running',
+                control_phase = 'monitoring',
+                scheduler_state = 'running',
+                scheduler_raw_state = 'RUNNING',
+                scheduler_reason = 'None',
+                daliuge_state = 'running'
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(execution.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let execution = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
         record_slurm_poll_failure(
             &pool,
             &execution,
@@ -5936,7 +5995,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.scheduler_state.as_deref(), Some("unknown"));
+        assert_eq!(updated.status_enum(), Some(ExecutionStatus::Running));
+        assert_eq!(updated.scheduler_state.as_deref(), Some("running"));
+        assert_eq!(updated.scheduler_raw_state.as_deref(), Some("RUNNING"));
+        assert_eq!(updated.scheduler_reason.as_deref(), Some("None"));
         assert_eq!(updated.failure_class.as_deref(), Some("connectivity"));
         assert!(!updated
             .last_error
@@ -5947,6 +6009,32 @@ mod tests {
             slurm_poll_round_from_manifest(updated.workflow_manifest.as_ref()),
             1
         );
+        let poll_round = slurm_poll_round_from_manifest(updated.workflow_manifest.as_ref());
+        apply_slurm_poll_update(
+            &pool,
+            updated.uuid,
+            &updated,
+            &SlurmJobPollResult {
+                raw_state: "RUNNING".into(),
+                normalized_state: "RUNNING".into(),
+                source: "squeue",
+                exit_code: None,
+                raw_line: Some("RUNNING|None".into()),
+            },
+            poll_round,
+            &PollPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let recovered = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status_enum(), Some(ExecutionStatus::Running));
+        assert_eq!(recovered.scheduler_state.as_deref(), Some("running"));
+        assert!(recovered.failure_class.is_none());
+        assert!(recovered.last_error.is_none());
+
         let observations = repo::list_execution_observations(&pool, execution.uuid, 100, 0)
             .await
             .unwrap();
@@ -5954,6 +6042,7 @@ mod tests {
             .iter()
             .find(|observation| observation.raw_state.as_deref() == Some("target_query_failed"))
             .unwrap();
+        assert_eq!(failure.normalized_state, "running");
         assert!(!failure
             .reason
             .as_deref()

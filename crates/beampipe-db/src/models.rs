@@ -186,6 +186,8 @@ pub struct ExecutionStatePatch {
     pub terminal_outcome: Option<TerminalOutcome>,
     pub failure_class: Option<FailureClass>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub clear_failure_context: bool,
     pub last_reconciled_at: Option<DateTime<Utc>>,
 }
 

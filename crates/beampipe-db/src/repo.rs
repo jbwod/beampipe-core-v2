@@ -2283,8 +2283,14 @@ pub async fn apply_execution_state_patch_with_transition(
             remote_session_dir = COALESCE($13, remote_session_dir),
             output_state = COALESCE($14, output_state),
             terminal_outcome = COALESCE($15, terminal_outcome),
-            failure_class = COALESCE($16, failure_class),
-            last_error = COALESCE($17, last_error),
+            failure_class = CASE
+                WHEN $19 THEN NULL
+                ELSE COALESCE($16, failure_class)
+            END,
+            last_error = CASE
+                WHEN $19 THEN NULL
+                ELSE COALESCE($17, last_error)
+            END,
             last_reconciled_at = COALESCE($18, last_reconciled_at),
             phase_timestamps = CASE
                 WHEN $2::text IS NOT NULL AND $2::text IS DISTINCT FROM control_phase
@@ -2314,6 +2320,7 @@ pub async fn apply_execution_state_patch_with_transition(
     .bind(failure_class)
     .bind(patch.last_error)
     .bind(patch.last_reconciled_at)
+    .bind(patch.clear_failure_context)
     .fetch_one(&mut *tx)
     .await?;
 
