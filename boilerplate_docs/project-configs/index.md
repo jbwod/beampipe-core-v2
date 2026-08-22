@@ -136,6 +136,14 @@ graph_patches:
 
 Manifest templates resolve both logical `flags.*` values and the flat persisted fields produced by discovery. Every graph source requires its expected SHA-256. Fetches time out after 30 seconds, reject content over 16 MiB, and verify the digest before parsing JSON. Use an immutable URL as well as the digest so configuration provenance remains human-auditable.
 
+The bundled WALLABY examples use graph files vendored from
+`wallaby-hires-beampipe` commit
+`6cc5c4cdc49c39a843b81ab14543d1c9c71b015f`. Setup materializes both the
+qualified Setonix graph and the no-download E2E graph under `config/graphs`;
+Compose mounts that directory read-only into API, scheduler, and worker roles.
+The configured SHA-256 remains authoritative and prevents a modified local
+file from executing.
+
 ## Automation
 
 ```yaml

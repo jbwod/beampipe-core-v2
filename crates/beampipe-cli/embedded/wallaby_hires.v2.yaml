@@ -39,8 +39,9 @@ adapters:
     retries: 2
 
 graph:
-  url: https://raw.githubusercontent.com/jbwod/wallaby-hires-beampipe/addf679ef9e76a99b5db07449eb19499cea7b34b/dlg-graphs/wallaby-hires_deploy-setonix-beampipe.graph
-  sha256: 5bd3f2a882ec398aac9f117698f8dec580772e83142b03ad2dbec39556bc3fda
+  # Vendored from wallaby-hires-beampipe commit 6cc5c4cdc49c39a843b81ab14543d1c9c71b015f.
+  path: /var/lib/beampipe/config/graphs/wallaby-hires_deploy-setonix-beampipe.graph
+  sha256: b3b85695068dee94b1e87f707d8c0ba45afc9e6ce347223ce2194c32f5e33de4
 
 discovery:
   queries:

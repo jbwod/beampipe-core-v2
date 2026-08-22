@@ -12,8 +12,14 @@ use uuid::Uuid;
 const OPERATOR_COMPOSE: &str = include_str!("../embedded/docker-compose.yml");
 const OPERATOR_ENV_EXAMPLE: &str = include_str!("../embedded/env.example");
 const SAMPLE_PROJECT: &str = include_str!("../embedded/wallaby_hires.v2.yaml");
+const SAMPLE_NODOWNLOADS_PROJECT: &str =
+    include_str!("../embedded/wallaby_hires_nodownloads.v2.yaml");
 const SAMPLE_REST_PROFILE: &str = include_str!("../embedded/deployment_profile.dlg-dim.json");
 const SAMPLE_SLURM_PROFILE: &str = include_str!("../embedded/deployment_profile.slurm-remote.json");
+const SAMPLE_DEPLOY_GRAPH: &[u8] =
+    include_bytes!("../embedded/graphs/wallaby-hires_deploy-setonix-beampipe.graph");
+const SAMPLE_NODOWNLOADS_GRAPH: &[u8] =
+    include_bytes!("../embedded/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph");
 const BUNDLE_MANIFEST: &str = ".beampipe-operator-bundle.json";
 
 #[derive(Debug, Default, Clone)]
@@ -49,6 +55,10 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
         (".env.example", OPERATOR_ENV_EXAMPLE),
         ("config/wallaby_hires.v2.yaml", SAMPLE_PROJECT),
         (
+            "config/wallaby_hires_nodownloads.v2.yaml",
+            SAMPLE_NODOWNLOADS_PROJECT,
+        ),
+        (
             "config/deployment_profile.dlg-dim.json",
             SAMPLE_REST_PROFILE,
         ),
@@ -57,6 +67,26 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
             SAMPLE_SLURM_PROFILE,
         ),
         ("credentials/ssh/.gitkeep", ""),
+    ] {
+        materialize_file(
+            root,
+            relative,
+            contents.as_bytes(),
+            force,
+            previous.as_ref(),
+            &mut next,
+            &mut report,
+        )?;
+    }
+    for (relative, contents) in [
+        (
+            "config/graphs/wallaby-hires_deploy-setonix-beampipe.graph",
+            SAMPLE_DEPLOY_GRAPH,
+        ),
+        (
+            "config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph",
+            SAMPLE_NODOWNLOADS_GRAPH,
+        ),
     ] {
         materialize_file(
             root,
@@ -75,14 +105,14 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
 fn materialize_file(
     root: &Path,
     relative: &str,
-    contents: &str,
+    contents: &[u8],
     force: bool,
     previous: Option<&BundleManifest>,
     next: &mut BundleManifest,
     report: &mut MaterializeReport,
 ) -> Result<()> {
     let path = root.join(relative);
-    let desired_hash = sha256(contents.as_bytes());
+    let desired_hash = sha256(contents);
     let actual_hash = fs::read(&path).ok().map(|bytes| sha256(&bytes));
     let previous_hash = previous.and_then(|manifest| manifest.files.get(relative));
     let managed = force
@@ -95,7 +125,7 @@ fn materialize_file(
             report.skipped.push(path.clone());
         } else {
             let existed = path.exists();
-            atomic_write(&path, contents.as_bytes())?;
+            atomic_write(&path, contents)?;
             if existed {
                 report.replaced.push(path.clone());
             } else {
@@ -170,6 +200,16 @@ mod tests {
         let project = fs::read(dir.path().join("config/wallaby_hires.v2.yaml")).unwrap();
         let config = ProjectConfig::from_slice(&project).unwrap();
         assert!(config.validate_report().valid);
+        assert_eq!(
+            sha256(
+                &fs::read(
+                    dir.path()
+                        .join("config/graphs/wallaby-hires_deploy-setonix-beampipe.graph")
+                )
+                .unwrap()
+            ),
+            "b3b85695068dee94b1e87f707d8c0ba45afc9e6ce347223ce2194c32f5e33de4"
+        );
 
         fs::write(dir.path().join("docker-compose.yml"), "operator-owned\n").unwrap();
         let second = materialize(dir.path(), false).unwrap();
@@ -195,12 +235,26 @@ mod tests {
             include_str!("../../../config/wallaby_hires.v2.yaml")
         );
         assert_eq!(
+            SAMPLE_NODOWNLOADS_PROJECT,
+            include_str!("../../../config/wallaby_hires_nodownloads.v2.yaml")
+        );
+        assert_eq!(
             SAMPLE_REST_PROFILE,
             include_str!("../../../config/deployment_profile.dlg-dim.json")
         );
         assert_eq!(
             SAMPLE_SLURM_PROFILE,
             include_str!("../../../config/deployment_profile.slurm-remote.json")
+        );
+        assert_eq!(
+            SAMPLE_DEPLOY_GRAPH,
+            include_bytes!("../../../config/graphs/wallaby-hires_deploy-setonix-beampipe.graph")
+        );
+        assert_eq!(
+            SAMPLE_NODOWNLOADS_GRAPH,
+            include_bytes!(
+                "../../../config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph"
+            )
         );
     }
 

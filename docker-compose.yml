@@ -118,6 +118,7 @@ services:
       <<: [*beampipe-shaping, *beampipe-backend-env]
     volumes:
       - *beampipe-slurm-ssh-volume
+      - *beampipe-config-volume
     expose:
       - "9090"
     depends_on:
@@ -147,6 +148,7 @@ services:
       <<: [*beampipe-shaping, *beampipe-backend-env]
     volumes:
       - *beampipe-slurm-ssh-volume
+      - *beampipe-config-volume
     expose:
       - "9090"
     depends_on:
