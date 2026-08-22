@@ -91,9 +91,7 @@ pub struct KnownHostEntry {
 
 impl KnownHostEntry {
     fn matches_target(&self, host: &str, port: u16) -> bool {
-        self.patterns
-            .iter()
-            .any(|pattern| known_host_pattern_matches(pattern, host, port))
+        known_host_patterns_match(&self.patterns, host, port)
     }
 }
 
@@ -118,20 +116,11 @@ pub fn load_known_host_entries(path: &str) -> Result<Vec<KnownHostEntry>, Orches
                     .into(),
             ));
         }
-        let host_field = if host_field.starts_with('@') {
-            let Some(next) = parts.next() else {
-                continue;
-            };
-            if next.starts_with("|1|") {
-                return Err(OrchestrationError::Backend(
-                    "hashed known_hosts entries are not supported; provide plain host patterns for Slurm login nodes"
-                        .into(),
-                ));
-            }
-            next
-        } else {
-            host_field
-        };
+        if host_field.starts_with('@') {
+            return Err(OrchestrationError::Backend(format!(
+                "known_hosts marker {host_field} is not supported; revoked and certificate-authority entries cannot be used as direct Slurm host keys"
+            )));
+        }
         let key_type = parts.next();
         let key_b64 = parts.next();
         let (Some(key_type), Some(key_b64)) = (key_type, key_b64) else {
@@ -176,13 +165,22 @@ pub fn known_hosts_has_target(
 }
 
 fn known_host_pattern_matches(pattern: &str, host: &str, port: u16) -> bool {
-    if pattern.starts_with('!') {
-        return false;
-    }
     if let Some((bracket_host, bracket_port)) = parse_bracket_host_port(pattern) {
         return bracket_port == port && wildcard_match(bracket_host, host);
     }
     port == 22 && wildcard_match(pattern, host)
+}
+
+fn known_host_patterns_match(patterns: &[String], host: &str, port: u16) -> bool {
+    let excluded = patterns.iter().any(|pattern| {
+        pattern
+            .strip_prefix('!')
+            .is_some_and(|pattern| known_host_pattern_matches(pattern, host, port))
+    });
+    !excluded
+        && patterns.iter().any(|pattern| {
+            !pattern.starts_with('!') && known_host_pattern_matches(pattern, host, port)
+        })
 }
 
 fn parse_bracket_host_port(pattern: &str) -> Option<(&str, u16)> {
@@ -509,7 +507,10 @@ pub async fn query_slurm_states_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::{known_hosts_has_target, load_known_host_keys, upload_text_command};
+    use super::{
+        known_host_patterns_match, known_hosts_has_target, load_known_host_keys,
+        upload_text_command,
+    };
 
     fn generate_public_key(dir: &tempfile::TempDir) -> String {
         let key_path = dir.path().join("id_test");
@@ -582,6 +583,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("hashed known_hosts entries are not supported"));
+    }
+
+    #[test]
+    fn known_hosts_rejects_revoked_markers_without_parsing_key_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            "@revoked login-a.example ssh-ed25519 invalid-key-data\n",
+        )
+        .unwrap();
+        let error = load_known_host_keys(path.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("@revoked"));
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn negated_host_pattern_vetoes_a_positive_wildcard() {
+        let patterns = vec!["*".into(), "!bad.example".into()];
+        assert!(!known_host_patterns_match(&patterns, "bad.example", 22));
+        assert!(known_host_patterns_match(&patterns, "good.example", 22));
     }
 
     #[test]
