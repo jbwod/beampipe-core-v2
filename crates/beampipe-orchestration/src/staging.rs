@@ -101,6 +101,8 @@ impl StagingClient for CasdaStagingClient {
         if metadata.is_empty() {
             return Ok(StageOutcome::default());
         }
+        let eval_inputs =
+            evaluation_staging_inputs(metadata).map_err(OrchestrationError::Backend)?;
         self.authenticate()
             .await
             .map_err(OrchestrationError::Backend)?;
@@ -155,10 +157,12 @@ impl StagingClient for CasdaStagingClient {
             }
         }
 
-        if let Ok((eval_data, eval_checksum)) = self.stage_eval_batch(metadata).await {
-            eval_urls.extend(eval_data);
-            eval_checksum_urls.extend(eval_checksum);
-        }
+        let (eval_data, eval_checksum) = self
+            .stage_eval_batch(&eval_inputs)
+            .await
+            .map_err(OrchestrationError::Backend)?;
+        eval_urls.extend(eval_data);
+        eval_checksum_urls.extend(eval_checksum);
 
         apply_url_maps(
             &mut staged_metadata,
@@ -195,45 +199,18 @@ impl CasdaStagingClient {
 
     async fn stage_eval_batch(
         &self,
-        records: &[Value],
+        inputs: &BTreeMap<String, (String, String)>,
     ) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
-        let mut seen = HashSet::new();
+        let mut seen_urls = HashSet::new();
         let mut access_urls = Vec::new();
-        for rec in records {
-            let eval_file = rec.get("evaluation_file").and_then(Value::as_str);
-            let sbid = rec.get("sbid").and_then(Value::as_str);
-            let access_url = rec
-                .get("evaluation_file_access_url")
-                .or_else(|| rec.get("access_url"))
-                .and_then(Value::as_str);
-            if let (Some(file), Some(sbid), Some(url)) = (eval_file, sbid, access_url) {
-                let key = (sbid.to_string(), file.to_string());
-                if seen.insert(key) {
-                    access_urls.push(url.to_string());
-                }
+        for (_, access_url) in inputs.values() {
+            if seen_urls.insert(access_url.clone()) {
+                access_urls.push(access_url.clone());
             }
-        }
-        if access_urls.is_empty() {
-            return Ok((HashMap::new(), HashMap::new()));
         }
         let xml = self.create_and_run_soda_job(&access_urls).await?;
         let (by_filename, by_filename_cs) = parse_eval_job_results(&xml);
-        let mut by_sbid = HashMap::new();
-        let mut by_sbid_cs = HashMap::new();
-        for rec in records {
-            let sbid = rec.get("sbid").and_then(Value::as_str).unwrap_or_default();
-            let eval_file = rec
-                .get("evaluation_file")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if let Some(url) = by_filename.get(eval_file) {
-                by_sbid.insert(sbid.to_string(), url.clone());
-            }
-            if let Some(url) = by_filename_cs.get(eval_file) {
-                by_sbid_cs.insert(sbid.to_string(), url.clone());
-            }
-        }
-        Ok((by_sbid, by_sbid_cs))
+        map_eval_staging_results(inputs, &by_filename, &by_filename_cs)
     }
 
     async fn create_and_run_soda_job(&self, access_urls: &[String]) -> Result<String, String> {
@@ -340,6 +317,71 @@ impl CasdaStagingClient {
     }
 }
 
+fn evaluation_staging_inputs(
+    records: &[Value],
+) -> Result<BTreeMap<String, (String, String)>, String> {
+    let mut inputs = BTreeMap::new();
+    for record in records {
+        let sbid = record
+            .get("sbid")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "CASDA evaluation staging metadata is missing sbid".to_string())?;
+        let filename = record
+            .get("evaluation_file")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("SBID {sbid} is missing evaluation_file"))?;
+        let expected_prefix = format!("calibration-metadata-processing-logs-SB{sbid}_");
+        if !filename.starts_with(&expected_prefix) || !filename.ends_with(".tar") {
+            return Err(format!(
+                "SBID {sbid} evaluation_file is not a calibration metadata archive"
+            ));
+        }
+        let access_url = record
+            .get("evaluation_file_access_url")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("SBID {sbid} is missing evaluation_file_access_url"))?;
+        let input = (filename.to_string(), access_url.to_string());
+        if let Some(existing) = inputs.get(sbid) {
+            if existing != &input {
+                return Err(format!(
+                    "SBID {sbid} has inconsistent evaluation staging metadata"
+                ));
+            }
+        } else {
+            inputs.insert(sbid.to_string(), input);
+        }
+    }
+    if inputs.is_empty() {
+        return Err("no calibration evaluation archives in CASDA staging metadata".into());
+    }
+    Ok(inputs)
+}
+
+fn map_eval_staging_results(
+    inputs: &BTreeMap<String, (String, String)>,
+    by_filename: &HashMap<String, String>,
+    by_filename_checksum: &HashMap<String, String>,
+) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
+    let mut by_sbid = HashMap::new();
+    let mut by_sbid_checksum = HashMap::new();
+    for (sbid, (filename, _)) in inputs {
+        let staged_url = by_filename.get(filename).ok_or_else(|| {
+            format!("CASDA evaluation staging result is missing {filename} for SBID {sbid}")
+        })?;
+        let checksum_url = by_filename_checksum.get(filename).ok_or_else(|| {
+            format!(
+                "CASDA evaluation staging result is missing the checksum for {filename} (SBID {sbid})"
+            )
+        })?;
+        by_sbid.insert(sbid.clone(), staged_url.clone());
+        by_sbid_checksum.insert(sbid.clone(), checksum_url.clone());
+    }
+    Ok((by_sbid, by_sbid_checksum))
+}
+
 fn collect_access_urls(records: &[Value], fields: &[&str]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -442,5 +484,79 @@ mod tests {
     fn read_completed_job_phase() {
         let xml = r#"<?xml version="1.0"?><uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"><uws:phase>COMPLETED</uws:phase></uws:job>"#;
         assert_eq!(read_job_phase(xml).as_deref(), Some("COMPLETED"));
+    }
+
+    #[test]
+    fn evaluation_staging_requires_explicit_eval_access_url() {
+        let error = evaluation_staging_inputs(&[serde_json::json!({
+            "sbid": "72962",
+            "evaluation_file": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+            "access_url": "https://example.test/visibility"
+        })])
+        .unwrap_err();
+
+        assert_eq!(error, "SBID 72962 is missing evaluation_file_access_url");
+    }
+
+    #[tokio::test]
+    async fn stage_propagates_eval_preflight_error_before_authentication() {
+        let client = CasdaStagingClient {
+            username: "unused".into(),
+            password: "unused".into(),
+            login_url: "http://127.0.0.1:1/must-not-be-called".into(),
+            client: Client::new(),
+            stage_by_sbid: true,
+        };
+        let error = client
+            .stage(&[serde_json::json!({
+                "sbid": "72962",
+                "evaluation_file": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                "access_url": "https://example.test/visibility"
+            })])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OrchestrationError::Backend(message)
+                if message == "SBID 72962 is missing evaluation_file_access_url"
+        ));
+    }
+
+    #[test]
+    fn evaluation_staging_rejects_non_calibration_archive() {
+        let error = evaluation_staging_inputs(&[serde_json::json!({
+            "sbid": "72962",
+            "evaluation_file": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+            "evaluation_file_access_url": "https://example.test/validation"
+        })])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "SBID 72962 evaluation_file is not a calibration metadata archive"
+        );
+    }
+
+    #[test]
+    fn evaluation_staging_results_must_cover_every_expected_archive() {
+        let filename = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
+        let inputs = evaluation_staging_inputs(&[serde_json::json!({
+            "sbid": "72962",
+            "evaluation_file": filename,
+            "evaluation_file_access_url": "https://example.test/calibration"
+        })])
+        .unwrap();
+
+        let error =
+            map_eval_staging_results(&inputs, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(error.contains("CASDA evaluation staging result is missing"));
+
+        let staged = HashMap::from([(
+            filename.to_string(),
+            "https://example.test/staged-calibration".to_string(),
+        )]);
+        let error = map_eval_staging_results(&inputs, &staged, &HashMap::new()).unwrap_err();
+        assert!(error.contains("missing the checksum"));
     }
 }

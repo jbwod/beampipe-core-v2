@@ -82,8 +82,17 @@ discovery:
     - name: sbid_to_eval_file
       adapter: casda
       template: |
-        SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'
+        SELECT * FROM casda.observation_evaluation_file
+        WHERE sbid = '{sbid}'
+        AND format = 'calibration'
+        AND filename LIKE 'calibration-metadata-processing-logs-SB{sbid}_%.tar'
 ```
+
+For each SBID, discovery considers only calibration metadata archives with the
+expected tar naming contract. When CASDA returns multiple valid archives, the
+largest is selected and equal sizes are resolved by the lexically latest filename.
+Missing calibration archives and duplicate winning rows fail closed; unrelated
+diagnostic and validation-report products are never used as fallbacks.
 
 Project-level `casda_tap_url` and `vizier_tap_url` can override runtime defaults. Keep credentials outside YAML.
 

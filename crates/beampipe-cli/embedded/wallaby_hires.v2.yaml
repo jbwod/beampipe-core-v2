@@ -65,7 +65,10 @@ discovery:
     - name: sbid_to_eval_file
       adapter: casda
       template: |
-        SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'
+        SELECT * FROM casda.observation_evaluation_file
+        WHERE sbid = '{sbid}'
+        AND format = 'calibration'
+        AND filename LIKE 'calibration-metadata-processing-logs-SB{sbid}_%.tar'
   prepare_metadata:
     field_map:
       source_identifier:

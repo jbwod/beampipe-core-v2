@@ -446,44 +446,85 @@ pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<ValidationDiagnost
 
 fn select_eval_file_by_size(value: &Value) -> Option<Value> {
     let row = select_eval_file_row(value)?;
-    row.get("filename")
-        .cloned()
-        .or_else(|| row.get("file_name").cloned())
-        .or_else(|| value_string(row.get("filename")).map(Value::String))
-        .or_else(|| value_string(row.get("file_name")).map(Value::String))
+    row_filename(&row).map(Value::String)
 }
 
-/// Pick the largest CASDA evaluation-file row by `filesize` (or `access_estsize`).
+/// Pick the largest valid CASDA calibration metadata archive.
+///
+/// Evaluation-file TAP results also contain diagnostics and validation reports.
+/// Those products are not interchangeable with the calibration tar consumed by
+/// WALLABY, so the selector deliberately has no non-calibration fallback. Equal
+/// sizes are resolved by the lexically latest filename (the archive name embeds
+/// its production timestamp).
 pub fn select_eval_file_row(value: &Value) -> Option<Map<String, Value>> {
     if let Some(obj) = value.as_object() {
-        if obj.contains_key("filename") || obj.contains_key("file_name") {
+        if is_calibration_metadata_archive(obj) && row_byte_size(obj).is_some() {
             return Some(obj.clone());
         }
+        return None;
     }
     let rows = value.as_array()?;
-    let mut best: Option<(i64, &Map<String, Value>)> = None;
+    let mut best: Option<(i64, String, &Map<String, Value>)> = None;
     for row in rows {
         let Some(obj) = row.as_object() else {
             continue;
         };
-        let size = row_byte_size(obj);
-        if best.map(|(best_size, _)| size > best_size).unwrap_or(true) {
-            best = Some((size, obj));
+        if !is_calibration_metadata_archive(obj) {
+            continue;
+        }
+        let Some(size) = row_byte_size(obj) else {
+            continue;
+        };
+        let filename = row_filename(obj)?;
+        let is_better = best
+            .as_ref()
+            .map(|(best_size, best_filename, _)| {
+                size > *best_size || (size == *best_size && filename > *best_filename)
+            })
+            .unwrap_or(true);
+        if is_better {
+            best = Some((size, filename, obj));
         }
     }
-    best.map(|(_, obj)| obj.clone())
+    best.map(|(_, _, obj)| obj.clone())
 }
 
-fn row_byte_size(obj: &Map<String, Value>) -> i64 {
+fn is_calibration_metadata_archive(obj: &Map<String, Value>) -> bool {
+    let format_is_calibration = row_field(obj, "format")
+        .and_then(|value| value_string(Some(value)))
+        .is_some_and(|format| format.eq_ignore_ascii_case("calibration"));
+    let filename_is_archive = row_filename(obj).is_some_and(|filename| {
+        filename.starts_with("calibration-metadata-processing-logs-SB")
+            && filename.ends_with(".tar")
+    });
+    let has_access_url = row_field(obj, "access_url")
+        .and_then(|value| value_string(Some(value)))
+        .is_some();
+    format_is_calibration && filename_is_archive && has_access_url
+}
+
+fn row_filename(obj: &Map<String, Value>) -> Option<String> {
+    row_field(obj, "filename")
+        .or_else(|| row_field(obj, "file_name"))
+        .and_then(|value| value_string(Some(value)))
+}
+
+fn row_field<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    obj.get(key)
+        .or_else(|| obj.get(&key.to_ascii_lowercase()))
+        .or_else(|| obj.get(&key.to_ascii_uppercase()))
+}
+
+fn row_byte_size(obj: &Map<String, Value>) -> Option<i64> {
     const KEYS: [&str; 4] = ["filesize", "file_size", "access_estsize", "size"];
     for key in KEYS {
         if let Some(value) = obj.get(key).or_else(|| obj.get(&key.to_ascii_uppercase())) {
             if let Some(size) = json_byte_size(value) {
-                return size;
+                return (size >= 0).then_some(size);
             }
         }
     }
-    0
+    None
 }
 
 fn json_byte_size(value: &Value) -> Option<i64> {
@@ -718,19 +759,64 @@ mod tests {
         assert_eq!(
             apply_transform_spec(
                 &spec(TransformKind::SelectEvalFileBySize),
-                &json!([{"filename": "small", "filesize": 1}, {"filename": "large", "filesize": 2}])
+                &json!([
+                    {
+                        "filename": "calibration-metadata-processing-logs-SB1_2026-01-01-000000.tar",
+                        "format": "calibration",
+                        "filesize": 1,
+                        "access_url": "https://example.test/old"
+                    },
+                    {
+                        "filename": "calibration-metadata-processing-logs-SB1_2026-01-02-000000.tar",
+                        "format": "calibration",
+                        "filesize": 2,
+                        "access_url": "https://example.test/new"
+                    }
+                ])
             ),
-            Some(json!("large"))
+            Some(json!(
+                "calibration-metadata-processing-logs-SB1_2026-01-02-000000.tar"
+            ))
         );
         assert_eq!(
             apply_transform_spec(
                 &spec(TransformKind::SelectEvalFileBySize),
                 &json!([
-                    {"filename": "cal.fits", "format": "calibration", "filesize": 10},
-                    {"filename": "beam.fits", "format": "fits", "filesize": 999}
+                    {
+                        "filename": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                        "format": "calibration",
+                        "filesize": 10,
+                        "access_url": "https://example.test/calibration"
+                    },
+                    {
+                        "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                        "format": "validation-report",
+                        "filesize": 999,
+                        "access_url": "https://example.test/validation"
+                    },
+                    {
+                        "filename": "diagnostics-SB72962.tar",
+                        "format": "diagnostics",
+                        "filesize": 9999,
+                        "access_url": "https://example.test/diagnostics"
+                    }
                 ])
             ),
-            Some(json!("beam.fits"))
+            Some(json!(
+                "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar"
+            ))
+        );
+        assert_eq!(
+            apply_transform_spec(
+                &spec(TransformKind::SelectEvalFileBySize),
+                &json!([{
+                    "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                    "format": "validation-report",
+                    "filesize": 999,
+                    "access_url": "https://example.test/validation"
+                }])
+            ),
+            None
         );
         let mut regex = spec(TransformKind::RegexExtract);
         regex.pattern = Some("SB([0-9]+)".into());
@@ -949,5 +1035,29 @@ discovery:
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         let errors = validate_transform_refs(&config);
         assert!(errors.iter().any(|e| e.message.contains("missing_step")));
+    }
+
+    #[test]
+    fn eval_selector_uses_filename_as_a_deterministic_size_tie_break() {
+        let selected = select_eval_file_row(&json!([
+            {
+                "filename": "calibration-metadata-processing-logs-SB34166_2021-12-30-000000.tar",
+                "format": "calibration",
+                "filesize": 11_100_000,
+                "access_url": "https://example.test/older"
+            },
+            {
+                "filename": "calibration-metadata-processing-logs-SB34166_2021-12-31-011733.tar",
+                "format": "calibration",
+                "filesize": 11_100_000,
+                "access_url": "https://example.test/newer"
+            }
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            selected["filename"],
+            "calibration-metadata-processing-logs-SB34166_2021-12-31-011733.tar"
+        );
     }
 }

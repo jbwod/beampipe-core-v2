@@ -1043,6 +1043,10 @@ enum ConfigDiscoveryError {
     MissingAdapter(String),
     #[error("adapter error: {0}")]
     Adapter(#[from] AdapterError),
+    #[error("SBID {sbid} has no valid calibration metadata archive")]
+    MissingCalibrationArchive { sbid: String },
+    #[error("SBID {sbid} has duplicate calibration metadata archive rows for {filename}")]
+    AmbiguousCalibrationArchive { sbid: String, filename: String },
 }
 
 impl ConfigDiscoveryRunner {
@@ -1118,10 +1122,11 @@ impl ConfigDiscoveryRunner {
                     .await
                 {
                     Ok(rows) => {
-                        if let Some(row) = sbid_enrichment_row(&query.name, &rows) {
+                        if let Some(row) = sbid_enrichment_row(&query.name, sbid, &rows)? {
                             by_sbid.insert(sbid.clone(), Value::Object(row));
                         }
                     }
+                    Err(err) if query.name == "sbid_to_eval_file" => return Err(err),
                     Err(err) => {
                         warn!(
                             adapter = query.adapter,
@@ -1841,14 +1846,47 @@ fn flatten_eval_enrichment(out: &mut Map<String, Value>) {
     }
 }
 
-fn sbid_enrichment_row(query_name: &str, rows: &[TapRow]) -> Option<TapRow> {
-    if query_name == "sbid_to_eval_file" {
-        let as_value = Value::Array(rows.iter().cloned().map(Value::Object).collect());
-        if let Some(best) = select_eval_file_row(&as_value) {
-            return Some(best);
-        }
+fn sbid_enrichment_row(
+    query_name: &str,
+    sbid: &str,
+    rows: &[TapRow],
+) -> Result<Option<TapRow>, ConfigDiscoveryError> {
+    if query_name != "sbid_to_eval_file" {
+        return Ok(rows.first().cloned());
     }
-    rows.first().cloned()
+
+    let expected_prefix = format!("calibration-metadata-processing-logs-SB{sbid}_");
+    let candidates: Vec<Value> = rows
+        .iter()
+        .filter(|row| {
+            value_string(row_value(row, "filename")).is_some_and(|filename| {
+                filename.starts_with(&expected_prefix) && filename.ends_with(".tar")
+            })
+        })
+        .cloned()
+        .map(Value::Object)
+        .collect();
+    let selected = select_eval_file_row(&Value::Array(candidates)).ok_or_else(|| {
+        ConfigDiscoveryError::MissingCalibrationArchive {
+            sbid: sbid.to_string(),
+        }
+    })?;
+    let selected_filename = value_string(row_value(&selected, "filename")).unwrap_or_default();
+    let duplicate_count = rows
+        .iter()
+        .filter(|row| {
+            value_string(row_value(row, "filename")).as_deref() == Some(selected_filename.as_str())
+                && value_string(row_value(row, "format"))
+                    .is_some_and(|format| format.eq_ignore_ascii_case("calibration"))
+        })
+        .count();
+    if duplicate_count > 1 {
+        return Err(ConfigDiscoveryError::AmbiguousCalibrationArchive {
+            sbid: sbid.to_string(),
+            filename: selected_filename,
+        });
+    }
+    Ok(Some(selected))
 }
 
 fn insert_flag_from_row(
@@ -5009,27 +5047,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_discovery_uses_project_query_templates() {
+    async fn config_discovery_selects_calibration_archive_and_preserves_it_in_manifest() {
         let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
         let mut casda = MockTapClient::default();
         casda.insert_rows(
             "ivoa.obscore",
-            vec![json!({"filename": "HIPASSJ1.ms", "obs_id": "ASKAP-123", "obs_publisher_did": "scan-9"})],
+            vec![json!({
+                "filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
+                "obs_id": "ASKAP-72962",
+                "obs_publisher_did": "scan-9"
+            })],
         );
         casda.insert_rows(
             "observation_evaluation_file",
             vec![
                 json!({
-                    "sbid": "123",
-                    "filename": "small.fits",
-                    "filesize": 10,
-                    "access_url": "https://x/small"
+                    "sbid": "72962",
+                    "filename": "calibration-metadata-processing-logs-SB72962_2025-04-20-063210.tar",
+                    "format": "calibration",
+                    "filesize": 12_800_000,
+                    "access_url": "https://example.test/calibration-old"
                 }),
                 json!({
-                    "sbid": "123",
-                    "filename": "beam.fits",
-                    "filesize": 9999,
-                    "access_url": "https://x/beam"
+                    "sbid": "72962",
+                    "filename": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                    "format": "calibration",
+                    "filesize": 16_700_000,
+                    "access_url": "https://example.test/calibration-expected"
+                }),
+                json!({
+                    "sbid": "72962",
+                    "filename": "diagnostics-SB72962.tar",
+                    "format": "diagnostics",
+                    "filesize": 115_000_000,
+                    "access_url": "https://example.test/diagnostics"
+                }),
+                json!({
+                    "sbid": "72962",
+                    "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                    "format": "validation-report",
+                    "filesize": 898_000_000,
+                    "access_url": "https://example.test/validation"
                 }),
             ],
         );
@@ -5044,7 +5102,7 @@ mod tests {
             ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
                 .unwrap();
         let result = runner
-            .discover_source(Some(&config), "wallaby_hires", "HIPASSJ1")
+            .discover_source(Some(&config), "wallaby_hires", "HIPASSJ1317-16")
             .await;
         match result {
             DiscoverySourceResult::HasMetadata {
@@ -5052,14 +5110,111 @@ mod tests {
                 discovery_flags,
                 ..
             } => {
-                assert_eq!(metadata[0]["sbid"], "123");
-                assert_eq!(metadata[0]["dataset_id"], "HIPASSJ1.ms");
-                assert_eq!(metadata[0]["evaluation_file"], "beam.fits");
-                assert_eq!(metadata[0]["evaluation_file_access_url"], "https://x/beam");
+                let expected = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
+                assert_eq!(metadata[0]["sbid"], "72962");
+                assert_eq!(
+                    metadata[0]["dataset_id"],
+                    "HIPASSJ1317-16_SB72962_F00_B00.ms.tar"
+                );
+                assert_eq!(metadata[0]["evaluation_file"], expected);
+                assert_eq!(
+                    metadata[0]["evaluation_file_access_url"],
+                    "https://example.test/calibration-expected"
+                );
                 assert_eq!(discovery_flags["ra_dec_vsys_complete"], true);
+
+                let manifest =
+                    build_manifest_from_config_with_staging(&config, &metadata, &[], &json!({}))
+                        .unwrap();
+                let dataset = &manifest["sources"][0]["sbids"][0]["datasets"][0];
+                assert_eq!(dataset["evaluation_file"], expected);
+                assert_eq!(
+                    dataset["evaluation_file_access_url"],
+                    "https://example.test/calibration-expected"
+                );
             }
             other => panic!("unexpected result: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn config_discovery_fails_without_calibration_archive() {
+        let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
+        let mut casda = MockTapClient::default();
+        casda.insert_rows(
+            "ivoa.obscore",
+            vec![json!({
+                "filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
+                "obs_id": "ASKAP-72962",
+                "obs_publisher_did": "scan-9"
+            })],
+        );
+        casda.insert_rows(
+            "observation_evaluation_file",
+            vec![json!({
+                "sbid": "72962",
+                "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                "format": "validation-report",
+                "filesize": 8980,
+                "access_url": "https://example.test/validation"
+            })],
+        );
+        clients.insert("casda".into(), Arc::new(casda));
+        clients.insert(
+            "vizier".into(),
+            Arc::new(MockTapClient::with_rows(
+                "VIII/73/hicat",
+                vec![json!({"RAJ2000": "1:2:3", "DEJ2000": "-1:2:3", "RVmom": 42})],
+            )),
+        );
+        let runner = ConfigDiscoveryRunner::with_clients(clients);
+        let config =
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
+                .unwrap();
+
+        let result = runner
+            .discover_source(Some(&config), "wallaby_hires", "HIPASSJ1317-16")
+            .await;
+
+        match result {
+            DiscoverySourceResult::Error { error, .. } => {
+                assert!(error.contains("SBID 72962 has no valid calibration metadata archive"));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_winning_calibration_archive_fails_closed() {
+        let filename = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
+        let rows = vec![
+            json!({
+                "sbid": "72962",
+                "filename": filename,
+                "format": "calibration",
+                "filesize": 16_700_000,
+                "access_url": "https://example.test/calibration-a"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            json!({
+                "sbid": "72962",
+                "filename": filename,
+                "format": "calibration",
+                "filesize": 16_700_000,
+                "access_url": "https://example.test/calibration-b"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        ];
+
+        let error = sbid_enrichment_row("sbid_to_eval_file", "72962", &rows).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigDiscoveryError::AmbiguousCalibrationArchive { .. }
+        ));
     }
 
     #[test]
