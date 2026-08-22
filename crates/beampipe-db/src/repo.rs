@@ -16,9 +16,9 @@ use beampipe_domain::{
         parsed_source_readiness_error, ArchiveMetadataReadiness, RegisteredSourceReadiness,
     },
     DaliugeState, ExecutionPhase, ExecutionRetryContext, ExecutionRetryPlan, ExecutionStatus,
-    LedgerPatch, LedgerState, SchedulerState, SubmissionState, TerminalOutcome,
+    LedgerPatch, LedgerState, OutputState, SchedulerState, SubmissionState, TerminalOutcome,
 };
-use beampipe_project::SignatureConfig;
+use beampipe_project::{ProjectConfig, SignatureConfig, WALLABY_OUTPUT_INVENTORY_SCHEMA};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1592,6 +1592,34 @@ async fn create_execution_internal(
             "deployment": profile.deployment,
         })
     });
+    let output_config = match project_config_id {
+        Some(config_id) => {
+            let row = get_project_config_by_uuid(pool, config_id)
+                .await?
+                .ok_or_else(|| sqlx::Error::Protocol("project config does not exist".into()))?;
+            let config: ProjectConfig = serde_json::from_value(row.spec).map_err(|error| {
+                sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
+            })?;
+            config.output_verification
+        }
+        None => beampipe_project::OutputVerificationConfig::default(),
+    };
+    if output_config.inventory_schema != WALLABY_OUTPUT_INVENTORY_SCHEMA {
+        return Err(sqlx::Error::Protocol(format!(
+            "unsupported output inventory schema '{}'",
+            output_config.inventory_schema
+        )));
+    }
+    let output_verification_required = output_config.required;
+    let output_verification_policy = json!({
+        "required": output_config.required,
+        "inventory_schema": output_config.inventory_schema,
+    });
+    let output_state = if output_verification_required {
+        "pending"
+    } else {
+        "not_started"
+    };
 
     let mut tx = pool.begin().await?;
     if let (Some(user_id), Some(key), Some(request_hash)) =
@@ -1698,13 +1726,14 @@ async fn create_execution_internal(
             deployment_profile_revision, deployment_profile_snapshot,
             project_config_id, discovery_signature, created_by_id, status,
             control_phase, submission_state, scheduler_state, daliuge_state, output_state,
-            output_verification_required, create_idempotency_key, create_request_sha256,
+            output_verification_required, output_verification_policy,
+            create_idempotency_key, create_request_sha256,
             scheduler_name, workflow_manifest
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending',
-            'discovered', 'not_started', 'not_submitted', 'not_created', 'not_started', false,
-            $11, $12, $13, $14
+            'discovered', 'not_started', 'not_submitted', 'not_created', $11, $12, $13,
+            $14, $15, $16, $17
         )
         RETURNING *
         "#,
@@ -1719,6 +1748,9 @@ async fn create_execution_internal(
     .bind(project_config_id)
     .bind(combined_discovery_signature)
     .bind(created_by_id)
+    .bind(output_state)
+    .bind(output_verification_required)
+    .bind(output_verification_policy.clone())
     .bind(idempotency_key)
     .bind(request_sha256)
     .bind(scheduler_name)
@@ -1728,8 +1760,8 @@ async fn create_execution_internal(
     let payload = serde_json::json!({
         "archive_name": archive_name,
         "sources": sources,
-        "output_verification_required": false,
-        "output_verification_policy": "not_configured",
+        "output_verification_required": output_verification_required,
+        "output_verification_policy": output_verification_policy,
     });
     insert_provenance_event(
         &mut *tx,
@@ -2047,7 +2079,10 @@ pub async fn retry_execution(
             daliuge_state = 'not_created',
             daliuge_raw_status = NULL,
             remote_session_dir = NULL,
-            output_state = 'not_started',
+            output_state = CASE
+                WHEN output_verification_required THEN 'pending'
+                ELSE 'not_started'
+            END,
             terminal_outcome = NULL,
             failure_class = NULL,
             last_error = NULL,
@@ -2431,7 +2466,230 @@ fn validate_artifact(artifact: &ExecutionArtifactInput) -> Result<(), sqlx::Erro
             "artifact sha256 must be 64 hexadecimal characters".into(),
         ));
     }
+    if artifact.size_bytes.is_some_and(|size| size < 0) {
+        return Err(sqlx::Error::Protocol(
+            "artifact size_bytes must be non-negative".into(),
+        ));
+    }
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VerifyExecutionOutputsError {
+    #[error("execution not found")]
+    NotFound,
+    #[error("output verification rejected: {0}")]
+    Rejected(String),
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+/// Atomically persist a trusted publication inventory and release a required
+/// execution to terminal success. The database never marks outputs verified
+/// unless the durable report artifact commits in the same transaction.
+pub async fn verify_execution_outputs(
+    pool: &PgPool,
+    execution_id: Uuid,
+    artifact: ExecutionArtifactInput,
+    actor: &str,
+    correlation_id: Option<&str>,
+) -> Result<(ExecutionRow, ExecutionArtifactRow), VerifyExecutionOutputsError> {
+    validate_artifact(&artifact)?;
+    if artifact.kind != "output_inventory"
+        || artifact.storage_kind != "remote"
+        || artifact.uri.as_deref().map(str::is_empty).unwrap_or(true)
+    {
+        return Err(VerifyExecutionOutputsError::Rejected(
+            "verification requires a remote output_inventory artifact with a destination URI"
+                .into(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let execution = sqlx::query_as::<_, ExecutionRow>(
+        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(VerifyExecutionOutputsError::NotFound)?;
+    if !execution.output_verification_required {
+        return Err(VerifyExecutionOutputsError::Rejected(
+            "the pinned execution policy explicitly opts out of output verification".into(),
+        ));
+    }
+    let expected_schema = execution
+        .output_verification_policy
+        .get("inventory_schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            VerifyExecutionOutputsError::Rejected(
+                "the pinned output verification policy has no inventory schema".into(),
+            )
+        })?;
+    let reported_schema = artifact
+        .metadata
+        .get("inventory_schema")
+        .and_then(Value::as_str);
+    if reported_schema != Some(expected_schema) {
+        return Err(VerifyExecutionOutputsError::Rejected(format!(
+            "inventory schema does not match pinned policy '{expected_schema}'"
+        )));
+    }
+    if execution
+        .output_state
+        .as_deref()
+        .and_then(OutputState::parse)
+        == Some(OutputState::Verified)
+    {
+        let existing = sqlx::query_as::<_, ExecutionArtifactRow>(
+            r#"
+            SELECT * FROM execution_artifacts
+            WHERE execution_id = $1 AND kind = 'output_inventory' AND sha256 = $2
+            "#,
+        )
+        .bind(execution_id)
+        .bind(&artifact.sha256)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing.filter(|row| {
+            row.uri == artifact.uri
+                && row.inline_json == artifact.inline_json
+                && row.metadata == artifact.metadata
+        }) {
+            tx.commit().await?;
+            return Ok((execution, existing));
+        }
+        return Err(VerifyExecutionOutputsError::Rejected(
+            "outputs were already verified with a different durable inventory".into(),
+        ));
+    }
+    if execution
+        .status_enum()
+        .is_some_and(ExecutionStatus::is_terminal)
+    {
+        return Err(VerifyExecutionOutputsError::Rejected(format!(
+            "execution is already terminal ({}) without verified outputs",
+            execution.status
+        )));
+    }
+    let axes = execution.axes();
+    let external_complete = axes.daliuge == DaliugeState::Finished
+        && matches!(
+            axes.scheduler,
+            SchedulerState::Succeeded | SchedulerState::NotSubmitted
+        );
+    if !external_complete {
+        return Err(VerifyExecutionOutputsError::Rejected(
+            "external execution has not completed successfully".into(),
+        ));
+    }
+    let inserted = sqlx::query_as::<_, ExecutionArtifactRow>(
+        r#"
+        INSERT INTO execution_artifacts (
+            uuid, execution_id, kind, storage_kind, uri, inline_json,
+            media_type, sha256, size_bytes, producer_phase, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (execution_id, kind, sha256) DO NOTHING
+        RETURNING *
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution_id)
+    .bind(&artifact.kind)
+    .bind(&artifact.storage_kind)
+    .bind(&artifact.uri)
+    .bind(&artifact.inline_json)
+    .bind(&artifact.media_type)
+    .bind(&artifact.sha256)
+    .bind(artifact.size_bytes)
+    .bind(&artifact.producer_phase)
+    .bind(&artifact.metadata)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let stored = match inserted {
+        Some(stored) => stored,
+        None => {
+            let stored = sqlx::query_as::<_, ExecutionArtifactRow>(
+                r#"
+                SELECT * FROM execution_artifacts
+                WHERE execution_id = $1 AND kind = $2 AND sha256 = $3
+                "#,
+            )
+            .bind(execution_id)
+            .bind(&artifact.kind)
+            .bind(&artifact.sha256)
+            .fetch_one(&mut *tx)
+            .await?;
+            if stored.uri != artifact.uri || stored.inline_json != artifact.inline_json {
+                return Err(VerifyExecutionOutputsError::Rejected(
+                    "inventory digest conflicts with an existing publication report".into(),
+                ));
+            }
+            stored
+        }
+    };
+    let updated = sqlx::query_as::<_, ExecutionRow>(
+        r#"
+        UPDATE batch_execution_record
+        SET output_state = 'verified',
+            status = 'completed',
+            control_phase = 'terminal',
+            terminal_outcome = 'succeeded',
+            failure_class = NULL,
+            last_error = NULL,
+            phase_timestamps = phase_timestamps
+                || jsonb_build_object('outputs_verified', to_jsonb(now()))
+                || CASE WHEN phase_timestamps ? 'terminal' THEN '{}'::JSONB
+                        ELSE jsonb_build_object('terminal', to_jsonb(now())) END,
+            last_reconciled_at = now(),
+            completed_at = COALESCE(completed_at, now()),
+            updated_at = now()
+        WHERE uuid = $1
+        RETURNING *
+        "#,
+    )
+    .bind(execution_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO execution_observations (
+            uuid, execution_id, kind, normalized_state, raw_state, reason,
+            payload, source_version, observed_at
+        )
+        VALUES ($1, $2, 'output', 'verified', 'publication_acknowledged', NULL,
+                $3, $4, now())
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution_id)
+    .bind(json!({
+        "artifact_id": stored.uuid,
+        "inventory_sha256": stored.sha256,
+        "destination_uri": stored.uri,
+    }))
+    .bind(expected_schema)
+    .execute(&mut *tx)
+    .await?;
+    insert_provenance_event(
+        &mut *tx,
+        "execution.outputs_verified",
+        &updated.project_module,
+        None,
+        Some(execution_id),
+        Some(actor),
+        correlation_id,
+        &json!({
+            "artifact_id": stored.uuid,
+            "inventory_sha256": stored.sha256,
+            "destination_uri": stored.uri,
+            "inventory_schema": expected_schema,
+        }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((updated, stored))
 }
 
 pub async fn list_execution_artifacts(

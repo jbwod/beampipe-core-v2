@@ -116,6 +116,11 @@ graph_patches:
     set:
       num_of_copies: "$count(sbids[].datasets[])"
 
+# This test graph intentionally produces no durable downloadable products.
+output_verification:
+  required: false
+  inventory_schema: wallaby-hires-output-inventory/v1
+
 automation:
   execution:
     enabled: false

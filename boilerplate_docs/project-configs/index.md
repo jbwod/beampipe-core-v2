@@ -29,6 +29,7 @@ graph: {}
 discovery: {}
 manifest: {}
 graph_patches: []
+output_verification: {}
 automation: {}
 extension: {}
 ```
@@ -41,6 +42,7 @@ extension: {}
 | `discovery` | project-specific ADQL, enrichments, mappings, flags, signature |
 | `manifest` | source/SBID/dataset grouping and output templates |
 | `graph`, `graph_patches` | logical graph source and deterministic mutations |
+| `output_verification` | pinned durable-product inventory policy |
 | `automation` | discovery cadence and execution admission limits |
 | `extension` | optional pinned WASM hooks |
 

@@ -460,6 +460,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-opentelemetry",
+ "url",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

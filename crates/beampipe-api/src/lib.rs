@@ -42,6 +42,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -72,7 +73,8 @@ pub struct AppState {
         list_sources, get_source, get_source_status, update_source, delete_source, get_source_metadata,
         list_source_executions, prepare_execution, create_execution, list_executions, get_execution,
         execution_status, execution_summary, execution_ledger_snapshot, execution_observations,
-        execution_artifacts, patch_execution, execute_execution, retry_execution, prepare_graph,
+        execution_artifacts, verify_execution_outputs, patch_execution, execute_execution,
+        retry_execution, prepare_graph,
         scheduler_status, scheduler_jobs, daliuge_inspect, daliuge_sessions,
         upload_project_config, get_project_config, list_project_config_versions,
         upload_project_config_wasm, get_project_config_wasm,
@@ -95,8 +97,10 @@ pub struct AppState {
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
         DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
         ExecutionCreate, ExecutionSourceSelection, ExecutionPatchRequest, ExecuteRequest,
-        ExecutionRetryRequest,
-        ExecutionRetryResponse, GraphPrepareRequest, GraphPrepareResponse, ExecutionStatus,
+        ExecutionRetryRequest, ExecutionRetryResponse, OutputInventoryProduct,
+        OutputPublicationAcknowledgement, ExecutionOutputVerificationRequest,
+        ExecutionOutputVerificationResponse, GraphPrepareRequest, GraphPrepareResponse,
+        ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
         ProjectConfig, ValidationReport, ValidationDiagnostic, DiagnosticSeverity,
         ApiErrorResponse, beampipe_domain::Failure,
@@ -119,6 +123,7 @@ pub struct AppState {
         beampipe_project::GraphPatchMatch,
         beampipe_project::GraphPatchMatchKind,
         beampipe_project::AutomationConfig,
+        beampipe_project::OutputVerificationConfig,
         beampipe_project::DiscoveryAutomationConfig,
         beampipe_project::ExecutionAutomationConfig,
         beampipe_project::ExtensionConfig,
@@ -190,6 +195,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/jobs", post(enqueue_job_handler))
         .route("/api/v2/executions/:id/execute", post(execute_execution))
         .route("/api/v2/executions/:id/retry", post(retry_execution))
+        .route(
+            "/api/v2/executions/:id/outputs/verify",
+            post(verify_execution_outputs),
+        )
         .route("/api/v2/graphs/prepare", post(prepare_graph))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2313,6 +2322,7 @@ pub struct ExecutionRead {
     pub daliuge_state: Option<String>,
     pub output_state: Option<String>,
     pub output_verification_required: bool,
+    pub output_verification_policy: Value,
     pub terminal_outcome: Option<String>,
     pub failure_class: Option<String>,
     pub discovery_signature: Option<String>,
@@ -2854,6 +2864,7 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
         daliuge_state: row.daliuge_state,
         output_state: row.output_state,
         output_verification_required: row.output_verification_required,
+        output_verification_policy: row.output_verification_policy,
         terminal_outcome: row.terminal_outcome,
         failure_class: row.failure_class,
         discovery_signature: row.discovery_signature,
@@ -3061,6 +3072,260 @@ async fn execution_artifacts(
         artifact.metadata = redact_value(&artifact.metadata);
     }
     Ok(Json(artifacts))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputInventoryProduct {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputPublicationAcknowledgement {
+    pub acknowledged: bool,
+    pub publisher: String,
+    pub receipt_id: String,
+    pub published_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionOutputVerificationRequest {
+    pub schema: String,
+    pub products: Vec<OutputInventoryProduct>,
+    pub inventory_sha256: String,
+    pub durable_destination_uri: String,
+    pub publication: OutputPublicationAcknowledgement,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionOutputVerificationResponse {
+    pub execution: ExecutionRead,
+    pub artifact: ExecutionArtifactRow,
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_products_sha256(products: &[OutputInventoryProduct]) -> Result<String, ApiError> {
+    let canonical: Vec<BTreeMap<&str, Value>> = products
+        .iter()
+        .map(|product| {
+            BTreeMap::from([
+                ("bytes", Value::from(product.bytes)),
+                ("path", Value::from(product.path.clone())),
+                ("sha256", Value::from(product.sha256.clone())),
+            ])
+        })
+        .collect();
+    let bytes =
+        serde_json::to_vec(&canonical).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn validate_durable_destination_uri(value: &str) -> Result<(), ApiError> {
+    let parsed = url::Url::parse(value).map_err(|_| {
+        ApiError::BadRequest("durable_destination_uri must be an absolute URI".into())
+    })?;
+    if parsed.fragment().is_some() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiError::BadRequest(
+            "durable_destination_uri must not contain credentials or a fragment".into(),
+        ));
+    }
+    match parsed.scheme() {
+        "s3" | "gs" if parsed.host_str().is_some() => Ok(()),
+        "https" if parsed.host_str().is_some() => Ok(()),
+        "file" if parsed.path().starts_with('/') && parsed.path().len() > 1 => Ok(()),
+        _ => Err(ApiError::BadRequest(
+            "durable_destination_uri must use s3, gs, https, or an absolute file URI".into(),
+        )),
+    }
+}
+
+fn validate_output_verification_request(
+    request: &ExecutionOutputVerificationRequest,
+    output_verification_required: bool,
+    output_verification_policy: &Value,
+) -> Result<u64, ApiError> {
+    if !output_verification_required {
+        return Err(ApiError::Conflict(
+            "this execution explicitly opts out of output verification".into(),
+        ));
+    }
+    let expected_schema = output_verification_policy
+        .get("inventory_schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::Conflict("pinned output policy is invalid".into()))?;
+    if request.schema != expected_schema {
+        return Err(ApiError::Conflict(format!(
+            "inventory schema '{}' does not match pinned schema '{expected_schema}'",
+            request.schema
+        )));
+    }
+    if request.products.is_empty() || request.products.len() > 100_000 {
+        return Err(ApiError::BadRequest(
+            "products must contain between 1 and 100000 entries".into(),
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    let mut total_bytes = 0_u64;
+    for product in &request.products {
+        let path = product.path.trim();
+        let unsafe_path = path.is_empty()
+            || path.starts_with('/')
+            || path.starts_with('\\')
+            || path.contains('\\')
+            || path.contains('\0')
+            || path
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."));
+        if unsafe_path {
+            return Err(ApiError::BadRequest(
+                "every output product requires a safe relative path without '.', '..', or empty components"
+                    .into(),
+            ));
+        }
+        if product.bytes == 0 {
+            return Err(ApiError::BadRequest(format!(
+                "output product '{}' must be non-empty",
+                product.path
+            )));
+        }
+        if !paths.insert(product.path.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "output product path is duplicated: {}",
+                product.path
+            )));
+        }
+        if !valid_sha256(&product.sha256) {
+            return Err(ApiError::BadRequest(format!(
+                "output product '{}' has an invalid lowercase SHA-256",
+                product.path
+            )));
+        }
+        total_bytes = total_bytes.checked_add(product.bytes).ok_or_else(|| {
+            ApiError::BadRequest("total output product size overflows u64".into())
+        })?;
+    }
+    if !valid_sha256(&request.inventory_sha256) {
+        return Err(ApiError::BadRequest(
+            "inventory_sha256 must be 64 lowercase hexadecimal characters".into(),
+        ));
+    }
+    let calculated = canonical_products_sha256(&request.products)?;
+    if request.inventory_sha256 != calculated {
+        return Err(ApiError::BadRequest(format!(
+            "inventory_sha256 does not match canonical products JSON (expected {calculated})"
+        )));
+    }
+    validate_durable_destination_uri(&request.durable_destination_uri)?;
+    if !request.publication.acknowledged {
+        return Err(ApiError::BadRequest(
+            "publication.acknowledged must be true".into(),
+        ));
+    }
+    for (field, value) in [
+        (
+            "publication.publisher",
+            request.publication.publisher.as_str(),
+        ),
+        (
+            "publication.receipt_id",
+            request.publication.receipt_id.as_str(),
+        ),
+    ] {
+        if value.trim().is_empty() || value.len() > 256 {
+            return Err(ApiError::BadRequest(format!(
+                "{field} must contain 1-256 characters"
+            )));
+        }
+    }
+    if request.publication.published_at > Utc::now() + chrono::Duration::minutes(5) {
+        return Err(ApiError::BadRequest(
+            "publication.published_at cannot be more than five minutes in the future".into(),
+        ));
+    }
+    Ok(total_bytes)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions/{id}/outputs/verify",
+    tag = "executions",
+    request_body = ExecutionOutputVerificationRequest,
+    responses(
+        (status = 200, body = ExecutionOutputVerificationResponse),
+        (status = 400, body = ApiErrorResponse),
+        (status = 403, body = ApiErrorResponse),
+        (status = 404, body = ApiErrorResponse),
+        (status = 409, body = ApiErrorResponse)
+    )
+)]
+async fn verify_execution_outputs(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ExecutionOutputVerificationRequest>,
+) -> Result<Json<ExecutionOutputVerificationResponse>, ApiError> {
+    user.require_superuser()?;
+    let execution = repo::get_execution(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let total_product_bytes = validate_output_verification_request(
+        &request,
+        execution.output_verification_required,
+        &execution.output_verification_policy,
+    )?;
+    let report =
+        serde_json::to_value(&request).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let report_size = serde_json::to_vec(&request)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .len();
+    let artifact = ExecutionArtifactInput {
+        kind: "output_inventory".into(),
+        storage_kind: "remote".into(),
+        uri: Some(request.durable_destination_uri.clone()),
+        inline_json: Some(report),
+        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        sha256: request.inventory_sha256.clone(),
+        size_bytes: Some(
+            i64::try_from(report_size)
+                .map_err(|_| ApiError::BadRequest("output inventory report is too large".into()))?,
+        ),
+        producer_phase: "publication_acknowledged".into(),
+        metadata: json!({
+            "inventory_schema": request.schema,
+            "product_count": request.products.len(),
+            "total_product_bytes": total_product_bytes,
+            "publication": request.publication,
+        }),
+    };
+    let actor = format!("trusted-publisher:{}", user.0.uuid);
+    let (execution, artifact) = repo::verify_execution_outputs(
+        &state.pool,
+        id,
+        artifact,
+        &actor,
+        Some(ctx.correlation_id()),
+    )
+    .await
+    .map_err(|error| match error {
+        repo::VerifyExecutionOutputsError::NotFound => ApiError::NotFound,
+        repo::VerifyExecutionOutputsError::Rejected(message) => ApiError::Conflict(message),
+        repo::VerifyExecutionOutputsError::Database(error) => ApiError::Db(error),
+    })?;
+    Ok(Json(ExecutionOutputVerificationResponse {
+        execution: enrich_execution(&state.pool, execution).await?,
+        artifact,
+    }))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -4089,6 +4354,76 @@ adapters:
             ExecutionStatus::Pending,
             Some("unexpected"),
             None,
+        ));
+    }
+
+    fn valid_output_report() -> ExecutionOutputVerificationRequest {
+        let products = vec![OutputInventoryProduct {
+            path: "HIPASSJ1318-21/image.fits".into(),
+            bytes: 42,
+            sha256: "a".repeat(64),
+        }];
+        let inventory_sha256 = canonical_products_sha256(&products).unwrap();
+        ExecutionOutputVerificationRequest {
+            schema: beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA.into(),
+            products,
+            inventory_sha256,
+            durable_destination_uri: "file:///durable/wallaby/run-1".into(),
+            publication: OutputPublicationAcknowledgement {
+                acknowledged: true,
+                publisher: "wallaby-publisher".into(),
+                receipt_id: "publication-1".into(),
+                published_at: Utc::now(),
+            },
+        }
+    }
+
+    #[test]
+    fn output_report_validates_canonical_inventory_and_publication_ack() {
+        let policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+        });
+        let request = valid_output_report();
+        assert_eq!(
+            validate_output_verification_request(&request, true, &policy).unwrap(),
+            42
+        );
+
+        let mut tampered = request.clone();
+        tampered.products[0].bytes = 43;
+        assert!(matches!(
+            validate_output_verification_request(&tampered, true, &policy),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_output_verification_request(&request, false, &policy),
+            Err(ApiError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn output_report_rejects_empty_and_unsafe_products() {
+        let policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+        });
+        for path in ["/absolute.fits", ".", "../escape.fits", "a/../b.fits"] {
+            let mut request = valid_output_report();
+            request.products[0].path = path.into();
+            request.inventory_sha256 = canonical_products_sha256(&request.products).unwrap();
+            assert!(matches!(
+                validate_output_verification_request(&request, true, &policy),
+                Err(ApiError::BadRequest(_))
+            ));
+        }
+
+        let mut request = valid_output_report();
+        request.products[0].bytes = 0;
+        request.inventory_sha256 = canonical_products_sha256(&request.products).unwrap();
+        assert!(matches!(
+            validate_output_verification_request(&request, true, &policy),
+            Err(ApiError::BadRequest(_))
         ));
     }
 }

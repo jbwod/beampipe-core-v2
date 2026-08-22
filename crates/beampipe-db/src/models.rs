@@ -87,6 +87,7 @@ pub struct ExecutionRow {
     pub daliuge_raw_status: Option<Value>,
     pub output_state: Option<String>,
     pub output_verification_required: bool,
+    pub output_verification_policy: Value,
     pub remote_session_dir: Option<String>,
     pub terminal_outcome: Option<String>,
     pub failure_class: Option<String>,

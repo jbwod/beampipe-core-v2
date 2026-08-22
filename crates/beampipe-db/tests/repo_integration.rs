@@ -1,6 +1,6 @@
 use beampipe_db::{
     connect, migrate,
-    models::{ExecutionStatePatch, WorkerRegistration},
+    models::{ExecutionArtifactInput, ExecutionStatePatch, WorkerRegistration},
     repo,
 };
 use beampipe_domain::{DaliugeState, ExecutionStatus, LedgerPatch};
@@ -442,6 +442,162 @@ async fn successful_reconciliation_clears_transient_error() {
     assert_eq!(completed.status, "completed");
     assert_eq!(completed.terminal_outcome.as_deref(), Some("succeeded"));
     assert!(completed.last_error.is_none());
+}
+
+#[tokio::test]
+async fn required_outputs_hold_success_until_inventory_artifact_commits() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("output_required_{}", Uuid::now_v7().simple());
+    let spec = json!({
+        "apiVersion": "beampipe.dev/v2",
+        "kind": "ProjectConfig",
+        "metadata": {"id": module},
+        "output_verification": {
+            "required": true,
+            "inventory_schema": "wallaby-hires-output-inventory/v1"
+        }
+    });
+    let config = repo::insert_project_config(&pool, &module, spec, &"c".repeat(64))
+        .await
+        .unwrap();
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "local",
+        None,
+        Some(config.uuid),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(execution.output_verification_required);
+    assert_eq!(execution.output_state.as_deref(), Some("pending"));
+    assert_eq!(
+        execution.output_verification_policy["inventory_schema"],
+        "wallaby-hires-output-inventory/v1"
+    );
+
+    let held = repo::apply_execution_state_patch(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            daliuge_state: Some(DaliugeState::Finished),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(held.status, "running");
+    assert_eq!(held.output_state.as_deref(), Some("pending"));
+    assert!(held.terminal_outcome.is_none());
+    assert!(held.completed_at.is_none());
+
+    let inventory_sha256 = "a".repeat(64);
+    let artifact = ExecutionArtifactInput {
+        kind: "output_inventory".into(),
+        storage_kind: "remote".into(),
+        uri: Some("file:///durable/wallaby/run-1".into()),
+        inline_json: Some(json!({
+            "schema": "wallaby-hires-output-inventory/v1",
+            "products": [{"path": "image.fits", "bytes": 42, "sha256": "b".repeat(64)}],
+            "inventory_sha256": inventory_sha256,
+        })),
+        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        sha256: inventory_sha256,
+        size_bytes: Some(512),
+        producer_phase: "publication_acknowledged".into(),
+        metadata: json!({
+            "inventory_schema": "wallaby-hires-output-inventory/v1",
+            "publication": {"acknowledged": true, "receipt_id": "receipt-1"},
+        }),
+    };
+    let (completed, stored) = repo::verify_execution_outputs(
+        &pool,
+        execution.uuid,
+        artifact.clone(),
+        "trusted-publisher:test",
+        Some("outputs:test"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.output_state.as_deref(), Some("verified"));
+    assert_eq!(completed.terminal_outcome.as_deref(), Some("succeeded"));
+    assert!(completed.completed_at.is_some());
+    assert_eq!(stored.uri, artifact.uri);
+
+    let (replayed, replayed_artifact) = repo::verify_execution_outputs(
+        &pool,
+        execution.uuid,
+        artifact,
+        "trusted-publisher:test",
+        Some("outputs:replay"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed.status, "completed");
+    assert_eq!(replayed_artifact.uuid, stored.uuid);
+
+    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "execution.outputs_verified")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn output_verification_opt_out_cannot_be_marked_verified() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("output_optout_{}", Uuid::now_v7().simple());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "local",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!execution.output_verification_required);
+    let result = repo::verify_execution_outputs(
+        &pool,
+        execution.uuid,
+        ExecutionArtifactInput {
+            kind: "output_inventory".into(),
+            storage_kind: "remote".into(),
+            uri: Some("file:///durable/wallaby/run-2".into()),
+            inline_json: Some(json!({"inventory": true})),
+            media_type: "application/json".into(),
+            sha256: "d".repeat(64),
+            size_bytes: Some(1),
+            producer_phase: "publication_acknowledged".into(),
+            metadata: json!({
+                "inventory_schema": "wallaby-hires-output-inventory/v1"
+            }),
+        },
+        "trusted-publisher:test",
+        None,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(repo::VerifyExecutionOutputsError::Rejected(_))
+    ));
 }
 
 #[tokio::test]

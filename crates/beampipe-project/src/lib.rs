@@ -12,6 +12,8 @@ pub mod expressions;
 pub mod transforms;
 pub mod wasm;
 
+pub const WALLABY_OUTPUT_INVENTORY_SCHEMA: &str = "wallaby-hires-output-inventory/v1";
+
 pub use expressions::evaluate_expression;
 pub use transforms::{
     apply_field_transform, apply_transform_spec, build_template_context, select_eval_file_row,
@@ -192,6 +194,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub graph_patches: Vec<GraphPatch>,
     #[serde(default)]
+    pub output_verification: OutputVerificationConfig,
+    #[serde(default)]
     pub automation: AutomationConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<ExtensionConfig>,
@@ -215,12 +219,36 @@ impl Default for ProjectConfig {
             discovery: DiscoveryConfig::default(),
             manifest: None,
             graph_patches: Vec::new(),
+            output_verification: OutputVerificationConfig::default(),
             automation: AutomationConfig::default(),
             extension: None,
             definitions: None,
             source_identity: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputVerificationConfig {
+    /// Hold terminal success until a trusted publisher acknowledges this inventory.
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default = "default_output_inventory_schema")]
+    pub inventory_schema: String,
+}
+
+impl Default for OutputVerificationConfig {
+    fn default() -> Self {
+        Self {
+            required: false,
+            inventory_schema: default_output_inventory_schema(),
+        }
+    }
+}
+
+fn default_output_inventory_schema() -> String {
+    WALLABY_OUTPUT_INVENTORY_SCHEMA.into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -782,6 +810,15 @@ impl ProjectConfig {
                 }
             }
         }
+        if self.output_verification.inventory_schema != WALLABY_OUTPUT_INVENTORY_SCHEMA {
+            errors.push(ValidationDiagnostic::error(
+                "output_verification.inventory_schema",
+                "unsupported_output_inventory_schema",
+                format!(
+                    "output_verification.inventory_schema must be {WALLABY_OUTPUT_INVENTORY_SCHEMA}"
+                ),
+            ));
+        }
         if let Some(graph) = &self.graph {
             let source_count = usize::from(graph.url.is_some()) + usize::from(graph.path.is_some());
             if source_count != 1 {
@@ -1230,6 +1267,25 @@ automation:
             .any(|diagnostic| { diagnostic.path == "automation.discovery.claim_ttl_minutes" }));
         assert!(report.errors.iter().any(|diagnostic| {
             diagnostic.path == "automation.execution.execution_rest_remote_poll_interval_seconds"
+        }));
+    }
+
+    #[test]
+    fn output_verification_policy_is_explicit_and_schema_pinned() {
+        let mut config = ProjectConfig::default();
+        config.metadata.id = "test".into();
+        assert!(!config.output_verification.required);
+        assert_eq!(
+            config.output_verification.inventory_schema,
+            WALLABY_OUTPUT_INVENTORY_SCHEMA
+        );
+
+        config.output_verification.required = true;
+        config.output_verification.inventory_schema = "unknown/v1".into();
+        let report = config.validate_report();
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "output_verification.inventory_schema"
+                && diagnostic.code == "unsupported_output_inventory_schema"
         }));
     }
 

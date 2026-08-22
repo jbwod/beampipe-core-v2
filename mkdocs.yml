@@ -49,6 +49,7 @@ nav:
       - Project YAML: project-configs/index.md
       - Transforms: project-configs/transforms.md
       - Graph preparation: project-configs/graph-patches.md
+      - Output verification: project-configs/output-verification.md
       - Deployment profiles and SSH: architecture/deployment-profiles.md
   - Reference:
       - CLI commands: reference/cli.md

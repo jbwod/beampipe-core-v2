@@ -50,6 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 uuid = { version = "1", features = ["serde", "v7", "v4"] }
+url = "2"
 quick-xml = { version = "0.37", features = ["serialize"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 ipnet = "2"

@@ -110,6 +110,10 @@ graph_patches:
     set:
       num_of_copies: "$count(sbids[].datasets[])"
 
+output_verification:
+  required: true
+  inventory_schema: wallaby-hires-output-inventory/v1
+
 automation:
   execution:
     enabled: true

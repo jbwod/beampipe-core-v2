@@ -1012,6 +1012,52 @@
         ],
         "type": "object"
       },
+      "ExecutionOutputVerificationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "durable_destination_uri": {
+            "type": "string"
+          },
+          "inventory_sha256": {
+            "type": "string"
+          },
+          "products": {
+            "items": {
+              "$ref": "#/components/schemas/OutputInventoryProduct"
+            },
+            "type": "array"
+          },
+          "publication": {
+            "$ref": "#/components/schemas/OutputPublicationAcknowledgement"
+          },
+          "schema": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema",
+          "products",
+          "inventory_sha256",
+          "durable_destination_uri",
+          "publication"
+        ],
+        "type": "object"
+      },
+      "ExecutionOutputVerificationResponse": {
+        "properties": {
+          "artifact": {
+            "$ref": "#/components/schemas/ExecutionArtifactRow"
+          },
+          "execution": {
+            "$ref": "#/components/schemas/ExecutionRead"
+          }
+        },
+        "required": [
+          "execution",
+          "artifact"
+        ],
+        "type": "object"
+      },
       "ExecutionPatchRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1102,6 +1148,7 @@
                 "nullable": true,
                 "type": "string"
               },
+              "output_verification_policy": {},
               "output_verification_required": {
                 "type": "boolean"
               },
@@ -1191,6 +1238,7 @@
               "sources",
               "status",
               "output_verification_required",
+              "output_verification_policy",
               "phase_timestamps",
               "retry_count",
               "created_at"
@@ -1554,6 +1602,10 @@
         "additionalProperties": false,
         "properties": {
           "path": {
+            "nullable": true,
+            "type": "string"
+          },
+          "sha256": {
             "nullable": true,
             "type": "string"
           },
@@ -2053,6 +2105,66 @@
           }
         ]
       },
+      "OutputInventoryProduct": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "bytes",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "OutputPublicationAcknowledgement": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledged": {
+            "type": "boolean"
+          },
+          "published_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "publisher": {
+            "type": "string"
+          },
+          "receipt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "acknowledged",
+          "publisher",
+          "receipt_id",
+          "published_at"
+        ],
+        "type": "object"
+      },
+      "OutputVerificationConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "inventory_schema": {
+            "type": "string"
+          },
+          "required": {
+            "description": "Hold terminal success until a trusted publisher acknowledges this inventory.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "PrepareMetadataConfig": {
         "additionalProperties": false,
         "properties": {
@@ -2137,6 +2249,9 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/ProjectMetadata"
+          },
+          "output_verification": {
+            "$ref": "#/components/schemas/OutputVerificationConfig"
           },
           "source_identity": {
             "allOf": [
@@ -4920,6 +5035,102 @@
             "description": "Authenticated but not permitted"
           },
           "404": {
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/outputs/verify": {
+      "post": {
+        "operationId": "verify_execution_outputs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionOutputVerificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionOutputVerificationResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
             "description": "Response"
           }
         },
