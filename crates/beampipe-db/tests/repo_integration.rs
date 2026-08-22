@@ -994,6 +994,41 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
         .unwrap()
         .is_empty());
 
+    let missing_sbid = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": source, "sbids": ["2"]}]),
+        "local",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let errors = repo::execution_source_readiness_errors(&pool, &missing_sbid)
+        .await
+        .unwrap();
+    assert!(errors
+        .iter()
+        .any(|error| error.contains("no discovered metadata") && error.contains("2")));
+
+    let malformed = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": source, "sbids": ["1", 2]}]),
+        "local",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let errors = repo::execution_source_readiness_errors(&pool, &malformed)
+        .await
+        .unwrap();
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("sbids[1] must be a non-empty string"));
+
     sqlx::query(
         "UPDATE source_registry SET enabled = false WHERE project_module = $1 AND source_identifier = $2",
     )
@@ -1017,6 +1052,41 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
         .await
         .unwrap();
     assert!(errors.iter().any(|error| error.contains("not registered")));
+}
+
+#[test]
+fn persisted_execution_scope_parser_rejects_ambiguous_selections() {
+    let parsed = repo::parse_execution_source_scope(&json!([
+        {"source_identifier": " source-1 ", "sbids": [" 2 ", "1"]},
+        {"source_identifier": "source-2"}
+    ]))
+    .unwrap();
+    assert_eq!(
+        parsed.source_identifiers(),
+        vec!["source-1".to_string(), "source-2".to_string()]
+    );
+    assert_eq!(
+        parsed.sources["source-1"]
+            .as_ref()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["1".to_string(), "2".to_string()]
+    );
+
+    for invalid in [
+        json!([]),
+        json!([{"source_identifier": ""}]),
+        json!([{"source_identifier": "source-1", "sbids": []}]),
+        json!([{"source_identifier": "source-1", "sbids": ["1", " 1 "]}]),
+        json!([
+            {"source_identifier": "source-1"},
+            {"source_identifier": " source-1 "}
+        ]),
+    ] {
+        assert!(repo::parse_execution_source_scope(&invalid).is_err());
+    }
 }
 
 #[tokio::test]

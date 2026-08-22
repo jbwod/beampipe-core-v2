@@ -884,34 +884,97 @@ pub async fn partition_sources_ready_for_execution(
 /// performs any external work. Unlike scheduler admission this does not mutate
 /// source pending flags and treats a source disappearing from the registry as a
 /// hard failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionSourceScope {
+    pub sources: BTreeMap<String, Option<BTreeSet<String>>>,
+}
+
+impl ExecutionSourceScope {
+    pub fn source_identifiers(&self) -> Vec<String> {
+        self.sources.keys().cloned().collect()
+    }
+}
+
+/// Parse the immutable source selection stored on an execution. Persisted
+/// selections are treated as a security boundary: malformed or ambiguous
+/// values must stop dispatch rather than being silently omitted.
+pub fn parse_execution_source_scope(value: &Value) -> Result<ExecutionSourceScope, String> {
+    let selections = value
+        .as_array()
+        .ok_or_else(|| "execution sources must be a JSON array".to_string())?;
+    if selections.is_empty() {
+        return Err("execution has no source selections".into());
+    }
+
+    let mut sources = BTreeMap::new();
+    for (index, selection) in selections.iter().enumerate() {
+        let object = selection
+            .as_object()
+            .ok_or_else(|| format!("execution sources[{index}] must be a JSON object"))?;
+        let source_identifier = object
+            .get("source_identifier")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "execution sources[{index}].source_identifier must be a non-empty string"
+                )
+            })?
+            .to_string();
+
+        let sbids = match object.get("sbids") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let values = value.as_array().ok_or_else(|| {
+                    format!("execution sources[{index}].sbids must be a JSON array when set")
+                })?;
+                if values.is_empty() {
+                    return Err(format!(
+                        "execution sources[{index}].sbids must contain at least one SBID when set"
+                    ));
+                }
+                let mut selected = BTreeSet::new();
+                for (sbid_index, sbid) in values.iter().enumerate() {
+                    let sbid = sbid
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|sbid| !sbid.is_empty())
+                        .ok_or_else(|| {
+                            format!(
+                                "execution sources[{index}].sbids[{sbid_index}] must be a non-empty string"
+                            )
+                        })?
+                        .to_string();
+                    if !selected.insert(sbid.clone()) {
+                        return Err(format!(
+                            "execution sources[{index}].sbids contains duplicate SBID '{sbid}'"
+                        ));
+                    }
+                }
+                Some(selected)
+            }
+        };
+
+        if sources.insert(source_identifier.clone(), sbids).is_some() {
+            return Err(format!(
+                "execution source '{source_identifier}' is selected more than once"
+            ));
+        }
+    }
+
+    Ok(ExecutionSourceScope { sources })
+}
+
 pub async fn execution_source_readiness_errors(
     pool: &PgPool,
     execution: &ExecutionRow,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let source_specs: Vec<(String, Option<Vec<String>>)> = execution
-        .sources
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|source| {
-            let sid = source.get("source_identifier")?.as_str()?.to_string();
-            let sbids = source.get("sbids").and_then(Value::as_array).map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            });
-            Some((sid, sbids))
-        })
-        .collect();
-    if source_specs.is_empty() {
-        return Ok(vec!["execution has no source selections".into()]);
-    }
-    let source_identifiers: Vec<String> = source_specs
-        .iter()
-        .map(|(source, _)| source.clone())
-        .collect();
+    let scope = match parse_execution_source_scope(&execution.sources) {
+        Ok(scope) => scope,
+        Err(error) => return Ok(vec![error]),
+    };
+    let source_identifiers = scope.source_identifiers();
     let registry_rows: Vec<SourceRegistryRow> = sqlx::query_as(
         r#"
         SELECT *
@@ -928,7 +991,7 @@ pub async fn execution_source_readiness_errors(
             .await?;
     let mut errors = Vec::new();
     let mut signatures = BTreeMap::new();
-    for (sid, sbids) in source_specs {
+    for (sid, sbids) in scope.sources {
         let registry = registry_rows
             .iter()
             .find(|row| row.source_identifier == sid);
@@ -946,9 +1009,15 @@ pub async fn execution_source_readiness_errors(
                 metadata_json: row.metadata_json.clone(),
             })
             .collect();
-        if let Some(error) =
-            parsed_source_readiness_error(&sid, sbids.as_deref(), readiness.as_ref(), &metadata)
-        {
+        let selected_sbids = sbids
+            .as_ref()
+            .map(|selected| selected.iter().cloned().collect::<Vec<_>>());
+        if let Some(error) = parsed_source_readiness_error(
+            &sid,
+            selected_sbids.as_deref(),
+            readiness.as_ref(),
+            &metadata,
+        ) {
             errors.push(error);
         }
         if let Some(signature) = registry.and_then(|row| row.discovery_signature.clone()) {

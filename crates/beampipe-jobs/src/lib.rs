@@ -4,8 +4,9 @@ use beampipe_adapters::{casda_tap, vizier_tap, AdapterError, TapRow};
 use beampipe_config::Settings;
 use beampipe_db::{
     models::{
-        DeploymentProfileRow, ExecutionArtifactInput, ExecutionObservationInput,
-        ExecutionProvenancePatch, ExecutionStatePatch, JobRow, WorkerRegistration,
+        ArchiveMetadataRow, DeploymentProfileRow, ExecutionArtifactInput,
+        ExecutionObservationInput, ExecutionProvenancePatch, ExecutionStatePatch, JobRow,
+        WorkerRegistration,
     },
     repo,
 };
@@ -46,7 +47,11 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn, Instrument};
@@ -2971,6 +2976,273 @@ async fn run_execute(
     Ok(())
 }
 
+type ExecutionDatasetScope = BTreeMap<(String, String), BTreeSet<String>>;
+
+fn required_dataset_string(
+    dataset: &Value,
+    field: &str,
+    context: &str,
+) -> Result<String, String> {
+    dataset
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{context} requires a non-empty string '{field}'"))
+}
+
+fn dataset_identity(dataset: &Value, context: &str) -> Result<String, String> {
+    let object = dataset
+        .as_object()
+        .ok_or_else(|| format!("{context} must be a JSON object"))?;
+    for field in ["dataset_id", "visibility_filename"] {
+        if let Some(identity) = object
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(format!("{field}:{identity}"));
+        }
+    }
+    Err(format!(
+        "{context} requires a non-empty string 'dataset_id' or 'visibility_filename'"
+    ))
+}
+
+fn add_dataset_scope_entry(
+    scope: &mut ExecutionDatasetScope,
+    dataset: &Value,
+    expected_parent: Option<(&str, &str)>,
+    context: &str,
+) -> Result<(), String> {
+    let source = required_dataset_string(dataset, "source_identifier", context)?;
+    let sbid = required_dataset_string(dataset, "sbid", context)?;
+    if let Some((parent_source, parent_sbid)) = expected_parent {
+        if source != parent_source {
+            return Err(format!(
+                "{context} source_identifier '{source}' does not match archive/manifest parent '{parent_source}'"
+            ));
+        }
+        if sbid != parent_sbid {
+            return Err(format!(
+                "{context} SBID '{sbid}' does not match archive/manifest parent '{parent_sbid}'"
+            ));
+        }
+    }
+    let identity = dataset_identity(dataset, context)?;
+    if !scope
+        .entry((source.clone(), sbid.clone()))
+        .or_default()
+        .insert(identity.clone())
+    {
+        return Err(format!(
+            "{context} duplicates dataset '{identity}' for source '{source}' SBID '{sbid}'"
+        ));
+    }
+    Ok(())
+}
+
+fn select_execution_archive_metadata(
+    selection: &repo::ExecutionSourceScope,
+    rows: &[ArchiveMetadataRow],
+) -> Result<(Vec<Value>, ExecutionDatasetScope), String> {
+    let mut metadata = Vec::new();
+    let mut expected_scope = ExecutionDatasetScope::new();
+
+    for (source, selected_sbids) in &selection.sources {
+        let selected_rows = rows
+            .iter()
+            .filter(|row| {
+                row.source_identifier == *source
+                    && selected_sbids
+                        .as_ref()
+                        .is_none_or(|sbids| sbids.contains(&row.sbid))
+            })
+            .collect::<Vec<_>>();
+        if selected_rows.is_empty() {
+            return Err(match selected_sbids {
+                Some(sbids) => format!(
+                    "source '{source}' has no archive metadata for selected SBIDs {}",
+                    sbids.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+                None => format!("source '{source}' has no archive metadata"),
+            });
+        }
+
+        if let Some(sbids) = selected_sbids {
+            let covered = selected_rows
+                .iter()
+                .map(|row| row.sbid.as_str())
+                .collect::<BTreeSet<_>>();
+            let missing = sbids
+                .iter()
+                .filter(|sbid| !covered.contains(sbid.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "source '{source}' is missing archive metadata for selected SBIDs {}",
+                    missing.join(", ")
+                ));
+            }
+        }
+
+        for row in selected_rows {
+            let row_context = format!(
+                "archive metadata for source '{}' SBID '{}'",
+                row.source_identifier, row.sbid
+            );
+            let payload = row
+                .metadata_json
+                .as_ref()
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{row_context} must be a JSON object"))?;
+            let datasets = payload
+                .get("datasets")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{row_context} requires a datasets array"))?;
+            if datasets.is_empty() {
+                return Err(format!("{row_context} contains no datasets"));
+            }
+            for (index, dataset) in datasets.iter().enumerate() {
+                let context = format!("{row_context} dataset[{index}]");
+                add_dataset_scope_entry(
+                    &mut expected_scope,
+                    dataset,
+                    Some((&row.source_identifier, &row.sbid)),
+                    &context,
+                )?;
+                metadata.push(dataset.clone());
+            }
+        }
+    }
+
+    Ok((metadata, expected_scope))
+}
+
+fn dataset_scope_from_records(
+    records: &[Value],
+    context: &str,
+) -> Result<ExecutionDatasetScope, String> {
+    let mut scope = ExecutionDatasetScope::new();
+    for (index, dataset) in records.iter().enumerate() {
+        add_dataset_scope_entry(
+            &mut scope,
+            dataset,
+            None,
+            &format!("{context} dataset[{index}]"),
+        )?;
+    }
+    Ok(scope)
+}
+
+fn validate_staged_dataset_scope(
+    records: &[Value],
+    skipped_sbids: &[String],
+    expected: &ExecutionDatasetScope,
+) -> Result<(), String> {
+    if !skipped_sbids.is_empty() {
+        return Err(format!(
+            "staging skipped selected SBIDs {}; execution requires exact selected coverage",
+            skipped_sbids.join(", ")
+        ));
+    }
+    let actual = dataset_scope_from_records(records, "staged metadata")?;
+    if &actual != expected {
+        return Err(format!(
+            "staging changed selected dataset scope (expected {} datasets across {} source/SBID groups, received {} across {})",
+            expected.values().map(BTreeSet::len).sum::<usize>(),
+            expected.len(),
+            actual.values().map(BTreeSet::len).sum::<usize>(),
+            actual.len(),
+        ));
+    }
+    Ok(())
+}
+
+fn dataset_scope_from_manifest(manifest: &Value) -> Result<ExecutionDatasetScope, String> {
+    let sources = manifest
+        .get("sources")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "workflow manifest requires a sources array".to_string())?;
+    let mut scope = ExecutionDatasetScope::new();
+    let mut seen_sources = BTreeSet::new();
+    for (source_index, source_value) in sources.iter().enumerate() {
+        let source = required_dataset_string(
+            source_value,
+            "source_identifier",
+            &format!("workflow manifest sources[{source_index}]"),
+        )?;
+        if !seen_sources.insert(source.clone()) {
+            return Err(format!(
+                "workflow manifest selects source '{source}' more than once"
+            ));
+        }
+        let sbids = source_value
+            .get("sbids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!("workflow manifest source '{source}' requires an sbids array")
+            })?;
+        let mut seen_sbids = BTreeSet::new();
+        for (sbid_index, sbid_value) in sbids.iter().enumerate() {
+            let sbid = required_dataset_string(
+                sbid_value,
+                "sbid",
+                &format!("workflow manifest source '{source}' sbids[{sbid_index}]"),
+            )?;
+            if !seen_sbids.insert(sbid.clone()) {
+                return Err(format!(
+                    "workflow manifest source '{source}' selects SBID '{sbid}' more than once"
+                ));
+            }
+            let datasets = sbid_value
+                .get("datasets")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!(
+                        "workflow manifest source '{source}' SBID '{sbid}' requires a datasets array"
+                    )
+                })?;
+            if datasets.is_empty() {
+                return Err(format!(
+                    "workflow manifest source '{source}' SBID '{sbid}' contains no datasets"
+                ));
+            }
+            for (dataset_index, dataset) in datasets.iter().enumerate() {
+                add_dataset_scope_entry(
+                    &mut scope,
+                    dataset,
+                    Some((&source, &sbid)),
+                    &format!(
+                        "workflow manifest source '{source}' SBID '{sbid}' dataset[{dataset_index}]"
+                    ),
+                )?;
+            }
+        }
+    }
+    Ok(scope)
+}
+
+fn validate_manifest_dataset_scope(
+    manifest: &Value,
+    expected: &ExecutionDatasetScope,
+) -> Result<(), String> {
+    let actual = dataset_scope_from_manifest(manifest)?;
+    if &actual != expected {
+        return Err(format!(
+            "workflow manifest changed selected dataset scope (expected {} datasets across {} source/SBID groups, received {} across {})",
+            expected.values().map(BTreeSet::len).sum::<usize>(),
+            expected.len(),
+            actual.values().map(BTreeSet::len).sum::<usize>(),
+            actual.len(),
+        ));
+    }
+    Ok(())
+}
+
 async fn run_execute_body(
     pool: &PgPool,
     config: &WorkerConfig,
@@ -3024,6 +3296,17 @@ async fn run_execute_body(
     let requires_casda = execution_requires_casda(execution, project_config.as_ref());
     let casda_client = CasdaStagingClient::from_env();
     ensure_execution_active(pool, execution_id, true).await?;
+    let source_scope = repo::parse_execution_source_scope(&execution.sources)?;
+    let source_identifiers = source_scope.source_identifiers();
+    let metadata_rows = repo::list_archive_metadata_for_sources(
+        pool,
+        &execution.project_module,
+        &source_identifiers,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let (selected_metadata, expected_dataset_scope) =
+        select_execution_archive_metadata(&source_scope, &metadata_rows)?;
     preflight_execute(
         do_stage,
         do_submit,
@@ -3072,38 +3355,22 @@ async fn run_execute_body(
         .await
         .map_err(|e| e.to_string())?;
     }
-    let source_identifiers = source_identifiers_from_json(&execution.sources);
     let manifest = if replay_manifest {
-        execution.workflow_manifest.clone().unwrap_or(json!({}))
+        let replayed = execution.workflow_manifest.clone().unwrap_or(json!({}));
+        validate_manifest_dataset_scope(&replayed, &expected_dataset_scope)?;
+        replayed
     } else {
-        let metadata_rows = repo::list_archive_metadata_for_sources(
-            pool,
-            &execution.project_module,
-            &source_identifiers,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        let metadata: Vec<_> = metadata_rows
-            .into_iter()
-            .filter_map(|row| row.metadata_json)
-            .flat_map(|value| {
-                value
-                    .get("datasets")
-                    .and_then(serde_json::Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            })
-            .collect();
         ensure_execution_active(pool, execution_id, false).await?;
         let (metadata, skipped_sbids) = run_stage_phase(
             execution_id,
             do_stage,
             requires_casda,
             casda_client,
-            metadata,
+            selected_metadata,
             correlation_id,
         )
         .await?;
+        validate_staged_dataset_scope(&metadata, &skipped_sbids, &expected_dataset_scope)?;
         let staging_context = staging_context_from_metadata(&metadata);
         let mut built = if let Some(ref cfg) = project_config {
             build_manifest_from_config_with_staging(
@@ -3116,6 +3383,7 @@ async fn run_execute_body(
         } else {
             beampipe_orchestration::build_wallaby_manifest(&metadata).map_err(|e| e.to_string())?
         };
+        validate_manifest_dataset_scope(&built, &expected_dataset_scope)?;
         if let Some(ref cfg) = project_config {
             built = apply_wasm_manifest(pool, cfg, &metadata, built)
                 .await
@@ -3125,6 +3393,7 @@ async fn run_execute_body(
                 .await
                 .map_err(|e| e.to_string())?;
         }
+        validate_manifest_dataset_scope(&built, &expected_dataset_scope)?;
         built
     };
     let manifest_path = project_config
@@ -3331,6 +3600,7 @@ fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
             error.component != DaliugeComponent::Translator
                 || !matches!(error.operation.as_str(), "unroll_and_partition" | "map")
         }
+        OrchestrationError::SubmissionUncertain(_) => true,
         OrchestrationError::Backend(_) => true,
     }
 }
@@ -4756,16 +5026,9 @@ fn execution_id_from_payload(
 }
 
 fn source_identifiers_from_json(value: &serde_json::Value) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            item.get("source_identifier")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect()
+    repo::parse_execution_source_scope(value)
+        .map(|scope| scope.source_identifiers())
+        .unwrap_or_default()
 }
 
 fn deployment_kind(value: &serde_json::Value) -> Option<&'static str> {
@@ -4960,6 +5223,37 @@ mod tests {
     use beampipe_adapters::MockTapClient;
     use serde_json::json;
 
+    fn archive_row(source: &str, sbid: &str, datasets: Vec<Value>) -> ArchiveMetadataRow {
+        ArchiveMetadataRow {
+            uuid: Uuid::now_v7(),
+            project_module: "scope-test".into(),
+            source_identifier: source.into(),
+            sbid: sbid.into(),
+            metadata_json: Some(json!({"datasets": datasets})),
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    fn scoped_dataset(source: &str, sbid: &str, dataset_id: &str) -> Value {
+        json!({
+            "source_identifier": source,
+            "sbid": sbid,
+            "dataset_id": dataset_id,
+        })
+    }
+
+    fn scoped_manifest(datasets: Vec<Value>) -> Value {
+        let source = datasets[0]["source_identifier"].as_str().unwrap();
+        let sbid = datasets[0]["sbid"].as_str().unwrap();
+        json!({
+            "sources": [{
+                "source_identifier": source,
+                "sbids": [{"sbid": sbid, "datasets": datasets}],
+            }]
+        })
+    }
+
     async fn test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = beampipe_db::connect(&url).await.ok()?;
@@ -4981,6 +5275,99 @@ mod tests {
             SchedulerState::from_normalized(&result.normalized_state),
             SchedulerState::Unknown
         );
+    }
+
+    #[test]
+    fn selected_sbid_scope_filters_archive_rows_exactly() {
+        let scope = repo::parse_execution_source_scope(&json!([{
+            "source_identifier": "source-1",
+            "sbids": ["1"]
+        }]))
+        .unwrap();
+        let selected = scoped_dataset("source-1", "1", "dataset-1");
+        let unselected = scoped_dataset("source-1", "2", "dataset-2");
+        let rows = vec![
+            archive_row("source-1", "1", vec![selected.clone()]),
+            archive_row("source-1", "2", vec![unselected]),
+        ];
+
+        let (metadata, expected) = select_execution_archive_metadata(&scope, &rows).unwrap();
+
+        assert_eq!(metadata, vec![selected]);
+        assert_eq!(expected.len(), 1);
+        assert!(expected.contains_key(&("source-1".into(), "1".into())));
+        assert!(!expected.contains_key(&("source-1".into(), "2".into())));
+    }
+
+    #[test]
+    fn selected_sbid_scope_rejects_missing_or_misparented_datasets() {
+        let scope = repo::parse_execution_source_scope(&json!([{
+            "source_identifier": "source-1",
+            "sbids": ["1"]
+        }]))
+        .unwrap();
+        let missing = select_execution_archive_metadata(
+            &scope,
+            &[archive_row(
+                "source-1",
+                "2",
+                vec![scoped_dataset("source-1", "2", "dataset-2")],
+            )],
+        )
+        .unwrap_err();
+        assert!(missing.contains("selected SBIDs 1"));
+
+        let misparented = select_execution_archive_metadata(
+            &scope,
+            &[archive_row(
+                "source-1",
+                "1",
+                vec![scoped_dataset("source-2", "1", "dataset-1")],
+            )],
+        )
+        .unwrap_err();
+        assert!(misparented.contains("does not match archive/manifest parent 'source-1'"));
+
+        let wrong_sbid = select_execution_archive_metadata(
+            &scope,
+            &[archive_row(
+                "source-1",
+                "1",
+                vec![scoped_dataset("source-1", "2", "dataset-1")],
+            )],
+        )
+        .unwrap_err();
+        assert!(wrong_sbid.contains("does not match archive/manifest parent '1'"));
+    }
+
+    #[test]
+    fn staging_and_manifest_must_preserve_exact_selected_scope() {
+        let selected = scoped_dataset("source-1", "1", "dataset-1");
+        let expected = dataset_scope_from_records(&[selected.clone()], "expected").unwrap();
+        validate_staged_dataset_scope(&[selected.clone()], &[], &expected).unwrap();
+        validate_manifest_dataset_scope(&scoped_manifest(vec![selected.clone()]), &expected)
+            .unwrap();
+
+        assert!(validate_staged_dataset_scope(&[], &[], &expected)
+            .unwrap_err()
+            .contains("changed selected dataset scope"));
+        assert!(validate_staged_dataset_scope(&[selected.clone()], &["1".into()], &expected)
+            .unwrap_err()
+            .contains("skipped selected SBIDs 1"));
+
+        let extra = scoped_dataset("source-1", "1", "dataset-2");
+        assert!(validate_manifest_dataset_scope(
+            &scoped_manifest(vec![selected.clone(), extra]),
+            &expected,
+        )
+        .unwrap_err()
+        .contains("changed selected dataset scope"));
+
+        let mut misparented = scoped_manifest(vec![selected]);
+        misparented["sources"][0]["sbids"][0]["datasets"][0]["sbid"] = json!("2");
+        assert!(validate_manifest_dataset_scope(&misparented, &expected)
+            .unwrap_err()
+            .contains("does not match archive/manifest parent '1'"));
     }
 
     #[test]
