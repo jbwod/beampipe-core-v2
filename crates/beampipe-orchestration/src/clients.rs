@@ -6,7 +6,9 @@ use crate::daliuge::{
 use crate::dim::{get_roots, prepare_physical_graph};
 use crate::http_client::{build_http_client, HttpClientOptions};
 use crate::slurm_deploy::{resolve_remote_user, submit_slurm_session, SlurmSubmitParams};
-use crate::slurm_ssh::{query_slurm_states_batch, SlurmSshSession, SlurmTarget};
+use crate::slurm_ssh::{
+    query_slurm_states_batch, scancel_command, validate_slurm_job_id, SlurmSshSession, SlurmTarget,
+};
 use crate::translator::{default_lg_name, partitioned_pgt_for_dlg_deploy};
 use crate::{BackendPoll, DimClient, OrchestrationError, SlurmClient, TranslatorClient};
 use async_trait::async_trait;
@@ -619,14 +621,11 @@ impl SlurmClient for SshSlurmClient {
         } else {
             parsed.slurm_job_id
         };
-        let username = self
-            .remote_user
-            .clone()
-            .or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
-            .unwrap_or_else(|| "root".into());
+        validate_slurm_job_id(&slurm_id)?;
         let deployment = self.deployment.clone().ok_or_else(|| {
             OrchestrationError::Backend("slurm deployment config required".into())
         })?;
+        let username = resolve_remote_user(&deployment);
         let target = SlurmTarget::from_deployment(&deployment, &username);
         let mut session = SlurmSshSession::connect(&target).await?;
         let results =
@@ -668,17 +667,14 @@ impl SlurmClient for SshSlurmClient {
         } else {
             parsed.slurm_job_id
         };
+        validate_slurm_job_id(&slurm_id)?;
         let deployment = self.deployment.clone().ok_or_else(|| {
             OrchestrationError::Backend("slurm deployment config required".into())
         })?;
-        let username = self
-            .remote_user
-            .clone()
-            .or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
-            .unwrap_or_else(|| "root".into());
+        let username = resolve_remote_user(&deployment);
         let target = SlurmTarget::from_deployment(&deployment, &username);
         let mut session = SlurmSshSession::connect(&target).await?;
-        session.run_command(&format!("scancel {slurm_id}")).await?;
+        session.run_command(&scancel_command(&slurm_id)?).await?;
         let _ = session.close().await;
         Ok(())
     }

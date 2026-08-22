@@ -483,6 +483,9 @@ pub async fn query_slurm_states_batch(
     if job_ids.is_empty() {
         return Ok(HashMap::new());
     }
+    for job_id in job_ids {
+        validate_slurm_job_id(job_id)?;
+    }
     let mut squeue_all = HashMap::new();
     let mut sacct_all = HashMap::new();
     for chunk in chunk_job_ids(job_ids) {
@@ -508,11 +511,25 @@ pub async fn query_slurm_states_batch(
     Ok(merge_squeue_sacct_batch(job_ids, &squeue_all, &sacct_all))
 }
 
+pub fn validate_slurm_job_id(job_id: &str) -> Result<(), OrchestrationError> {
+    if job_id.is_empty() || !job_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(OrchestrationError::Backend(
+            "Slurm job ID must contain ASCII digits only".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn scancel_command(job_id: &str) -> Result<String, OrchestrationError> {
+    validate_slurm_job_id(job_id)?;
+    Ok(format!("scancel -- {job_id}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        known_host_patterns_match, known_hosts_has_target, load_known_host_keys,
-        upload_text_command,
+        known_host_patterns_match, known_hosts_has_target, load_known_host_keys, scancel_command,
+        upload_text_command, validate_slurm_job_id,
     };
 
     fn generate_public_key(dir: &tempfile::TempDir) -> String {
@@ -538,6 +555,16 @@ mod tests {
         let command = upload_text_command("/scratch/session graph.pgt");
         assert!(command.starts_with("umask 077 && tee "));
         assert!(command.contains("'/scratch/session graph.pgt'"));
+    }
+
+    #[test]
+    fn scheduler_commands_reject_untrusted_job_ids() {
+        assert!(validate_slurm_job_id("123456").is_ok());
+        assert_eq!(scancel_command("123456").unwrap(), "scancel -- 123456");
+        for value in ["", "123_4", "123,456", "123; touch /tmp/bad"] {
+            assert!(validate_slurm_job_id(value).is_err(), "accepted {value:?}");
+            assert!(scancel_command(value).is_err(), "accepted {value:?}");
+        }
     }
 
     #[test]
