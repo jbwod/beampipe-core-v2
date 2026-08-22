@@ -298,14 +298,17 @@ impl SlurmSshSession {
                 _ => {}
             }
         }
-        if let Some(code) = exit_status {
-            if code != 0 {
-                let out = String::from_utf8_lossy(&stdout);
-                let err = String::from_utf8_lossy(&stderr);
-                return Err(OrchestrationError::Backend(format!(
-                    "remote command failed (exit={code}): {command:?}\nstdout: {out}\nstderr: {err}"
-                )));
-            }
+        let Some(code) = exit_status else {
+            return Err(OrchestrationError::Backend(format!(
+                "remote command ended without an SSH exit status: {command:?}"
+            )));
+        };
+        if code != 0 {
+            let out = String::from_utf8_lossy(&stdout);
+            let err = String::from_utf8_lossy(&stderr);
+            return Err(OrchestrationError::Backend(format!(
+                "remote command failed (exit={code}): {command:?}\nstdout: {out}\nstderr: {err}"
+            )));
         }
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     }

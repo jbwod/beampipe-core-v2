@@ -234,6 +234,46 @@ pub fn parse_jobsub_path(stdout: &str) -> Result<String, OrchestrationError> {
     )))
 }
 
+pub fn parse_sbatch_job_id(stdout: &str) -> Result<String, OrchestrationError> {
+    let candidates: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let mut fields = line.split(';');
+            let Some(job_id) = fields.next() else {
+                return false;
+            };
+            if job_id.is_empty() || !job_id.bytes().all(|byte| byte.is_ascii_digit()) {
+                return false;
+            }
+            match (fields.next(), fields.next()) {
+                (None, None) => true,
+                (Some(cluster), None) => {
+                    !cluster.is_empty()
+                        && cluster.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                        })
+                }
+                _ => false,
+            }
+        })
+        .collect();
+    match candidates.as_slice() {
+        [candidate] => Ok(candidate
+            .split_once(';')
+            .map(|(job_id, _)| job_id)
+            .unwrap_or(candidate)
+            .to_string()),
+        [] => Err(OrchestrationError::Backend(
+            "sbatch --parsable returned no valid numeric job ID".into(),
+        )),
+        _ => Err(OrchestrationError::Backend(
+            "sbatch --parsable returned multiple possible job IDs".into(),
+        )),
+    }
+}
+
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
@@ -276,7 +316,7 @@ pub async fn submit_slurm_session(
     let mut session = SlurmSshSession::connect(&target).await?;
 
     session
-        .run_command(&format!("mkdir -p {staging_dir}"))
+        .run_command(&format!("mkdir -p -- {}", shell_quote(&staging_dir)))
         .await?;
     session
         .upload_text_atomic(
@@ -324,12 +364,7 @@ pub async fn submit_slurm_session(
         .await?;
     let _ = session.close().await;
 
-    let slurm_job_id = sbatch_out
-        .split(';')
-        .next()
-        .unwrap_or(&sbatch_out)
-        .trim()
-        .to_string();
+    let slurm_job_id = parse_sbatch_job_id(&sbatch_out)?;
     let session_dir = jobsub_path
         .rsplit_once('/')
         .map(|(dir, _)| dir.to_string())
@@ -393,6 +428,27 @@ mod tests {
     fn parse_jobsub_extracts_path() {
         let stdout = "Created job submission script /home/user/sessions/x/jobsub.sh\n";
         assert!(parse_jobsub_path(stdout).unwrap().ends_with("jobsub.sh"));
+    }
+
+    #[test]
+    fn sbatch_receipt_parser_accepts_one_id_after_a_banner() {
+        assert_eq!(
+            parse_sbatch_job_id("module environment ready\n123456;setonix\n").unwrap(),
+            "123456"
+        );
+    }
+
+    #[test]
+    fn sbatch_receipt_parser_fails_closed_on_missing_ambiguous_or_unsafe_output() {
+        for output in [
+            "",
+            "Submitted batch job 123456\n",
+            "123456\n654321\n",
+            "123456;setonix;extra\n",
+            "123456;setonix && touch /tmp/bad\n",
+        ] {
+            assert!(parse_sbatch_job_id(output).is_err(), "accepted {output:?}");
+        }
     }
 
     #[test]
