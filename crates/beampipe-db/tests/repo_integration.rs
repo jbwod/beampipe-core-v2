@@ -3,7 +3,9 @@ use beampipe_db::{
     models::{ExecutionArtifactInput, ExecutionStatePatch, WorkerRegistration},
     repo,
 };
-use beampipe_domain::{ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch};
+use beampipe_domain::{
+    ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch, SubmissionState,
+};
 use chrono::{Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -898,6 +900,71 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     assert_eq!(event.actor.as_deref(), Some("user:test"));
     assert_eq!(event.correlation_id.as_deref(), Some("cancel:test"));
     assert_eq!(event.payload["invalidated_execute_jobs"], 1);
+}
+
+#[tokio::test]
+async fn cancellation_refuses_unresolved_external_submission() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("can_unres_{}", Uuid::now_v7());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(repo::begin_execution_submission(
+        &pool,
+        execution.uuid,
+        "slurm",
+        "session-cancel-race",
+        None,
+    )
+    .await
+    .unwrap());
+
+    for state in [SubmissionState::InFlight, SubmissionState::Uncertain] {
+        if state == SubmissionState::Uncertain {
+            repo::apply_execution_state_patch(
+                &pool,
+                execution.uuid,
+                ExecutionStatePatch {
+                    submission_state: Some(state),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let before = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = repo::cancel_execution_with_correlation(
+            &pool,
+            execution.uuid,
+            "user:test",
+            Some("cancel:unresolved"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("submission outcome"));
+        let current = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.status, before.status);
+        assert!(!current.status_enum().unwrap().is_terminal());
+        assert_eq!(current.submission_state.as_deref(), Some(state.as_str()));
+        assert!(current.completed_at.is_none());
+    }
 }
 
 #[tokio::test]

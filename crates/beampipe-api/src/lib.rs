@@ -22,6 +22,7 @@ use beampipe_domain::{
         RegisteredSourceReadiness, SourceExecutionStatus,
     },
     DaliugeState, ExecutionStatus, Failure, FailureClass, RetryDisposition, SchedulerState,
+    SubmissionState,
 };
 use beampipe_jobs::{spawn_workers, WorkerConfig};
 use beampipe_metrics as metrics;
@@ -3449,6 +3450,12 @@ async fn patch_execution(
             current.as_str()
         )));
     }
+    if cancellation_submission_is_unresolved(execution.submission_state.as_deref()) {
+        return Err(ApiError::Conflict(
+            "execution submission outcome is unresolved; wait for reconciliation to record an exact external job before cancelling"
+                .into(),
+        ));
+    }
     if execution_cancel_requires_external(
         current,
         execution.scheduler_job_id.as_deref(),
@@ -3474,6 +3481,13 @@ async fn patch_execution(
     })?
     .ok_or(ApiError::NotFound)?;
     Ok(Json(enrich_execution(&state.pool, row).await?))
+}
+
+fn cancellation_submission_is_unresolved(submission_state: Option<&str>) -> bool {
+    matches!(
+        submission_state.and_then(SubmissionState::parse),
+        Some(SubmissionState::InFlight | SubmissionState::Uncertain)
+    )
 }
 
 fn execution_cancel_requires_external(
@@ -4549,6 +4563,14 @@ adapters:
             Some("session-1"),
             Some("finished"),
         ));
+    }
+
+    #[test]
+    fn unresolved_submission_cannot_be_reported_as_cancelled() {
+        assert!(cancellation_submission_is_unresolved(Some("in_flight")));
+        assert!(cancellation_submission_is_unresolved(Some("uncertain")));
+        assert!(!cancellation_submission_is_unresolved(Some("submitted")));
+        assert!(!cancellation_submission_is_unresolved(None));
     }
 
     #[test]

@@ -3802,6 +3802,7 @@ pub async fn cancel_execution_with_correlation(
             updated_at = now()
         WHERE uuid = $1
           AND status IN ('pending', 'running', 'awaiting_scheduler', 'retrying', 'cancelled')
+          AND COALESCE(submission_state, 'not_started') NOT IN ('in_flight', 'uncertain')
         RETURNING *
         "#,
     )
@@ -3809,15 +3810,24 @@ pub async fn cancel_execution_with_correlation(
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = updated else {
-        let current: Option<String> =
-            sqlx::query_scalar("SELECT status FROM batch_execution_record WHERE uuid = $1")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let current: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, submission_state FROM batch_execution_record WHERE uuid = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
         tx.rollback().await?;
         return match current {
             None => Ok(None),
-            Some(status) => Err(sqlx::Error::Protocol(format!(
+            Some((_status, submission_state))
+                if matches!(submission_state.as_deref(), Some("in_flight" | "uncertain")) =>
+            {
+                Err(sqlx::Error::Protocol(format!(
+                    "execution cannot be cancelled while submission outcome is '{}'",
+                    submission_state.as_deref().unwrap_or("unknown")
+                )))
+            }
+            Some((status, _)) => Err(sqlx::Error::Protocol(format!(
                 "execution cannot be cancelled from terminal status '{status}'"
             ))),
         };
