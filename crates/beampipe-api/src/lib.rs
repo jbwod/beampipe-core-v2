@@ -388,7 +388,7 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
     if with_worker {
         worker_pool = Some(spawn_workers(
             pool.clone(),
-            WorkerConfig::from_settings(&settings),
+            embedded_worker_config(WorkerConfig::from_settings(&settings)),
         ));
     }
     let rate_limiter = RateLimiter::from_settings(&settings).await?;
@@ -412,6 +412,13 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
     }
     tracing::info!("event=api_shutdown_complete");
     Ok(())
+}
+
+fn embedded_worker_config(mut config: WorkerConfig) -> WorkerConfig {
+    // The API already owns the process-wide metrics listener. Starting the
+    // worker listener on the same address would race it and log EADDRINUSE.
+    config.metrics_server_enabled = false;
+    config
 }
 
 async fn shutdown_signal() {
@@ -4281,6 +4288,20 @@ fn duration_seconds(row: &ExecutionRow) -> Option<i64> {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn embedded_worker_reuses_the_api_metrics_listener() {
+        let mut worker_config = WorkerConfig::with_polling(Duration::from_millis(250), 30);
+        worker_config.metrics_server_enabled = true;
+        worker_config.metrics_bind_addr = "127.0.0.1:19090".into();
+        let standalone_worker_config = worker_config.clone();
+
+        let embedded = embedded_worker_config(worker_config);
+
+        assert!(!embedded.metrics_server_enabled);
+        assert_eq!(embedded.metrics_bind_addr, "127.0.0.1:19090");
+        assert!(standalone_worker_config.metrics_server_enabled);
+    }
 
     #[test]
     fn current_user_response_excludes_hashed_password() {
