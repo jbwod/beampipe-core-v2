@@ -232,6 +232,19 @@ run the outer `sbatch --parsable`, and poll the validated exact outer ID. Never
 retry an ambiguous submission. Core holds `in_flight` or `uncertain` work for
 reconciliation by its stable session name.
 
+The submission attempt has one persisted wall-clock deadline. Its default is
+30 minutes (`BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS=1800`); the accepted
+range is 1 to 86,400 seconds. The deadline covers the whole backend submit
+future, not each SSH command independently. A timeout leaves the submission
+`uncertain` because Setonix may have accepted work before the response was
+lost. It never makes an automatic retry safe.
+
+At intent creation Core also freezes a fingerprint of the resolved login host,
+port, remote user, and credential slot. If environment fallback would resolve a
+different user later, name reconciliation stops before opening SSH. Correct the
+configuration and review the evidence; do not search a different scheduler
+namespace and treat its absence as proof.
+
 Signed URL expiry is measured against queue delay as well as staging time. If
 the URL will expire before the job can consume it, cancel the exact run with
 approval and create a newly staged execution; do not reuse stale URLs.
@@ -262,7 +275,49 @@ and confirms `CANCELLED` using the same SSH session. A zero exit from `scancel`
 alone is not confirmation. Cancel any orphan child only by its validated exact
 ID and with separate approval.
 
-## 7. Approval C: publish and verify outputs
+## 7. Last-resort unresolved-submission barrier
+
+If the outer job ID is still unknown, do not retry and do not call cancellation
+with a name or wildcard. The superuser abandonment endpoint is a local,
+terminal safety fence; it does not contact Setonix and does not prove that no
+external job exists.
+
+Use it only under a separate operator approval after all of these are true:
+
+- the persisted submission deadline and latest execute-worker activity have
+  both been quiet for at least 24 hours;
+- no execute worker has an active or incompletely fenced lease;
+- the resolved login target and remote user still match the submission intent;
+- at least three separately approved exact-name lookups completed against both
+  `squeue` and `sacct`, span at least ten minutes, and the newest is no more than
+  ten minutes old;
+- the latest lookup is complete and negative, and no exact or ambiguous match
+  has been observed after the quiet grace;
+- the operator accepts that an external job may nevertheless exist.
+
+Refresh the execution immediately before sending the compare-and-set values:
+
+```http
+POST /api/v2/executions/{EXECUTION_ID}/submission/abandon
+Authorization: Bearer <LOCAL_SUPERUSER_TOKEN>
+Content-Type: application/json
+
+{
+  "reason": "attended review completed; external submission remains unresolved",
+  "expected_submission_state": "uncertain",
+  "expected_daliuge_session_id": "<EXACT_PERSISTED_SESSION_ID>",
+  "expected_submission_deadline_at": "<EXACT_PERSISTED_RFC3339_TIMESTAMP>",
+  "acknowledge_external_job_may_exist": true
+}
+```
+
+The transaction marks the ledger `failed` with outcome `inconsistent`, fences
+queued or expired execute jobs, and records the evidence IDs and rationale. It
+does not clear the unresolved submission axis. Automatic name reconciliation
+stops for that execution. A late exact receipt is retained idempotently as
+evidence but cannot reopen the terminal ledger, and retry remains blocked.
+
+## 8. Approval C: publish and verify outputs
 
 Slurm `COMPLETED` records compute evidence only. The production project requires
 a non-empty Wallaby output inventory, durable publication, and trusted
@@ -284,7 +339,7 @@ Expected immutable Core artifacts are `manifest`, `source_graph`,
 non-empty SHA-256 and size. Only the atomic output-verification transition may
 set the aggregate execution to succeeded.
 
-## 8. Approval D: exact cleanup
+## 9. Approval D: exact cleanup
 
 Before cleanup, prove that the outer ID and every recorded child ID are terminal
 or absent, retain sanitized receipts/logs/hashes/inventory/provenance, and verify
