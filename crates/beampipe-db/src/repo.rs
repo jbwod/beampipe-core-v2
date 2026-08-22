@@ -6894,11 +6894,14 @@ pub async fn list_slurm_executions_pending_poll(
               WHERE active_execute.execution_id = execution.uuid
                 AND active_execute.kind = 'execute'
                 AND active_execute.status = 'running'
-                AND COALESCE(
-                    active_execute.lease_expires_at,
-                    active_execute.locked_until,
-                    '-infinity'::TIMESTAMPTZ
-                ) > now()
+                AND (
+                    active_execute.lease_expires_at IS NULL
+                    OR active_execute.locked_until IS NULL
+                    OR GREATEST(
+                        active_execute.lease_expires_at,
+                        active_execute.locked_until
+                    ) > now()
+                )
           )
         ORDER BY execution.created_at ASC
         "#,
@@ -6966,11 +6969,14 @@ pub async fn list_rest_executions_pending_poll(
               WHERE active_execute.execution_id = execution.uuid
                 AND active_execute.kind = 'execute'
                 AND active_execute.status = 'running'
-                AND COALESCE(
-                    active_execute.lease_expires_at,
-                    active_execute.locked_until,
-                    '-infinity'::TIMESTAMPTZ
-                ) > now()
+                AND (
+                    active_execute.lease_expires_at IS NULL
+                    OR active_execute.locked_until IS NULL
+                    OR GREATEST(
+                        active_execute.lease_expires_at,
+                        active_execute.locked_until
+                    ) > now()
+                )
           )
         ORDER BY execution.created_at ASC
         "#,

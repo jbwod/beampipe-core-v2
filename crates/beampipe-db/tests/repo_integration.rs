@@ -2686,6 +2686,12 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         .unwrap()
         .iter()
         .any(|row| row.uuid == slurm_execution.uuid));
+    set_job_lease_partially_active(&pool, slurm_execute.uuid).await;
+    assert!(!repo::list_slurm_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == slurm_execution.uuid));
     set_job_lease_expired(&pool, slurm_execute.uuid).await;
     assert!(repo::list_slurm_executions_pending_poll(&pool)
         .await
@@ -2753,6 +2759,12 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         .unwrap()
         .iter()
         .any(|row| row.uuid == rest_execution.uuid));
+    set_job_lease_incompletely_fenced(&pool, rest_execute.uuid).await;
+    assert!(!repo::list_rest_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == rest_execution.uuid));
     set_job_lease_expired(&pool, rest_execute.uuid).await;
     assert!(repo::list_rest_executions_pending_poll(&pool)
         .await
@@ -2795,6 +2807,26 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
 async fn set_job_lease_active(pool: &sqlx::PgPool, job_id: Uuid) {
     sqlx::query(
         "UPDATE jobs SET status = 'running', lease_expires_at = now() + interval '60 seconds', locked_until = now() + interval '60 seconds' WHERE uuid = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn set_job_lease_partially_active(pool: &sqlx::PgPool, job_id: Uuid) {
+    sqlx::query(
+        "UPDATE jobs SET status = 'running', lease_expires_at = now() - interval '1 second', locked_until = now() + interval '60 seconds' WHERE uuid = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn set_job_lease_incompletely_fenced(pool: &sqlx::PgPool, job_id: Uuid) {
+    sqlx::query(
+        "UPDATE jobs SET status = 'running', lease_expires_at = NULL, locked_until = now() - interval '1 second' WHERE uuid = $1",
     )
     .bind(job_id)
     .execute(pool)
