@@ -313,7 +313,9 @@ pub fn extract_beampipe_run_record(workflow_manifest: &Value) -> Option<Value> {
 }
 
 pub fn parse_observed_at(v: &Value) -> Option<DateTime<Utc>> {
-    v.as_str()
+    v.get("observed_at")
+        .unwrap_or(v)
+        .as_str()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
 }
@@ -429,6 +431,14 @@ mod tests {
         let out = merge_slurm_poll_tick_round(None, 3);
         assert_eq!(out["beampipe_run_record"]["slurm_poll"]["round"], 3);
         assert!(out["beampipe_run_record"]["slurm_poll"]["started_at"].is_string());
+    }
+
+    #[test]
+    fn observed_at_parser_accepts_run_record_observation() {
+        let observed_at = "2026-08-22T03:23:43.555Z";
+
+        assert!(parse_observed_at(&json!(observed_at)).is_some());
+        assert!(parse_observed_at(&json!({"observed_at": observed_at})).is_some());
     }
 
     #[test]

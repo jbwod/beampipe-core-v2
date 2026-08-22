@@ -4226,32 +4226,51 @@ fn observed_slurm_state(row: &ExecutionRow) -> Option<String> {
 }
 
 fn observed_dim_state(row: &ExecutionRow) -> Option<String> {
-    row.workflow_manifest
-        .as_ref()
+    projected_dim_state(row.workflow_manifest.as_ref(), row.daliuge_state.as_deref())
+}
+
+fn projected_dim_state(
+    workflow_manifest: Option<&Value>,
+    persisted_state: Option<&str>,
+) -> Option<String> {
+    let run_record_state = workflow_manifest
         .and_then(|m| m.get("beampipe_run_record"))
         .and_then(|rr| rr.get("dim"))
         .and_then(|d| d.get("last_observation"))
         .and_then(|o| o.get("session_state"))
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str);
+    run_record_state
+        .filter(|state| !state.eq_ignore_ascii_case("unknown"))
+        .or(persisted_state)
+        .or(run_record_state)
         .map(str::to_string)
 }
 
 fn last_observation_at(row: &ExecutionRow) -> Option<chrono::DateTime<Utc>> {
-    let slurm = row.workflow_manifest.as_ref().and_then(|m| {
+    projected_last_observation_at(row.workflow_manifest.as_ref(), row.last_reconciled_at)
+}
+
+fn projected_last_observation_at(
+    workflow_manifest: Option<&Value>,
+    reconciliation_fallback: Option<chrono::DateTime<Utc>>,
+) -> Option<chrono::DateTime<Utc>> {
+    let slurm = workflow_manifest.and_then(|m| {
         m.get("beampipe_run_record")
             .and_then(|rr| rr.get("slurm"))
             .and_then(|s| s.get("last_observation"))
     });
-    let dim = row.workflow_manifest.as_ref().and_then(|m| {
+    let dim = workflow_manifest.and_then(|m| {
         m.get("beampipe_run_record")
             .and_then(|rr| rr.get("dim"))
             .and_then(|d| d.get("last_observation"))
     });
+    let has_observation = slurm.is_some() || dim.is_some();
     [slurm, dim]
         .into_iter()
         .flatten()
         .filter_map(beampipe_domain::run_record::parse_observed_at)
         .max()
+        .or_else(|| has_observation.then_some(reconciliation_fallback).flatten())
 }
 
 fn duration_seconds(row: &ExecutionRow) -> Option<i64> {
@@ -4432,6 +4451,35 @@ adapters:
             Some("unexpected"),
             None,
         ));
+    }
+
+    #[test]
+    fn dim_status_projection_falls_back_to_canonical_persisted_state() {
+        let manifest = json!({
+            "beampipe_run_record": {
+                "dim": {"last_observation": {"session_state": "unknown"}}
+            }
+        });
+
+        assert_eq!(
+            projected_dim_state(Some(&manifest), Some("finished")).as_deref(),
+            Some("finished")
+        );
+    }
+
+    #[test]
+    fn observation_projection_uses_reconciliation_time_for_legacy_record() {
+        let manifest = json!({
+            "beampipe_run_record": {
+                "dim": {"last_observation": {"session_state": "unknown"}}
+            }
+        });
+        let reconciled_at = Utc::now();
+
+        assert_eq!(
+            projected_last_observation_at(Some(&manifest), Some(reconciled_at)),
+            Some(reconciled_at)
+        );
     }
 
     fn valid_output_report() -> ExecutionOutputVerificationRequest {

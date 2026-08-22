@@ -3798,26 +3798,12 @@ async fn apply_dim_poll_update(
     .await?;
     metrics::record_reconciliation_result("daliuge", "observed");
     let mut manifest = if poll.status.is_terminal() {
-        merge_dim_poll_into_manifest(
+        merge_terminal_dim_poll_into_manifest(
             execution.workflow_manifest.clone(),
             &session_id,
-            poll_summary
-                .get("status")
-                .and_then(|v| v.get("status").or(Some(v)))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown"),
-            true,
-            Some(match poll.status {
-                ExecutionStatus::Completed => "completed",
-                ExecutionStatus::Failed => "failed",
-                ExecutionStatus::Cancelled => "cancelled",
-                _ => "unknown",
-            }),
-            None,
-            poll_summary
-                .get("error_drop_uids")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len() as i64),
+            daliuge_state,
+            poll.status,
+            &poll_summary,
         )
     } else {
         merge_poll_summary(
@@ -3933,6 +3919,32 @@ async fn apply_dim_poll_update(
         .await?;
     }
     Ok(())
+}
+
+fn merge_terminal_dim_poll_into_manifest(
+    existing: Option<Value>,
+    session_id: &str,
+    daliuge_state: DaliugeState,
+    status: ExecutionStatus,
+    poll_summary: &Value,
+) -> Value {
+    merge_dim_poll_into_manifest(
+        existing,
+        session_id,
+        daliuge_state.as_str(),
+        true,
+        Some(match status {
+            ExecutionStatus::Completed => "completed",
+            ExecutionStatus::Failed => "failed",
+            ExecutionStatus::Cancelled => "cancelled",
+            _ => "unknown",
+        }),
+        None,
+        poll_summary
+            .get("error_drop_uids")
+            .and_then(Value::as_array)
+            .map(|items| items.len() as i64),
+    )
 }
 
 async fn record_dim_reconciliation_error(
@@ -4936,6 +4948,28 @@ mod tests {
             ExecutionStatus::Running
         );
         assert!(!execution_status_for_slurm_state("RUNNING").is_terminal());
+    }
+
+    #[test]
+    fn terminal_dim_manifest_uses_canonical_state_for_non_string_backend_status() {
+        let manifest = merge_terminal_dim_poll_into_manifest(
+            None,
+            "BeampipeExecution-run-1",
+            DaliugeState::Finished,
+            ExecutionStatus::Completed,
+            &json!({
+                "status": {"status": 3},
+                "normalized_session_state": "finished",
+                "error_drop_uids": []
+            }),
+        );
+        let dim = &manifest["beampipe_run_record"]["dim"];
+
+        assert_eq!(dim["last_observation"]["session_state"], "finished");
+        assert_eq!(dim["terminal"]["session_state"], "finished");
+        assert_eq!(dim["terminal"]["ledger_status"], "completed");
+        assert!(beampipe_domain::run_record::parse_observed_at(&dim["last_observation"]).is_some());
+        assert!(beampipe_domain::run_record::parse_observed_at(&dim["terminal"]).is_some());
     }
 
     #[test]
