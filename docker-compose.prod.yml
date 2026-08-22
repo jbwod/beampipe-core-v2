@@ -34,6 +34,10 @@ services:
       BEAMPIPE_ENV: production
       BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL for production}
+    # Publish the API only. Per-process metrics remain on the private Compose
+    # network for Prometheus and are never bound to a production host port.
+    ports: !override
+      - "${BEAMPIPE_API_PORT:-8080}:8080"
     security_opt:
       - no-new-privileges:true
     restart: always

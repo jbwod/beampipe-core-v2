@@ -20,6 +20,15 @@ const SAMPLE_DEPLOY_GRAPH: &[u8] =
     include_bytes!("../embedded/graphs/wallaby-hires_deploy-setonix-beampipe.graph");
 const SAMPLE_NODOWNLOADS_GRAPH: &[u8] =
     include_bytes!("../embedded/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph");
+const PROMETHEUS_CONFIG: &str = include_str!("../embedded/observability/prometheus.yml");
+const PROMETHEUS_ALERTS: &str = include_str!("../embedded/observability/alerts.yml");
+const ALERTMANAGER_CONFIG: &str = include_str!("../embedded/observability/alertmanager.yml");
+const GRAFANA_DATASOURCE: &str =
+    include_str!("../embedded/observability/grafana/provisioning/datasources/prometheus.yml");
+const GRAFANA_DASHBOARD_PROVIDER: &str =
+    include_str!("../embedded/observability/grafana/provisioning/dashboards/beampipe.yml");
+const GRAFANA_OVERVIEW_DASHBOARD: &str =
+    include_str!("../embedded/observability/grafana/dashboards/beampipe-overview.json");
 const BUNDLE_MANIFEST: &str = ".beampipe-operator-bundle.json";
 
 #[derive(Debug, Default, Clone)]
@@ -65,6 +74,21 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
         (
             "config/deployment_profile.slurm-remote.json",
             SAMPLE_SLURM_PROFILE,
+        ),
+        ("observability/prometheus.yml", PROMETHEUS_CONFIG),
+        ("observability/alerts.yml", PROMETHEUS_ALERTS),
+        ("observability/alertmanager.yml", ALERTMANAGER_CONFIG),
+        (
+            "observability/grafana/provisioning/datasources/prometheus.yml",
+            GRAFANA_DATASOURCE,
+        ),
+        (
+            "observability/grafana/provisioning/dashboards/beampipe.yml",
+            GRAFANA_DASHBOARD_PROVIDER,
+        ),
+        (
+            "observability/grafana/dashboards/beampipe-overview.json",
+            GRAFANA_OVERVIEW_DASHBOARD,
         ),
         ("credentials/ssh/.gitkeep", ""),
     ] {
@@ -254,6 +278,36 @@ mod tests {
             SAMPLE_NODOWNLOADS_GRAPH,
             include_bytes!(
                 "../../../config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph"
+            )
+        );
+        assert_eq!(
+            PROMETHEUS_CONFIG,
+            include_str!("../../../deploy/operator/observability/prometheus.yml")
+        );
+        assert_eq!(
+            PROMETHEUS_ALERTS,
+            include_str!("../../../deploy/operator/observability/alerts.yml")
+        );
+        assert_eq!(
+            ALERTMANAGER_CONFIG,
+            include_str!("../../../deploy/operator/observability/alertmanager.yml")
+        );
+        assert_eq!(
+            GRAFANA_DATASOURCE,
+            include_str!(
+                "../../../deploy/operator/observability/grafana/provisioning/datasources/prometheus.yml"
+            )
+        );
+        assert_eq!(
+            GRAFANA_DASHBOARD_PROVIDER,
+            include_str!(
+                "../../../deploy/operator/observability/grafana/provisioning/dashboards/beampipe.yml"
+            )
+        );
+        assert_eq!(
+            GRAFANA_OVERVIEW_DASHBOARD,
+            include_str!(
+                "../../../deploy/operator/observability/grafana/dashboards/beampipe-overview.json"
             )
         );
     }

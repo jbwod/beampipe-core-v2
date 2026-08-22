@@ -131,5 +131,57 @@ services:
     init: true
     restart: unless-stopped
 
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.5.5
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${BEAMPIPE_PROMETHEUS_RETENTION:-30d}
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - beampipe_prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:${BEAMPIPE_PROMETHEUS_PORT:-9099}:9090"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  alertmanager:
+    profiles: [observability]
+    image: prom/alertmanager:v0.33.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - beampipe_alertmanager_data:/alertmanager
+    ports:
+      - "127.0.0.1:${BEAMPIPE_ALERTMANAGER_PORT:-9094}:9093"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:13.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${BEAMPIPE_GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${BEAMPIPE_GRAFANA_ADMIN_PASSWORD:?set by beampipe setup}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - beampipe_grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${BEAMPIPE_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   beampipe_pgdata:
+  beampipe_prometheus_data:
+  beampipe_alertmanager_data:
+  beampipe_grafana_data:

@@ -2,7 +2,10 @@
 
 Use metrics to find the affected subsystem, then use execution/source events and immutable artifacts to explain one run. Logs alone are not the ledger.
 
-Grafana is not currently included in Compose and no dashboard JSON is tracked in this repository. Connect an external Grafana to Prometheus at `http://prometheus:9090`. A useful overview should put API traffic first, followed by queue health, workers, dependencies, discovery, and executions.
+The operator Compose bundle includes persistent Prometheus, Alertmanager, and
+Grafana services plus a provisioned Beampipe operations dashboard. Metrics
+listeners stay on the private Compose network; the three operator UIs bind to
+loopback by default.
 
 ## Endpoints
 
@@ -17,7 +20,7 @@ Grafana is not currently included in Compose and no dashboard JSON is tracked in
 | `/executions/{id}/artifacts` | Manifest and graph evidence |
 | `/sources/{id}/events` | Discovery provenance |
 
-Each host process needs a unique metrics bind address. Containers can all use `0.0.0.0:9090` because they have separate network namespaces.
+Each host process needs a unique metrics bind address. Containers can all use `0.0.0.0:9090` because they have separate network namespaces. Production Compose does not publish those process listeners; Prometheus reaches them by service name on the private network.
 
 ## Dashboard order
 
@@ -36,15 +39,24 @@ Do not put high-cardinality source IDs, execution IDs, session IDs, URLs, or err
 ## Prometheus and alerts
 
 ```bash
-docker compose --profile observability up -d prometheus
+docker compose --profile observability up -d
 curl -fsS http://127.0.0.1:9099/-/ready
 curl -fsS http://127.0.0.1:9099/api/v1/targets | jq .data.activeTargets
 ```
 
-Prometheus rules live in `deploy/prometheus/alerts.yml`. Alertmanager is available through the `alerting` profile:
+Open Grafana at `http://127.0.0.1:3000` using
+`BEAMPIPE_GRAFANA_ADMIN_USER` and `BEAMPIPE_GRAFANA_ADMIN_PASSWORD` from the
+installation `.env`. Prometheus, Alertmanager, and Grafana data survive
+container replacement in named volumes. Back up those volumes separately when
+historical dashboards or alert state are operationally important.
+
+Prometheus rules live in `deploy/prometheus/alerts.yml`. The packaged
+Alertmanager receiver intentionally sends nowhere, so the default bundle never
+contains an unexpanded secret placeholder. Replace its config with an
+operator-owned, secret-backed receiver before relying on external paging:
 
 ```bash
-docker compose --profile observability --profile alerting up -d
+./scripts/promtool-test-alerts.sh
 ```
 
 Beampipe also manages notification channels, alert rules, and redacted deliveries through `/api/v2`. Dash operators configure and test these on **Alerts** (`/alerts`). Prometheus/Alertmanager is a separate infra-health path and does not write in-app deliveries.

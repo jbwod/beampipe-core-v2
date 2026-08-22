@@ -433,6 +433,16 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     if !env_existed && opts.jwt_secret.is_none() {
         println!("Generated a random JWT secret and stored it in .env.");
     }
+    let existing_grafana_password = std::env::var("BEAMPIPE_GRAFANA_ADMIN_PASSWORD")
+        .ok()
+        .or_else(|| env_file_value(&env_path, "BEAMPIPE_GRAFANA_ADMIN_PASSWORD"));
+    let grafana_admin_password =
+        select_grafana_admin_password(existing_grafana_password.as_deref(), env_existed)?;
+    if !env_existed
+        && !grafana_password_is_valid(existing_grafana_password.as_deref().unwrap_or(""))
+    {
+        println!("Generated a random Grafana administrator password and stored it in .env.");
+    }
 
     let casda_tap_url = env_override(
         opts.casda_tap_url.as_deref(),
@@ -470,6 +480,11 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         &docker_database_url,
     )?;
     update_env_file(&env_path, "BEAMPIPE_JWT_SECRET", &jwt_secret)?;
+    update_env_file(
+        &env_path,
+        "BEAMPIPE_GRAFANA_ADMIN_PASSWORD",
+        &grafana_admin_password,
+    )?;
     update_env_file(&env_path, "BEAMPIPE_CASDA_TAP_URL", &casda_tap_url)?;
     update_env_file(&env_path, "BEAMPIPE_TM_URL", &tm_url)?;
     update_env_file(&env_path, "BEAMPIPE_WORKER_POOL", &worker_pool)?;
@@ -508,6 +523,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
 
     std::env::set_var("DATABASE_URL", &database_url);
     std::env::set_var("BEAMPIPE_JWT_SECRET", &jwt_secret);
+    std::env::set_var("BEAMPIPE_GRAFANA_ADMIN_PASSWORD", &grafana_admin_password);
     std::env::set_var("BEAMPIPE_CASDA_TAP_URL", &casda_tap_url);
     std::env::set_var("BEAMPIPE_TM_URL", &tm_url);
     std::env::set_var("BEAMPIPE_WORKER_POOL", &worker_pool);
@@ -926,6 +942,29 @@ fn generate_jwt_secret() -> String {
 
 fn generate_database_password() -> String {
     Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string()
+}
+
+fn select_grafana_admin_password(existing: Option<&str>, env_existed: bool) -> Result<String> {
+    if let Some(password) = existing.filter(|value| grafana_password_is_valid(value)) {
+        return Ok(password.to_string());
+    }
+    if env_existed {
+        bail!(
+            "existing BEAMPIPE_GRAFANA_ADMIN_PASSWORD is empty, weak, or a placeholder; set a new password explicitly"
+        );
+    }
+    Ok(generate_admin_password())
+}
+
+fn grafana_password_is_valid(password: &str) -> bool {
+    let normalized = password.trim().to_ascii_lowercase();
+    password.len() >= 12
+        && ![
+            "change-me-before-use",
+            "replace-with-a-random-password",
+            "changeme",
+        ]
+        .contains(&normalized.as_str())
 }
 
 fn read_secret_file(path: &Path, label: &str) -> Result<String> {
@@ -3402,6 +3441,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("known placeholder"));
+    }
+
+    #[test]
+    fn setup_generates_a_grafana_password_for_a_new_install() {
+        let password =
+            select_grafana_admin_password(Some("replace-with-a-random-password"), false).unwrap();
+        assert!(grafana_password_is_valid(&password));
+        assert_ne!(password, "replace-with-a-random-password");
+    }
+
+    #[test]
+    fn setup_refuses_an_existing_grafana_placeholder() {
+        let error = select_grafana_admin_password(Some("replace-with-a-random-password"), true)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("BEAMPIPE_GRAFANA_ADMIN_PASSWORD"));
+    }
+
+    #[test]
+    fn setup_preserves_an_existing_grafana_password() {
+        let password = "an-existing-random-grafana-password";
+        assert_eq!(
+            select_grafana_admin_password(Some(password), true).unwrap(),
+            password
+        );
     }
 
     #[test]
