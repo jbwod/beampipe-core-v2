@@ -123,7 +123,8 @@ manifest:
     vsys: "{flags.vsys}"
 
 graph:
-  url: https://example.org/pinned/wallaby.graph
+  url: https://example.org/releases/wallaby-v1.graph
+  sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 graph_patches:
   - match:
@@ -133,7 +134,7 @@ graph_patches:
       num_of_copies: "$count(sbids[].datasets[])"
 ```
 
-Manifest templates resolve both logical `flags.*` values and the flat persisted fields produced by discovery. Graph bytes are checksummed and stored on the execution, but remote branch URLs remain mutable before preparation; use immutable URLs or externally verified hashes for qualification.
+Manifest templates resolve both logical `flags.*` values and the flat persisted fields produced by discovery. Every graph source requires its expected SHA-256. Fetches time out after 30 seconds, reject content over 16 MiB, and verify the digest before parsing JSON. Use an immutable URL as well as the digest so configuration provenance remains human-auditable.
 
 ## Automation
 

@@ -272,6 +272,8 @@ pub struct GraphConfig {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -781,11 +783,12 @@ impl ProjectConfig {
             }
         }
         if let Some(graph) = &self.graph {
-            if graph.url.is_some() && graph.path.is_some() {
+            let source_count = usize::from(graph.url.is_some()) + usize::from(graph.path.is_some());
+            if source_count != 1 {
                 errors.push(ValidationDiagnostic::error(
                     "graph",
                     "mutually_exclusive",
-                    "graph must use only one of url or path",
+                    "graph must use exactly one of url or path",
                 ));
             }
             if graph
@@ -809,6 +812,23 @@ impl ProjectConfig {
                     "required",
                     "graph.path must be non-empty when set",
                 ));
+            }
+            match graph.sha256.as_deref() {
+                None => errors.push(ValidationDiagnostic::error(
+                    "graph.sha256",
+                    "required",
+                    "graph.sha256 is required to pin graph content",
+                )),
+                Some(value)
+                    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+                {
+                    errors.push(ValidationDiagnostic::error(
+                        "graph.sha256",
+                        "invalid_sha256",
+                        "graph.sha256 must contain exactly 64 hexadecimal characters",
+                    ));
+                }
+                Some(_) => {}
             }
         }
         for (collection, queries) in [
@@ -1234,5 +1254,41 @@ discovery:
             .errors
             .iter()
             .any(|diagnostic| diagnostic.path == "discovery.enrichments[0].name"));
+    }
+
+    #[test]
+    fn graph_requires_one_source_and_a_sha256_pin() {
+        let yaml = r#"
+apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata:
+  id: graph-pin-test
+graph:
+  url: https://example.test/graph.json
+"#;
+        let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
+        let report = config.validate_report();
+        assert!(report
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.path == "graph.sha256"));
+
+        let invalid = ProjectConfig::from_slice(
+            yaml.replace(
+                "  url: https://example.test/graph.json",
+                "  url: https://example.test/graph.json\n  path: /tmp/graph.json\n  sha256: not-a-digest",
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+        .validate_report();
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.path == "graph"));
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.code == "invalid_sha256"));
     }
 }

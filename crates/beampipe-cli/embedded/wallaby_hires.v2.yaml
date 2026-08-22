@@ -39,7 +39,8 @@ adapters:
     retries: 2
 
 graph:
-  url: https://raw.githubusercontent.com/jbwod/wallaby-hires-beampipe/refs/heads/main/dlg-graphs/wallaby-hires_deploy-setonix-beampipe.graph
+  url: https://raw.githubusercontent.com/jbwod/wallaby-hires-beampipe/addf679ef9e76a99b5db07449eb19499cea7b34b/dlg-graphs/wallaby-hires_deploy-setonix-beampipe.graph
+  sha256: 5bd3f2a882ec398aac9f117698f8dec580772e83142b03ad2dbec39556bc3fda
 
 discovery:
   queries:
@@ -130,4 +131,3 @@ automation:
     tick_discovery_batch_limit: 100
     concurrent_discovery_batch_limit: 24
     stale_after_hours: 24
-
