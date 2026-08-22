@@ -502,9 +502,7 @@ pub async fn set_last_executed_discovery_signature_for_sources(
 }
 
 pub async fn queue_depth(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'queued'")
-        .fetch_one(pool)
-        .await
+    runnable_queue_depth(pool).await
 }
 
 /// Queued jobs that are eligible to be claimed now, excluding deferred and recurring work
@@ -4108,7 +4106,8 @@ pub async fn operator_overview_counts(
                 AS running_executions,
             (SELECT COUNT(*) FROM batch_execution_record WHERE status = 'failed')::bigint
                 AS failed_executions,
-            (SELECT COUNT(*) FROM jobs WHERE status = 'queued')::bigint AS queue_depth,
+            (SELECT COUNT(*) FROM jobs
+             WHERE status = 'queued' AND next_run_at <= now())::bigint AS queue_depth,
             (SELECT COUNT(*) FROM worker_instances WHERE status = 'active')::bigint
                 AS active_workers,
             (SELECT COUNT(*) FROM worker_instances

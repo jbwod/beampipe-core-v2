@@ -177,6 +177,15 @@ async fn queue_gauges_only_include_runnable_jobs() {
             .map(|(_, count)| *count),
         Some(1)
     );
+    let runnable = repo::runnable_queue_depth(&pool).await.unwrap();
+    assert_eq!(repo::queue_depth(&pool).await.unwrap(), runnable);
+    assert_eq!(
+        repo::operator_overview_counts(&pool, 120)
+            .await
+            .unwrap()
+            .queue_depth,
+        runnable
+    );
 
     let ages = repo::oldest_queued_job_age_by_kind(&pool).await.unwrap();
     assert!(!ages.iter().any(|(kind, _)| kind == &future_kind));
