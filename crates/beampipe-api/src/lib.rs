@@ -2558,6 +2558,14 @@ async fn validate_execution_admission(
                 "archive '{archive_name}' is not enabled by project '{project_module}'"
             ));
         }
+        if let Some(max_sources) = execution_source_limit(config) {
+            if normalized_sources.len() > max_sources {
+                errors.push(format!(
+                    "project '{project_module}' permits at most {max_sources} source(s) per execution; received {}",
+                    normalized_sources.len()
+                ));
+            }
+        }
     }
 
     let profile = if req.deployment_profile_id.is_some()
@@ -2710,6 +2718,15 @@ async fn validate_execution_admission(
         project_config_id: project_config.map(|config| config.uuid),
         sources: normalized_sources,
     })
+}
+
+fn execution_source_limit(config: &ProjectConfig) -> Option<usize> {
+    config
+        .automation
+        .execution
+        .as_ref()
+        .and_then(|execution| usize::try_from(execution.max_sources_per_execution).ok())
+        .filter(|limit| *limit > 0)
 }
 
 fn execution_create_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
@@ -4436,6 +4453,14 @@ adapters:
             execution_create_request_sha256(&request),
             execution_create_request_sha256(&equivalent)
         );
+    }
+
+    #[test]
+    fn manual_admission_uses_the_project_execution_source_limit() {
+        let config =
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
+                .unwrap();
+        assert_eq!(execution_source_limit(&config), Some(1));
     }
 
     #[test]
