@@ -917,9 +917,7 @@ pub fn parse_execution_source_scope(value: &Value) -> Result<ExecutionSourceScop
             .map(str::trim)
             .filter(|source| !source.is_empty())
             .ok_or_else(|| {
-                format!(
-                    "execution sources[{index}].source_identifier must be a non-empty string"
-                )
+                format!("execution sources[{index}].source_identifier must be a non-empty string")
             })?
             .to_string();
 
@@ -2611,9 +2609,7 @@ pub async fn begin_execution_submission(
             "submission timeout must be positive".into(),
         ));
     }
-    if scheduler_name == "slurm"
-        && target_fingerprint.is_none_or(|value| value.trim().is_empty())
-    {
+    if scheduler_name == "slurm" && target_fingerprint.is_none_or(|value| value.trim().is_empty()) {
         return Err(sqlx::Error::Protocol(
             "Slurm submission intent requires a resolved target fingerprint".into(),
         ));
@@ -2662,10 +2658,9 @@ pub async fn begin_execution_submission(
 
     // `now()` is fixed at transaction start and can be stale after waiting for
     // the execution row lock. Anchor this attempt to a fresh database clock.
-    let submission_started_at =
-        sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
-            .fetch_one(&mut *tx)
-            .await?;
+    let submission_started_at = sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await?;
     let submission_deadline_at = submission_started_at
         .checked_add_signed(chrono::Duration::seconds(submission_timeout_seconds))
         .ok_or_else(|| sqlx::Error::Protocol("submission deadline is out of range".into()))?;
@@ -2791,8 +2786,7 @@ fn execute_job_has_active_lease(job: &JobRow, now: DateTime<Utc>) -> bool {
     if job.status != "running" {
         return false;
     }
-    let (Some(lease_expires_at), Some(locked_until)) =
-        (job.lease_expires_at, job.locked_until)
+    let (Some(lease_expires_at), Some(locked_until)) = (job.lease_expires_at, job.locked_until)
     else {
         // A running job with incomplete fencing evidence is conservatively active.
         return true;
@@ -3049,9 +3043,7 @@ pub async fn record_slurm_name_lookup(
             raw_state,
             reason,
             ..
-        } if result == "exact"
-            && (canonical_state_mutation_allowed || late_after_abandonment) =>
-        {
+        } if result == "exact" && (canonical_state_mutation_allowed || late_after_abandonment) => {
             let row = sqlx::query_as::<_, ExecutionRow>(
                 r#"
                 UPDATE batch_execution_record
@@ -3105,8 +3097,7 @@ pub async fn record_slurm_name_lookup(
             }
             row
         }
-        SlurmNameLookupOutcome::NotFound if canonical_state_mutation_allowed =>
-        {
+        SlurmNameLookupOutcome::NotFound if canonical_state_mutation_allowed => {
             sqlx::query_as::<_, ExecutionRow>(
                 r#"
                 UPDATE batch_execution_record
@@ -3123,8 +3114,7 @@ pub async fn record_slurm_name_lookup(
             .fetch_one(&mut *tx)
             .await?
         }
-        SlurmNameLookupOutcome::Ambiguous { .. } if canonical_state_mutation_allowed =>
-        {
+        SlurmNameLookupOutcome::Ambiguous { .. } if canonical_state_mutation_allowed => {
             sqlx::query_as::<_, ExecutionRow>(
                 r#"
                 UPDATE batch_execution_record
@@ -3314,7 +3304,9 @@ pub fn validate_slurm_abandonment_evidence(
     if !latest_is_complete_negative {
         return Err(AbandonSlurmSubmissionError::Conflict {
             code: "submission_abandonment_latest_evidence_not_negative".into(),
-            message: "the latest scheduler lookup after the quiet grace must be complete and negative".into(),
+            message:
+                "the latest scheduler lookup after the quiet grace must be complete and negative"
+                    .into(),
         });
     }
     let mut eligible = attempts_newest_first
@@ -3352,7 +3344,9 @@ pub fn validate_slurm_abandonment_evidence(
     {
         return Err(AbandonSlurmSubmissionError::Conflict {
             code: "submission_abandonment_evidence_stale".into(),
-            message: "the latest complete negative Slurm lookup must be no more than ten minutes old".into(),
+            message:
+                "the latest complete negative Slurm lookup must be no more than ten minutes old"
+                    .into(),
         });
     }
     let newest_at = newest.query_completed_at;
@@ -3471,7 +3465,10 @@ pub async fn abandon_slurm_submission(
         tx.rollback().await?;
         return Err(conflict(
             "submission_abandonment_terminal_execution",
-            format!("execution is already terminal with status '{}'", execution.status),
+            format!(
+                "execution is already terminal with status '{}'",
+                execution.status
+            ),
         ));
     }
     let current_submission = execution
@@ -3813,19 +3810,13 @@ fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sql
             "submission receipt requires a physical graph".into(),
         ));
     }
-    let session_id = receipt_nonempty(
-        input.daliuge_session_id.as_deref(),
-        "daliuge_session_id",
-    )?;
+    let session_id = receipt_nonempty(input.daliuge_session_id.as_deref(), "daliuge_session_id")?;
     match input.scheduler_name.as_str() {
         "slurm" => {
             receipt_nonempty(input.scheduler_job_id.as_deref(), "scheduler_job_id")?;
-            let session_dir = receipt_nonempty(
-                input.remote_session_dir.as_deref(),
-                "remote_session_dir",
-            )?;
-            let staging_root =
-                receipt_nonempty(input.staging_root.as_deref(), "staging_root")?;
+            let session_dir =
+                receipt_nonempty(input.remote_session_dir.as_deref(), "remote_session_dir")?;
+            let staging_root = receipt_nonempty(input.staging_root.as_deref(), "staging_root")?;
             let expected_staging_root =
                 format!("{}/wallaby-staging", session_dir.trim_end_matches('/'));
             if staging_root != expected_staging_root {
@@ -3890,8 +3881,7 @@ pub async fn record_submission_receipt(
     input: SubmissionReceiptInput,
 ) -> Result<SubmissionReceiptResult, sqlx::Error> {
     validate_submission_receipt(&input)?;
-    let (physical_graph_sha256, physical_graph_size) =
-        json_payload_sha256(&input.physical_graph)?;
+    let (physical_graph_sha256, physical_graph_size) = json_payload_sha256(&input.physical_graph)?;
     let (workflow_manifest_sha256, _) = json_payload_sha256(&input.workflow_manifest)?;
     let receipt_document = json!({
         "schema": "beampipe-submission-receipt/v1",
@@ -4338,8 +4328,8 @@ async fn finalize_successful_sources(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let current_signature = (!signature_values.is_empty())
-        .then(|| discovery_signature(&signature_values));
+    let current_signature =
+        (!signature_values.is_empty()).then(|| discovery_signature(&signature_values));
     let finalized_current_signatures = current.len() == source_identifiers.len()
         && all_current_signatures_present
         && execution.discovery_signature.as_deref() == current_signature.as_deref();
@@ -4932,7 +4922,9 @@ pub enum ConfirmedExternalCancellation {
         scheduler_job_id: String,
         exact_job_id: String,
     },
-    Daliuge { session_id: String },
+    Daliuge {
+        session_id: String,
+    },
 }
 
 pub async fn cancel_execution_with_confirmed_external_cancellation(
@@ -4945,9 +4937,7 @@ pub async fn cancel_execution_with_confirmed_external_cancellation(
     match &confirmation {
         ConfirmedExternalCancellation::Slurm { exact_job_id, .. }
             if exact_job_id.is_empty()
-                || !exact_job_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit()) =>
+                || !exact_job_id.bytes().all(|byte| byte.is_ascii_digit()) =>
         {
             return Err(sqlx::Error::Protocol(
                 "confirmed Slurm cancellation requires an exact ASCII-digit job ID".into(),
@@ -5301,9 +5291,9 @@ pub async fn enqueue_job_with_options(
         .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     let mut tx = pool.begin().await?;
     if kind == "execute" {
-        let execution_id = opts.execution_id.ok_or_else(|| {
-            sqlx::Error::Protocol("execute jobs require an execution_id".into())
-        })?;
+        let execution_id = opts
+            .execution_id
+            .ok_or_else(|| sqlx::Error::Protocol("execute jobs require an execution_id".into()))?;
         let execution: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
             r#"
             SELECT status, submission_abandoned_at
@@ -5322,7 +5312,10 @@ pub async fn enqueue_job_with_options(
             )));
         };
         if submission_abandoned_at.is_some()
-            || matches!(status.as_str(), "completed" | "failed" | "cancelled" | "not_submitted")
+            || matches!(
+                status.as_str(),
+                "completed" | "failed" | "cancelled" | "not_submitted"
+            )
         {
             tx.rollback().await?;
             return Err(sqlx::Error::Protocol(format!(
@@ -7599,7 +7592,12 @@ mod tests {
         let evidence = vec![
             negative_evidence(now - Duration::minutes(1), session_id, intent_id, intent_at),
             negative_evidence(now - Duration::minutes(6), session_id, intent_id, intent_at),
-            negative_evidence(now - Duration::minutes(11), session_id, intent_id, intent_at),
+            negative_evidence(
+                now - Duration::minutes(11),
+                session_id,
+                intent_id,
+                intent_at,
+            ),
         ];
         let ids = validate_slurm_abandonment_evidence(
             &evidence,

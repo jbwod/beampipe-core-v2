@@ -462,11 +462,7 @@ where
     }
 }
 
-fn record_slurm_paths(
-    manifest: &mut Value,
-    session_dir: Option<&str>,
-    staging_root: Option<&str>,
-) {
+fn record_slurm_paths(manifest: &mut Value, session_dir: Option<&str>, staging_root: Option<&str>) {
     let Some(slurm) = manifest
         .get_mut("beampipe_run_record")
         .and_then(Value::as_object_mut)
@@ -481,7 +477,9 @@ fn record_slurm_paths(
     if !paths.is_object() {
         *paths = Value::Object(serde_json::Map::new());
     }
-    let paths = paths.as_object_mut().expect("paths reset to an object above");
+    let paths = paths
+        .as_object_mut()
+        .expect("paths reset to an object above");
     if let Some(session_dir) = session_dir.filter(|value| !value.trim().is_empty()) {
         paths.insert("session_dir".into(), Value::String(session_dir.into()));
     }

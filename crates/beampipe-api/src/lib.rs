@@ -3526,13 +3526,8 @@ async fn patch_execution(
         )
         .await
     } else {
-        repo::cancel_execution_with_correlation(
-            &state.pool,
-            id,
-            &actor,
-            Some(ctx.correlation_id()),
-        )
-        .await
+        repo::cancel_execution_with_correlation(&state.pool, id, &actor, Some(ctx.correlation_id()))
+            .await
     };
     let row = cancellation
         .map_err(|error| {
@@ -3655,9 +3650,7 @@ async fn cancel_execution_scheduler(
                 .clone()
                 .filter(|session_id| !session_id.trim().is_empty())
                 .ok_or_else(|| {
-                    ApiError::Conflict(
-                        "DALiuGE cancellation requires an exact session ID".into(),
-                    )
+                    ApiError::Conflict("DALiuGE cancellation requires an exact session ID".into())
                 })?;
             repo::ConfirmedExternalCancellation::Daliuge { session_id }
         }
@@ -4760,7 +4753,10 @@ adapters:
             let mut request = valid_submission_abandonment_request();
             request.expected_submission_state = state.into();
             let validated = request.validate().unwrap();
-            assert_eq!(validated.reason, "three complete scheduler negatives reviewed");
+            assert_eq!(
+                validated.reason,
+                "three complete scheduler negatives reviewed"
+            );
         }
 
         let mut request = valid_submission_abandonment_request();

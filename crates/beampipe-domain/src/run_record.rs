@@ -520,15 +520,8 @@ mod tests {
 
     #[test]
     fn dim_terminal_evidence_does_not_imply_aggregate_completion() {
-        let polled = merge_dim_poll_into_manifest(
-            None,
-            "session-1",
-            "finished",
-            true,
-            None,
-            None,
-            Some(0),
-        );
+        let polled =
+            merge_dim_poll_into_manifest(None, "session-1", "finished", true, None, None, Some(0));
         let terminal = &polled["beampipe_run_record"]["dim"]["terminal"];
 
         assert_eq!(terminal["session_state"], "finished");

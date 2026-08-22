@@ -1046,8 +1046,7 @@ mod tests {
             .unwrap();
         assert_eq!(default, 1_800);
 
-        let worker: WorkerFile =
-            serde_yaml::from_str("submission_timeout_seconds: 900\n").unwrap();
+        let worker: WorkerFile = serde_yaml::from_str("submission_timeout_seconds: 900\n").unwrap();
         assert_eq!(worker.submission_timeout_seconds, Some(900));
     }
 

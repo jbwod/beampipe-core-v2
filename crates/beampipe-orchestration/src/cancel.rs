@@ -178,10 +178,7 @@ struct SlurmCancelPollPolicy {
 
 #[async_trait]
 trait SlurmCancellationPoller {
-    async fn poll(
-        &mut self,
-        scheduler_job_id: &str,
-    ) -> Result<BackendPoll, OrchestrationError>;
+    async fn poll(&mut self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError>;
 }
 
 struct SshCancellationPoller<'a> {
@@ -192,20 +189,14 @@ struct SshCancellationPoller<'a> {
 
 #[async_trait]
 impl SlurmCancellationPoller for SshCancellationPoller<'_> {
-    async fn poll(
-        &mut self,
-        scheduler_job_id: &str,
-    ) -> Result<BackendPoll, OrchestrationError> {
+    async fn poll(&mut self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError> {
         if scheduler_job_id != self.scheduler_job_id {
             return Err(OrchestrationError::Backend(
                 "cancellation poll job identifier changed".into(),
             ));
         }
-        let results = query_slurm_states_batch(
-            self.session,
-            std::slice::from_ref(&self.slurm_id),
-        )
-        .await?;
+        let results =
+            query_slurm_states_batch(self.session, std::slice::from_ref(&self.slurm_id)).await?;
         let result = results.get(&self.slurm_id).cloned().ok_or_else(|| {
             OrchestrationError::Backend(format!(
                 "no cancellation poll result for slurm job {}",
@@ -297,9 +288,7 @@ pub fn rest_endpoint(rest: &RestRemoteDeploymentConfig) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        confirm_slurm_cancellation, SlurmCancelPollPolicy, SlurmCancellationPoller,
-    };
+    use super::{confirm_slurm_cancellation, SlurmCancelPollPolicy, SlurmCancellationPoller};
     use crate::{BackendPoll, OrchestrationError};
     use async_trait::async_trait;
     use beampipe_domain::ExecutionStatus;
@@ -338,9 +327,7 @@ mod tests {
                         "normalized_state": normalized_state,
                     }),
                 }),
-                Some(PollStep::Error(message)) => {
-                    Err(OrchestrationError::Backend(message.into()))
-                }
+                Some(PollStep::Error(message)) => Err(OrchestrationError::Backend(message.into())),
                 None => Err(OrchestrationError::Backend(
                     "fake poll sequence exhausted".into(),
                 )),
@@ -362,12 +349,8 @@ mod tests {
             PollStep::Status(ExecutionStatus::Cancelled, "CANCELLED"),
         ]);
 
-        let result = confirm_slurm_cancellation(
-            "session:12345|/dlg/run",
-            &mut poller,
-            test_policy(3),
-        )
-        .await;
+        let result =
+            confirm_slurm_cancellation("session:12345|/dlg/run", &mut poller, test_policy(3)).await;
 
         assert!(result.cancelled);
         assert_eq!(result.reason, None);
@@ -379,10 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn completion_race_is_not_reported_as_cancelled() {
-        let mut poller = FakeSlurmPoller::new([PollStep::Status(
-            ExecutionStatus::Completed,
-            "COMPLETED",
-        )]);
+        let mut poller =
+            FakeSlurmPoller::new([PollStep::Status(ExecutionStatus::Completed, "COMPLETED")]);
 
         let result = confirm_slurm_cancellation("12345", &mut poller, test_policy(3)).await;
 
@@ -405,11 +386,9 @@ mod tests {
         let result = confirm_slurm_cancellation("12345", &mut poller, test_policy(3)).await;
 
         assert!(!result.cancelled);
-        assert!(result
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("unconfirmed after 3 polls")
-                && reason.contains("UNKNOWN")));
+        assert!(result.reason.as_deref().is_some_and(|reason| reason
+            .contains("unconfirmed after 3 polls")
+            && reason.contains("UNKNOWN")));
         assert_eq!(poller.polled_ids.len(), 3);
     }
 

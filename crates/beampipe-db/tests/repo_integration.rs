@@ -1,14 +1,11 @@
 use beampipe_db::{
     connect, migrate,
     models::{
-        ExecutionArtifactInput, ExecutionObservationInput, ExecutionStatePatch,
-        WorkerRegistration,
+        ExecutionArtifactInput, ExecutionObservationInput, ExecutionStatePatch, WorkerRegistration,
     },
     repo,
 };
-use beampipe_domain::{
-    ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch, SubmissionState,
-};
+use beampipe_domain::{ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch, SubmissionState};
 use chrono::{Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -529,12 +526,11 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     assert!(held.terminal_outcome.is_none());
     assert!(held.completed_at.is_none());
 
-    let direct_completion = sqlx::query(
-        "UPDATE batch_execution_record SET status = 'completed' WHERE uuid = $1",
-    )
-    .bind(execution.uuid)
-    .execute(&pool)
-    .await;
+    let direct_completion =
+        sqlx::query("UPDATE batch_execution_record SET status = 'completed' WHERE uuid = $1")
+            .bind(execution.uuid)
+            .execute(&pool)
+            .await;
     assert!(
         direct_completion.is_err(),
         "the database must reject required, unverified completion"
@@ -575,8 +571,8 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     assert!(completed.completed_at.is_some());
     assert_eq!(stored.uri, artifact.uri);
     assert_eq!(
-        completed.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]
-            ["output_verification"]["artifact_id"],
+        completed.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["output_verification"]
+            ["artifact_id"],
         stored.uuid.to_string()
     );
     let source = repo::get_source_by_identifier(&pool, &module, "source-1")
@@ -759,7 +755,10 @@ async fn output_verification_preserves_discovery_that_changed_after_admission() 
         .unwrap()
         .unwrap();
     assert!(source.workflow_run_pending);
-    assert_eq!(source.workflow_claim_token.as_deref(), Some("changed-claim"));
+    assert_eq!(
+        source.workflow_claim_token.as_deref(),
+        Some("changed-claim")
+    );
     assert_ne!(
         source.last_executed_discovery_signature,
         source.discovery_signature
@@ -771,7 +770,10 @@ async fn output_verification_preserves_discovery_that_changed_after_admission() 
         .iter()
         .find(|event| event.event_type == "execution.completed")
         .unwrap();
-    assert_eq!(completed_event.payload["source_signatures_finalized"], false);
+    assert_eq!(
+        completed_event.payload["source_signatures_finalized"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -916,23 +918,38 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     assert!(!stale_success.entered_terminal);
     assert_eq!(stale_success.row.status, "cancelled");
     assert_eq!(stale_success.row.control_phase, cancelled.control_phase);
-    assert_eq!(stale_success.row.submission_state, cancelled.submission_state);
+    assert_eq!(
+        stale_success.row.submission_state,
+        cancelled.submission_state
+    );
     assert_eq!(stale_success.row.scheduler_name, cancelled.scheduler_name);
-    assert_eq!(stale_success.row.scheduler_job_id, cancelled.scheduler_job_id);
+    assert_eq!(
+        stale_success.row.scheduler_job_id,
+        cancelled.scheduler_job_id
+    );
     assert_eq!(stale_success.row.scheduler_state, cancelled.scheduler_state);
     assert_eq!(
         stale_success.row.scheduler_raw_state,
         cancelled.scheduler_raw_state
     );
-    assert_eq!(stale_success.row.scheduler_reason, cancelled.scheduler_reason);
+    assert_eq!(
+        stale_success.row.scheduler_reason,
+        cancelled.scheduler_reason
+    );
     assert_eq!(
         stale_success.row.daliuge_session_id,
         cancelled.daliuge_session_id
     );
     assert_eq!(stale_success.row.daliuge_state, cancelled.daliuge_state);
-    assert_eq!(stale_success.row.daliuge_raw_status, cancelled.daliuge_raw_status);
+    assert_eq!(
+        stale_success.row.daliuge_raw_status,
+        cancelled.daliuge_raw_status
+    );
     assert_eq!(stale_success.row.output_state, cancelled.output_state);
-    assert_eq!(stale_success.row.terminal_outcome, cancelled.terminal_outcome);
+    assert_eq!(
+        stale_success.row.terminal_outcome,
+        cancelled.terminal_outcome
+    );
 
     let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
         .await
@@ -1129,13 +1146,11 @@ async fn confirmed_exact_slurm_cancellation_wins_over_a_stale_running_patch() {
         ignored.row.scheduler_raw_state.as_deref(),
         Some("CANCELLED_CONFIRMED")
     );
-    let cancelled_job = repo::get_job_by_idempotency_key(
-        &pool,
-        execute_job.idempotency_key.as_deref().unwrap(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let cancelled_job =
+        repo::get_job_by_idempotency_key(&pool, execute_job.idempotency_key.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(cancelled_job.status, "cancelled");
 
     let session_dir = "/remote/sessions/BeampipeExecution-cancel-exact";
@@ -1159,10 +1174,22 @@ async fn confirmed_exact_slurm_cancellation_wins_over_a_stale_running_patch() {
     .await
     .unwrap();
     assert_eq!(late_receipt.execution.status, "cancelled");
-    assert_eq!(late_receipt.execution.control_phase.as_deref(), Some("terminal"));
-    assert_eq!(late_receipt.execution.submission_state.as_deref(), Some("submitted"));
-    assert_eq!(late_receipt.execution.scheduler_state.as_deref(), Some("cancelled"));
-    assert_eq!(late_receipt.execution.terminal_outcome.as_deref(), Some("cancelled"));
+    assert_eq!(
+        late_receipt.execution.control_phase.as_deref(),
+        Some("terminal")
+    );
+    assert_eq!(
+        late_receipt.execution.submission_state.as_deref(),
+        Some("submitted")
+    );
+    assert_eq!(
+        late_receipt.execution.scheduler_state.as_deref(),
+        Some("cancelled")
+    );
+    assert_eq!(
+        late_receipt.execution.terminal_outcome.as_deref(),
+        Some("cancelled")
+    );
 }
 
 #[tokio::test]
@@ -1405,14 +1432,17 @@ async fn prepare_submission_receipt_execution(
         1_800,
         (backend == "slurm").then_some("integration-target-sha"),
     )
-        .await
-        .unwrap()
-        .is_none());
+    .await
+    .unwrap()
+    .is_none());
     let execution = repo::get_execution(pool, execution.uuid)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(execution.submission_deadline_at, Some(submission_deadline_at));
+    assert_eq!(
+        execution.submission_deadline_at,
+        Some(submission_deadline_at)
+    );
     let intent = repo::list_execution_observations(pool, execution.uuid, 10, 0)
         .await
         .unwrap()
@@ -1441,8 +1471,7 @@ async fn prepare_abandonable_slurm_submission(
     beampipe_db::models::ExecutionRow,
     beampipe_db::models::ExecutionObservationRow,
 ) {
-    let execution =
-        prepare_submission_receipt_execution(pool, module, "slurm", session_id).await;
+    let execution = prepare_submission_receipt_execution(pool, module, "slurm", session_id).await;
     let now = Utc::now();
     let intent_at = now - Duration::hours(26);
     let deadline_at = intent_at + Duration::minutes(30);
@@ -1607,7 +1636,10 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
     assert_eq!(abandoned.control_phase.as_deref(), Some("terminal"));
     assert_eq!(abandoned.submission_state.as_deref(), Some("in_flight"));
     assert_eq!(abandoned.terminal_outcome.as_deref(), Some("inconsistent"));
-    assert_eq!(abandoned.failure_class.as_deref(), Some("inconsistent_state"));
+    assert_eq!(
+        abandoned.failure_class.as_deref(),
+        Some("inconsistent_state")
+    );
     assert!(abandoned.submission_abandoned_at.is_some());
     for job_id in [queued_job.uuid, expired_job.uuid] {
         let fenced: (
@@ -1634,16 +1666,12 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
         assert!(fenced.4.is_none());
         assert!(fenced.5.is_none());
     }
-    let abandonment_event = repo::list_provenance_events_for_execution(
-        &pool,
-        execution.uuid,
-        100,
-    )
-    .await
-    .unwrap()
-    .into_iter()
-    .find(|event| event.event_type == "execution.submission_abandoned")
-    .expect("durable abandonment provenance");
+    let abandonment_event = repo::list_provenance_events_for_execution(&pool, execution.uuid, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "execution.submission_abandoned")
+        .expect("durable abandonment provenance");
     let invalidated_ids = abandonment_event.payload["invalidated_execute_job_ids"]
         .as_array()
         .unwrap();
@@ -1702,17 +1730,20 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
     assert!(late.late_after_abandonment);
     assert_eq!(late.execution.status, "failed");
     assert_eq!(late.execution.control_phase.as_deref(), Some("terminal"));
-    assert_eq!(late.execution.submission_state.as_deref(), Some("in_flight"));
-    assert_eq!(late.execution.terminal_outcome.as_deref(), Some("inconsistent"));
+    assert_eq!(
+        late.execution.submission_state.as_deref(),
+        Some("in_flight")
+    );
+    assert_eq!(
+        late.execution.terminal_outcome.as_deref(),
+        Some("inconsistent")
+    );
     assert_eq!(late.execution.scheduler_job_id.as_deref(), Some("4242"));
     assert!(late.execution.physical_graph_sha256.is_some());
-    let events_before_replay = repo::list_provenance_events_for_execution(
-        &pool,
-        execution.uuid,
-        100,
-    )
-    .await
-    .unwrap();
+    let events_before_replay =
+        repo::list_provenance_events_for_execution(&pool, execution.uuid, 100)
+            .await
+            .unwrap();
     assert!(events_before_replay
         .iter()
         .any(|event| event.event_type == "execution.submission_detected_after_abandonment"));
@@ -1777,16 +1808,10 @@ async fn abandonment_rejects_an_active_execute_lease() {
     )
     .await
     .unwrap();
-    repo::claim_next_job_for_worker(
-        &pool,
-        worker,
-        &queue,
-        &["daliuge-deployment".into()],
-        60,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    repo::claim_next_job_for_worker(&pool, worker, &queue, &["daliuge-deployment".into()], 60)
+        .await
+        .unwrap()
+        .unwrap();
     sqlx::query(
         r#"
         UPDATE batch_execution_record
@@ -1820,8 +1845,14 @@ async fn abandonment_rejects_an_active_execute_lease() {
     )
     .await
     .unwrap();
-    assert_eq!(raced_lookup.execution.scheduler_state.as_deref(), Some("pending"));
-    assert_eq!(raced_lookup.execution.failure_class.as_deref(), Some("timeout"));
+    assert_eq!(
+        raced_lookup.execution.scheduler_state.as_deref(),
+        Some("pending")
+    );
+    assert_eq!(
+        raced_lookup.execution.failure_class.as_deref(),
+        Some("timeout")
+    );
     assert_eq!(
         raced_lookup.execution.last_error.as_deref(),
         Some("live submitter context")
@@ -1904,7 +1935,10 @@ async fn abandonment_rejects_a_scheduler_match_after_negative_evidence() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code(), "submission_abandonment_scheduler_match_observed");
+    assert_eq!(
+        error.code(),
+        "submission_abandonment_scheduler_match_observed"
+    );
 }
 
 #[tokio::test]
@@ -1991,9 +2025,18 @@ async fn submission_receipt_winning_the_row_lock_prevents_abandonment() {
         stale_lookup.observation.payload["canonical_state_mutation_allowed"],
         false
     );
-    assert_eq!(stale_lookup.observation.payload["eligible_for_abandonment"], false);
-    assert_eq!(stale_lookup.execution.submission_state.as_deref(), Some("submitted"));
-    assert_eq!(stale_lookup.execution.scheduler_job_id.as_deref(), Some("5252"));
+    assert_eq!(
+        stale_lookup.observation.payload["eligible_for_abandonment"],
+        false
+    );
+    assert_eq!(
+        stale_lookup.execution.submission_state.as_deref(),
+        Some("submitted")
+    );
+    assert_eq!(
+        stale_lookup.execution.scheduler_job_id.as_deref(),
+        Some("5252")
+    );
     let error = repo::abandon_slurm_submission(
         &pool,
         execution.uuid,
@@ -2054,12 +2097,18 @@ async fn slurm_submission_receipt_is_atomic_idempotent_and_conflict_safe() {
         .unwrap();
     assert!(!recorded.replayed);
     assert_eq!(recorded.execution.status, "awaiting_scheduler");
-    assert_eq!(recorded.execution.control_phase.as_deref(), Some("submitted"));
+    assert_eq!(
+        recorded.execution.control_phase.as_deref(),
+        Some("submitted")
+    );
     assert_eq!(
         recorded.execution.submission_state.as_deref(),
         Some("submitted")
     );
-    assert_eq!(recorded.execution.scheduler_state.as_deref(), Some("pending"));
+    assert_eq!(
+        recorded.execution.scheduler_state.as_deref(),
+        Some("pending")
+    );
     assert_eq!(
         recorded.execution.daliuge_state.as_deref(),
         Some("not_created")
@@ -2076,9 +2125,11 @@ async fn slurm_submission_receipt_is_atomic_idempotent_and_conflict_safe() {
         recorded.physical_graph_artifact.metadata["staging_root"],
         staging_root
     );
-    assert!(recorded.physical_graph_artifact.metadata["submission_receipt_sha256"]
-        .as_str()
-        .is_some_and(|value| value.len() == 64));
+    assert!(
+        recorded.physical_graph_artifact.metadata["submission_receipt_sha256"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64)
+    );
 
     let artifact_count = repo::list_execution_artifacts(&pool, execution.uuid)
         .await
@@ -2162,7 +2213,10 @@ async fn slurm_submission_receipt_is_atomic_idempotent_and_conflict_safe() {
         .unwrap()
         .unwrap();
     assert_eq!(unchanged.scheduler_job_id.as_deref(), Some("4242"));
-    assert_eq!(unchanged.physical_graph_sha256, recorded.execution.physical_graph_sha256);
+    assert_eq!(
+        unchanged.physical_graph_sha256,
+        recorded.execution.physical_graph_sha256
+    );
 }
 
 #[tokio::test]
@@ -2194,7 +2248,10 @@ async fn recovered_exact_slurm_id_stays_uncertain_until_the_receipt_commits() {
         .unwrap()
         .unwrap();
     assert_eq!(recovered.status, "awaiting_scheduler");
-    assert_eq!(recovered.control_phase.as_deref(), Some("submission_pending"));
+    assert_eq!(
+        recovered.control_phase.as_deref(),
+        Some("submission_pending")
+    );
     assert_eq!(recovered.submission_state.as_deref(), Some("uncertain"));
     assert_eq!(recovered.scheduler_job_id.as_deref(), Some("4242"));
     assert_eq!(recovered.scheduler_state.as_deref(), Some("running"));
@@ -2246,9 +2303,18 @@ async fn recovered_exact_slurm_id_stays_uncertain_until_the_receipt_commits() {
     .await
     .unwrap();
     assert_eq!(recorded.execution.status, "running");
-    assert_eq!(recorded.execution.control_phase.as_deref(), Some("submitted"));
-    assert_eq!(recorded.execution.submission_state.as_deref(), Some("submitted"));
-    assert_eq!(recorded.execution.scheduler_state.as_deref(), Some("running"));
+    assert_eq!(
+        recorded.execution.control_phase.as_deref(),
+        Some("submitted")
+    );
+    assert_eq!(
+        recorded.execution.submission_state.as_deref(),
+        Some("submitted")
+    );
+    assert_eq!(
+        recorded.execution.scheduler_state.as_deref(),
+        Some("running")
+    );
     assert!(recorded.execution.physical_graph_sha256.is_some());
 }
 

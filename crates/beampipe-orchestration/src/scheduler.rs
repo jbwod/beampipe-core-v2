@@ -119,11 +119,7 @@ impl SchedulerAdapterError {
         }
     }
 
-    fn invalid_response(
-        operation: &str,
-        target: &str,
-        detail: impl Into<String>,
-    ) -> Self {
+    fn invalid_response(operation: &str, target: &str, detail: impl Into<String>) -> Self {
         let detail = detail.into();
         Self {
             scheduler: SchedulerKind::SlurmRemote,
@@ -792,7 +788,10 @@ fn parse_named_jobs(
             return Err(NamedJobParseError::new(
                 source,
                 line_number,
-                format!("expected 4 pipe-delimited fields, received {}", fields.len()),
+                format!(
+                    "expected 4 pipe-delimited fields, received {}",
+                    fields.len()
+                ),
             ));
         }
         let returned_name = fields[1].trim();
@@ -846,12 +845,7 @@ fn complete_named_job_lookup(
     squeue_output: &str,
     sacct_output: &str,
 ) -> Result<SchedulerNameLookup, NamedJobParseError> {
-    let squeue = parse_named_jobs(
-        squeue_output,
-        job_name,
-        "squeue",
-        query_completed_at,
-    )?;
+    let squeue = parse_named_jobs(squeue_output, job_name, "squeue", query_completed_at)?;
     let sacct = parse_named_jobs(sacct_output, job_name, "sacct", query_completed_at)?;
     Ok(SchedulerNameLookup {
         job_name: job_name.into(),
@@ -1091,13 +1085,8 @@ mod tests {
     fn named_job_lookup_rejects_invalid_exact_name_job_id() {
         for invalid_id in ["123.batch", "123_4", "not-a-job", "123;touch"] {
             let output = format!("{invalid_id}|BeampipeExecution-abc|COMPLETED|None\n");
-            let error = parse_named_jobs(
-                &output,
-                "BeampipeExecution-abc",
-                "sacct",
-                timestamp(1),
-            )
-            .expect_err("invalid IDs must not become matches or negative evidence");
+            let error = parse_named_jobs(&output, "BeampipeExecution-abc", "sacct", timestamp(1))
+                .expect_err("invalid IDs must not become matches or negative evidence");
 
             assert!(error.message.contains("invalid allocation job ID"));
         }

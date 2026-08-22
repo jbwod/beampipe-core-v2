@@ -3040,21 +3040,13 @@ async fn run_execute(
 fn submission_state_holds_automatic_work(state: Option<SubmissionState>) -> bool {
     matches!(
         state,
-        Some(
-            SubmissionState::InFlight
-                | SubmissionState::Uncertain
-                | SubmissionState::Submitted
-        )
+        Some(SubmissionState::InFlight | SubmissionState::Uncertain | SubmissionState::Submitted)
     )
 }
 
 type ExecutionDatasetScope = BTreeMap<(String, String), BTreeSet<String>>;
 
-fn required_dataset_string(
-    dataset: &Value,
-    field: &str,
-    context: &str,
-) -> Result<String, String> {
+fn required_dataset_string(dataset: &Value, field: &str, context: &str) -> Result<String, String> {
     dataset
         .get(field)
         .and_then(Value::as_str)
@@ -3722,10 +3714,9 @@ async fn run_submit_phase(
             });
         match deployment {
             Some(deployment) => Some(resolved_slurm_target_fingerprint(&deployment)?),
-            None if !use_real => Some(
-                json_sha256(&json!({"backend": "mock-slurm"}))
-                    .map(|(sha256, _)| sha256)?,
-            ),
+            None if !use_real => {
+                Some(json_sha256(&json!({"backend": "mock-slurm"})).map(|(sha256, _)| sha256)?)
+            }
             None => {
                 return Err(
                     "real Slurm submission requires a valid pinned deployment profile".into(),
@@ -4186,10 +4177,7 @@ async fn apply_dim_poll_update(
                 Some(execution_id),
             )
             .await?;
-            metrics::record_execute_terminal(
-                &execution.project_module,
-                aggregate_status.as_str(),
-            );
+            metrics::record_execute_terminal(&execution.project_module, aggregate_status.as_str());
         }
         return Ok(());
     }
@@ -4971,8 +4959,7 @@ async fn run_slurm_poll_tick(
             }
         };
         let slurm_job_id = slurm_job_id_from_scheduler(scheduler_job_id);
-        if let Err(error) =
-            beampipe_orchestration::slurm_ssh::validate_slurm_job_id(&slurm_job_id)
+        if let Err(error) = beampipe_orchestration::slurm_ssh::validate_slurm_job_id(&slurm_job_id)
         {
             record_slurm_poll_failure(
                 pool,
@@ -5256,8 +5243,8 @@ async fn reconcile_uncertain_slurm_submissions(
             .await?;
             continue;
         };
-        let current_target_fingerprint = resolved_slurm_target_fingerprint(&deployment)
-            .map_err(sqlx::Error::Protocol)?;
+        let current_target_fingerprint =
+            resolved_slurm_target_fingerprint(&deployment).map_err(sqlx::Error::Protocol)?;
         if current_target_fingerprint != intent_target_fingerprint {
             record_slurm_poll_failure(
                 pool,
@@ -5887,9 +5874,11 @@ mod tests {
         assert!(validate_staged_dataset_scope(&[], &[], &expected)
             .unwrap_err()
             .contains("changed selected dataset scope"));
-        assert!(validate_staged_dataset_scope(&[selected.clone()], &["1".into()], &expected)
-            .unwrap_err()
-            .contains("skipped selected SBIDs 1"));
+        assert!(
+            validate_staged_dataset_scope(&[selected.clone()], &["1".into()], &expected)
+                .unwrap_err()
+                .contains("skipped selected SBIDs 1")
+        );
 
         let extra = scoped_dataset("source-1", "1", "dataset-2");
         assert!(validate_manifest_dataset_scope(
@@ -5913,7 +5902,10 @@ mod tests {
             SchedulerState::TimedOut
         );
         assert_eq!(terminal_reason("TIMEOUT"), Some("timeout"));
-        assert_eq!(terminal_ledger_status(ExecutionStatus::Failed), Some("failed"));
+        assert_eq!(
+            terminal_ledger_status(ExecutionStatus::Failed),
+            Some("failed")
+        );
     }
 
     #[test]
@@ -5943,22 +5935,15 @@ mod tests {
         let first = advance_slurm_poll_progress(None, 479, 480, "scheduler_state_unknown");
         assert_eq!(first.next_round, 480);
         assert!(first.operator_escalated);
-        assert_eq!(
-            slurm_poll_round_from_manifest(Some(&first.manifest)),
-            480
-        );
+        assert_eq!(slurm_poll_round_from_manifest(Some(&first.manifest)), 480);
         assert_eq!(
             first.manifest["beampipe_run_record"]["slurm_poll"]["operator_escalation"]
                 ["terminalized"],
             false
         );
 
-        let second = advance_slurm_poll_progress(
-            Some(first.manifest),
-            480,
-            480,
-            "scheduler_state_unknown",
-        );
+        let second =
+            advance_slurm_poll_progress(Some(first.manifest), 480, 480, "scheduler_state_unknown");
         assert_eq!(second.next_round, 481);
         assert!(!second.operator_escalated);
         assert_eq!(
@@ -5993,11 +5978,9 @@ mod tests {
 
     #[tokio::test]
     async fn slurm_target_wall_clock_timeout_bounds_a_stalled_query() {
-        let result = within_slurm_target_timeout(
-            Duration::from_millis(1),
-            std::future::pending::<()>(),
-        )
-        .await;
+        let result =
+            within_slurm_target_timeout(Duration::from_millis(1), std::future::pending::<()>())
+                .await;
 
         assert!(result.is_err());
         assert_eq!(SLURM_TARGET_WALL_CLOCK_TIMEOUT, Duration::from_secs(60));
@@ -6015,18 +5998,12 @@ mod tests {
             Duration::ZERO
         );
 
-        let timed_out = within_submission_timeout(
-            Duration::from_millis(5),
-            std::future::pending::<()>(),
-        )
-        .await;
+        let timed_out =
+            within_submission_timeout(Duration::from_millis(5), std::future::pending::<()>()).await;
         assert!(timed_out.is_err());
 
-        let completed = within_submission_timeout(
-            Duration::from_secs(1),
-            async { "receipt" },
-        )
-        .await;
+        let completed =
+            within_submission_timeout(Duration::from_secs(1), async { "receipt" }).await;
         assert_eq!(completed.unwrap(), "receipt");
 
         let patch = submission_timeout_patch("deadline exceeded".into());
@@ -6072,16 +6049,9 @@ mod tests {
             ..Default::default()
         };
 
-        apply_slurm_poll_update(
-            &pool,
-            execution.uuid,
-            &execution,
-            &unknown,
-            0,
-            &policy,
-        )
-        .await
-        .unwrap();
+        apply_slurm_poll_update(&pool, execution.uuid, &execution, &unknown, 0, &policy)
+            .await
+            .unwrap();
         let first = repo::get_execution(&pool, execution.uuid)
             .await
             .unwrap()
@@ -6365,7 +6335,10 @@ mod tests {
         assert_eq!(after_slurm.scheduler_state, cancelled_slurm.scheduler_state);
         assert_eq!(after_slurm.daliuge_state, cancelled_slurm.daliuge_state);
         assert_eq!(after_slurm.output_state, cancelled_slurm.output_state);
-        assert_eq!(after_slurm.workflow_manifest, cancelled_slurm.workflow_manifest);
+        assert_eq!(
+            after_slurm.workflow_manifest,
+            cancelled_slurm.workflow_manifest
+        );
         assert_eq!(
             after_slurm.workflow_manifest,
             Some(json!({"sentinel": "slurm-before-cancel"}))
@@ -6400,10 +6373,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let stale_dim = repo::get_execution(&pool, dim.uuid)
-            .await
-            .unwrap()
-            .unwrap();
+        let stale_dim = repo::get_execution(&pool, dim.uuid).await.unwrap().unwrap();
         let cancelled_dim = repo::cancel_execution_with_confirmed_external_cancellation(
             &pool,
             dim.uuid,
@@ -6439,10 +6409,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let after_dim = repo::get_execution(&pool, dim.uuid)
-            .await
-            .unwrap()
-            .unwrap();
+        let after_dim = repo::get_execution(&pool, dim.uuid).await.unwrap().unwrap();
         assert_eq!(after_dim.status, "cancelled");
         assert_eq!(after_dim.control_phase, cancelled_dim.control_phase);
         assert_eq!(after_dim.scheduler_state, cancelled_dim.scheduler_state);
@@ -6457,15 +6424,15 @@ mod tests {
         let slurm_observations = repo::list_execution_observations(&pool, slurm.uuid, 100, 0)
             .await
             .unwrap();
-        assert!(slurm_observations.iter().any(|observation| {
-            observation.raw_state.as_deref() == Some("COMPLETED")
-        }));
+        assert!(slurm_observations
+            .iter()
+            .any(|observation| { observation.raw_state.as_deref() == Some("COMPLETED") }));
         let dim_observations = repo::list_execution_observations(&pool, dim.uuid, 100, 0)
             .await
             .unwrap();
-        assert!(dim_observations.iter().any(|observation| {
-            observation.normalized_state == "finished"
-        }));
+        assert!(dim_observations
+            .iter()
+            .any(|observation| { observation.normalized_state == "finished" }));
     }
 
     #[test]
@@ -6663,10 +6630,12 @@ mod tests {
                 );
                 assert_eq!(updated.daliuge_state.as_deref(), Some("finished"));
                 assert!(updated.terminal_outcome.is_none());
-                assert!(updated.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["dim"]
-                    ["terminal"]
-                    .get("ledger_status")
-                    .is_none());
+                assert!(
+                    updated.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["dim"]
+                        ["terminal"]
+                        .get("ledger_status")
+                        .is_none()
+                );
                 assert!(!repo::list_rest_executions_pending_poll(&pool)
                     .await
                     .unwrap()
@@ -6930,20 +6899,18 @@ mod tests {
 
     #[test]
     fn submission_target_fingerprint_includes_the_resolved_remote_user() {
-        let DeploymentConfig::SlurmRemote(mut deployment) =
-            serde_json::from_value(json!({
-                "kind": "slurm_remote",
-                "login_node": "setonix.example",
-                "ssh_port": 22,
-                "remote_user": "operator-a",
-                "ssh_credential": "hpc",
-                "account": "project",
-                "home_dir": "/home/operator-a",
-                "log_dir": "/scratch/project/logs",
-                "dlg_root": "/scratch/project/dlg"
-            }))
-            .unwrap()
-        else {
+        let DeploymentConfig::SlurmRemote(mut deployment) = serde_json::from_value(json!({
+            "kind": "slurm_remote",
+            "login_node": "setonix.example",
+            "ssh_port": 22,
+            "remote_user": "operator-a",
+            "ssh_credential": "hpc",
+            "account": "project",
+            "home_dir": "/home/operator-a",
+            "log_dir": "/scratch/project/logs",
+            "dlg_root": "/scratch/project/dlg"
+        }))
+        .unwrap() else {
             panic!("expected Slurm profile");
         };
         let first = resolved_slurm_target_fingerprint(&deployment).unwrap();

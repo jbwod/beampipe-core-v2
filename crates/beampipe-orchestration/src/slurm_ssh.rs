@@ -323,15 +323,12 @@ impl SlurmSshSession {
             .channel_open_session()
             .await
             .map_err(|e| OrchestrationError::Backend(format!("SSH channel: {e}")))?;
-        channel
-            .exec(true, command)
-            .await
-            .map_err(|error| {
-                remote_command_transport_error(
-                    kind,
-                    format!("SSH exec response was not observed for {command:?}: {error}"),
-                )
-            })?;
+        channel.exec(true, command).await.map_err(|error| {
+            remote_command_transport_error(
+                kind,
+                format!("SSH exec response was not observed for {command:?}: {error}"),
+            )
+        })?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -448,10 +445,7 @@ struct RemoteCommandOutput {
     exit_status: u32,
 }
 
-fn remote_command_transport_error(
-    kind: RemoteCommandKind,
-    detail: String,
-) -> OrchestrationError {
+fn remote_command_transport_error(kind: RemoteCommandKind, detail: String) -> OrchestrationError {
     match kind {
         RemoteCommandKind::Ordinary => OrchestrationError::Backend(detail),
         RemoteCommandKind::Submission => OrchestrationError::SubmissionUncertain(detail),
@@ -600,7 +594,10 @@ fn sacct_query_command(job_ids: &str) -> String {
 }
 
 fn is_missing_squeue_job_error(stderr: &str) -> bool {
-    let mut lines = stderr.lines().map(str::trim).filter(|line| !line.is_empty());
+    let mut lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
     let Some(first) = lines.next() else {
         return false;
     };
@@ -610,10 +607,7 @@ fn is_missing_squeue_job_error(stderr: &str) -> bool {
     })
 }
 
-fn squeue_stdout(
-    command: &str,
-    output: RemoteCommandOutput,
-) -> Result<String, OrchestrationError> {
+fn squeue_stdout(command: &str, output: RemoteCommandOutput) -> Result<String, OrchestrationError> {
     if output.exit_status == 0 || is_missing_squeue_job_error(&output.stderr) {
         return Ok(output.stdout);
     }
@@ -640,10 +634,8 @@ pub async fn query_slurm_states_batch(
     for chunk in chunk_job_ids(job_ids) {
         let joined = chunk.join(",");
         let squeue_cmd = squeue_query_command(&joined);
-        let squeue_out = squeue_stdout(
-            &squeue_cmd,
-            session.run_command_output(&squeue_cmd).await?,
-        )?;
+        let squeue_out =
+            squeue_stdout(&squeue_cmd, session.run_command_output(&squeue_cmd).await?)?;
         squeue_all.extend(parse_squeue_batch(&squeue_out));
 
         let missing: Vec<String> = chunk
@@ -678,9 +670,9 @@ pub fn scancel_command(job_id: &str) -> Result<String, OrchestrationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_stdout, is_missing_squeue_job_error,
-        known_host_patterns_match, known_hosts_has_target, load_known_host_keys, scancel_command,
-        remote_command_transport_error, sacct_query_command, squeue_query_command, squeue_stdout,
+        command_stdout, is_missing_squeue_job_error, known_host_patterns_match,
+        known_hosts_has_target, load_known_host_keys, remote_command_transport_error,
+        sacct_query_command, scancel_command, squeue_query_command, squeue_stdout,
         upload_text_command, validate_slurm_job_id, RemoteCommandKind, RemoteCommandOutput,
         SlurmSshPool, SlurmTarget,
     };

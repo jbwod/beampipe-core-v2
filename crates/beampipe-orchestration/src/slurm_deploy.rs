@@ -261,13 +261,9 @@ fn sbatch_command(
     jobsub_path: &str,
     staging_root: &str,
 ) -> Result<String, OrchestrationError> {
-    sbatch_command_with(
-        deployment,
-        session_id,
-        jobsub_path,
-        staging_root,
-        |name| std::env::var(name).ok(),
-    )
+    sbatch_command_with(deployment, session_id, jobsub_path, staging_root, |name| {
+        std::env::var(name).ok()
+    })
 }
 
 pub fn create_dlg_job_argv(
@@ -411,12 +407,15 @@ fn derive_session_paths(
             "job submission script path must be beneath DLG_ROOT".into(),
         ));
     }
-    let session_dir = jobsub_path.parent().filter(|path| *path != dlg_root).ok_or_else(|| {
-        OrchestrationError::Backend(
-            "job submission script path must be inside a session directory beneath DLG_ROOT"
-                .into(),
-        )
-    })?;
+    let session_dir = jobsub_path
+        .parent()
+        .filter(|path| *path != dlg_root)
+        .ok_or_else(|| {
+            OrchestrationError::Backend(
+                "job submission script path must be inside a session directory beneath DLG_ROOT"
+                    .into(),
+            )
+        })?;
     let staging_root = session_dir.join("wallaby-staging");
     Ok((
         session_dir.to_string_lossy().into_owned(),
@@ -506,12 +505,7 @@ pub async fn submit_slurm_session(
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
     let (session_dir, staging_root) = derive_session_paths(&jobsub_path, &dlg_root)?;
-    let sbatch = sbatch_command(
-        &deployment,
-        &session_id,
-        &jobsub_path,
-        &staging_root,
-    )?;
+    let sbatch = sbatch_command(&deployment, &session_id, &jobsub_path, &staging_root)?;
     let sbatch_out = session.run_submission_command(&sbatch).await?;
     let _ = session.close().await;
 
@@ -677,9 +671,8 @@ mod tests {
     fn outer_sbatch_exports_a_distinct_wallaby_root_per_session() {
         let mut dep = deployment();
         dep.dlg_root = "/dlg root".into();
-        dep.environment_setup = Some(
-            "export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"".into(),
-        );
+        dep.environment_setup =
+            Some("export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
         let (_, root_a) =
             derive_session_paths("/dlg root/sessions/execution-a/job sub.sh", &dep.dlg_root)
                 .unwrap();
@@ -808,9 +801,7 @@ mod tests {
             "session id",
             "/dlg/job sub.sh",
             "/dlg/sessions/session id/wallaby-staging",
-            |name| {
-                (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into())
-            },
+            |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into()),
         )
         .unwrap();
 

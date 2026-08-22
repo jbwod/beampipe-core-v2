@@ -14,8 +14,7 @@ use std::future::Future;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-const LIVE_SLURM_PROBE_ENABLED_ENV: &str =
-    "BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED";
+const LIVE_SLURM_PROBE_ENABLED_ENV: &str = "BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED";
 const USE_REAL_BACKENDS_ENV: &str = "BEAMPIPE_USE_REAL_BACKENDS";
 
 static LAST_SOURCE_PROCESSING_KEYS: LazyLock<Mutex<HashSet<(String, String)>>> =
@@ -642,15 +641,10 @@ mod tests {
     async fn disabled_slurm_probe_never_invokes_runner() {
         let probe = slurm_profile_probe();
         let calls = AtomicUsize::new(0);
-        let result = run_profile_probe_with(
-            &probe,
-            Duration::from_secs(7),
-            false,
-            |_, _| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                std::future::ready(true)
-            },
-        )
+        let result = run_profile_probe_with(&probe, Duration::from_secs(7), false, |_, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(true)
+        })
         .await;
 
         assert_eq!(result, None);
@@ -661,18 +655,14 @@ mod tests {
     async fn enabled_slurm_probe_invokes_runner_once_and_returns_result() {
         let probe = slurm_profile_probe();
         let calls = AtomicUsize::new(0);
-        let result = run_profile_probe_with(
-            &probe,
-            Duration::from_secs(7),
-            true,
-            |slurm, timeout| {
+        let result =
+            run_profile_probe_with(&probe, Duration::from_secs(7), true, |slurm, timeout| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(slurm.login_node, "login.example.org");
                 assert_eq!(timeout, Duration::from_secs(7));
                 std::future::ready(false)
-            },
-        )
-        .await;
+            })
+            .await;
 
         assert_eq!(result, Some(false));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
