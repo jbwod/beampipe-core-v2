@@ -33,7 +33,7 @@
       "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
       "id": 3,
       "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"expr": "sum(max by (dependency) (beampipe_dependency_up) == 0) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "(sum(max by (dependency) (beampipe_dependency_up) == 0) or vector(0)) + (sum(max by (profile, dependency) (beampipe_deployment_profile_dependency_up) == 0) or vector(0))", "refId": "A"}],
       "title": "Dependencies down",
       "type": "stat"
     },

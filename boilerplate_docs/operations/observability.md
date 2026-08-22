@@ -29,12 +29,14 @@ Each host process needs a unique metrics bind address. Containers can all use `0
 | API traffic | Is operator/API demand healthy? | request rate, error ratio, p50/p95 latency, route and status |
 | Queue | Is work arriving faster than it completes? | queued/running jobs, oldest age, retries, dead letters |
 | Workers | Is capacity healthy and correctly routed? | active workers, heartbeats, leases, utilization by pool/capability |
-| Dependencies | Is pressure external? | TAP, TM, DIM, SSH/Slurm health and latency |
+| Dependencies | Is pressure external? | global TAP health plus TM, DIM, and real SSH/Slurm probes for default or in-flight deployment profiles |
 | Discovery | Are sources becoming ready? | checked/changed/error outcomes, duration, pending sources |
 | Execution | Are runs progressing safely? | control phase, terminal outcomes, uncertain submissions, poll errors |
 | Security | Are production policies being rejected? | security-check failures and inline-secret rejections |
 
 Do not put high-cardinality source IDs, execution IDs, session IDs, URLs, or error strings into metric labels. Those belong in events and structured logs.
+In-flight source gauges are aggregated by project and phase; deployment
+dependency gauges are bounded by the configured profile registry.
 
 ## Prometheus and alerts
 

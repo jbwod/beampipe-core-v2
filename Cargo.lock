@@ -592,6 +592,7 @@ dependencies = [
  "beampipe-db",
  "beampipe-domain",
  "beampipe-orchestration",
+ "beampipe-profiles",
  "chrono",
  "metrics",
  "metrics-exporter-prometheus",

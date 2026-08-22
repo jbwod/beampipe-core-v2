@@ -64,6 +64,15 @@ groups:
           summary: "Dependency unreachable"
           description: "Postgres or TAP dependency gauge reports down (refreshed from metrics server)."
 
+      - alert: BeampipeDeploymentProfileDependencyDown
+        expr: max by (profile, dependency) (last_over_time(beampipe_deployment_profile_dependency_up[5m])) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Deployment profile dependency unreachable"
+          description: "The {{ $labels.dependency }} dependency for profile {{ $labels.profile }} is unreachable."
+
       - alert: BeampipeSlurmPollErrors
         expr: increase(beampipe_slurm_poll_errors_total[10m]) > 3
         for: 5m

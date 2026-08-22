@@ -70,25 +70,28 @@ pub fn set_pending_age_seconds(project_module: &str, age: i64) {
 }
 
 /// `phase`: `discovering`, `admitting`, or `executing` (see `list_sources_currently_processing`).
-pub fn set_source_processing(
-    project_module: &str,
-    source_identifier: &str,
-    phase: &str,
-    active: bool,
-) {
+pub fn set_sources_processing(project_module: &str, phase: &str, count: i64) {
     gauge!(
-        "beampipe_source_processing",
+        "beampipe_sources_processing",
         "project_module" => project_module.to_string(),
-        "source_identifier" => source_identifier.to_string(),
         "phase" => phase.to_string()
     )
-    .set(if active { 1.0 } else { 0.0 });
+    .set(count.max(0) as f64);
 }
 
 pub fn set_dependency_up(name: &str, up: bool) {
     gauge!(
         "beampipe_dependency_up",
         "dependency" => name.to_string()
+    )
+    .set(if up { 1.0 } else { 0.0 });
+}
+
+pub fn set_deployment_profile_dependency_up(profile: &str, dependency: &str, up: bool) {
+    gauge!(
+        "beampipe_deployment_profile_dependency_up",
+        "profile" => profile.to_string(),
+        "dependency" => dependency.to_string()
     )
     .set(if up { 1.0 } else { 0.0 });
 }

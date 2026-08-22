@@ -1,15 +1,21 @@
 //! Periodic refresh of DB-backed Prometheus gauges and dependency probes.
 
 use beampipe_adapters::probe_tap_health;
+use beampipe_db::models::DeploymentProfileRow;
 use beampipe_db::test_modules::is_integration_test_project_module;
+use beampipe_orchestration::cancel::rest_endpoint;
 use beampipe_orchestration::slurm_credentials::SlurmSshCredentials;
+use beampipe_orchestration::slurm_deploy::{probe_slurm_login, resolve_remote_user};
 use beampipe_orchestration::tm_health::{probe_dim_reachable, probe_tm_reachable, TmProbeResult};
+use beampipe_profiles::{DaliugeTranslationConfig, DeploymentConfig, SlurmRemoteDeploymentConfig};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-static LAST_SOURCE_PROCESSING_KEYS: LazyLock<Mutex<HashSet<(String, String, String)>>> =
+static LAST_SOURCE_PROCESSING_KEYS: LazyLock<Mutex<HashSet<(String, String)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static LAST_PROFILE_DEPENDENCY_KEYS: LazyLock<Mutex<HashSet<(String, String)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static LAST_JOB_KIND_KEYS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -26,6 +32,24 @@ fn phase_priority(phase: &str) -> u8 {
         "admitting" => 2,
         "discovering" => 1,
         _ => 0,
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ProfileProbe {
+    Http {
+        dependency: &'static str,
+        url: String,
+    },
+    Slurm(Box<SlurmRemoteDeploymentConfig>),
+}
+
+impl ProfileProbe {
+    fn dependency(&self) -> &'static str {
+        match self {
+            Self::Http { dependency, .. } => dependency,
+            Self::Slurm(_) => "slurm",
+        }
     }
 }
 
@@ -74,29 +98,170 @@ pub async fn refresh_dependencies(pool: &PgPool) {
     };
     crate::set_dependency_up("redis", redis_up);
 
-    crate::set_slurm_ssh_configured(SlurmSshCredentials::try_resolve_ok());
-
-    let tm_url = std::env::var("BEAMPIPE_TM_HEALTH_URL")
+    let fallback_tm_url = std::env::var("BEAMPIPE_TM_HEALTH_URL")
         .or_else(|_| std::env::var("BEAMPIPE_TM_URL"))
-        .unwrap_or_else(|_| "http://localhost:9000".into());
-    let tm_up = matches!(
-        probe_tm_reachable(&tm_url, Duration::from_secs(timeout_secs)).await,
-        TmProbeResult::Ok | TmProbeResult::NotConfigured
-    );
-    crate::set_dependency_up("tm", tm_up);
-
-    let dim_url = std::env::var("BEAMPIPE_DIM_HEALTH_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty());
+    let fallback_dim_url = std::env::var("BEAMPIPE_DIM_HEALTH_URL")
         .or_else(|_| std::env::var("BEAMPIPE_DIM_URL"))
-        .unwrap_or_default();
-    let dim_up = if dim_url.trim().is_empty() {
-        true
-    } else {
-        matches!(
-            probe_dim_reachable(&dim_url, Duration::from_secs(timeout_secs)).await,
+        .ok()
+        .filter(|url| !url.trim().is_empty());
+    refresh_profile_dependencies(
+        pool,
+        fallback_tm_url.as_deref(),
+        fallback_dim_url.as_deref(),
+        Duration::from_secs(timeout_secs),
+    )
+    .await;
+}
+
+async fn active_deployment_profiles(
+    pool: &PgPool,
+) -> Result<Vec<DeploymentProfileRow>, sqlx::Error> {
+    sqlx::query_as::<_, DeploymentProfileRow>(
+        r#"
+        SELECT profile.*
+        FROM daliuge_deployment_profile profile
+        WHERE profile.is_default = true
+           OR EXISTS (
+                SELECT 1
+                FROM batch_execution_record execution
+                WHERE execution.deployment_profile_id = profile.uuid
+                  AND execution.status IN (
+                      'pending', 'running', 'awaiting_scheduler', 'retrying'
+                  )
+           )
+        ORDER BY profile.name ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+fn profile_probes(
+    profile: &DeploymentProfileRow,
+    fallback_tm_url: Option<&str>,
+    fallback_dim_url: Option<&str>,
+) -> Result<Vec<ProfileProbe>, serde_json::Error> {
+    let translation: DaliugeTranslationConfig =
+        serde_json::from_value(profile.translation.clone())?;
+    let deployment: DeploymentConfig = serde_json::from_value(profile.deployment.clone())?;
+    let mut probes = Vec::new();
+    if let Some(url) = translation
+        .tm_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+        .or(fallback_tm_url)
+    {
+        probes.push(ProfileProbe::Http {
+            dependency: "tm",
+            url: url.to_string(),
+        });
+    }
+    match deployment {
+        DeploymentConfig::RestRemote(rest) => {
+            if let Some(url) = rest_endpoint(&rest).or_else(|| fallback_dim_url.map(str::to_string))
+            {
+                probes.push(ProfileProbe::Http {
+                    dependency: "dim",
+                    url,
+                });
+            }
+        }
+        DeploymentConfig::SlurmRemote(slurm) => probes.push(ProfileProbe::Slurm(Box::new(slurm))),
+    }
+    Ok(probes)
+}
+
+async fn run_profile_probe(probe: &ProfileProbe, timeout: Duration) -> bool {
+    match probe {
+        ProfileProbe::Http {
+            dependency: "tm",
+            url,
+        } => matches!(
+            probe_tm_reachable(url, timeout).await,
             TmProbeResult::Ok | TmProbeResult::NotConfigured
-        )
+        ),
+        ProfileProbe::Http { url, .. } => matches!(
+            probe_dim_reachable(url, timeout).await,
+            TmProbeResult::Ok | TmProbeResult::NotConfigured
+        ),
+        ProfileProbe::Slurm(slurm) => {
+            let username = resolve_remote_user(slurm);
+            matches!(
+                tokio::time::timeout(timeout, probe_slurm_login(slurm, &username)).await,
+                Ok(Ok(()))
+            )
+        }
+    }
+}
+
+async fn refresh_profile_dependencies(
+    pool: &PgPool,
+    fallback_tm_url: Option<&str>,
+    fallback_dim_url: Option<&str>,
+    timeout: Duration,
+) {
+    let profiles = match active_deployment_profiles(pool).await {
+        Ok(profiles) => profiles,
+        Err(error) => {
+            tracing::warn!(event = "metrics_profile_query_failed", %error);
+            return;
+        }
     };
-    crate::set_dependency_up("dim", dim_up);
+    let mut current = HashSet::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut slurm_credentials_configured = true;
+    for profile in profiles {
+        let probes = match profile_probes(&profile, fallback_tm_url, fallback_dim_url) {
+            Ok(probes) => probes,
+            Err(error) => {
+                current.insert((profile.name.clone(), "configuration".to_string()));
+                crate::set_deployment_profile_dependency_up(&profile.name, "configuration", false);
+                tracing::warn!(
+                    event = "metrics_profile_parse_failed",
+                    profile = %profile.name,
+                    %error
+                );
+                continue;
+            }
+        };
+        for probe in probes {
+            if let ProfileProbe::Slurm(slurm) = &probe {
+                slurm_credentials_configured &=
+                    SlurmSshCredentials::resolve_for(slurm.ssh_credential.as_deref()).is_ok();
+            }
+            let profile_name = profile.name.clone();
+            let dependency = probe.dependency().to_string();
+            current.insert((profile_name.clone(), dependency.clone()));
+            tasks.spawn(async move {
+                let up = run_profile_probe(&probe, timeout).await;
+                (profile_name, dependency, up)
+            });
+        }
+    }
+    crate::set_slurm_ssh_configured(slurm_credentials_configured);
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((profile, dependency, up)) => {
+                crate::set_deployment_profile_dependency_up(&profile, &dependency, up);
+            }
+            Err(error) => tracing::warn!(event = "metrics_profile_probe_join_failed", %error),
+        }
+    }
+    zero_missing_profile_dependency_gauges(&current);
+}
+
+fn zero_missing_profile_dependency_gauges(current: &HashSet<(String, String)>) {
+    let mut last = LAST_PROFILE_DEPENDENCY_KEYS
+        .lock()
+        .expect("profile dependency metric keys lock");
+    for (profile, dependency) in last.difference(current) {
+        // Deleted or inactive profiles must not leave a permanently firing
+        // time series behind in this long-lived process.
+        crate::set_deployment_profile_dependency_up(profile, dependency, true);
+    }
+    *last = current.clone();
 }
 
 /// Refresh queue, pending backlog, and execution gauges from Postgres.
@@ -243,6 +408,24 @@ async fn refresh_source_processing_gauges(pool: &PgPool) {
         return;
     };
 
+    let counts = aggregate_source_processing(rows);
+    let current = counts.keys().cloned().collect::<HashSet<_>>();
+    for ((module, phase), count) in counts {
+        crate::set_sources_processing(&module, &phase, count);
+    }
+
+    let mut last = LAST_SOURCE_PROCESSING_KEYS
+        .lock()
+        .expect("source processing metric keys lock");
+    for (module, phase) in last.difference(&current) {
+        crate::set_sources_processing(module, phase, 0);
+    }
+    *last = current;
+}
+
+fn aggregate_source_processing(
+    rows: Vec<(String, String, String)>,
+) -> HashMap<(String, String), i64> {
     let mut best: HashMap<(String, String), String> = HashMap::new();
     for (module, source, phase) in rows {
         if is_internal_test_module(&module) {
@@ -257,25 +440,19 @@ async fn refresh_source_processing_gauges(pool: &PgPool) {
             })
             .or_insert(phase);
     }
-
-    let mut current = HashSet::with_capacity(best.len());
-    for ((module, source), phase) in &best {
-        current.insert((module.clone(), source.clone(), phase.clone()));
-        crate::set_source_processing(module, source, phase, true);
+    let mut counts = HashMap::new();
+    for ((module, _source), phase) in best {
+        *counts.entry((module, phase)).or_insert(0) += 1;
     }
-
-    let mut last = LAST_SOURCE_PROCESSING_KEYS
-        .lock()
-        .expect("source processing metric keys lock");
-    for (module, source, phase) in last.difference(&current) {
-        crate::set_source_processing(module, source, phase, false);
-    }
-    *last = current;
+    counts
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_internal_test_module;
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn internal_test_modules_filtered() {
@@ -287,5 +464,92 @@ mod tests {
         ));
         assert!(is_internal_test_module("exec_sig_abc"));
         assert!(!is_internal_test_module("wallaby_hires"));
+    }
+
+    #[test]
+    fn source_processing_is_aggregated_without_source_labels() {
+        let counts = aggregate_source_processing(vec![
+            ("wallaby".into(), "a".into(), "discovering".into()),
+            ("wallaby".into(), "a".into(), "executing".into()),
+            ("wallaby".into(), "b".into(), "executing".into()),
+            ("wallaby".into(), "c".into(), "admitting".into()),
+            ("exec_sig_test".into(), "hidden".into(), "executing".into()),
+        ]);
+        assert_eq!(
+            counts.get(&("wallaby".into(), "executing".into())),
+            Some(&2)
+        );
+        assert_eq!(
+            counts.get(&("wallaby".into(), "admitting".into())),
+            Some(&1)
+        );
+        assert_eq!(counts.len(), 2);
+    }
+
+    fn profile(
+        translation: serde_json::Value,
+        deployment: serde_json::Value,
+    ) -> DeploymentProfileRow {
+        DeploymentProfileRow {
+            uuid: Uuid::now_v7(),
+            name: "qualified".into(),
+            description: None,
+            project_module: Some("wallaby".into()),
+            is_default: true,
+            max_concurrent_executions: None,
+            translation,
+            deployment,
+            revision: 1,
+            spec_sha256: None,
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn rest_profile_probes_its_own_tm_and_dim() {
+        let row = profile(
+            json!({"tm_url": "http://profile-tm:9000"}),
+            json!({
+                "kind": "rest_remote",
+                "deploy_host": "profile-dim",
+                "deploy_port": 8001
+            }),
+        );
+        let probes = profile_probes(
+            &row,
+            Some("http://fallback-tm:9000"),
+            Some("http://fallback-dim:8001"),
+        )
+        .unwrap();
+        assert!(matches!(
+            &probes[0],
+            ProfileProbe::Http { dependency: "tm", url } if url == "http://profile-tm:9000"
+        ));
+        assert!(matches!(
+            &probes[1],
+            ProfileProbe::Http { dependency: "dim", url } if url.contains("profile-dim:8001")
+        ));
+    }
+
+    #[test]
+    fn slurm_profile_creates_a_real_ssh_probe() {
+        let row = profile(
+            json!({"tm_url": "http://profile-tm:9000"}),
+            json!({
+                "kind": "slurm_remote",
+                "login_node": "login.example.org",
+                "ssh_credential": "setonix",
+                "account": "project",
+                "home_dir": "/scratch/project",
+                "log_dir": "/scratch/project/log",
+                "dlg_root": "/scratch/project/dlg"
+            }),
+        );
+        let probes = profile_probes(&row, None, None).unwrap();
+        assert_eq!(probes.len(), 2);
+        assert!(
+            matches!(&probes[1], ProfileProbe::Slurm(slurm) if slurm.login_node == "login.example.org")
+        );
     }
 }
