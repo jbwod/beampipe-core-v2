@@ -2300,18 +2300,37 @@ async fn schedule_project_executions(
         let project_config_id = repo::get_active_project_config(pool, project_module)
             .await?
             .map(|c| c.uuid);
-        let execution = match repo::create_execution(
+        let scheduler_manifest = json!({
+            "beampipe_run_record": {
+                "scheduler": {
+                    "policy_decision": "admitted",
+                    "claim_token": claim_token,
+                    "admitted_source_count": valid.len(),
+                    "queue_depth": repo::queue_depth(pool).await.unwrap_or_default(),
+                }
+            }
+        });
+        let job_payload = metrics::payload_with_trace(
+            json!({}),
+            &metrics::correlation_only(tick_correlation.clone()),
+        );
+        let (_execution, _job) = match repo::create_automated_execution_and_enqueue(
             pool,
             project_module,
             sources,
             &policy.archive_name,
             deployment_profile_id,
             project_config_id,
-            None,
+            Some(&tick_correlation),
+            repo::AutomatedExecutionEnqueue {
+                scheduler_manifest,
+                job_payload,
+                worker_pool: config.pool.clone(),
+            },
         )
         .await
         {
-            Ok(execution) => execution,
+            Ok(result) => result,
             Err(sqlx::Error::Protocol(message))
                 if message.contains("concurrency limit reached") =>
             {
@@ -2320,42 +2339,6 @@ async fn schedule_project_executions(
             }
             Err(error) => return Err(error),
         };
-        repo::apply_execution_patch_with_correlation(
-            pool,
-            execution.uuid,
-            LedgerPatch {
-                scheduler_name: Some("workflow_auto".into()),
-                workflow_manifest: Some(json!({
-                    "beampipe_run_record": {
-                        "scheduler": {
-                            "policy_decision": "admitted",
-                            "claim_token": claim_token,
-                            "admitted_source_count": valid.len(),
-                            "queue_depth": repo::queue_depth(pool).await.unwrap_or_default(),
-                        }
-                    }
-                })),
-                ..beampipe_domain::LedgerPatch::default()
-            },
-            None,
-        )
-        .await?;
-        let job_payload = metrics::payload_with_trace(
-            json!({"execution_id": execution.uuid}),
-            &metrics::correlation_only(tick_correlation.clone()),
-        );
-        repo::enqueue_job_with_options(
-            pool,
-            "execute",
-            job_payload,
-            repo::JobEnqueueOptions {
-                execution_id: Some(execution.uuid),
-                idempotency_key: Some(format!("execute:{}", execution.uuid)),
-                pool: Some(config.pool.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
         pacing_sleep(config).await;
         admitted_sources.extend(valid);
         created_runs += 1;

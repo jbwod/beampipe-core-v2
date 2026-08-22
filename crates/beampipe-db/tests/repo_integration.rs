@@ -327,6 +327,78 @@ async fn execution_create_idempotency_is_scoped_and_payload_bound() {
 }
 
 #[tokio::test]
+async fn automated_execution_and_execute_job_commit_together() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("auto_atomic_{}", Uuid::now_v7().simple());
+    let (execution, job) = repo::create_automated_execution_and_enqueue(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "local",
+        None,
+        None,
+        Some("scheduler:test"),
+        repo::AutomatedExecutionEnqueue {
+            scheduler_manifest: json!({"scheduler": {"policy_decision": "admitted"}}),
+            job_payload: json!({"traceparent": "test"}),
+            worker_pool: "automation".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(execution.scheduler_name.as_deref(), Some("workflow_auto"));
+    assert_eq!(
+        execution.workflow_manifest.as_ref().unwrap()["scheduler"]["policy_decision"],
+        "admitted"
+    );
+    assert_eq!(job.execution_id, Some(execution.uuid));
+    assert_eq!(job.payload["execution_id"], execution.uuid.to_string());
+    assert_eq!(job.payload["traceparent"], "test");
+    assert_eq!(job.pool, "automation");
+    assert_eq!(
+        job.required_capability.as_deref(),
+        Some("daliuge-deployment")
+    );
+}
+
+#[tokio::test]
+async fn automated_execution_rolls_back_when_enqueue_fails() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("auto_rollback_{}", Uuid::now_v7().simple());
+    let error = repo::create_automated_execution_and_enqueue(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "local",
+        None,
+        None,
+        Some("scheduler:test"),
+        repo::AutomatedExecutionEnqueue {
+            scheduler_manifest: json!({"scheduler": {"policy_decision": "admitted"}}),
+            job_payload: json!({}),
+            worker_pool: "x".repeat(65),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("too long"));
+    let executions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM batch_execution_record WHERE project_module = $1")
+            .bind(&module)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(executions, 0, "ledger insert must roll back with enqueue");
+}
+
+#[tokio::test]
 async fn successful_reconciliation_clears_transient_error() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");

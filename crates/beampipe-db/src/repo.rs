@@ -1475,6 +1475,80 @@ pub async fn create_execution_idempotent_with_correlation(
     idempotency_key: Option<&str>,
     request_sha256: Option<&str>,
 ) -> Result<(ExecutionRow, bool), sqlx::Error> {
+    let (execution, created, _) = create_execution_internal(
+        pool,
+        project_module,
+        sources,
+        archive_name,
+        deployment_profile_id,
+        project_config_id,
+        created_by_id,
+        correlation_id,
+        idempotency_key,
+        request_sha256,
+        None,
+    )
+    .await?;
+    Ok((execution, created))
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomatedExecutionEnqueue {
+    pub scheduler_manifest: Value,
+    /// Object payload augmented with the transactionally allocated execution ID.
+    pub job_payload: Value,
+    pub worker_pool: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_automated_execution_and_enqueue(
+    pool: &PgPool,
+    project_module: &str,
+    sources: Value,
+    archive_name: &str,
+    deployment_profile_id: Option<Uuid>,
+    project_config_id: Option<Uuid>,
+    correlation_id: Option<&str>,
+    enqueue: AutomatedExecutionEnqueue,
+) -> Result<(ExecutionRow, JobRow), sqlx::Error> {
+    let (execution, created, job) = create_execution_internal(
+        pool,
+        project_module,
+        sources,
+        archive_name,
+        deployment_profile_id,
+        project_config_id,
+        None,
+        correlation_id,
+        None,
+        None,
+        Some(enqueue),
+    )
+    .await?;
+    debug_assert!(
+        created,
+        "automated creation does not replay idempotency keys"
+    );
+    let job = job.ok_or_else(|| {
+        sqlx::Error::Protocol("automated execution committed without an execute job".into())
+    })?;
+    Ok((execution, job))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_execution_internal(
+    pool: &PgPool,
+    project_module: &str,
+    sources: Value,
+    archive_name: &str,
+    deployment_profile_id: Option<Uuid>,
+    project_config_id: Option<Uuid>,
+    created_by_id: Option<i32>,
+    correlation_id: Option<&str>,
+    idempotency_key: Option<&str>,
+    request_sha256: Option<&str>,
+    automation: Option<AutomatedExecutionEnqueue>,
+) -> Result<(ExecutionRow, bool, Option<JobRow>), sqlx::Error> {
     if idempotency_key.is_some() != request_sha256.is_some()
         || idempotency_key.is_some() != created_by_id.is_some()
     {
@@ -1545,7 +1619,7 @@ pub async fn create_execution_idempotent_with_correlation(
                 ));
             }
             tx.commit().await?;
-            return Ok((existing, false));
+            return Ok((existing, false, None));
         }
     }
     if let Some(profile) = resolved_profile
@@ -1613,6 +1687,10 @@ pub async fn create_execution_idempotent_with_correlation(
             .collect();
         Some(discovery_signature(&values))
     };
+    let scheduler_name = automation.as_ref().map(|_| "workflow_auto");
+    let scheduler_manifest = automation
+        .as_ref()
+        .map(|enqueue| enqueue.scheduler_manifest.clone());
     let row = sqlx::query_as::<_, ExecutionRow>(
         r#"
         INSERT INTO batch_execution_record (
@@ -1620,12 +1698,13 @@ pub async fn create_execution_idempotent_with_correlation(
             deployment_profile_revision, deployment_profile_snapshot,
             project_config_id, discovery_signature, created_by_id, status,
             control_phase, submission_state, scheduler_state, daliuge_state, output_state,
-            output_verification_required, create_idempotency_key, create_request_sha256
+            output_verification_required, create_idempotency_key, create_request_sha256,
+            scheduler_name, workflow_manifest
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending',
             'discovered', 'not_started', 'not_submitted', 'not_created', 'not_started', false,
-            $11, $12
+            $11, $12, $13, $14
         )
         RETURNING *
         "#,
@@ -1642,6 +1721,8 @@ pub async fn create_execution_idempotent_with_correlation(
     .bind(created_by_id)
     .bind(idempotency_key)
     .bind(request_sha256)
+    .bind(scheduler_name)
+    .bind(scheduler_manifest)
     .fetch_one(&mut *tx)
     .await?;
     let payload = serde_json::json!({
@@ -1661,8 +1742,50 @@ pub async fn create_execution_idempotent_with_correlation(
         &payload,
     )
     .await?;
+    let job = if let Some(enqueue) = automation {
+        let mut job_payload = enqueue.job_payload;
+        let Some(payload) = job_payload.as_object_mut() else {
+            return Err(sqlx::Error::Protocol(
+                "automated execute job payload must be a JSON object".into(),
+            ));
+        };
+        payload.insert("execution_id".into(), Value::String(id.to_string()));
+        let required_capability = execution_required_capability(&row);
+        let job = sqlx::query_as::<_, JobRow>(
+            r#"
+            INSERT INTO jobs (
+                uuid, kind, payload, execution_id, idempotency_key, next_run_at,
+                pool, required_capability
+            )
+            VALUES ($1, 'execute', $2, $3, $4, now(), $5, $6)
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(job_payload)
+        .bind(id)
+        .bind(format!("execute:{id}"))
+        .bind(enqueue.worker_pool)
+        .bind(required_capability)
+        .fetch_one(&mut *tx)
+        .await?;
+        insert_provenance_event(
+            &mut *tx,
+            "execution.automated_admitted",
+            project_module,
+            source_identifiers.first().map(String::as_str),
+            Some(id),
+            Some("system:execution_scheduler"),
+            correlation_id,
+            &json!({"job_id": job.uuid, "required_capability": required_capability}),
+        )
+        .await?;
+        Some(job)
+    } else {
+        None
+    };
     tx.commit().await?;
-    Ok((row, true))
+    Ok((row, true, job))
 }
 
 pub async fn get_execution_by_create_idempotency_key(
