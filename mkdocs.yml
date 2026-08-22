@@ -44,6 +44,7 @@ nav:
   - Operate:
       - Operator handbook: operations/index.md
       - Dashboard workflow: operations/dashboard-workflow.md
+      - Setonix qualification: operations/setonix-qualification.md
       - Workers and scheduling: operations/workers-scheduling.md
       - Observability: operations/observability.md
       - Recovery and cancellation: operations/recovery.md
