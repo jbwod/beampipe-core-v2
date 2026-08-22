@@ -2594,6 +2594,7 @@ pub async fn begin_execution_submission(
     daliuge_session_id: &str,
     daliuge_manager_url: Option<&str>,
     submission_timeout_seconds: i64,
+    target_fingerprint: Option<&str>,
 ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
     if !matches!(scheduler_name, "slurm" | "daliuge") {
         return Err(sqlx::Error::Protocol(format!(
@@ -2608,6 +2609,13 @@ pub async fn begin_execution_submission(
     if submission_timeout_seconds <= 0 {
         return Err(sqlx::Error::Protocol(
             "submission timeout must be positive".into(),
+        ));
+    }
+    if scheduler_name == "slurm"
+        && target_fingerprint.is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(sqlx::Error::Protocol(
+            "Slurm submission intent requires a resolved target fingerprint".into(),
         ));
     }
 
@@ -2705,12 +2713,1052 @@ pub async fn begin_execution_submission(
         "backend": scheduler_name,
         "submission_deadline_at": submission_deadline_at,
         "submission_timeout_seconds": submission_timeout_seconds,
+        "target_fingerprint": target_fingerprint,
     }))
     .bind(submission_started_at)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(Some(submission_deadline_at))
+}
+
+pub const SLURM_NAME_LOOKUP_SCHEMA: &str = "beampipe-slurm-name-lookup/v1";
+
+#[derive(Debug, Clone)]
+pub enum SlurmNameLookupOutcome {
+    NotFound,
+    Exact {
+        scheduler_job_id: String,
+        state: SchedulerState,
+        raw_state: String,
+        reason: Option<String>,
+        source: String,
+        observed_at: DateTime<Utc>,
+    },
+    Ambiguous {
+        scheduler_job_ids: Vec<String>,
+    },
+    Error {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SlurmNameLookupRecordInput {
+    pub lookup_id: Uuid,
+    pub intent_observation_id: Uuid,
+    pub daliuge_session_id: String,
+    pub profile_sha256: String,
+    pub target_fingerprint: String,
+    pub accounting_not_before: DateTime<Utc>,
+    pub query_started_at: DateTime<Utc>,
+    pub query_completed_at: DateTime<Utc>,
+    pub squeue_complete: bool,
+    pub sacct_complete: bool,
+    pub outcome: SlurmNameLookupOutcome,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlurmNameLookupRecordResult {
+    pub execution: ExecutionRow,
+    pub observation: ExecutionObservationRow,
+    pub late_after_abandonment: bool,
+}
+
+pub async fn latest_submission_intent_observation(
+    pool: &PgPool,
+    execution_id: Uuid,
+) -> Result<Option<ExecutionObservationRow>, sqlx::Error> {
+    sqlx::query_as::<_, ExecutionObservationRow>(
+        r#"
+        SELECT *
+        FROM execution_observations
+        WHERE execution_id = $1
+          AND kind = 'daliuge_session'
+          AND raw_state = 'intent_persisted'
+        ORDER BY observed_at DESC, uuid DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(execution_id)
+    .fetch_optional(pool)
+    .await
+}
+
+fn execute_job_has_active_lease(job: &JobRow, now: DateTime<Utc>) -> bool {
+    if job.status != "running" {
+        return false;
+    }
+    let (Some(lease_expires_at), Some(locked_until)) =
+        (job.lease_expires_at, job.locked_until)
+    else {
+        // A running job with incomplete fencing evidence is conservatively active.
+        return true;
+    };
+    lease_expires_at.max(locked_until) > now
+}
+
+/// Persist one exact-name lookup and its state effect in a single transaction.
+/// Only a complete squeue+sacct negative recorded without an active execute
+/// lease can later qualify as operator-abandonment evidence.
+pub async fn record_slurm_name_lookup(
+    pool: &PgPool,
+    execution_id: Uuid,
+    input: SlurmNameLookupRecordInput,
+) -> Result<SlurmNameLookupRecordResult, sqlx::Error> {
+    if input.daliuge_session_id.trim().is_empty()
+        || input.profile_sha256.trim().is_empty()
+        || input.target_fingerprint.trim().is_empty()
+    {
+        return Err(sqlx::Error::Protocol(
+            "Slurm name lookup evidence is missing its identity binding".into(),
+        ));
+    }
+    if input.query_completed_at < input.query_started_at {
+        return Err(sqlx::Error::Protocol(
+            "Slurm name lookup completion precedes its start".into(),
+        ));
+    }
+    if let SlurmNameLookupOutcome::Exact {
+        scheduler_job_id, ..
+    } = &input.outcome
+    {
+        if scheduler_job_id.is_empty()
+            || !scheduler_job_id.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(sqlx::Error::Protocol(
+                "exact Slurm name lookup requires an ASCII-digit job ID".into(),
+            ));
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+    let Some(locked) = sqlx::query_as::<_, ExecutionRow>(
+        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(format!(
+            "execution {execution_id} does not exist"
+        )));
+    };
+    if locked.scheduler_name.as_deref() != Some("slurm")
+        || locked.daliuge_session_id.as_deref() != Some(input.daliuge_session_id.as_str())
+    {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "Slurm name lookup no longer matches the persisted submission intent".into(),
+        ));
+    }
+    let persisted_profile_sha256 = locked
+        .deployment_profile_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("spec_sha256"))
+        .and_then(Value::as_str);
+    if persisted_profile_sha256.is_some_and(|value| value != input.profile_sha256) {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "Slurm name lookup profile hash does not match the pinned execution profile".into(),
+        ));
+    }
+    let Some(intent) = sqlx::query_as::<_, ExecutionObservationRow>(
+        r#"
+        SELECT * FROM execution_observations
+        WHERE execution_id = $1
+          AND kind = 'daliuge_session'
+          AND raw_state = 'intent_persisted'
+        ORDER BY observed_at DESC, uuid DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "Slurm name lookup requires persisted submission intent evidence".into(),
+        ));
+    };
+    let persisted_target_fingerprint = intent
+        .payload
+        .get("target_fingerprint")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    if intent.uuid != input.intent_observation_id
+        || input.accounting_not_before != intent.observed_at
+        || persisted_target_fingerprint != Some(input.target_fingerprint.as_str())
+    {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "Slurm name lookup is not bound to the latest submission intent and resolved target"
+                .into(),
+        ));
+    }
+
+    let execute_jobs = sqlx::query_as::<_, JobRow>(
+        r#"
+        SELECT * FROM jobs
+        WHERE execution_id = $1
+          AND kind = 'execute'
+          AND status IN ('queued', 'running')
+        ORDER BY created_at ASC
+        FOR UPDATE
+        "#,
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let database_now = sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await?;
+    let active_execute_lease = execute_jobs
+        .iter()
+        .any(|job| execute_job_has_active_lease(job, database_now));
+    let late_after_abandonment = locked.submission_abandoned_at.is_some();
+    let current_submission = locked
+        .submission_state
+        .as_deref()
+        .and_then(SubmissionState::parse)
+        .unwrap_or_default();
+    let unresolved_without_receipt = !late_after_abandonment
+        && !locked
+            .status_enum()
+            .is_some_and(ExecutionStatus::is_terminal)
+        && matches!(
+            current_submission,
+            SubmissionState::InFlight | SubmissionState::Uncertain
+        )
+        && locked.scheduler_job_id.is_none()
+        && locked.physical_graph_sha256.is_none();
+    let canonical_state_mutation_allowed = unresolved_without_receipt && !active_execute_lease;
+
+    let (mut result, normalized_state, raw_state, reason, matched_ids) = match &input.outcome {
+        SlurmNameLookupOutcome::NotFound => (
+            "not_found".to_string(),
+            SchedulerState::Unknown.as_str().to_string(),
+            "not_found_by_name".to_string(),
+            Some("no scheduler job matches the exact DALiuGE session name".to_string()),
+            Vec::<String>::new(),
+        ),
+        SlurmNameLookupOutcome::Exact {
+            scheduler_job_id,
+            state,
+            raw_state,
+            reason,
+            ..
+        } => (
+            "exact".to_string(),
+            state.as_str().to_string(),
+            raw_state.clone(),
+            reason.clone(),
+            vec![scheduler_job_id.clone()],
+        ),
+        SlurmNameLookupOutcome::Ambiguous { scheduler_job_ids } => (
+            "ambiguous".to_string(),
+            SchedulerState::Unknown.as_str().to_string(),
+            "ambiguous_name_match".to_string(),
+            Some(format!(
+                "multiple scheduler jobs match the exact DALiuGE session name: {}",
+                scheduler_job_ids.join(", ")
+            )),
+            scheduler_job_ids.clone(),
+        ),
+        SlurmNameLookupOutcome::Error { code, message, .. } => (
+            "error".to_string(),
+            SchedulerState::Unknown.as_str().to_string(),
+            code.clone(),
+            Some(message.clone()),
+            Vec::<String>::new(),
+        ),
+    };
+    if let SlurmNameLookupOutcome::Exact {
+        scheduler_job_id, ..
+    } = &input.outcome
+    {
+        if locked
+            .scheduler_job_id
+            .as_deref()
+            .is_some_and(|persisted| persisted != scheduler_job_id)
+        {
+            result = "exact_conflict".into();
+        }
+    }
+    let complete_negative = result == "not_found"
+        && input.squeue_complete
+        && input.sacct_complete
+        && canonical_state_mutation_allowed
+        && persisted_profile_sha256.is_some();
+    let (source, retryable) = match &input.outcome {
+        SlurmNameLookupOutcome::Exact { source, .. } => (Some(source.clone()), false),
+        SlurmNameLookupOutcome::Error { retryable, .. } => (None, *retryable),
+        _ => (None, false),
+    };
+    let payload = json!({
+        "schema": SLURM_NAME_LOOKUP_SCHEMA,
+        "lookup_id": input.lookup_id,
+        "intent_observation_id": input.intent_observation_id,
+        "daliuge_session_id": input.daliuge_session_id,
+        "profile_sha256": input.profile_sha256,
+        "profile_pinned": persisted_profile_sha256.is_some(),
+        "target_fingerprint": input.target_fingerprint,
+        "accounting_not_before": input.accounting_not_before,
+        "query_started_at": input.query_started_at,
+        "query_completed_at": input.query_completed_at,
+        "sources": {"squeue": input.squeue_complete, "sacct": input.sacct_complete},
+        "query_complete": input.squeue_complete && input.sacct_complete,
+        "result": result,
+        "matched_scheduler_job_ids": matched_ids,
+        "source": source,
+        "retryable": retryable,
+        "active_execute_lease": active_execute_lease,
+        "canonical_state_mutation_allowed": canonical_state_mutation_allowed,
+        "eligible_for_abandonment": complete_negative,
+        "late_after_abandonment": late_after_abandonment,
+    });
+    let observation = sqlx::query_as::<_, ExecutionObservationRow>(
+        r#"
+        INSERT INTO execution_observations (
+            uuid, execution_id, kind, normalized_state, raw_state, reason,
+            payload, source_version, observed_at
+        )
+        VALUES ($1, $2, 'scheduler', $3, $4, $5, $6, $7, $8)
+        RETURNING *
+        "#,
+    )
+    .bind(input.lookup_id)
+    .bind(execution_id)
+    .bind(&normalized_state)
+    .bind(&raw_state)
+    .bind(&reason)
+    .bind(payload)
+    .bind(SLURM_NAME_LOOKUP_SCHEMA)
+    .bind(input.query_completed_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let execution = match &input.outcome {
+        SlurmNameLookupOutcome::Exact {
+            scheduler_job_id,
+            state,
+            raw_state,
+            reason,
+            ..
+        } if result == "exact"
+            && (canonical_state_mutation_allowed || late_after_abandonment) =>
+        {
+            let row = sqlx::query_as::<_, ExecutionRow>(
+                r#"
+                UPDATE batch_execution_record
+                SET submission_state = CASE
+                        WHEN submission_abandoned_at IS NULL THEN 'uncertain'
+                        ELSE submission_state
+                    END,
+                    scheduler_job_id = COALESCE(scheduler_job_id, $2),
+                    scheduler_state = $3,
+                    scheduler_raw_state = $4,
+                    scheduler_reason = $5,
+                    failure_class = CASE
+                        WHEN submission_abandoned_at IS NULL THEN NULL
+                        ELSE failure_class
+                    END,
+                    last_error = CASE
+                        WHEN submission_abandoned_at IS NULL THEN NULL
+                        ELSE last_error
+                    END,
+                    last_reconciled_at = $6,
+                    updated_at = now()
+                WHERE uuid = $1
+                RETURNING *
+                "#,
+            )
+            .bind(execution_id)
+            .bind(scheduler_job_id)
+            .bind(state.as_str())
+            .bind(raw_state)
+            .bind(reason)
+            .bind(input.query_completed_at)
+            .fetch_one(&mut *tx)
+            .await?;
+            if late_after_abandonment {
+                let correlation_id = execution_id.to_string();
+                insert_provenance_event(
+                    &mut *tx,
+                    "execution.submission_detected_after_abandonment",
+                    &row.project_module,
+                    None,
+                    Some(execution_id),
+                    Some("system:submission-reconciler"),
+                    Some(correlation_id.as_str()),
+                    &json!({
+                        "lookup_id": input.lookup_id,
+                        "scheduler_job_id": scheduler_job_id,
+                        "operator_abandonment_preserved": true,
+                    }),
+                )
+                .await?;
+            }
+            row
+        }
+        SlurmNameLookupOutcome::NotFound if canonical_state_mutation_allowed =>
+        {
+            sqlx::query_as::<_, ExecutionRow>(
+                r#"
+                UPDATE batch_execution_record
+                SET scheduler_state = 'unknown',
+                    failure_class = 'not_found',
+                    last_reconciled_at = $2,
+                    updated_at = now()
+                WHERE uuid = $1
+                RETURNING *
+                "#,
+            )
+            .bind(execution_id)
+            .bind(input.query_completed_at)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+        SlurmNameLookupOutcome::Ambiguous { .. } if canonical_state_mutation_allowed =>
+        {
+            sqlx::query_as::<_, ExecutionRow>(
+                r#"
+                UPDATE batch_execution_record
+                SET scheduler_state = 'unknown',
+                    failure_class = 'inconsistent_state',
+                    last_error = $2,
+                    last_reconciled_at = $3,
+                    updated_at = now()
+                WHERE uuid = $1
+                RETURNING *
+                "#,
+            )
+            .bind(execution_id)
+            .bind(reason.as_deref())
+            .bind(input.query_completed_at)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+        _ => locked,
+    };
+    tx.commit().await?;
+    Ok(SlurmNameLookupRecordResult {
+        execution,
+        observation,
+        late_after_abandonment,
+    })
+}
+
+pub const SUBMISSION_ABANDONMENT_GRACE_SECONDS: i64 = 24 * 60 * 60;
+pub const SUBMISSION_ABANDONMENT_NEGATIVE_COUNT: usize = 3;
+pub const SUBMISSION_ABANDONMENT_NEGATIVE_SPAN_SECONDS: i64 = 10 * 60;
+pub const SUBMISSION_ABANDONMENT_EVIDENCE_FRESHNESS_SECONDS: i64 = 10 * 60;
+
+#[derive(Debug, Clone)]
+pub struct AbandonSlurmSubmissionInput {
+    pub actor: String,
+    pub correlation_id: Option<String>,
+    pub reason: String,
+    pub expected_submission_state: SubmissionState,
+    pub expected_daliuge_session_id: String,
+    pub expected_submission_deadline_at: DateTime<Utc>,
+    pub acknowledge_external_job_may_exist: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AbandonSlurmSubmissionError {
+    #[error("execution not found")]
+    NotFound,
+    #[error("{code}: {message}")]
+    Invalid { code: String, message: String },
+    #[error("{code}: {message}")]
+    Conflict { code: String, message: String },
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+impl AbandonSlurmSubmissionError {
+    pub fn code(&self) -> &str {
+        match self {
+            Self::NotFound => "execution_not_found",
+            Self::Invalid { code, .. } | Self::Conflict { code, .. } => code,
+            Self::Database(_) => "database_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SlurmLookupEvidenceAttempt {
+    pub observation_id: Uuid,
+    pub lookup_id: Uuid,
+    pub observed_at: DateTime<Utc>,
+    pub daliuge_session_id: String,
+    pub intent_observation_id: Uuid,
+    pub profile_sha256: String,
+    pub target_fingerprint: String,
+    pub accounting_not_before: DateTime<Utc>,
+    pub query_completed_at: DateTime<Utc>,
+    pub squeue_complete: bool,
+    pub sacct_complete: bool,
+    pub result: String,
+    pub eligible_for_abandonment: bool,
+}
+
+fn parse_slurm_lookup_evidence(
+    row: &ExecutionObservationRow,
+) -> Result<SlurmLookupEvidenceAttempt, AbandonSlurmSubmissionError> {
+    let invalid = |field: &str| AbandonSlurmSubmissionError::Conflict {
+        code: "submission_abandonment_evidence_invalid".into(),
+        message: format!(
+            "Slurm lookup observation {} has invalid or missing {field}",
+            row.uuid
+        ),
+    };
+    let payload = &row.payload;
+    if payload.get("schema").and_then(Value::as_str) != Some(SLURM_NAME_LOOKUP_SCHEMA) {
+        return Err(invalid("schema"));
+    }
+    let parse_uuid = |field: &str| {
+        payload
+            .get(field)
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<Uuid>().ok())
+            .ok_or_else(|| invalid(field))
+    };
+    let parse_time = |field: &str| {
+        payload
+            .get(field)
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc))
+            .ok_or_else(|| invalid(field))
+    };
+    let string = |field: &str| {
+        payload
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| invalid(field))
+    };
+    Ok(SlurmLookupEvidenceAttempt {
+        observation_id: row.uuid,
+        lookup_id: parse_uuid("lookup_id")?,
+        observed_at: row.observed_at,
+        daliuge_session_id: string("daliuge_session_id")?,
+        intent_observation_id: parse_uuid("intent_observation_id")?,
+        profile_sha256: string("profile_sha256")?,
+        target_fingerprint: string("target_fingerprint")?,
+        accounting_not_before: parse_time("accounting_not_before")?,
+        query_completed_at: parse_time("query_completed_at")?,
+        squeue_complete: payload
+            .pointer("/sources/squeue")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| invalid("sources.squeue"))?,
+        sacct_complete: payload
+            .pointer("/sources/sacct")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| invalid("sources.sacct"))?,
+        result: string("result")?,
+        eligible_for_abandonment: payload
+            .get("eligible_for_abandonment")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| invalid("eligible_for_abandonment"))?,
+    })
+}
+
+pub fn validate_slurm_abandonment_evidence(
+    attempts_newest_first: &[SlurmLookupEvidenceAttempt],
+    expected_session_id: &str,
+    expected_intent_id: Uuid,
+    expected_intent_observed_at: DateTime<Utc>,
+    expected_profile_sha256: &str,
+    expected_target_fingerprint: &str,
+    quiet_eligible_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<Vec<Uuid>, AbandonSlurmSubmissionError> {
+    let mut relevant = attempts_newest_first
+        .iter()
+        .filter(|attempt| {
+            attempt.observed_at >= quiet_eligible_at
+                && attempt.query_completed_at >= quiet_eligible_at
+                && attempt.daliuge_session_id == expected_session_id
+                && attempt.intent_observation_id == expected_intent_id
+                && attempt.profile_sha256 == expected_profile_sha256
+                && attempt.target_fingerprint == expected_target_fingerprint
+                && attempt.accounting_not_before == expected_intent_observed_at
+        })
+        .collect::<Vec<_>>();
+    relevant.sort_by_key(|attempt| std::cmp::Reverse(attempt.query_completed_at));
+    if relevant.iter().any(|attempt| {
+        matches!(
+            attempt.result.as_str(),
+            "exact" | "exact_conflict" | "ambiguous"
+        )
+    }) {
+        return Err(AbandonSlurmSubmissionError::Conflict {
+            code: "submission_abandonment_scheduler_match_observed".into(),
+            message: "a scheduler match or ambiguous match was observed after the quiet grace; resolve the external job identity instead of abandoning the submission".into(),
+        });
+    }
+    let latest_is_complete_negative = relevant.first().is_some_and(|attempt| {
+        attempt.result == "not_found"
+            && attempt.squeue_complete
+            && attempt.sacct_complete
+            && attempt.eligible_for_abandonment
+    });
+    if !latest_is_complete_negative {
+        return Err(AbandonSlurmSubmissionError::Conflict {
+            code: "submission_abandonment_latest_evidence_not_negative".into(),
+            message: "the latest scheduler lookup after the quiet grace must be complete and negative".into(),
+        });
+    }
+    let mut eligible = attempts_newest_first
+        .iter()
+        .filter(|attempt| {
+            attempt.result == "not_found"
+                && attempt.squeue_complete
+                && attempt.sacct_complete
+                && attempt.eligible_for_abandonment
+                && attempt.observed_at >= quiet_eligible_at
+                && attempt.query_completed_at >= quiet_eligible_at
+                && attempt.daliuge_session_id == expected_session_id
+                && attempt.intent_observation_id == expected_intent_id
+                && attempt.profile_sha256 == expected_profile_sha256
+                && attempt.target_fingerprint == expected_target_fingerprint
+                && attempt.accounting_not_before == expected_intent_observed_at
+        })
+        .collect::<Vec<_>>();
+    eligible.sort_by_key(|attempt| std::cmp::Reverse(attempt.query_completed_at));
+    if eligible.len() < SUBMISSION_ABANDONMENT_NEGATIVE_COUNT {
+        return Err(AbandonSlurmSubmissionError::Conflict {
+            code: "submission_abandonment_negative_evidence_insufficient".into(),
+            message: format!(
+                "at least {} complete negative Slurm lookups are required after the quiet grace",
+                SUBMISSION_ABANDONMENT_NEGATIVE_COUNT
+            ),
+        });
+    }
+    let newest = eligible[0];
+    if now
+        .signed_duration_since(newest.query_completed_at)
+        .num_seconds()
+        > SUBMISSION_ABANDONMENT_EVIDENCE_FRESHNESS_SECONDS
+        || newest.query_completed_at > now
+    {
+        return Err(AbandonSlurmSubmissionError::Conflict {
+            code: "submission_abandonment_evidence_stale".into(),
+            message: "the latest complete negative Slurm lookup must be no more than ten minutes old".into(),
+        });
+    }
+    let newest_at = newest.query_completed_at;
+    let expected_target = newest.target_fingerprint.as_str();
+    let oldest = eligible
+        .iter()
+        .copied()
+        .find(|attempt| {
+            attempt.lookup_id != newest.lookup_id
+                && attempt.target_fingerprint == expected_target
+                && newest_at
+                    .signed_duration_since(attempt.query_completed_at)
+                    .num_seconds()
+                    >= SUBMISSION_ABANDONMENT_NEGATIVE_SPAN_SECONDS
+        })
+        .ok_or_else(|| AbandonSlurmSubmissionError::Conflict {
+            code: "submission_abandonment_evidence_span_too_short".into(),
+            message: "complete negative Slurm lookups must span at least ten minutes".into(),
+        })?;
+    let middle = eligible
+        .iter()
+        .copied()
+        .find(|attempt| {
+            attempt.lookup_id != newest.lookup_id
+                && attempt.lookup_id != oldest.lookup_id
+                && attempt.target_fingerprint == expected_target
+        })
+        .ok_or_else(|| AbandonSlurmSubmissionError::Conflict {
+            code: "submission_abandonment_distinct_evidence_insufficient".into(),
+            message: "three distinct complete negative Slurm lookups are required".into(),
+        })?;
+    Ok(vec![
+        newest.observation_id,
+        middle.observation_id,
+        oldest.observation_id,
+    ])
+}
+
+fn latest_execute_activity(job: &JobRow) -> DateTime<Utc> {
+    [
+        Some(job.created_at),
+        job.updated_at,
+        job.heartbeat_at,
+        job.lease_expires_at,
+        job.locked_until,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(job.created_at)
+}
+
+/// Operator-controlled terminal fencing for a Slurm submission whose exact
+/// external ID remains unknown. This transition consumes only persisted
+/// evidence and deliberately never submits, polls, cancels, or retries work.
+pub async fn abandon_slurm_submission(
+    pool: &PgPool,
+    execution_id: Uuid,
+    input: AbandonSlurmSubmissionInput,
+) -> Result<ExecutionRow, AbandonSlurmSubmissionError> {
+    let reason = input.reason.trim();
+    if reason.is_empty() || reason.len() > 1_000 {
+        return Err(AbandonSlurmSubmissionError::Invalid {
+            code: "submission_abandonment_reason_invalid".into(),
+            message: "an abandonment reason between 1 and 1000 bytes is required".into(),
+        });
+    }
+    if !matches!(
+        input.expected_submission_state,
+        SubmissionState::InFlight | SubmissionState::Uncertain
+    ) {
+        return Err(AbandonSlurmSubmissionError::Invalid {
+            code: "submission_abandonment_state_invalid".into(),
+            message: "expected_submission_state must be in_flight or uncertain".into(),
+        });
+    }
+    if input.expected_daliuge_session_id.trim().is_empty() {
+        return Err(AbandonSlurmSubmissionError::Invalid {
+            code: "submission_abandonment_session_required".into(),
+            message: "expected_daliuge_session_id is required".into(),
+        });
+    }
+    if !input.acknowledge_external_job_may_exist {
+        return Err(AbandonSlurmSubmissionError::Invalid {
+            code: "submission_abandonment_orphan_risk_not_acknowledged".into(),
+            message: "operator abandonment requires explicit acknowledgement that an external job may still exist".into(),
+        });
+    }
+
+    let mut tx = pool.begin().await?;
+    let Some(execution) = sqlx::query_as::<_, ExecutionRow>(
+        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(AbandonSlurmSubmissionError::NotFound);
+    };
+    let conflict = |code: &str, message: String| AbandonSlurmSubmissionError::Conflict {
+        code: code.into(),
+        message,
+    };
+    if execution.submission_abandoned_at.is_some() {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_already_abandoned",
+            "the unresolved submission was already abandoned".into(),
+        ));
+    }
+    if execution
+        .status_enum()
+        .is_some_and(ExecutionStatus::is_terminal)
+    {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_abandonment_terminal_execution",
+            format!("execution is already terminal with status '{}'", execution.status),
+        ));
+    }
+    let current_submission = execution
+        .submission_state
+        .as_deref()
+        .and_then(SubmissionState::parse)
+        .unwrap_or_default();
+    if execution.scheduler_name.as_deref() != Some("slurm")
+        || current_submission != input.expected_submission_state
+        || execution.daliuge_session_id.as_deref()
+            != Some(input.expected_daliuge_session_id.as_str())
+        || execution.submission_deadline_at != Some(input.expected_submission_deadline_at)
+    {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_abandonment_cas_mismatch",
+            "submission state, session, backend, or deadline changed since operator review".into(),
+        ));
+    }
+    if execution.scheduler_job_id.is_some() {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_abandonment_exact_job_known",
+            "an exact Slurm job ID is now known; use confirmed external cancellation".into(),
+        ));
+    }
+    if matches!(
+        execution.daliuge_state.as_deref(),
+        Some("deploying" | "running" | "cancelling")
+    ) {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_abandonment_daliuge_active",
+            "DALiuGE activity is present for this execution".into(),
+        ));
+    }
+    let expected_profile_sha256 = execution
+        .deployment_profile_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("spec_sha256"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            conflict(
+                "submission_abandonment_profile_unpinned",
+                "a pinned deployment profile hash is required".into(),
+            )
+        })?
+        .to_string();
+    let Some(intent) = sqlx::query_as::<_, ExecutionObservationRow>(
+        r#"
+        SELECT * FROM execution_observations
+        WHERE execution_id = $1
+          AND kind = 'daliuge_session'
+          AND raw_state = 'intent_persisted'
+        ORDER BY observed_at DESC, uuid DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_abandonment_intent_missing",
+            "persisted submission intent evidence is missing".into(),
+        ));
+    };
+    let expected_target_fingerprint = intent
+        .payload
+        .get("target_fingerprint")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            conflict(
+                "submission_abandonment_target_unpinned",
+                "the persisted submission intent has no resolved target fingerprint".into(),
+            )
+        })?
+        .to_string();
+    let execute_jobs = sqlx::query_as::<_, JobRow>(
+        r#"
+        SELECT * FROM jobs
+        WHERE execution_id = $1 AND kind = 'execute'
+        ORDER BY created_at ASC
+        FOR UPDATE
+        "#,
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let now = sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await?;
+    if execute_jobs
+        .iter()
+        .any(|job| execute_job_has_active_lease(job, now))
+    {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_abandonment_active_execute_lease",
+            "an execute worker still holds an active or incompletely fenced lease".into(),
+        ));
+    }
+    let quiet_anchor = execute_jobs
+        .iter()
+        .map(latest_execute_activity)
+        .chain(std::iter::once(input.expected_submission_deadline_at))
+        .max()
+        .unwrap_or(input.expected_submission_deadline_at);
+    let quiet_eligible_at = quiet_anchor
+        .checked_add_signed(chrono::Duration::seconds(
+            SUBMISSION_ABANDONMENT_GRACE_SECONDS,
+        ))
+        .ok_or_else(|| {
+            conflict(
+                "submission_abandonment_deadline_invalid",
+                "quiet-grace deadline is out of range".into(),
+            )
+        })?;
+    if now < quiet_eligible_at {
+        tx.rollback().await?;
+        return Err(conflict(
+            "submission_abandonment_quiet_grace",
+            format!("the 24-hour quiet grace does not end until {quiet_eligible_at}"),
+        ));
+    }
+    let lookup_rows = sqlx::query_as::<_, ExecutionObservationRow>(
+        r#"
+        SELECT * FROM execution_observations
+        WHERE execution_id = $1
+          AND kind = 'scheduler'
+          AND source_version = $2
+          AND observed_at >= $3
+        ORDER BY observed_at DESC, uuid DESC
+        LIMIT 500
+        "#,
+    )
+    .bind(execution_id)
+    .bind(SLURM_NAME_LOOKUP_SCHEMA)
+    .bind(quiet_eligible_at)
+    .fetch_all(&mut *tx)
+    .await?;
+    let lookup_attempts = lookup_rows
+        .iter()
+        .map(parse_slurm_lookup_evidence)
+        .collect::<Result<Vec<_>, _>>()?;
+    let evidence_ids = validate_slurm_abandonment_evidence(
+        &lookup_attempts,
+        &input.expected_daliuge_session_id,
+        intent.uuid,
+        intent.observed_at,
+        &expected_profile_sha256,
+        &expected_target_fingerprint,
+        quiet_eligible_at,
+        now,
+    )?;
+
+    let invalidated_job_ids = execute_jobs
+        .iter()
+        .filter(|job| matches!(job.status.as_str(), "queued" | "running"))
+        .map(|job| job.uuid)
+        .collect::<Vec<_>>();
+    for job in execute_jobs
+        .iter()
+        .filter(|job| matches!(job.status.as_str(), "queued" | "running"))
+    {
+        if let Some(lease_token) = job.lease_token {
+            sqlx::query(
+                r#"
+                INSERT INTO job_claim_history
+                    (uuid, job_id, worker_id, lease_token, event, details)
+                VALUES ($1, $2, $3, $4, 'released', $5)
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(job.uuid)
+            .bind(job.lease_owner)
+            .bind(lease_token)
+            .bind(json!({
+                "reason": "operator_abandoned_unresolved_submission",
+                "execution_id": execution_id,
+            }))
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET status = 'cancelled',
+            locked_until = NULL,
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            failure_class = 'inconsistent_state',
+            last_error = 'fenced after operator abandonment of unresolved external submission',
+            updated_at = now()
+        WHERE execution_id = $1
+          AND kind = 'execute'
+          AND status IN ('queued', 'running')
+        "#,
+    )
+    .bind(execution_id)
+    .execute(&mut *tx)
+    .await?;
+    let updated = sqlx::query_as::<_, ExecutionRow>(
+        r#"
+        UPDATE batch_execution_record
+        SET status = 'failed',
+            execution_phase = NULL,
+            control_phase = 'terminal',
+            terminal_outcome = 'inconsistent',
+            failure_class = 'inconsistent_state',
+            submission_abandoned_at = $2,
+            last_error = $3,
+            completed_at = COALESCE(completed_at, $2),
+            phase_timestamps = CASE
+                WHEN phase_timestamps ? 'terminal' THEN phase_timestamps
+                ELSE phase_timestamps || jsonb_build_object('terminal', to_jsonb($2))
+            END,
+            updated_at = now()
+        WHERE uuid = $1
+        RETURNING *
+        "#,
+    )
+    .bind(execution_id)
+    .bind(now)
+    .bind(format!(
+        "operator abandoned unresolved Slurm submission after durable negative evidence: {reason}"
+    ))
+    .fetch_one(&mut *tx)
+    .await?;
+    let abandonment_payload = json!({
+        "schema": "beampipe-slurm-submission-abandonment/v1",
+        "reason": reason,
+        "acknowledged_orphan_risk": true,
+        "prior_submission_state": input.expected_submission_state.as_str(),
+        "daliuge_session_id": input.expected_daliuge_session_id,
+        "submission_deadline_at": input.expected_submission_deadline_at,
+        "quiet_anchor": quiet_anchor,
+        "quiet_eligible_at": quiet_eligible_at,
+        "abandoned_at": now,
+        "intent_observation_id": intent.uuid,
+        "profile_sha256": expected_profile_sha256,
+        "target_fingerprint": expected_target_fingerprint,
+        "negative_lookup_observation_ids": evidence_ids,
+        "invalidated_execute_job_ids": invalidated_job_ids,
+        "policy": {
+            "quiet_grace_seconds": SUBMISSION_ABANDONMENT_GRACE_SECONDS,
+            "negative_lookup_count": SUBMISSION_ABANDONMENT_NEGATIVE_COUNT,
+            "negative_lookup_span_seconds": SUBMISSION_ABANDONMENT_NEGATIVE_SPAN_SECONDS,
+            "latest_evidence_max_age_seconds": SUBMISSION_ABANDONMENT_EVIDENCE_FRESHNESS_SECONDS,
+        },
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO execution_observations (
+            uuid, execution_id, kind, normalized_state, raw_state, reason,
+            payload, source_version, observed_at
+        )
+        VALUES ($1, $2, 'scheduler', 'unknown', 'operator_abandoned', $3, $4,
+                'beampipe-slurm-submission-abandonment/v1', $5)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution_id)
+    .bind(reason)
+    .bind(&abandonment_payload)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    insert_provenance_event(
+        &mut *tx,
+        "execution.submission_abandoned",
+        &updated.project_module,
+        None,
+        Some(execution_id),
+        Some(&input.actor),
+        input.correlation_id.as_deref(),
+        &abandonment_payload,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(updated)
 }
 
 #[derive(Debug, Clone)]
@@ -2739,6 +3787,7 @@ pub struct SubmissionReceiptResult {
     pub execution: ExecutionRow,
     pub physical_graph_artifact: ExecutionArtifactRow,
     pub replayed: bool,
+    pub late_after_abandonment: bool,
 }
 
 fn json_payload_sha256(value: &Value) -> Result<(String, i64), sqlx::Error> {
@@ -2899,6 +3948,7 @@ pub async fn record_submission_receipt(
         .as_deref()
         .and_then(SubmissionState::parse)
         .unwrap_or(SubmissionState::NotStarted);
+    let late_after_abandonment = locked.submission_abandoned_at.is_some();
     let intent_conflicts = locked
         .scheduler_name
         .as_deref()
@@ -2922,7 +3972,7 @@ pub async fn record_submission_receipt(
         ));
     }
 
-    if current_submission == SubmissionState::Submitted {
+    if current_submission == SubmissionState::Submitted || late_after_abandonment {
         let artifact = sqlx::query_as::<_, ExecutionArtifactRow>(
             r#"
             SELECT * FROM execution_artifacts
@@ -2950,19 +4000,22 @@ pub async fn record_submission_receipt(
                         .and_then(Value::as_str)
                         == Some(receipt_sha256.as_str())
             });
-        if !exact {
+        if exact {
+            let artifact = artifact.expect("exact receipt requires the physical graph artifact");
+            tx.commit().await?;
+            return Ok(SubmissionReceiptResult {
+                execution: locked,
+                physical_graph_artifact: artifact,
+                replayed: true,
+                late_after_abandonment,
+            });
+        }
+        if current_submission == SubmissionState::Submitted {
             tx.rollback().await?;
             return Err(sqlx::Error::Protocol(
                 "conflicting submission receipt for an already submitted execution".into(),
             ));
         }
-        let artifact = artifact.expect("exact receipt requires the physical graph artifact");
-        tx.commit().await?;
-        return Ok(SubmissionReceiptResult {
-            execution: locked,
-            physical_graph_artifact: artifact,
-            replayed: true,
-        });
     }
     if !matches!(
         current_submission,
@@ -3083,7 +4136,10 @@ pub async fn record_submission_receipt(
             workflow_manifest = $4,
             physical_graph_sha256 = $5,
             control_phase = CASE WHEN $3 THEN control_phase ELSE 'submitted' END,
-            submission_state = 'submitted',
+            submission_state = CASE
+                WHEN $12 THEN submission_state
+                ELSE 'submitted'
+            END,
             scheduler_name = $6,
             scheduler_job_id = $7,
             scheduler_state = $8,
@@ -3094,7 +4150,7 @@ pub async fn record_submission_receipt(
             failure_class = CASE WHEN $3 THEN failure_class ELSE NULL END,
             last_error = CASE WHEN $3 THEN last_error ELSE NULL END,
             phase_timestamps = CASE
-                WHEN phase_timestamps ? 'submitted' THEN phase_timestamps
+                WHEN $12 OR phase_timestamps ? 'submitted' THEN phase_timestamps
                 ELSE phase_timestamps || jsonb_build_object('submitted', to_jsonb(now()))
             END,
             last_reconciled_at = now(),
@@ -3114,6 +4170,7 @@ pub async fn record_submission_receipt(
     .bind(&input.daliuge_session_id)
     .bind(daliuge_state.as_str())
     .bind(&input.remote_session_dir)
+    .bind(late_after_abandonment)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -3164,7 +4221,11 @@ pub async fn record_submission_receipt(
         .unwrap_or_else(|| execution_id.to_string());
     insert_provenance_event(
         &mut *tx,
-        "execution.submission_recorded",
+        if late_after_abandonment {
+            "execution.submission_detected_after_abandonment"
+        } else {
+            "execution.submission_recorded"
+        },
         &execution.project_module,
         source_identifiers.first().map(String::as_str),
         Some(execution_id),
@@ -3173,6 +4234,7 @@ pub async fn record_submission_receipt(
         &json!({
             "submission_receipt_sha256": receipt_sha256,
             "receipt": receipt_document,
+            "operator_abandonment_preserved": late_after_abandonment,
         }),
     )
     .await?;
@@ -3222,6 +4284,7 @@ pub async fn record_submission_receipt(
         execution,
         physical_graph_artifact: artifact,
         replayed: false,
+        late_after_abandonment,
     })
 }
 
@@ -4236,7 +5299,38 @@ pub async fn enqueue_job_with_options(
         .or_else(|| job_kind_capability(kind));
     let required_labels = serde_json::to_value(&opts.required_labels)
         .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
-    if let Some(max_attempts) = opts.max_attempts {
+    let mut tx = pool.begin().await?;
+    if kind == "execute" {
+        let execution_id = opts.execution_id.ok_or_else(|| {
+            sqlx::Error::Protocol("execute jobs require an execution_id".into())
+        })?;
+        let execution: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            r#"
+            SELECT status, submission_abandoned_at
+            FROM batch_execution_record
+            WHERE uuid = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(execution_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((status, submission_abandoned_at)) = execution else {
+            tx.rollback().await?;
+            return Err(sqlx::Error::Protocol(format!(
+                "execution {execution_id} does not exist"
+            )));
+        };
+        if submission_abandoned_at.is_some()
+            || matches!(status.as_str(), "completed" | "failed" | "cancelled" | "not_submitted")
+        {
+            tx.rollback().await?;
+            return Err(sqlx::Error::Protocol(format!(
+                "cannot enqueue execute work for terminal or operator-abandoned execution {execution_id}"
+            )));
+        }
+    }
+    let job = if let Some(max_attempts) = opts.max_attempts {
         sqlx::query_as::<_, JobRow>(
             r#"
             INSERT INTO jobs (
@@ -4260,8 +5354,8 @@ pub async fn enqueue_job_with_options(
         .bind(required_capability)
         .bind(&required_labels)
         .bind(opts.priority.unwrap_or(0))
-        .fetch_one(pool)
-        .await
+        .fetch_one(&mut *tx)
+        .await?
     } else {
         sqlx::query_as::<_, JobRow>(
             r#"
@@ -4285,9 +5379,11 @@ pub async fn enqueue_job_with_options(
         .bind(required_capability)
         .bind(&required_labels)
         .bind(opts.priority.unwrap_or(0))
-        .fetch_one(pool)
-        .await
-    }
+        .fetch_one(&mut *tx)
+        .await?
+    };
+    tx.commit().await?;
+    Ok(job)
 }
 
 fn job_kind_capability(kind: &str) -> Option<&'static str> {
@@ -5824,17 +6920,21 @@ pub async fn list_slurm_submissions_pending_reconciliation(
           AND execution.submission_state IN ('in_flight', 'uncertain')
           AND execution.status NOT IN ('completed', 'failed', 'cancelled', 'not_submitted')
           AND execution.terminal_outcome IS NULL
+          AND execution.submission_abandoned_at IS NULL
           AND NOT EXISTS (
               SELECT 1
               FROM jobs AS active_execute
               WHERE active_execute.execution_id = execution.uuid
                 AND active_execute.kind = 'execute'
                 AND active_execute.status = 'running'
-                AND COALESCE(
-                    active_execute.lease_expires_at,
-                    active_execute.locked_until,
-                    '-infinity'::TIMESTAMPTZ
-                ) > now()
+                AND (
+                    active_execute.lease_expires_at IS NULL
+                    OR active_execute.locked_until IS NULL
+                    OR GREATEST(
+                        active_execute.lease_expires_at,
+                        active_execute.locked_until
+                    ) > now()
+                )
           )
         ORDER BY execution.created_at ASC
         "#,
@@ -6415,8 +7515,13 @@ pub async fn list_alert_deliveries(
 
 #[cfg(test)]
 mod tests {
-    use super::deployment_profile_spec_sha256;
+    use super::{
+        deployment_profile_spec_sha256, validate_slurm_abandonment_evidence,
+        SlurmLookupEvidenceAttempt,
+    };
+    use chrono::{Duration, Utc};
     use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn deployment_profile_hash_is_stable_and_content_addressed() {
@@ -6453,5 +7558,177 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, changed);
         assert_eq!(first.len(), 64);
+    }
+
+    fn negative_evidence(
+        completed_at: chrono::DateTime<Utc>,
+        session_id: &str,
+        intent_id: Uuid,
+        intent_at: chrono::DateTime<Utc>,
+    ) -> SlurmLookupEvidenceAttempt {
+        SlurmLookupEvidenceAttempt {
+            observation_id: Uuid::now_v7(),
+            lookup_id: Uuid::now_v7(),
+            observed_at: completed_at,
+            daliuge_session_id: session_id.into(),
+            intent_observation_id: intent_id,
+            profile_sha256: "profile-sha".into(),
+            target_fingerprint: "target-sha".into(),
+            accounting_not_before: intent_at,
+            query_completed_at: completed_at,
+            squeue_complete: true,
+            sacct_complete: true,
+            result: "not_found".into(),
+            eligible_for_abandonment: true,
+        }
+    }
+
+    #[test]
+    fn abandonment_requires_three_recent_complete_negatives_spanning_ten_minutes() {
+        let now = Utc::now();
+        let intent_at = now - Duration::hours(30);
+        let quiet_at = now - Duration::minutes(20);
+        let intent_id = Uuid::now_v7();
+        let session_id = "BeampipeExecution-evidence";
+        let evidence = vec![
+            negative_evidence(now - Duration::minutes(1), session_id, intent_id, intent_at),
+            negative_evidence(now - Duration::minutes(6), session_id, intent_id, intent_at),
+            negative_evidence(now - Duration::minutes(11), session_id, intent_id, intent_at),
+        ];
+        let ids = validate_slurm_abandonment_evidence(
+            &evidence,
+            session_id,
+            intent_id,
+            intent_at,
+            "profile-sha",
+            "target-sha",
+            quiet_at,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 3);
+
+        let mut partial = evidence.clone();
+        partial[0].sacct_complete = false;
+        assert_eq!(
+            validate_slurm_abandonment_evidence(
+                &partial,
+                session_id,
+                intent_id,
+                intent_at,
+                "profile-sha",
+                "target-sha",
+                quiet_at,
+                now,
+            )
+            .unwrap_err()
+            .code(),
+            "submission_abandonment_latest_evidence_not_negative"
+        );
+
+        let mut wrong_target = evidence.clone();
+        wrong_target[1].target_fingerprint = "different-target".into();
+        assert_eq!(
+            validate_slurm_abandonment_evidence(
+                &wrong_target,
+                session_id,
+                intent_id,
+                intent_at,
+                "profile-sha",
+                "target-sha",
+                quiet_at,
+                now,
+            )
+            .unwrap_err()
+            .code(),
+            "submission_abandonment_negative_evidence_insufficient"
+        );
+
+        let mut ambiguous = negative_evidence(
+            now - Duration::seconds(30),
+            session_id,
+            intent_id,
+            intent_at,
+        );
+        ambiguous.result = "ambiguous".into();
+        ambiguous.eligible_for_abandonment = false;
+        let mut with_ambiguous = evidence.clone();
+        with_ambiguous.push(ambiguous);
+        assert_eq!(
+            validate_slurm_abandonment_evidence(
+                &with_ambiguous,
+                session_id,
+                intent_id,
+                intent_at,
+                "profile-sha",
+                "target-sha",
+                quiet_at,
+                now,
+            )
+            .unwrap_err()
+            .code(),
+            "submission_abandonment_scheduler_match_observed"
+        );
+
+        let mut latest_error = negative_evidence(
+            now - Duration::seconds(10),
+            session_id,
+            intent_id,
+            intent_at,
+        );
+        latest_error.result = "error".into();
+        latest_error.eligible_for_abandonment = false;
+        let mut with_latest_error = evidence.clone();
+        with_latest_error.push(latest_error);
+        assert_eq!(
+            validate_slurm_abandonment_evidence(
+                &with_latest_error,
+                session_id,
+                intent_id,
+                intent_at,
+                "profile-sha",
+                "target-sha",
+                quiet_at,
+                now,
+            )
+            .unwrap_err()
+            .code(),
+            "submission_abandonment_latest_evidence_not_negative"
+        );
+
+        let mut dense = (1..=145)
+            .map(|tick| {
+                negative_evidence(
+                    now - Duration::seconds(tick * 5),
+                    session_id,
+                    intent_id,
+                    intent_at,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut intervening_error = negative_evidence(
+            now - Duration::seconds(10),
+            session_id,
+            intent_id,
+            intent_at,
+        );
+        intervening_error.result = "error".into();
+        intervening_error.eligible_for_abandonment = false;
+        dense.insert(0, intervening_error);
+        assert_eq!(
+            validate_slurm_abandonment_evidence(
+                &dense,
+                session_id,
+                intent_id,
+                intent_at,
+                "profile-sha",
+                "target-sha",
+                quiet_at,
+                now,
+            )
+            .unwrap()
+            .len(),
+            3
+        );
     }
 }

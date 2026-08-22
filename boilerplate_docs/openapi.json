@@ -1231,6 +1231,16 @@
               "status": {
                 "type": "string"
               },
+              "submission_abandoned_at": {
+                "format": "date-time",
+                "nullable": true,
+                "type": "string"
+              },
+              "submission_deadline_at": {
+                "format": "date-time",
+                "nullable": true,
+                "type": "string"
+              },
               "submission_state": {
                 "nullable": true,
                 "type": "string"
@@ -1437,6 +1447,16 @@
           "status": {
             "type": "string"
           },
+          "submission_abandoned_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "submission_deadline_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
           "submission_state": {
             "nullable": true,
             "type": "string"
@@ -1454,6 +1474,42 @@
           "uuid",
           "status",
           "retry_count"
+        ],
+        "type": "object"
+      },
+      "ExecutionSubmissionAbandonRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_external_job_may_exist": {
+            "description": "Explicit acknowledgement that negative scheduler evidence cannot prove non-existence.",
+            "type": "boolean"
+          },
+          "expected_daliuge_session_id": {
+            "description": "Compare-and-set guard for the exact DALiuGE/Slurm submission name.",
+            "type": "string"
+          },
+          "expected_submission_deadline_at": {
+            "description": "Compare-and-set guard for the persisted backend submission deadline.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "expected_submission_state": {
+            "description": "Compare-and-set guard. Only `in_flight` and `uncertain` may be abandoned.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Required operator rationale, stored with the durable abandonment evidence.",
+            "maxLength": 1000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "expected_submission_state",
+          "expected_daliuge_session_id",
+          "expected_submission_deadline_at",
+          "acknowledge_external_job_may_exist"
         ],
         "type": "object"
       },
@@ -5298,6 +5354,122 @@
           }
         ],
         "summary": "Get execution status",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/v2/executions/{id}/submission/abandon": {
+      "post": {
+        "operationId": "abandon_execution_submission",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionSubmissionAbandonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionRead"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "tags": [
           "executions"
         ]

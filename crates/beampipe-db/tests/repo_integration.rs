@@ -978,6 +978,7 @@ async fn cancellation_refuses_unresolved_external_submission() {
         "session-cancel-race",
         None,
         1_800,
+        Some("cancel-race-target"),
     )
     .await
     .unwrap()
@@ -1390,6 +1391,7 @@ async fn prepare_submission_receipt_execution(
         session_id,
         None,
         1_800,
+        (backend == "slurm").then_some("integration-target-sha"),
     )
     .await
     .unwrap()
@@ -1401,6 +1403,7 @@ async fn prepare_submission_receipt_execution(
         session_id,
         None,
         1_800,
+        (backend == "slurm").then_some("integration-target-sha"),
     )
         .await
         .unwrap()
@@ -1428,6 +1431,593 @@ async fn prepare_submission_receipt_execution(
         serde_json::to_value(submission_deadline_at).unwrap()
     );
     execution
+}
+
+async fn prepare_abandonable_slurm_submission(
+    pool: &sqlx::PgPool,
+    module: &str,
+    session_id: &str,
+) -> (
+    beampipe_db::models::ExecutionRow,
+    beampipe_db::models::ExecutionObservationRow,
+) {
+    let execution =
+        prepare_submission_receipt_execution(pool, module, "slurm", session_id).await;
+    let now = Utc::now();
+    let intent_at = now - Duration::hours(26);
+    let deadline_at = intent_at + Duration::minutes(30);
+    let profile_sha256 = "integration-profile-sha";
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET submission_deadline_at = $2,
+            deployment_profile_snapshot = $3
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(execution.uuid)
+    .bind(deadline_at)
+    .bind(json!({
+        "spec_sha256": profile_sha256,
+        "deployment": {"kind": "slurm_remote", "login_node": "offline.invalid"},
+    }))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE execution_observations
+        SET observed_at = $2,
+            payload = payload || jsonb_build_object('submission_deadline_at', to_jsonb($3::timestamptz))
+        WHERE execution_id = $1
+          AND kind = 'daliuge_session'
+          AND raw_state = 'intent_persisted'
+        "#,
+    )
+    .bind(execution.uuid)
+    .bind(intent_at)
+    .bind(deadline_at)
+    .execute(pool)
+    .await
+    .unwrap();
+    let intent = repo::latest_submission_intent_observation(pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    for minutes_ago in [11, 6, 1] {
+        let completed_at = now - Duration::minutes(minutes_ago);
+        repo::record_slurm_name_lookup(
+            pool,
+            execution.uuid,
+            repo::SlurmNameLookupRecordInput {
+                lookup_id: Uuid::now_v7(),
+                intent_observation_id: intent.uuid,
+                daliuge_session_id: session_id.into(),
+                profile_sha256: profile_sha256.into(),
+                target_fingerprint: "integration-target-sha".into(),
+                accounting_not_before: intent.observed_at,
+                query_started_at: completed_at - Duration::seconds(1),
+                query_completed_at: completed_at,
+                squeue_complete: true,
+                sacct_complete: true,
+                outcome: repo::SlurmNameLookupOutcome::NotFound,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    (
+        repo::get_execution(pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap(),
+        intent,
+    )
+}
+
+#[tokio::test]
+async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let session_id = format!("BeampipeExecution-abandon-{}", Uuid::now_v7());
+    let (execution, _) = prepare_abandonable_slurm_submission(
+        &pool,
+        &format!("abandon_{}", Uuid::now_v7().simple()),
+        &session_id,
+    )
+    .await;
+    let deadline = execution.submission_deadline_at.unwrap();
+    let queued_job = repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid, "fence": "queued"}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(execution.uuid),
+            idempotency_key: Some(format!("abandon-fence-queued:{}", execution.uuid)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let expired_job = repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid, "fence": "expired-running"}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(execution.uuid),
+            idempotency_key: Some(format!("abandon-fence-expired:{}", execution.uuid)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let old_activity = Utc::now() - Duration::hours(26);
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET created_at = $2,
+            updated_at = $2,
+            next_run_at = $2
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(queued_job.uuid)
+    .bind(old_activity)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET status = 'running',
+            created_at = $2,
+            updated_at = $2,
+            heartbeat_at = $2,
+            locked_until = $2,
+            lease_expires_at = $2,
+            lease_token = $3
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(expired_job.uuid)
+    .bind(old_activity)
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let abandoned = repo::abandon_slurm_submission(
+        &pool,
+        execution.uuid,
+        repo::AbandonSlurmSubmissionInput {
+            actor: "user:integration-superuser".into(),
+            correlation_id: Some("abandon:integration".into()),
+            reason: "remote submission remains unresolved after attended review".into(),
+            expected_submission_state: SubmissionState::InFlight,
+            expected_daliuge_session_id: session_id.clone(),
+            expected_submission_deadline_at: deadline,
+            acknowledge_external_job_may_exist: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(abandoned.status, "failed");
+    assert!(abandoned.execution_phase.is_none());
+    assert_eq!(abandoned.control_phase.as_deref(), Some("terminal"));
+    assert_eq!(abandoned.submission_state.as_deref(), Some("in_flight"));
+    assert_eq!(abandoned.terminal_outcome.as_deref(), Some("inconsistent"));
+    assert_eq!(abandoned.failure_class.as_deref(), Some("inconsistent_state"));
+    assert!(abandoned.submission_abandoned_at.is_some());
+    for job_id in [queued_job.uuid, expired_job.uuid] {
+        let fenced: (
+            String,
+            Option<chrono::DateTime<Utc>>,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+        ) = sqlx::query_as(
+            r#"
+            SELECT status, locked_until, lease_owner, lease_token, lease_expires_at, heartbeat_at
+            FROM jobs WHERE uuid = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(fenced.0, "cancelled");
+        assert!(fenced.1.is_none());
+        assert!(fenced.2.is_none());
+        assert!(fenced.3.is_none());
+        assert!(fenced.4.is_none());
+        assert!(fenced.5.is_none());
+    }
+    let abandonment_event = repo::list_provenance_events_for_execution(
+        &pool,
+        execution.uuid,
+        100,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|event| event.event_type == "execution.submission_abandoned")
+    .expect("durable abandonment provenance");
+    let invalidated_ids = abandonment_event.payload["invalidated_execute_job_ids"]
+        .as_array()
+        .unwrap();
+    assert!(invalidated_ids.contains(&json!(queued_job.uuid)));
+    assert!(invalidated_ids.contains(&json!(expired_job.uuid)));
+    assert!(repo::begin_execution_submission(
+        &pool,
+        execution.uuid,
+        "slurm",
+        &session_id,
+        None,
+        1_800,
+        Some("integration-target-sha"),
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let enqueue_after_abandonment = repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid, "fence": "after-abandonment"}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(execution.uuid),
+            idempotency_key: Some(format!("abandon-fence-late:{}", execution.uuid)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("operator abandonment must fence future execute work");
+    assert!(enqueue_after_abandonment
+        .to_string()
+        .contains("terminal or operator-abandoned"));
+    assert!(!repo::list_slurm_submissions_pending_reconciliation(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == execution.uuid));
+
+    let session_dir = format!("/remote/sessions/{session_id}");
+    let late_input = repo::SubmissionReceiptInput {
+        scheduler_name: "slurm".into(),
+        scheduler_job_id: Some("4242".into()),
+        daliuge_session_id: Some(session_id),
+        remote_session_dir: Some(session_dir.clone()),
+        staging_root: Some(format!("{session_dir}/wallaby-staging")),
+        workflow_manifest: json!({"late_after_abandonment": true}),
+        physical_graph: json!([{"oid": "late-drop"}]),
+        next_status: ExecutionStatus::AwaitingScheduler,
+        actor: "system:late-worker".into(),
+        correlation_id: Some("receipt:late-after-abandonment".into()),
+        poll_job: None,
+    };
+    let late = repo::record_submission_receipt(&pool, execution.uuid, late_input.clone())
+        .await
+        .unwrap();
+    assert!(late.late_after_abandonment);
+    assert_eq!(late.execution.status, "failed");
+    assert_eq!(late.execution.control_phase.as_deref(), Some("terminal"));
+    assert_eq!(late.execution.submission_state.as_deref(), Some("in_flight"));
+    assert_eq!(late.execution.terminal_outcome.as_deref(), Some("inconsistent"));
+    assert_eq!(late.execution.scheduler_job_id.as_deref(), Some("4242"));
+    assert!(late.execution.physical_graph_sha256.is_some());
+    let events_before_replay = repo::list_provenance_events_for_execution(
+        &pool,
+        execution.uuid,
+        100,
+    )
+    .await
+    .unwrap();
+    assert!(events_before_replay
+        .iter()
+        .any(|event| event.event_type == "execution.submission_detected_after_abandonment"));
+    let replay = repo::record_submission_receipt(&pool, execution.uuid, late_input)
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    assert!(replay.late_after_abandonment);
+    assert_eq!(
+        replay.physical_graph_artifact.uuid,
+        late.physical_graph_artifact.uuid
+    );
+    assert_eq!(
+        repo::list_execution_artifacts(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|artifact| artifact.kind == "physical_graph")
+            .count(),
+        1
+    );
+    assert_eq!(
+        repo::list_provenance_events_for_execution(&pool, execution.uuid, 100)
+            .await
+            .unwrap()
+            .len(),
+        events_before_replay.len()
+    );
+}
+
+#[tokio::test]
+async fn abandonment_rejects_an_active_execute_lease() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let queue = format!("abandon_queue_{}", Uuid::now_v7().simple());
+    let worker = Uuid::now_v7();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(worker, &queue, &["daliuge-deployment"]),
+    )
+    .await
+    .unwrap();
+    let session_id = format!("BeampipeExecution-abandon-lease-{}", Uuid::now_v7());
+    let (execution, intent) = prepare_abandonable_slurm_submission(
+        &pool,
+        &format!("abandon_lease_{}", Uuid::now_v7().simple()),
+        &session_id,
+    )
+    .await;
+    repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(execution.uuid),
+            idempotency_key: Some(format!("abandon-active:{}", execution.uuid)),
+            pool: Some(queue.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    repo::claim_next_job_for_worker(
+        &pool,
+        worker,
+        &queue,
+        &["daliuge-deployment".into()],
+        60,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET scheduler_state = 'pending',
+            failure_class = 'timeout',
+            last_error = 'live submitter context'
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(execution.uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let lookup_at = Utc::now();
+    let raced_lookup = repo::record_slurm_name_lookup(
+        &pool,
+        execution.uuid,
+        repo::SlurmNameLookupRecordInput {
+            lookup_id: Uuid::now_v7(),
+            intent_observation_id: intent.uuid,
+            daliuge_session_id: session_id.clone(),
+            profile_sha256: "integration-profile-sha".into(),
+            target_fingerprint: "integration-target-sha".into(),
+            accounting_not_before: intent.observed_at,
+            query_started_at: lookup_at - Duration::seconds(1),
+            query_completed_at: lookup_at,
+            squeue_complete: true,
+            sacct_complete: true,
+            outcome: repo::SlurmNameLookupOutcome::NotFound,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(raced_lookup.execution.scheduler_state.as_deref(), Some("pending"));
+    assert_eq!(raced_lookup.execution.failure_class.as_deref(), Some("timeout"));
+    assert_eq!(
+        raced_lookup.execution.last_error.as_deref(),
+        Some("live submitter context")
+    );
+    assert_eq!(
+        raced_lookup.observation.payload["eligible_for_abandonment"],
+        false
+    );
+    let error = repo::abandon_slurm_submission(
+        &pool,
+        execution.uuid,
+        repo::AbandonSlurmSubmissionInput {
+            actor: "user:integration-superuser".into(),
+            correlation_id: None,
+            reason: "must not win the worker lease race".into(),
+            expected_submission_state: SubmissionState::InFlight,
+            expected_daliuge_session_id: session_id,
+            expected_submission_deadline_at: execution.submission_deadline_at.unwrap(),
+            acknowledge_external_job_may_exist: true,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), "submission_abandonment_active_execute_lease");
+    assert!(repo::get_execution(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap()
+        .submission_abandoned_at
+        .is_none());
+}
+
+#[tokio::test]
+async fn abandonment_rejects_a_scheduler_match_after_negative_evidence() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let session_id = format!("BeampipeExecution-abandon-ambiguous-{}", Uuid::now_v7());
+    let (execution, intent) = prepare_abandonable_slurm_submission(
+        &pool,
+        &format!("abandon_ambiguous_{}", Uuid::now_v7().simple()),
+        &session_id,
+    )
+    .await;
+    let lookup_at = Utc::now();
+    repo::record_slurm_name_lookup(
+        &pool,
+        execution.uuid,
+        repo::SlurmNameLookupRecordInput {
+            lookup_id: Uuid::now_v7(),
+            intent_observation_id: intent.uuid,
+            daliuge_session_id: session_id.clone(),
+            profile_sha256: "integration-profile-sha".into(),
+            target_fingerprint: "integration-target-sha".into(),
+            accounting_not_before: intent.observed_at,
+            query_started_at: lookup_at - Duration::seconds(1),
+            query_completed_at: lookup_at,
+            squeue_complete: true,
+            sacct_complete: true,
+            outcome: repo::SlurmNameLookupOutcome::Ambiguous {
+                scheduler_job_ids: vec!["6101".into(), "6102".into()],
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let error = repo::abandon_slurm_submission(
+        &pool,
+        execution.uuid,
+        repo::AbandonSlurmSubmissionInput {
+            actor: "user:integration-superuser".into(),
+            correlation_id: None,
+            reason: "ambiguous scheduler evidence must prevent abandonment".into(),
+            expected_submission_state: SubmissionState::InFlight,
+            expected_daliuge_session_id: session_id,
+            expected_submission_deadline_at: execution.submission_deadline_at.unwrap(),
+            acknowledge_external_job_may_exist: true,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), "submission_abandonment_scheduler_match_observed");
+}
+
+#[tokio::test]
+async fn submission_receipt_winning_the_row_lock_prevents_abandonment() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let session_id = format!("BeampipeExecution-receipt-first-{}", Uuid::now_v7());
+    let execution = prepare_submission_receipt_execution(
+        &pool,
+        &format!("receipt_first_{}", Uuid::now_v7().simple()),
+        "slurm",
+        &session_id,
+    )
+    .await;
+    let intent = repo::latest_submission_intent_observation(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    let mismatch_at = Utc::now();
+    let mismatch = repo::record_slurm_name_lookup(
+        &pool,
+        execution.uuid,
+        repo::SlurmNameLookupRecordInput {
+            lookup_id: Uuid::now_v7(),
+            intent_observation_id: intent.uuid,
+            daliuge_session_id: session_id.clone(),
+            profile_sha256: "integration-profile-sha".into(),
+            target_fingerprint: "different-resolved-user".into(),
+            accounting_not_before: intent.observed_at,
+            query_started_at: mismatch_at - Duration::seconds(1),
+            query_completed_at: mismatch_at,
+            squeue_complete: true,
+            sacct_complete: true,
+            outcome: repo::SlurmNameLookupOutcome::NotFound,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(mismatch.to_string().contains("resolved target"));
+    let session_dir = format!("/remote/sessions/{session_id}");
+    let receipt = repo::record_submission_receipt(
+        &pool,
+        execution.uuid,
+        repo::SubmissionReceiptInput {
+            scheduler_name: "slurm".into(),
+            scheduler_job_id: Some("5252".into()),
+            daliuge_session_id: Some(session_id.clone()),
+            remote_session_dir: Some(session_dir.clone()),
+            staging_root: Some(format!("{session_dir}/wallaby-staging")),
+            workflow_manifest: json!({"receipt_first": true}),
+            physical_graph: json!([{"oid": "receipt-first-drop"}]),
+            next_status: ExecutionStatus::AwaitingScheduler,
+            actor: "system:receipt-first".into(),
+            correlation_id: None,
+            poll_job: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!receipt.late_after_abandonment);
+    let lookup_at = Utc::now();
+    let stale_lookup = repo::record_slurm_name_lookup(
+        &pool,
+        execution.uuid,
+        repo::SlurmNameLookupRecordInput {
+            lookup_id: Uuid::now_v7(),
+            intent_observation_id: intent.uuid,
+            daliuge_session_id: session_id.clone(),
+            profile_sha256: "integration-profile-sha".into(),
+            target_fingerprint: "integration-target-sha".into(),
+            accounting_not_before: intent.observed_at,
+            query_started_at: lookup_at - Duration::seconds(1),
+            query_completed_at: lookup_at,
+            squeue_complete: true,
+            sacct_complete: true,
+            outcome: repo::SlurmNameLookupOutcome::NotFound,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stale_lookup.observation.payload["canonical_state_mutation_allowed"],
+        false
+    );
+    assert_eq!(stale_lookup.observation.payload["eligible_for_abandonment"], false);
+    assert_eq!(stale_lookup.execution.submission_state.as_deref(), Some("submitted"));
+    assert_eq!(stale_lookup.execution.scheduler_job_id.as_deref(), Some("5252"));
+    let error = repo::abandon_slurm_submission(
+        &pool,
+        execution.uuid,
+        repo::AbandonSlurmSubmissionInput {
+            actor: "user:integration-superuser".into(),
+            correlation_id: None,
+            reason: "stale operator review must lose to the receipt".into(),
+            expected_submission_state: SubmissionState::InFlight,
+            expected_daliuge_session_id: session_id,
+            expected_submission_deadline_at: execution.submission_deadline_at.unwrap(),
+            acknowledge_external_job_may_exist: true,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), "submission_abandonment_cas_mismatch");
+    let current = repo::get_execution(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.status, "awaiting_scheduler");
+    assert_eq!(current.submission_state.as_deref(), Some("submitted"));
+    assert_eq!(current.scheduler_job_id.as_deref(), Some("5252"));
+    assert!(current.submission_abandoned_at.is_none());
 }
 
 #[tokio::test]
@@ -1616,6 +2206,7 @@ async fn recovered_exact_slurm_id_stays_uncertain_until_the_receipt_commits() {
         &session_id,
         None,
         1_800,
+        Some("recovered-target"),
     )
     .await
     .unwrap()
@@ -2035,6 +2626,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         "BeampipeExecution-selector-slurm",
         None,
         1_800,
+        Some("selector-slurm-target"),
     )
     .await
     .unwrap()
@@ -2128,6 +2720,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         "BeampipeExecution-selector-rest",
         Some("http://dim.invalid"),
         1_800,
+        None,
     )
     .await
     .unwrap()

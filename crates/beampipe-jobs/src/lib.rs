@@ -2438,6 +2438,20 @@ fn json_sha256(value: &Value) -> Result<(String, i64), String> {
     Ok((format!("{:x}", Sha256::digest(&bytes)), bytes.len() as i64))
 }
 
+fn resolved_slurm_target_fingerprint(
+    deployment: &SlurmRemoteDeploymentConfig,
+) -> Result<String, String> {
+    let remote_user = resolve_remote_user(deployment);
+    let target = SlurmTarget::from_deployment(deployment, &remote_user);
+    json_sha256(&json!({
+        "login_node": target.login_node,
+        "ssh_port": target.ssh_port,
+        "remote_user": target.remote_user,
+        "credential_slot": target.credential_slot,
+    }))
+    .map(|(sha256, _)| sha256)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GraphPreparationPreview {
     pub project_module: String,
@@ -3697,6 +3711,30 @@ async fn run_submit_phase(
     });
     let submission_timeout_seconds = i64::try_from(submission_timeout.as_secs())
         .map_err(|_| "submission timeout exceeds the supported range".to_string())?;
+    let target_fingerprint = if backend_kind == "slurm_remote" {
+        let deployment = profile
+            .and_then(|profile| {
+                serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()).ok()
+            })
+            .and_then(|deployment| match deployment {
+                DeploymentConfig::SlurmRemote(slurm) => Some(slurm),
+                DeploymentConfig::RestRemote(_) => None,
+            });
+        match deployment {
+            Some(deployment) => Some(resolved_slurm_target_fingerprint(&deployment)?),
+            None if !use_real => Some(
+                json_sha256(&json!({"backend": "mock-slurm"}))
+                    .map(|(sha256, _)| sha256)?,
+            ),
+            None => {
+                return Err(
+                    "real Slurm submission requires a valid pinned deployment profile".into(),
+                )
+            }
+        }
+    } else {
+        None
+    };
     let submission_deadline_at = repo::begin_execution_submission(
         pool,
         execution_id,
@@ -3708,6 +3746,7 @@ async fn run_submit_phase(
         &expected_session_id,
         daliuge_manager_url.as_deref(),
         submission_timeout_seconds,
+        target_fingerprint.as_deref(),
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -3835,7 +3874,7 @@ async fn apply_submit_result(
     } else {
         None
     };
-    repo::record_submission_receipt(
+    let receipt = repo::record_submission_receipt(
         pool,
         execution_id,
         repo::SubmissionReceiptInput {
@@ -3853,6 +3892,15 @@ async fn apply_submit_result(
         },
     )
     .await?;
+    if receipt.late_after_abandonment {
+        error!(
+            event = "submission_receipt_after_operator_abandonment",
+            execution_id = %execution_id,
+            scheduler_job_id = receipt.execution.scheduler_job_id.as_deref().unwrap_or_default(),
+            "external submission was detected after its unresolved intent was operator-abandoned"
+        );
+        metrics::record_reconciliation_result("slurm_submission", "receipt_after_abandonment");
+    }
     Ok(())
 }
 
@@ -5145,207 +5193,213 @@ async fn reconcile_uncertain_slurm_submissions(
             .await?;
             continue;
         };
-        match serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()) {
-            Ok(DeploymentConfig::SlurmRemote(_)) => {}
-            Ok(_) => {
-                record_slurm_poll_failure(
-                    pool,
-                    &execution,
-                    "find_by_name",
-                    "invalid_deployment_profile_kind",
-                    "the execution deployment profile is not a Slurm remote profile",
-                    FailureClass::Configuration,
-                    false,
-                )
-                .await?;
-                continue;
-            }
-            Err(error) => {
-                record_slurm_poll_failure(
-                    pool,
-                    &execution,
-                    "find_by_name",
-                    "invalid_deployment_profile",
-                    &format!("the Slurm deployment profile is invalid: {error}"),
-                    FailureClass::Configuration,
-                    false,
-                )
-                .await?;
-                continue;
-            }
+        let deployment =
+            match serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()) {
+                Ok(DeploymentConfig::SlurmRemote(deployment)) => deployment,
+                Ok(_) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "find_by_name",
+                        "invalid_deployment_profile_kind",
+                        "the execution deployment profile is not a Slurm remote profile",
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(error) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "find_by_name",
+                        "invalid_deployment_profile",
+                        &format!("the Slurm deployment profile is invalid: {error}"),
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+        let Some(intent) = repo::latest_submission_intent_observation(pool, execution.uuid).await?
+        else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_submission_intent_evidence",
+                "the unresolved Slurm submission has no persisted intent timestamp",
+                FailureClass::InconsistentState,
+                false,
+            )
+            .await?;
+            continue;
+        };
+        let Some(intent_target_fingerprint) = intent
+            .payload
+            .get("target_fingerprint")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_submission_target_fingerprint",
+                "the unresolved Slurm submission has no pinned resolved target identity",
+                FailureClass::InconsistentState,
+                false,
+            )
+            .await?;
+            continue;
+        };
+        let current_target_fingerprint = resolved_slurm_target_fingerprint(&deployment)
+            .map_err(sqlx::Error::Protocol)?;
+        if current_target_fingerprint != intent_target_fingerprint {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "submission_target_identity_changed",
+                "the resolved Slurm login target or remote user changed after submission intent; refusing name lookup",
+                FailureClass::InconsistentState,
+                false,
+            )
+            .await?;
+            continue;
         }
+        let profile_sha256 = profile.spec_sha256.clone().unwrap_or_else(|| {
+            repo::deployment_profile_spec_sha256(
+                &profile.name,
+                profile.description.as_deref(),
+                profile.project_module.as_deref(),
+                profile.is_default,
+                profile.max_concurrent_executions,
+                &profile.translation,
+                &profile.deployment,
+            )
+        });
+        let target_fingerprint = intent_target_fingerprint;
+        let lookup_id = Uuid::now_v7();
+        let lookup_started_at = Utc::now();
         let client = slurm_backend_from_profile(Some(&profile), true, execution.created_at).slurm;
-        let matches = match within_slurm_target_timeout(
+        let lookup = match within_slurm_target_timeout(
             SLURM_TARGET_WALL_CLOCK_TIMEOUT,
-            client.find_by_name(&session_id, execution.created_at),
+            client.find_by_name(&session_id, intent.observed_at),
         )
         .await
         {
-            Ok(Ok(lookup)) => lookup.matches,
+            Ok(Ok(lookup)) => lookup,
             Ok(Err(error)) => {
-                record_slurm_poll_failure(
+                let completed_at = Utc::now();
+                repo::record_slurm_name_lookup(
                     pool,
-                    &execution,
-                    "find_by_name",
-                    "submission_reconciliation_failed",
-                    &error.to_string(),
-                    error.failure_class(),
-                    error.retryable,
+                    execution.uuid,
+                    repo::SlurmNameLookupRecordInput {
+                        lookup_id,
+                        intent_observation_id: intent.uuid,
+                        daliuge_session_id: session_id.clone(),
+                        profile_sha256: profile_sha256.clone(),
+                        target_fingerprint: target_fingerprint.clone(),
+                        accounting_not_before: intent.observed_at,
+                        query_started_at: lookup_started_at,
+                        query_completed_at: completed_at,
+                        squeue_complete: false,
+                        sacct_complete: false,
+                        outcome: repo::SlurmNameLookupOutcome::Error {
+                            code: format!("scheduler_{:?}", error.kind).to_ascii_lowercase(),
+                            message: beampipe_security::redact_string(&error.to_string()),
+                            retryable: error.retryable,
+                        },
+                    },
                 )
                 .await?;
                 metrics::record_reconciliation_result("slurm_submission", "lookup_error");
                 continue;
             }
             Err(_) => {
-                record_slurm_poll_failure(
+                let completed_at = Utc::now();
+                repo::record_slurm_name_lookup(
                     pool,
-                    &execution,
-                    "find_by_name",
-                    "find_by_name_timeout",
-                    &format!(
-                        "Slurm submission reconciliation exceeded the {} second wall-clock limit",
-                        SLURM_TARGET_WALL_CLOCK_TIMEOUT.as_secs()
-                    ),
-                    FailureClass::Timeout,
-                    true,
+                    execution.uuid,
+                    repo::SlurmNameLookupRecordInput {
+                        lookup_id,
+                        intent_observation_id: intent.uuid,
+                        daliuge_session_id: session_id.clone(),
+                        profile_sha256: profile_sha256.clone(),
+                        target_fingerprint: target_fingerprint.clone(),
+                        accounting_not_before: intent.observed_at,
+                        query_started_at: lookup_started_at,
+                        query_completed_at: completed_at,
+                        squeue_complete: false,
+                        sacct_complete: false,
+                        outcome: repo::SlurmNameLookupOutcome::Error {
+                            code: "find_by_name_timeout".into(),
+                            message: format!(
+                                "Slurm submission reconciliation exceeded the {} second wall-clock limit",
+                                SLURM_TARGET_WALL_CLOCK_TIMEOUT.as_secs()
+                            ),
+                            retryable: true,
+                        },
+                    },
                 )
                 .await?;
                 metrics::record_reconciliation_result("slurm_submission", "lookup_timeout");
                 continue;
             }
         };
-        match matches.as_slice() {
-            [] => {
-                repo::record_execution_observation(
-                    pool,
-                    execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: SchedulerState::Unknown.as_str().into(),
-                        raw_state: Some("not_found_by_name".into()),
-                        reason: Some(
-                            "no scheduler job currently matches the stable session name".into(),
-                        ),
-                        payload: json!({"daliuge_session_id": &session_id}),
-                        source_version: None,
-                        observed_at: Some(Utc::now()),
-                    },
-                )
-                .await?;
-                metrics::record_reconciliation_result("slurm_submission", "not_found");
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        scheduler_state: Some(SchedulerState::Unknown),
-                        failure_class: Some(FailureClass::NotFound),
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            }
-            [observation] => {
-                if let Err(error) =
-                    beampipe_orchestration::slurm_ssh::validate_slurm_job_id(
-                        &observation.external_job_id,
-                    )
-                {
-                    record_slurm_poll_failure(
-                        pool,
-                        &execution,
-                        "find_by_name",
-                        "invalid_recovered_scheduler_job_id",
-                        &error.to_string(),
-                        FailureClass::Validation,
-                        false,
-                    )
-                    .await?;
-                    metrics::record_reconciliation_result(
-                        "slurm_submission",
-                        "invalid_exact_job_id",
-                    );
-                    continue;
-                }
-                repo::record_execution_observation(
-                    pool,
-                    execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: observation.state.as_str().into(),
-                        raw_state: Some(observation.raw_state.clone()),
-                        reason: observation.reason.clone(),
-                        payload: json!({
-                            "scheduler_job_id": observation.external_job_id,
-                            "daliuge_session_id": &session_id,
-                            "recovered_after_lost_response": true,
-                            "source": observation.source,
-                            "submission_receipt_present": false,
-                            "submission_state": SubmissionState::Uncertain.as_str(),
-                        }),
-                        source_version: None,
-                        observed_at: Some(observation.observed_at),
-                    },
-                )
-                .await?;
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        submission_state: Some(SubmissionState::Uncertain),
-                        scheduler_job_id: Some(observation.external_job_id.clone()),
-                        scheduler_state: Some(observation.state),
-                        scheduler_raw_state: Some(observation.raw_state.clone()),
-                        scheduler_reason: observation.reason.clone(),
-                        clear_failure_context: true,
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-                metrics::record_reconciliation_result(
-                    "slurm_submission",
-                    "recovered_unreceipted",
-                );
-            }
-            observations => {
-                let job_ids: Vec<_> = observations
+        let outcome = match lookup.matches.as_slice() {
+            [] => repo::SlurmNameLookupOutcome::NotFound,
+            [observation] => repo::SlurmNameLookupOutcome::Exact {
+                scheduler_job_id: observation.external_job_id.clone(),
+                state: observation.state,
+                raw_state: observation.raw_state.clone(),
+                reason: observation.reason.clone(),
+                source: observation.source.clone(),
+                observed_at: observation.observed_at,
+            },
+            observations => repo::SlurmNameLookupOutcome::Ambiguous {
+                scheduler_job_ids: observations
                     .iter()
                     .map(|observation| observation.external_job_id.clone())
-                    .collect();
-                let detail = format!(
-                    "multiple scheduler jobs match stable session name {session_id}: {}",
-                    job_ids.join(", ")
-                );
-                repo::record_execution_observation(
-                    pool,
-                    execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: SchedulerState::Unknown.as_str().into(),
-                        raw_state: Some("ambiguous_name_match".into()),
-                        reason: Some(detail.clone()),
-                        payload: json!({"scheduler_job_ids": job_ids}),
-                        source_version: None,
-                        observed_at: Some(Utc::now()),
-                    },
-                )
-                .await?;
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        scheduler_state: Some(SchedulerState::Unknown),
-                        failure_class: Some(FailureClass::InconsistentState),
-                        last_error: Some(detail),
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-                metrics::record_reconciliation_result("slurm_submission", "ambiguous");
-            }
-        }
+                    .collect(),
+            },
+        };
+        let result_label = match &outcome {
+            repo::SlurmNameLookupOutcome::NotFound => "not_found",
+            repo::SlurmNameLookupOutcome::Exact { .. } => "recovered_unreceipted",
+            repo::SlurmNameLookupOutcome::Ambiguous { .. } => "ambiguous",
+            repo::SlurmNameLookupOutcome::Error { .. } => unreachable!(),
+        };
+        let recorded = repo::record_slurm_name_lookup(
+            pool,
+            execution.uuid,
+            repo::SlurmNameLookupRecordInput {
+                lookup_id,
+                intent_observation_id: intent.uuid,
+                daliuge_session_id: session_id,
+                profile_sha256,
+                target_fingerprint,
+                accounting_not_before: lookup.accounting_not_before,
+                query_started_at: lookup.query_started_at,
+                query_completed_at: lookup.query_completed_at,
+                squeue_complete: lookup.source_completion.squeue_completed,
+                sacct_complete: lookup.source_completion.sacct_completed,
+                outcome,
+            },
+        )
+        .await?;
+        metrics::record_reconciliation_result(
+            "slurm_submission",
+            if recorded.late_after_abandonment {
+                "detected_after_abandonment"
+            } else {
+                result_label
+            },
+        );
     }
     Ok(())
 }
@@ -5549,7 +5603,7 @@ fn slurm_backend_from_profile(
                 chrono::Utc::now().format("%Y%m%d")
             );
             login = slurm.login_node.clone();
-            remote_user = slurm.remote_user.clone();
+            remote_user = Some(resolve_remote_user(&slurm));
             account = Some(slurm.account.clone());
             slurm_dep = Some(slurm);
         }
@@ -6194,6 +6248,7 @@ mod tests {
                 &session_id,
                 Some("http://dim.invalid"),
                 1_800,
+                None,
             )
             .await
             .unwrap()
@@ -6871,6 +6926,30 @@ mod tests {
             ),
             Some("slurm_remote")
         );
+    }
+
+    #[test]
+    fn submission_target_fingerprint_includes_the_resolved_remote_user() {
+        let DeploymentConfig::SlurmRemote(mut deployment) =
+            serde_json::from_value(json!({
+                "kind": "slurm_remote",
+                "login_node": "setonix.example",
+                "ssh_port": 22,
+                "remote_user": "operator-a",
+                "ssh_credential": "hpc",
+                "account": "project",
+                "home_dir": "/home/operator-a",
+                "log_dir": "/scratch/project/logs",
+                "dlg_root": "/scratch/project/dlg"
+            }))
+            .unwrap()
+        else {
+            panic!("expected Slurm profile");
+        };
+        let first = resolved_slurm_target_fingerprint(&deployment).unwrap();
+        deployment.remote_user = Some("operator-b".into());
+        let second = resolved_slurm_target_fingerprint(&deployment).unwrap();
+        assert_ne!(first, second);
     }
 
     #[test]

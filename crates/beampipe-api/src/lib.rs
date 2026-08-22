@@ -75,7 +75,7 @@ pub struct AppState {
         list_source_executions, prepare_execution, create_execution, list_executions, get_execution,
         execution_status, execution_summary, execution_ledger_snapshot, execution_observations,
         execution_artifacts, verify_execution_outputs, patch_execution, execute_execution,
-        retry_execution, prepare_graph,
+        retry_execution, abandon_execution_submission, prepare_graph,
         scheduler_status, scheduler_jobs, daliuge_inspect, daliuge_sessions,
         upload_project_config, get_project_config, list_project_config_versions,
         upload_project_config_wasm, get_project_config_wasm,
@@ -98,7 +98,8 @@ pub struct AppState {
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
         DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
         ExecutionCreate, ExecutionSourceSelection, ExecutionPatchRequest, ExecuteRequest,
-        ExecutionRetryRequest, ExecutionRetryResponse, OutputInventoryProduct,
+        ExecutionRetryRequest, ExecutionRetryResponse, ExecutionSubmissionAbandonRequest,
+        OutputInventoryProduct,
         OutputPublicationAcknowledgement, ExecutionOutputVerificationRequest,
         ExecutionOutputVerificationResponse, GraphPrepareRequest, GraphPrepareResponse,
         ExecutionStatus,
@@ -196,6 +197,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/jobs", post(enqueue_job_handler))
         .route("/api/v2/executions/:id/execute", post(execute_execution))
         .route("/api/v2/executions/:id/retry", post(retry_execution))
+        .route(
+            "/api/v2/executions/:id/submission/abandon",
+            post(abandon_execution_submission),
+        )
         .route(
             "/api/v2/executions/:id/outputs/verify",
             post(verify_execution_outputs),
@@ -476,6 +481,10 @@ pub enum ApiError {
     Scheduler(#[from] SchedulerAdapterError),
     #[error("execution retry rejected ({code}): {message}")]
     RetryRejected { code: String, message: String },
+    #[error("submission abandonment request rejected ({code}): {message}")]
+    SubmissionAbandonmentInvalid { code: String, message: String },
+    #[error("submission abandonment conflict ({code}): {message}")]
+    SubmissionAbandonmentConflict { code: String, message: String },
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -600,6 +609,24 @@ fn api_failure(error: &ApiError) -> Failure {
             "no retry job was created and no external work was repeated",
         )
         .with_operator_action("reconcile external state or create a new execution as indicated"),
+        ApiError::SubmissionAbandonmentInvalid { code, message } => Failure::new(
+            code.clone(),
+            "submission_abandonment",
+            FailureClass::Validation,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the unresolved submission was not abandoned",
+        )
+        .with_operator_action("correct the request and retry only after reviewing orphan risk"),
+        ApiError::SubmissionAbandonmentConflict { code, message } => Failure::new(
+            code.clone(),
+            "submission_abandonment",
+            FailureClass::InconsistentState,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the unresolved submission was not abandoned",
+        )
+        .with_operator_action("refresh the execution and review its reconciliation evidence"),
     }
 }
 
@@ -620,6 +647,8 @@ impl IntoResponse for ApiError {
             ApiError::Wasm(_) => StatusCode::BAD_REQUEST,
             ApiError::Daliuge(_) | ApiError::Scheduler(_) => StatusCode::BAD_GATEWAY,
             ApiError::RetryRejected { .. } => StatusCode::CONFLICT,
+            ApiError::SubmissionAbandonmentInvalid { .. } => StatusCode::BAD_REQUEST,
+            ApiError::SubmissionAbandonmentConflict { .. } => StatusCode::CONFLICT,
         };
         if matches!(&self, ApiError::Db(_)) {
             tracing::error!(error = %self, "event=api_request_failed");
@@ -2324,6 +2353,8 @@ pub struct ExecutionRead {
     pub remote_session_dir: Option<String>,
     pub control_phase: Option<String>,
     pub submission_state: Option<String>,
+    pub submission_deadline_at: Option<chrono::DateTime<Utc>>,
+    pub submission_abandoned_at: Option<chrono::DateTime<Utc>>,
     pub scheduler_state: Option<String>,
     pub scheduler_raw_state: Option<String>,
     pub scheduler_reason: Option<String>,
@@ -2393,6 +2424,8 @@ pub struct ExecutionStatusResponse {
     pub daliuge_session_id: Option<String>,
     pub control_phase: Option<String>,
     pub submission_state: Option<String>,
+    pub submission_deadline_at: Option<chrono::DateTime<Utc>>,
+    pub submission_abandoned_at: Option<chrono::DateTime<Utc>>,
     pub scheduler_state: Option<String>,
     pub scheduler_raw_state: Option<String>,
     pub scheduler_reason: Option<String>,
@@ -2885,6 +2918,8 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
         remote_session_dir: row.remote_session_dir,
         control_phase: row.control_phase,
         submission_state: row.submission_state,
+        submission_deadline_at: row.submission_deadline_at,
+        submission_abandoned_at: row.submission_abandoned_at,
         scheduler_state: row.scheduler_state,
         scheduler_raw_state: row.scheduler_raw_state,
         scheduler_reason: row.scheduler_reason,
@@ -3013,6 +3048,8 @@ async fn execution_status(
         daliuge_session_id: row.daliuge_session_id.clone(),
         control_phase: row.control_phase.clone(),
         submission_state: row.submission_state.clone(),
+        submission_deadline_at: row.submission_deadline_at,
+        submission_abandoned_at: row.submission_abandoned_at,
         scheduler_state: row.scheduler_state.clone(),
         scheduler_raw_state: row.scheduler_raw_state.clone(),
         scheduler_reason: row.scheduler_reason.clone(),
@@ -3655,6 +3692,64 @@ pub struct ExecutionRetryRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSubmissionAbandonRequest {
+    /// Required operator rationale, stored with the durable abandonment evidence.
+    #[schema(min_length = 1, max_length = 1000)]
+    pub reason: String,
+    /// Compare-and-set guard. Only `in_flight` and `uncertain` may be abandoned.
+    pub expected_submission_state: String,
+    /// Compare-and-set guard for the exact DALiuGE/Slurm submission name.
+    pub expected_daliuge_session_id: String,
+    /// Compare-and-set guard for the persisted backend submission deadline.
+    pub expected_submission_deadline_at: chrono::DateTime<Utc>,
+    /// Explicit acknowledgement that negative scheduler evidence cannot prove non-existence.
+    pub acknowledge_external_job_may_exist: bool,
+}
+
+impl ExecutionSubmissionAbandonRequest {
+    fn validate(mut self) -> Result<Self, ApiError> {
+        let reason = self.reason.trim().to_owned();
+        if reason.is_empty() {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_reason_required".into(),
+                message: "an operator rationale is required for the audit trail".into(),
+            });
+        }
+        if reason.len() > 1_000 {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_reason_too_long".into(),
+                message: "the operator rationale must be at most 1000 bytes".into(),
+            });
+        }
+        if !matches!(
+            SubmissionState::parse(&self.expected_submission_state),
+            Some(SubmissionState::InFlight | SubmissionState::Uncertain)
+        ) {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_state_invalid".into(),
+                message: "expected_submission_state must be 'in_flight' or 'uncertain'".into(),
+            });
+        }
+        let session_id = self.expected_daliuge_session_id.trim();
+        if session_id.is_empty() || session_id != self.expected_daliuge_session_id {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_session_id_invalid".into(),
+                message: "expected_daliuge_session_id must be a non-empty exact identifier without surrounding whitespace".into(),
+            });
+        }
+        if !self.acknowledge_external_job_may_exist {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_orphan_risk_not_acknowledged".into(),
+                message: "acknowledge_external_job_may_exist must be true".into(),
+            });
+        }
+        self.reason = reason;
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExecutionRetryResponse {
     pub status: String,
@@ -3817,6 +3912,64 @@ async fn retry_execution(
             do_submit: result.plan.do_submit,
         }),
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions/{id}/submission/abandon",
+    tag = "executions",
+    request_body = ExecutionSubmissionAbandonRequest,
+    security(("BearerAuth" = [])),
+    responses(
+        (status = 200, body = ExecutionRead),
+        (status = 400, body = ApiErrorResponse),
+        (status = 401, body = ApiErrorResponse),
+        (status = 403, body = ApiErrorResponse),
+        (status = 404, body = ApiErrorResponse),
+        (status = 409, body = ApiErrorResponse),
+        (status = 429, body = ApiErrorResponse),
+        (status = 500, body = ApiErrorResponse)
+    )
+)]
+async fn abandon_execution_submission(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExecutionSubmissionAbandonRequest>,
+) -> Result<Json<ExecutionRead>, ApiError> {
+    user.require_superuser()?;
+    let req = req.validate()?;
+    let expected_submission_state = SubmissionState::parse(&req.expected_submission_state)
+        .ok_or_else(|| ApiError::SubmissionAbandonmentInvalid {
+            code: "submission_abandonment_state_invalid".into(),
+            message: "expected_submission_state must be 'in_flight' or 'uncertain'".into(),
+        })?;
+    let execution = repo::abandon_slurm_submission(
+        &state.pool,
+        id,
+        repo::AbandonSlurmSubmissionInput {
+            actor: format!("user:{}", user.0.uuid),
+            correlation_id: Some(ctx.correlation_id().to_owned()),
+            reason: req.reason,
+            expected_submission_state,
+            expected_daliuge_session_id: req.expected_daliuge_session_id,
+            expected_submission_deadline_at: req.expected_submission_deadline_at,
+            acknowledge_external_job_may_exist: req.acknowledge_external_job_may_exist,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        repo::AbandonSlurmSubmissionError::NotFound => ApiError::NotFound,
+        repo::AbandonSlurmSubmissionError::Invalid { code, message } => {
+            ApiError::SubmissionAbandonmentInvalid { code, message }
+        }
+        repo::AbandonSlurmSubmissionError::Conflict { code, message } => {
+            ApiError::SubmissionAbandonmentConflict { code, message }
+        }
+        repo::AbandonSlurmSubmissionError::Database(error) => ApiError::Db(error),
+    })?;
+    Ok(Json(enrich_execution(&state.pool, execution).await?))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -4589,6 +4742,90 @@ adapters:
         assert_ne!(execute_job_options(&payload), (true, true));
         assert!(!execute_job_replayable("failed"));
         assert!(!execute_job_replayable("cancelled"));
+    }
+
+    fn valid_submission_abandonment_request() -> ExecutionSubmissionAbandonRequest {
+        ExecutionSubmissionAbandonRequest {
+            reason: "  three complete scheduler negatives reviewed  ".into(),
+            expected_submission_state: "uncertain".into(),
+            expected_daliuge_session_id: "beampipe-0198f2f7".into(),
+            expected_submission_deadline_at: Utc::now(),
+            acknowledge_external_job_may_exist: true,
+        }
+    }
+
+    #[test]
+    fn submission_abandonment_body_accepts_only_explicit_safe_cas_values() {
+        for state in ["in_flight", "uncertain"] {
+            let mut request = valid_submission_abandonment_request();
+            request.expected_submission_state = state.into();
+            let validated = request.validate().unwrap();
+            assert_eq!(validated.reason, "three complete scheduler negatives reviewed");
+        }
+
+        let mut request = valid_submission_abandonment_request();
+        request.expected_submission_state = "submitted".into();
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_state_invalid"
+        ));
+
+        let mut request = valid_submission_abandonment_request();
+        request.expected_daliuge_session_id = " session-with-space ".into();
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_session_id_invalid"
+        ));
+
+        let mut request = valid_submission_abandonment_request();
+        request.acknowledge_external_job_may_exist = false;
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_orphan_risk_not_acknowledged"
+        ));
+    }
+
+    #[test]
+    fn submission_abandonment_body_rejects_missing_long_and_unknown_input() {
+        let mut request = valid_submission_abandonment_request();
+        request.reason = " \t\n ".into();
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_reason_required"
+        ));
+
+        let mut request = valid_submission_abandonment_request();
+        request.reason = "x".repeat(1_001);
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_reason_too_long"
+        ));
+
+        let missing_acknowledgement = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "uncertain",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now()
+        });
+        assert!(serde_json::from_value::<ExecutionSubmissionAbandonRequest>(
+            missing_acknowledgement
+        )
+        .is_err());
+
+        let value = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "uncertain",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now(),
+            "acknowledge_external_job_may_exist": true,
+            "grace_period_seconds": 0
+        });
+        assert!(serde_json::from_value::<ExecutionSubmissionAbandonRequest>(value).is_err());
     }
 
     #[test]
