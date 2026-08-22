@@ -43,7 +43,7 @@
             "fields": [
                 {
                     "name": "func_name",
-                    "value": "wallaby_hires.process_CSV_str",
+                    "value": "wallaby_hires.process_CSV_str_setonix",
                     "defaultValue": "wallaby_hires.read_and_process_csv",
                     "description": "Python function name",
                     "readonly": false,
@@ -434,7 +434,7 @@
             "fields": [
                 {
                     "name": "func_name",
-                    "value": "wallaby_hires.process_CSV_mosaic_str",
+                    "value": "wallaby_hires.process_CSV_mosaic_str_setonix",
                     "defaultValue": "wallaby_hires.read_and_process_csv_mosaic",
                     "description": "Python function name",
                     "readonly": false,
@@ -8234,7 +8234,7 @@
                 },
                 {
                     "name": "dirname",
-                    "value": "$DLG_ROOT/wallaby_staging_data/",
+                    "value": "$WALLABY_HIRES_STAGING_ROOT",
                     "defaultValue": "",
                     "description": "Directory name/path",
                     "readonly": false,
@@ -8415,7 +8415,7 @@
                 },
                 {
                     "name": "dirname",
-                    "value": "$DLG_ROOT/wallaby_staging_data/",
+                    "value": "$WALLABY_HIRES_STAGING_ROOT",
                     "defaultValue": "",
                     "description": "Directory name/path",
                     "readonly": false,
@@ -8522,7 +8522,7 @@
             "fields": [
                 {
                     "name": "func_name",
-                    "value": "wallaby_hires.extract_beam_root",
+                    "value": "wallaby_hires.extract_beam_root_setonix",
                     "defaultValue": "",
                     "description": "Python function name",
                     "readonly": false,
@@ -9257,7 +9257,7 @@
             "fields": [
                 {
                     "name": "command",
-                    "value": "if test -z \"$BEAMPIPE_SLURM_ACCOUNT\" || test -z \"$BEAMPIPE_ASKAPSOFT_SIF\"; then echo \"BEAMPIPE_SLURM_ACCOUNT and BEAMPIPE_ASKAPSOFT_SIF are required\" >&2; exit 2; fi\ncd {beam_root} && \\\ncat > imager_job.sh <<EOF\n#!/bin/bash --login\n#SBATCH --account=$BEAMPIPE_SLURM_ACCOUNT\n#SBATCH --partition=work\n#SBATCH --nodes=1\n#SBATCH --ntasks=2\n#SBATCH --ntasks-per-node=2\n#SBATCH --cpus-per-task=1\n#SBATCH --mem=12G\n#SBATCH --time=00:20:00\n#SBATCH --job-name=BP-imager\n#SBATCH --output=imager-%j.out\n#SBATCH --error=imager-%j.err\n#SBATCH --export=NONE\n\nmodule use /group/askap/modulefiles\nmodule load singularity/4.1.0-askap\n\nexport OMP_NUM_THREADS=1\nexport FI_CXI_DEFAULT_VNI=\\$(od -vAn -N4 -tu < /dev/urandom)\n\nunset SLURM_CPU_BIND SLURM_CPU_BIND_LIST SLURM_CPU_BIND_TYPE SLURM_CPU_BIND_VERBOSE\nunset SLURM_MEM_PER_CPU SLURM_MEM_PER_GPU\n\nCONFIG=\"{c}\"\n\necho \"IMAGER START \\$(date)\"\necho \"HOST=\\$(hostname)\"\necho \"PWD=\\$(pwd)\"\necho \"CONFIG=\\${CONFIG}\"\nls -lh \"\\${CONFIG}\"\n\nsrun -N 1 -n 2 -c 1 -m block:block:block \\\n  singularity exec \\\n    --bind \"\\$PWD:/askapbuffer,/scratch:/scratch\" \\\n    \"$BEAMPIPE_ASKAPSOFT_SIF\" \\\n    imager -c \"\\${CONFIG}\"\n\nrc=\\$?\necho \"IMAGER END \\$(date), rc=\\${rc}\"\nls -lh image* weights* *.fits 2>/dev/null || true\nexit \"\\${rc}\"\nEOF\n\nchmod +x imager_job.sh\nsbatch --wait --export=NONE imager_job.sh",
+                    "value": "exec wallaby_hires run-setonix-imager --workdir \"{beam_root}\" --config \"{c}\" --partition work --nodes 1 --ntasks 2 --ntasks-per-node 2 --cpus-per-task 1 --memory 12G --time-limit 00:20:00",
                     "defaultValue": "",
                     "description": "The command to be executed",
                     "readonly": false,
@@ -9588,7 +9588,7 @@
             "fields": [
                 {
                     "name": "command",
-                    "value": "test -n \"$BEAMPIPE_ASKAPSOFT_SIF\" || exit 2; cd {beam_root}; singularity exec --bind $PWD:/askapbuffer \"$BEAMPIPE_ASKAPSOFT_SIF\" imcontsub -c {c}",
+                    "value": "test -n \"$BEAMPIPE_ASKAPSOFT_SIF\" || exit 2; cd \"{beam_root}\"; singularity exec --bind \"$PWD:/askapbuffer\" \"$BEAMPIPE_ASKAPSOFT_SIF\" imcontsub -c \"{c}\"",
                     "defaultValue": "",
                     "description": "The command to be executed",
                     "readonly": false,
@@ -9919,7 +9919,7 @@
             "fields": [
                 {
                     "name": "command",
-                    "value": "test -n \"$BEAMPIPE_ASKAPSOFT_SIF\" || exit 2; cd {beam_root}; singularity exec --bind $PWD:/askapbuffer \"$BEAMPIPE_ASKAPSOFT_SIF\" linmos -c {c}",
+                    "value": "test -n \"$BEAMPIPE_ASKAPSOFT_SIF\" || exit 2; cd \"{beam_root}\"; singularity exec --bind \"$PWD:/askapbuffer\" \"$BEAMPIPE_ASKAPSOFT_SIF\" linmos -c \"{c}\"",
                     "defaultValue": "",
                     "description": "The command to be executed",
                     "readonly": false,
@@ -10249,7 +10249,7 @@
             "fields": [
                 {
                     "name": "command",
-                    "value": "test -n \"$BEAMPIPE_ASKAPSOFT_SIF\" || exit 2; singularity exec --bind $PWD:/askapbuffer \"$BEAMPIPE_ASKAPSOFT_SIF\" linmos -c {c}",
+                    "value": "set -eu\ntest -n \"$BEAMPIPE_ASKAPSOFT_SIF\" || { echo \"BEAMPIPE_ASKAPSOFT_SIF is required\" >&2; exit 2; }\nROOT=\"${WALLABY_HIRES_STAGING_ROOT:-}\"\ncase \"$ROOT\" in /*) ;; *) echo \"WALLABY_HIRES_STAGING_ROOT must be absolute\" >&2; exit 2;; esac\ntest \"$ROOT\" != / || { echo \"WALLABY_HIRES_STAGING_ROOT cannot be /\" >&2; exit 2; }\ncd \"$ROOT\"\nCONFIG=$(mktemp \"$ROOT/.beampipe-mosaic.XXXXXX.in\")\ncleanup_config() { rm -f -- \"$CONFIG\"; }\ntrap cleanup_config EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\ncp -- \"{c}\" \"$CONFIG\"\nsingularity exec --bind \"$ROOT:/askapbuffer\" --pwd /askapbuffer \"$BEAMPIPE_ASKAPSOFT_SIF\" linmos -c \"/askapbuffer/${CONFIG##*/}\"\nwallaby_hires inventory-staging-outputs",
                     "defaultValue": "",
                     "description": "The command to be executed",
                     "readonly": false,

@@ -39,9 +39,9 @@ adapters:
     retries: 2
 
 graph:
-  # Vendored from wallaby-hires-beampipe commit 6cc5c4cdc49c39a843b81ab14543d1c9c71b015f.
+  # Vendored from wallaby-hires-beampipe release commit 198db534b4858eab2b36c0aa0d08d7b56c4d2e9d.
   path: config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph
-  sha256: 0eca45aa2603380cd1ca562e603d3f01c0ccdc5a075c21adf2b60dc05e8de6f3
+  sha256: 89c579233947e111b1f33c64753c039ccac32a0c142129fb27fbe0d4ba4774b4
 
 discovery:
   queries:
