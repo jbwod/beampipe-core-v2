@@ -2797,18 +2797,7 @@ async fn create_execution(
         idempotency_key.as_ref().map(|_| request_sha256.as_str()),
     )
     .await
-    .map_err(|error| {
-        if error
-            .to_string()
-            .contains("idempotency key was already used")
-        {
-            ApiError::Conflict(
-                "Idempotency-Key was already used for a different execution request".into(),
-            )
-        } else {
-            ApiError::Db(error)
-        }
-    })?;
+    .map_err(map_execution_create_error)?;
     Ok((
         if created {
             StatusCode::CREATED
@@ -2817,6 +2806,19 @@ async fn create_execution(
         },
         Json(enrich_execution(&state.pool, row).await?),
     ))
+}
+
+fn map_execution_create_error(error: sqlx::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("idempotency key was already used") {
+        ApiError::Conflict(
+            "Idempotency-Key was already used for a different execution request".into(),
+        )
+    } else if message.contains("concurrency limit reached") {
+        ApiError::Conflict(message)
+    } else {
+        ApiError::Db(error)
+    }
 }
 
 #[utoipa::path(get, path = "/api/v2/executions/{id}", tag = "executions", responses((status = 200), (status = 404)))]
@@ -4395,6 +4397,17 @@ adapters:
             execution_create_request_sha256(&request),
             execution_create_request_sha256(&equivalent)
         );
+    }
+
+    #[test]
+    fn execution_profile_capacity_is_an_admission_conflict() {
+        let error = map_execution_create_error(sqlx::Error::Protocol(
+            "deployment profile 'dlg-dim' concurrency limit reached (1/1)".into(),
+        ));
+        assert!(matches!(
+            error,
+            ApiError::Conflict(message) if message.contains("concurrency limit reached (1/1)")
+        ));
     }
 
     #[test]
