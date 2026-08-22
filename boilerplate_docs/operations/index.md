@@ -18,12 +18,13 @@ All roles coordinate through PostgreSQL. The console is a projection of that sta
 
 ## API rate limiting and proxy trust
 
-Sensitive API routes can use Redis-backed fixed-window rate limiting. Set
-`BEAMPIPE_REDIS_URL` and, when the limiter is mandatory,
-`BEAMPIPE_REQUIRE_RATE_LIMITER=true`. A required limiter fails startup when
-Redis cannot be reached. Once configured, Redis errors fail requests closed in
-production; development logs the dependency failure before allowing the
-request.
+Sensitive API routes use Redis-backed fixed-window rate limiting. Production
+always requires `BEAMPIPE_REDIS_URL` and fails startup when Redis is absent or
+unreachable; `BEAMPIPE_REQUIRE_RATE_LIMITER=false` cannot weaken that policy.
+In development the limiter remains optional unless
+`BEAMPIPE_REQUIRE_RATE_LIMITER=true`. Runtime Redis errors fail requests closed
+whenever the limiter is required; optional development mode logs the dependency
+failure before allowing the request.
 
 The API always keys direct clients from the TCP peer address. It only consumes
 `X-Forwarded-For` when that peer belongs to a network explicitly listed in

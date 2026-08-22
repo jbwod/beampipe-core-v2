@@ -20,6 +20,7 @@ fn security_strict_enabled(settings: &Settings) -> bool {
 /// Collect security issues (always runs all checks; used by `beampipe security check`).
 pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
     let mut errors = Vec::new();
+    let production = beampipe_security::is_production_env_name(&settings.beampipe_env);
 
     if settings.jwt_secret.len() < 32 {
         errors.push(format!(
@@ -44,7 +45,7 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
         );
     }
 
-    if is_production_env() {
+    if production {
         if settings.metrics_public {
             errors.push("BEAMPIPE_METRICS_PUBLIC=true is not allowed in production".into());
         }
@@ -54,9 +55,9 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
                     .into(),
             );
         }
-        if settings.require_rate_limiter && settings.redis_url.is_none() {
+        if settings.redis_url.is_none() {
             errors.push(
-                "BEAMPIPE_REQUIRE_RATE_LIMITER=true requires BEAMPIPE_REDIS_URL in production"
+                "BEAMPIPE_REDIS_URL is required in production; the API always enforces a reachable rate limiter"
                     .into(),
             );
         }
@@ -153,5 +154,38 @@ pub fn validate_security(settings: &Settings) -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_production_settings_require_redis_even_without_optional_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("beampipe.yaml");
+        std::fs::write(
+            &path,
+            r#"apiVersion: beampipe.dev/config/v1
+kind: BeampipeConfig
+environment: production
+database:
+  url: postgres://beampipe:strong-password@database/beampipe
+auth:
+  jwt_secret: 0123456789abcdef0123456789abcdef
+api:
+  require_rate_limiter: false
+"#,
+        )
+        .unwrap();
+        let mut settings = Settings::load_from_path(Some(&path)).unwrap().settings;
+        settings.beampipe_env = "production".into();
+        settings.require_rate_limiter = false;
+        settings.redis_url = None;
+
+        assert!(collect_security_issues(&settings)
+            .iter()
+            .any(|issue| issue.contains("BEAMPIPE_REDIS_URL is required in production")));
     }
 }

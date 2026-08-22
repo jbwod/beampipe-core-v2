@@ -171,6 +171,7 @@ database:
   max_connections: 20
 api:
   bind_addr: 0.0.0.0:8080
+  require_rate_limiter: true
 auth:
   jwt_secret: null
 worker:
@@ -195,6 +196,8 @@ integrations:
   dim_url: null
 metrics:
   server_enabled: true
+redis:
+  url: null
 telemetry:
   log_json: true
 "#
@@ -217,6 +220,8 @@ BEAMPIPE_CONFIG=beampipe.yaml
 BEAMPIPE_CASDA_TAP_URL=<casda-tap-url>
 BEAMPIPE_TM_URL=<daliuge-translator-url>
 BEAMPIPE_DIM_URL=<daliuge-manager-url>
+BEAMPIPE_REDIS_URL=<redis-url>
+BEAMPIPE_REQUIRE_RATE_LIMITER=true
 SLURM_SSH_PRIVATE_KEY_PATH=<runtime-mounted-private-key>
 SLURM_SSH_KNOWN_HOSTS=<runtime-mounted-known-hosts>
 "#
@@ -246,6 +251,9 @@ mod tests {
     #[test]
     fn production_template_contains_no_generated_secret() {
         assert!(production_config().contains("jwt_secret: null"));
+        assert!(production_config().contains("require_rate_limiter: true"));
+        assert!(production_config().contains("redis:\n  url: null"));
+        assert!(production_env().contains("BEAMPIPE_REDIS_URL=<redis-url>"));
         assert!(!production_config().contains("change-me"));
     }
 

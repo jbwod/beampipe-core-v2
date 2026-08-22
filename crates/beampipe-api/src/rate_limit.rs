@@ -34,8 +34,8 @@ impl RateLimiter {
                 "request limit and period must both be greater than zero".into(),
             ));
         }
-        let fail_closed = settings.require_rate_limiter
-            || beampipe_security::is_production_env_name(&settings.beampipe_env);
+        let fail_closed =
+            rate_limiter_required(&settings.beampipe_env, settings.require_rate_limiter);
         let trusted_proxy_cidrs = settings
             .trusted_proxy_cidrs
             .iter()
@@ -45,12 +45,7 @@ impl RateLimiter {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let client = connect_backend(
-            settings.redis_url.as_deref(),
-            fail_closed,
-            settings.require_rate_limiter,
-        )
-        .await?;
+        let client = connect_backend(settings.redis_url.as_deref(), fail_closed).await?;
         Ok(Self {
             client,
             limit: settings.rate_limit_requests,
@@ -101,15 +96,19 @@ impl RateLimiter {
     }
 }
 
+fn rate_limiter_required(environment: &str, explicitly_required: bool) -> bool {
+    explicitly_required || beampipe_security::is_production_env_name(environment)
+}
+
 async fn connect_backend(
     redis_url: Option<&str>,
     fail_closed: bool,
-    required: bool,
 ) -> Result<Option<ConnectionManager>, RateLimitError> {
     let Some(url) = redis_url else {
-        return if required {
+        return if fail_closed {
             Err(RateLimitError::Configuration(
-                "BEAMPIPE_REQUIRE_RATE_LIMITER=true requires BEAMPIPE_REDIS_URL".into(),
+                "a required rate limiter needs BEAMPIPE_REDIS_URL; production always requires a limiter"
+                    .into(),
             ))
         } else {
             Ok(None)
@@ -229,17 +228,22 @@ mod tests {
 
     #[tokio::test]
     async fn production_does_not_disable_a_broken_redis_backend() {
+        assert!(rate_limiter_required("production", false));
+        assert!(rate_limiter_required("prod", false));
+        assert!(rate_limiter_required("development", true));
+        assert!(!rate_limiter_required("development", false));
         assert!(matches!(
-            connect_backend(Some("not-a-redis-url"), true, false).await,
+            connect_backend(Some("not-a-redis-url"), true).await,
             Err(RateLimitError::Redis(_))
         ));
-        assert!(connect_backend(Some("not-a-redis-url"), false, false)
+        assert!(connect_backend(Some("not-a-redis-url"), false)
             .await
             .unwrap()
             .is_none());
         assert!(matches!(
-            connect_backend(None, true, true).await,
+            connect_backend(None, true).await,
             Err(RateLimitError::Configuration(_))
         ));
+        assert!(connect_backend(None, false).await.unwrap().is_none());
     }
 }

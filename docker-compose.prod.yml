@@ -1,8 +1,8 @@
 # Production overlay: use with
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up
 #
-# Requires BEAMPIPE_JWT_SECRET, DATABASE_URL, PostgreSQL credentials, and a
-# credentials tree at BEAMPIPE_SSH_CREDENTIALS_HOST:
+# Requires BEAMPIPE_JWT_SECRET, DATABASE_URL, BEAMPIPE_REDIS_URL, PostgreSQL
+# credentials, and a credentials tree at BEAMPIPE_SSH_CREDENTIALS_HOST:
 #   <host>/<slot>/private_key
 #   <host>/<slot>/passphrase          # required when the key is encrypted
 #   <host>/<slot>/known_hosts         # or <host>/known_hosts
@@ -34,6 +34,7 @@ services:
       BEAMPIPE_ENV: production
       BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL for production}
+      BEAMPIPE_REDIS_URL: ${BEAMPIPE_REDIS_URL:?set BEAMPIPE_REDIS_URL for production}
     # Publish the API only. Per-process metrics remain on the private Compose
     # network for Prometheus and are never bound to a production host port.
     ports: !override
@@ -48,6 +49,7 @@ services:
       BEAMPIPE_ENV: production
       BEAMPIPE_JWT_SECRET: ${BEAMPIPE_JWT_SECRET:?set BEAMPIPE_JWT_SECRET for production}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL for production}
+      BEAMPIPE_REDIS_URL: ${BEAMPIPE_REDIS_URL:?set BEAMPIPE_REDIS_URL for production}
       BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-true}
       BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
       BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS: "true"
