@@ -78,10 +78,20 @@ Place operator-owned copies in a private directory if you do not want to edit th
 }
 ```
 
+- `translation.tm_url` is the Translator Manager address visible from a
+  Beampipe worker.
 - `dim_host_for_tm` is the DIM address visible from Translator Manager.
-- `deploy_host` is the address visible from Beampipe workers.
+- `deploy_host` is the DIM address visible from Beampipe workers.
 - Keep TLS verification enabled. Use trusted CA configuration instead of disabling it.
 - Validate the graph application/runtime package versions, not only endpoint health.
+
+These are three network viewpoints, not aliases for one host. For example, the
+qualified local topology used `http://dlg-tm.desk` from Core to TM,
+`dlg-dim:8001` from TM to DIM, and `dlg-dim.desk:80` from Core to DIM through
+Traefik. Direct Docker service names are also valid when all callers share the
+network. Never substitute `127.0.0.1` without checking which process makes the
+connection; container loopback points back to that container. See the complete
+[local DALiuGE qualification](../getting-started/local-daliuge.md#proven-topology).
 
 ```bash
 beampipe doctor --profile local-daliuge
@@ -264,4 +274,10 @@ Inline PEM, home-directory fallback, and disabled host-key checks are developmen
 
 Before raising concurrency, qualify one run and then a paced batch. Watch login-node SSH/SFTP pressure, remote filesystem growth, TM availability, profile caps, and poll duration. Polling is batched by target through pooled SSH sessions, but submission still stages files per execution.
 
-The strongest unresolved risk from local testing is graph/runtime package compatibility. Pin DALiuGE and project application versions in the Slurm runtime and record them with each qualification result.
+The local REST path has qualified the pinned WALLABY graph and application
+package against the local DALiuGE runtime. That does not qualify Setonix or any
+other Slurm facility. The bundled Slurm profile has passed schema, rendering,
+and command tests only; a live qualification still requires the real account,
+SSH slot, paths, runtime modules, and `BEAMPIPE_ASKAPSOFT_SIF`. Pin DALiuGE and
+project application versions in that runtime and record them with every
+facility qualification.

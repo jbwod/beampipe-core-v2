@@ -22,6 +22,13 @@ loopback by default.
 
 Each host process needs a unique metrics bind address. Containers can all use `0.0.0.0:9090` because they have separate network namespaces. Production Compose does not publish those process listeners; Prometheus reaches them by service name on the private network.
 
+`beampipe serve --worker true` owns one metrics listener for the combined
+scheduler process; its embedded worker does not start a second listener. On a
+current build, startup should contain one listener message and no bind failure.
+If a host deployment reports `address already in use`, look for mixed/old
+binaries or two supervised processes sharing `BEAMPIPE_METRICS_BIND_ADDR`.
+Do not disable metrics to hide the collision.
+
 ## Dashboard order
 
 | Row | Operator question | Signals |

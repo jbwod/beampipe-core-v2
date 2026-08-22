@@ -24,6 +24,19 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, creates the first administrator, and uploads the reference project.
 
+### Fresh database and migration ownership
+
+In the managed Compose topology, the API is the migration gate. It starts with
+`BEAMPIPE_MIGRATE_ON_SERVE=true`, applies every pending SQLx migration, and
+becomes healthy only afterwards. Scheduler and worker services depend on that
+health check. Do not race fresh setup with a separate `beampipe migrate` or
+start workers against an unmigrated database.
+
+For native or externally supervised roles, run `beampipe migrate` once as a
+deployment step before starting API, scheduler, and workers unless the API role
+is explicitly designated as migration owner. Back up an existing database
+before upgrading across migrations.
+
 The installer writes `~/.local/bin/beampipe` and appends that directory to `~/.bashrc` and `~/.profile`. The current terminal still needs `export PATH="$HOME/.local/bin:$PATH"` (or a new terminal) before `beampipe` is found.
 
 Unattended equivalent:
@@ -47,6 +60,11 @@ beampipe stop
 beampipe start
 beampipe uninstall
 ```
+
+Production API startup requires a reachable Redis service configured through
+`BEAMPIPE_REDIS_URL`. Setting `BEAMPIPE_REQUIRE_RATE_LIMITER=false` does not
+disable that production requirement. Development may omit Redis; see
+[API rate limiting and proxy trust](../operations/index.md#api-rate-limiting-and-proxy-trust).
 
 `beampipe uninstall` stops Compose services, deletes the installation directory, and by default removes managed PostgreSQL volumes. Confirmation is required unless `--yes` is passed. `--keep-volumes` retains Compose volumes. `--purge-binary` also removes `~/.local/bin/beampipe`. Sibling checkouts such as `~/beampipe-dash` are not deleted.
 

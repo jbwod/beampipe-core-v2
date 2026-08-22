@@ -150,4 +150,13 @@ Beampipe owns durable intent, preparation artifacts, admission, submission recor
 
 ## Current qualification
 
-The implementation has been exercised through real CASDA/VizieR discovery, automatic admission, manifest and graph preparation, DALiuGE translation, and REST deployment to a local cluster. That run exposed and fixed manifest flag resolution. A graph/runtime package mismatch then prevented terminal graph success, and CASDA staging plus Slurm have not yet been qualified end to end.
+The implementation has been exercised through real CASDA/VizieR discovery,
+manifest and graph preparation, idempotent creation and start, DALiuGE
+translation, REST deployment, reconciliation, and terminal success on the
+WALLABY no-download graph. The result retained the pinned project/profile,
+finished DIM observation, and manifest/source/patched/physical graph artifacts.
+The runbook is [Local DALiuGE end to end](getting-started/local-daliuge.md).
+
+This qualification intentionally skipped CASDA staging and opted out of output
+verification in the pinned no-download project. Setonix/Slurm has passed config
+and command tests but has not run live without its account, SSH, paths, and SIF.

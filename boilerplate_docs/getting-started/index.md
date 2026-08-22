@@ -40,3 +40,7 @@ Continue with:
 1. [Install and configure](installation.md) for Docker, native host, and source-build paths.
 2. [Deployment profiles and SSH](../architecture/deployment-profiles.md) for REST/DIM or Slurm.
 3. [First workflow](first-run.md) to register and discover a source.
+4. [Local DALiuGE end to end](local-daliuge.md) to qualify real discovery,
+   translation, REST deployment, reconciliation, and artifacts with the
+   no-download graph.
+5. [Dashboard setup and tour](dashboard.md) for the optional web console.

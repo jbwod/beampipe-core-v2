@@ -97,6 +97,7 @@ curl -fsS -X POST "$BASE/api/v2/executions/prepare" \
 
 EXEC=$(curl -fsS -X POST "$BASE/api/v2/executions" \
   -H "$AUTH" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: operator-intent-20260822-001' \
   -d @/tmp/execution.json)
 EXEC_ID=$(jq -r .uuid <<<"$EXEC")
 
@@ -104,6 +105,17 @@ curl -fsS -X POST "$BASE/api/v2/executions/$EXEC_ID/execute" \
   -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"do_stage":false,"do_submit":false}' | jq .
 ```
+
+Creation keys are scoped to the authenticated user and one request body. The
+first request returns `201`, an exact retry returns the same execution with
+`200`, and reuse with different content returns `409`. Persist the key before
+sending the request so a lost response can be resumed safely.
+
+Execution start is intrinsically idempotent for the execution UUID. Exact
+queued, running, and completed retries return `202` with the same job ID;
+different `do_stage`/`do_submit` flags return `409`. `do_submit:false` is a
+preparation-only boundary. Use `do_submit:true` only after the pinned profile
+doctor passes and real backends are deliberately enabled.
 
 Inspect exact state instead of polling only the compact status:
 
