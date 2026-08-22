@@ -3,8 +3,10 @@ use crate::slurm_ssh::{SlurmSshSession, SlurmTarget};
 use crate::OrchestrationError;
 use beampipe_profiles::{DaliugeAlgo, SlurmRemoteDeploymentConfig};
 use serde_json::Value;
+use std::path::{Component, Path, PathBuf};
 
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
+const WALLABY_STAGING_ROOT_ENV: &str = "WALLABY_HIRES_STAGING_ROOT";
 
 pub struct SlurmSubmitParams {
     pub execution_id: String,
@@ -17,6 +19,7 @@ pub struct SlurmSubmitParams {
 pub struct SlurmSubmitResult {
     pub slurm_job_id: String,
     pub session_dir: String,
+    pub staging_root: Option<String>,
     pub composite_scheduler_job_id: String,
 }
 
@@ -134,7 +137,9 @@ where
     F: FnMut(&str) -> Option<String>,
 {
     let mut lines = vec![env_prelude_with(deployment, read_environment)?];
-    for command in ["sbatch", "squeue", "sacct", "scancel", "srun", "python3"] {
+    for command in [
+        "sbatch", "squeue", "sacct", "scancel", "scontrol", "srun", "python3",
+    ] {
         lines.push(format!(
             "command -v {command} >/dev/null 2>&1 || {{ echo 'missing required command: {command}' >&2; exit 127; }}"
         ));
@@ -171,12 +176,15 @@ fn sbatch_command_with<F>(
     deployment: &SlurmRemoteDeploymentConfig,
     session_id: &str,
     jobsub_path: &str,
+    staging_root: &str,
     read_environment: F,
 ) -> Result<String, OrchestrationError>
 where
     F: FnMut(&str) -> Option<String>,
 {
-    let mut exported = vec![SLURM_ACCOUNT_ENV];
+    let staging_root = normalized_remote_absolute_path(staging_root, "Wallaby staging root")?;
+    let staging_root = staging_root.to_string_lossy();
+    let mut exported = vec![SLURM_ACCOUNT_ENV, WALLABY_STAGING_ROOT_ENV];
     if deployment
         .environment_setup
         .as_deref()
@@ -216,8 +224,10 @@ where
     }
     argv.push(jobsub_path.to_string());
     let inner = format!(
-        "{}\n{}",
+        "{}\numask 077\nmkdir -p -- {}\nexport {WALLABY_STAGING_ROOT_ENV}={}\n{}",
         env_prelude_with(deployment, read_environment)?,
+        shell_quote(&staging_root),
+        shell_quote(&staging_root),
         argv.iter()
             .map(|argument| shell_quote(argument))
             .collect::<Vec<_>>()
@@ -230,10 +240,15 @@ fn sbatch_command(
     deployment: &SlurmRemoteDeploymentConfig,
     session_id: &str,
     jobsub_path: &str,
+    staging_root: &str,
 ) -> Result<String, OrchestrationError> {
-    sbatch_command_with(deployment, session_id, jobsub_path, |name| {
-        std::env::var(name).ok()
-    })
+    sbatch_command_with(
+        deployment,
+        session_id,
+        jobsub_path,
+        staging_root,
+        |name| std::env::var(name).ok(),
+    )
 }
 
 pub fn create_dlg_job_argv(
@@ -264,8 +279,9 @@ pub fn create_dlg_job_argv(
 
 pub fn parse_jobsub_path(stdout: &str) -> Result<String, OrchestrationError> {
     for line in stdout.lines() {
-        if line.contains(JOBSUB_CREATED_RE) {
-            if let Some(path) = line.split_whitespace().last() {
+        if let Some((_, path)) = line.split_once(JOBSUB_CREATED_RE) {
+            let path = path.trim();
+            if !path.is_empty() {
                 return Ok(path.to_string());
             }
         }
@@ -313,6 +329,70 @@ pub fn parse_sbatch_job_id(stdout: &str) -> Result<String, OrchestrationError> {
             "sbatch --parsable returned multiple possible job IDs".into(),
         )),
     }
+}
+
+fn parse_dispatched_sbatch_job_id(stdout: &str) -> Result<String, OrchestrationError> {
+    parse_sbatch_job_id(stdout).map_err(|error| {
+        let non_empty_lines = stdout.lines().filter(|line| !line.trim().is_empty()).count();
+        OrchestrationError::SubmissionUncertain(format!(
+            "sbatch exited successfully, but its submission receipt was invalid: {error}; non_empty_lines={non_empty_lines}"
+        ))
+    })
+}
+
+fn normalized_remote_absolute_path(
+    raw_path: &str,
+    label: &str,
+) -> Result<PathBuf, OrchestrationError> {
+    if raw_path.chars().any(char::is_control) {
+        return Err(OrchestrationError::Backend(format!(
+            "{label} contains control characters"
+        )));
+    }
+    let path = Path::new(raw_path);
+    if !path.is_absolute() {
+        return Err(OrchestrationError::Backend(format!(
+            "{label} must be an absolute path"
+        )));
+    }
+
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(OrchestrationError::Backend(format!(
+                    "{label} must not contain relative or traversal components"
+                )));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn derive_session_paths(
+    jobsub_path: &str,
+    dlg_root: &str,
+) -> Result<(String, String), OrchestrationError> {
+    let jobsub_path = normalized_remote_absolute_path(jobsub_path, "job submission script path")?;
+    let dlg_root = normalized_remote_absolute_path(dlg_root, "DLG_ROOT")?;
+    if !jobsub_path.starts_with(&dlg_root) || jobsub_path == dlg_root {
+        return Err(OrchestrationError::Backend(
+            "job submission script path must be beneath DLG_ROOT".into(),
+        ));
+    }
+    let session_dir = jobsub_path.parent().filter(|path| *path != dlg_root).ok_or_else(|| {
+        OrchestrationError::Backend(
+            "job submission script path must be inside a session directory beneath DLG_ROOT"
+                .into(),
+        )
+    })?;
+    let staging_root = session_dir.join("wallaby-staging");
+    Ok((
+        session_dir.to_string_lossy().into_owned(),
+        staging_root.to_string_lossy().into_owned(),
+    ))
 }
 
 fn shell_quote(s: &str) -> String {
@@ -400,25 +480,31 @@ pub async fn submit_slurm_session(
         .run_command(&format!("bash -lc {}", shell_quote(&inner)))
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
-    let sbatch_out = session
-        .run_command(&sbatch_command(&deployment, &session_id, &jobsub_path)?)
-        .await?;
+    let (session_dir, staging_root) = derive_session_paths(&jobsub_path, &dlg_root)?;
+    let sbatch = sbatch_command(
+        &deployment,
+        &session_id,
+        &jobsub_path,
+        &staging_root,
+    )?;
+    let sbatch_out = session.run_submission_command(&sbatch).await?;
     let _ = session.close().await;
 
-    let slurm_job_id = parse_sbatch_job_id(&sbatch_out)?;
-    let session_dir = jobsub_path
-        .rsplit_once('/')
-        .map(|(dir, _)| dir.to_string())
-        .unwrap_or_else(|| format!("{dlg_root}/sessions/{session_id}"));
+    let slurm_job_id = parse_dispatched_sbatch_job_id(&sbatch_out)?;
     let composite = beampipe_domain::slurm::compose_scheduler_job_id(
         &session_id,
         &slurm_job_id,
         Some(&session_dir),
     )
-    .map_err(|e| OrchestrationError::Backend(e.to_string()))?;
+    .map_err(|error| {
+        OrchestrationError::SubmissionUncertain(format!(
+            "sbatch accepted job {slurm_job_id}, but its receipt could not be encoded: {error}"
+        ))
+    })?;
     Ok(SlurmSubmitResult {
         slurm_job_id,
         session_dir,
+        staging_root: Some(staging_root),
         composite_scheduler_job_id: composite,
     })
 }
@@ -471,8 +557,11 @@ mod tests {
 
     #[test]
     fn parse_jobsub_extracts_path() {
-        let stdout = "Created job submission script /home/user/sessions/x/jobsub.sh\n";
-        assert!(parse_jobsub_path(stdout).unwrap().ends_with("jobsub.sh"));
+        let stdout = "Created job submission script /home/user/session root/x/job sub.sh\n";
+        assert_eq!(
+            parse_jobsub_path(stdout).unwrap(),
+            "/home/user/session root/x/job sub.sh"
+        );
     }
 
     #[test]
@@ -493,6 +582,92 @@ mod tests {
             "123456;setonix && touch /tmp/bad\n",
         ] {
             assert!(parse_sbatch_job_id(output).is_err(), "accepted {output:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_successful_sbatch_receipt_is_submission_uncertain() {
+        for output in ["", "Submitted batch job 123456\n", "123456\n654321\n"] {
+            assert!(matches!(
+                parse_dispatched_sbatch_job_id(output),
+                Err(OrchestrationError::SubmissionUncertain(_))
+            ));
+        }
+        assert_eq!(
+            parse_dispatched_sbatch_job_id("module ready\n123456;setonix\n").unwrap(),
+            "123456"
+        );
+    }
+
+    #[test]
+    fn session_paths_are_absolute_contained_and_space_safe() {
+        let (session_dir, staging_root) = derive_session_paths(
+            "/scratch/project root/dlg/sessions/execution one/job sub.sh",
+            "/scratch/project root/dlg",
+        )
+        .unwrap();
+
+        assert_eq!(
+            session_dir,
+            "/scratch/project root/dlg/sessions/execution one"
+        );
+        assert_eq!(
+            staging_root,
+            "/scratch/project root/dlg/sessions/execution one/wallaby-staging"
+        );
+    }
+
+    #[test]
+    fn session_paths_reject_relative_traversal_control_and_outside_paths() {
+        for jobsub_path in [
+            "sessions/execution/jobsub.sh",
+            "/dlg/sessions/../outside/jobsub.sh",
+            "/dlg/sessions/execution\n/jobsub.sh",
+            "/other/sessions/execution/jobsub.sh",
+            "/dlg/jobsub.sh",
+        ] {
+            assert!(
+                derive_session_paths(jobsub_path, "/dlg").is_err(),
+                "accepted {jobsub_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn outer_sbatch_exports_a_distinct_wallaby_root_per_session() {
+        let mut dep = deployment();
+        dep.dlg_root = "/dlg root".into();
+        dep.environment_setup = Some(
+            "export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"".into(),
+        );
+        let (_, root_a) =
+            derive_session_paths("/dlg root/sessions/execution-a/job sub.sh", &dep.dlg_root)
+                .unwrap();
+        let (_, root_b) =
+            derive_session_paths("/dlg root/sessions/execution-b/job sub.sh", &dep.dlg_root)
+                .unwrap();
+        assert_ne!(root_a, root_b);
+
+        let command = sbatch_command_with(
+            &dep,
+            "execution-a",
+            "/dlg root/sessions/execution-a/job sub.sh",
+            &root_a,
+            |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap.sif".into()),
+        )
+        .unwrap();
+        for expected in [
+            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
+            "export BEAMPIPE_SLURM_ACCOUNT=myacct",
+            "export BEAMPIPE_ASKAPSOFT_SIF=/images/askap.sif",
+            "export WALLABY_HIRES_STAGING_ROOT=",
+            "/dlg root/sessions/execution-a/wallaby-staging",
+            "mkdir -p --",
+        ] {
+            assert!(
+                command.contains(expected),
+                "missing {expected:?} in {command}"
+            );
         }
     }
 
@@ -558,6 +733,7 @@ mod tests {
             "command -v squeue",
             "command -v sacct",
             "command -v scancel",
+            "command -v scontrol",
             "command -v srun",
             "command -v python3",
             "test -d '/scratch/project/user/dlg root'",
@@ -585,16 +761,22 @@ mod tests {
         dep.resources.wall_time_minutes = Some(50);
         dep.resources.constraint = Some("cpu".into());
         dep.resources.quality_of_service = Some("normal".into());
-        let command = sbatch_command_with(&dep, "session id", "/dlg/job sub.sh", |name| {
-            (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into())
-        })
+        let command = sbatch_command_with(
+            &dep,
+            "session id",
+            "/dlg/job sub.sh",
+            "/dlg/sessions/session id/wallaby-staging",
+            |name| {
+                (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into())
+            },
+        )
         .unwrap();
 
         assert!(command.starts_with("bash -lc "));
         assert!(command.contains("export BEAMPIPE_SLURM_ACCOUNT=myacct"));
         assert!(command.contains("export BEAMPIPE_ASKAPSOFT_SIF="));
         for expected in [
-            "--export=BEAMPIPE_SLURM_ACCOUNT,BEAMPIPE_ASKAPSOFT_SIF",
+            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
             "--parsable",
             "--job-name=session id",
             "--account=myacct",

@@ -277,6 +277,30 @@ impl SlurmSshSession {
     }
 
     pub async fn run_command(&mut self, command: &str) -> Result<String, OrchestrationError> {
+        self.run_command_inner(command, RemoteCommandKind::Ordinary)
+            .await
+    }
+
+    /// Run the scheduler submission command while retaining the distinction
+    /// between a definite command failure and a lost submission response.
+    ///
+    /// Opening the channel happens before dispatch and an explicit non-zero
+    /// exit is a definite failure. Once the exec request may have reached the
+    /// remote shell, losing its response or exit status leaves the scheduler
+    /// outcome uncertain and must prevent an automatic resubmission.
+    pub async fn run_submission_command(
+        &mut self,
+        command: &str,
+    ) -> Result<String, OrchestrationError> {
+        self.run_command_inner(command, RemoteCommandKind::Submission)
+            .await
+    }
+
+    async fn run_command_inner(
+        &mut self,
+        command: &str,
+        kind: RemoteCommandKind,
+    ) -> Result<String, OrchestrationError> {
         let mut channel = self
             .handle
             .channel_open_session()
@@ -285,7 +309,12 @@ impl SlurmSshSession {
         channel
             .exec(true, command)
             .await
-            .map_err(|e| OrchestrationError::Backend(format!("SSH exec: {e}")))?;
+            .map_err(|error| {
+                remote_command_transport_error(
+                    kind,
+                    format!("SSH exec response was not observed for {command:?}: {error}"),
+                )
+            })?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -299,16 +328,15 @@ impl SlurmSshSession {
             }
         }
         let Some(code) = exit_status else {
-            return Err(OrchestrationError::Backend(format!(
-                "remote command ended without an SSH exit status: {command:?}"
-            )));
+            return Err(remote_command_transport_error(
+                kind,
+                format!("remote command ended without an SSH exit status: {command:?}"),
+            ));
         };
         if code != 0 {
             let out = String::from_utf8_lossy(&stdout);
             let err = String::from_utf8_lossy(&stderr);
-            return Err(OrchestrationError::Backend(format!(
-                "remote command failed (exit={code}): {command:?}\nstdout: {out}\nstderr: {err}"
-            )));
+            return Err(remote_command_exit_error(command, code, &out, &err));
         }
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
@@ -389,6 +417,33 @@ impl SlurmSshSession {
             .await;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteCommandKind {
+    Ordinary,
+    Submission,
+}
+
+fn remote_command_transport_error(
+    kind: RemoteCommandKind,
+    detail: String,
+) -> OrchestrationError {
+    match kind {
+        RemoteCommandKind::Ordinary => OrchestrationError::Backend(detail),
+        RemoteCommandKind::Submission => OrchestrationError::SubmissionUncertain(detail),
+    }
+}
+
+fn remote_command_exit_error(
+    command: &str,
+    code: u32,
+    stdout: &str,
+    stderr: &str,
+) -> OrchestrationError {
+    OrchestrationError::Backend(format!(
+        "remote command failed (exit={code}): {command:?}\nstdout: {stdout}\nstderr: {stderr}"
+    ))
 }
 
 fn shell_escape_single(s: &str) -> String {
@@ -529,8 +584,10 @@ pub fn scancel_command(job_id: &str) -> Result<String, OrchestrationError> {
 mod tests {
     use super::{
         known_host_patterns_match, known_hosts_has_target, load_known_host_keys, scancel_command,
-        upload_text_command, validate_slurm_job_id,
+        remote_command_exit_error, remote_command_transport_error, upload_text_command,
+        validate_slurm_job_id, RemoteCommandKind,
     };
+    use crate::OrchestrationError;
 
     fn generate_public_key(dir: &tempfile::TempDir) -> String {
         let key_path = dir.path().join("id_test");
@@ -565,6 +622,36 @@ mod tests {
             assert!(validate_slurm_job_id(value).is_err(), "accepted {value:?}");
             assert!(scancel_command(value).is_err(), "accepted {value:?}");
         }
+    }
+
+    #[test]
+    fn submission_transport_loss_is_uncertain() {
+        assert!(matches!(
+            remote_command_transport_error(
+                RemoteCommandKind::Submission,
+                "response lost after dispatch".into()
+            ),
+            OrchestrationError::SubmissionUncertain(_)
+        ));
+    }
+
+    #[test]
+    fn ordinary_transport_loss_is_backend() {
+        assert!(matches!(
+            remote_command_transport_error(
+                RemoteCommandKind::Ordinary,
+                "response lost after dispatch".into()
+            ),
+            OrchestrationError::Backend(_)
+        ));
+    }
+
+    #[test]
+    fn explicit_nonzero_submission_exit_is_deterministic() {
+        assert!(matches!(
+            remote_command_exit_error("sbatch --parsable job.sh", 1, "", "invalid account"),
+            OrchestrationError::Backend(_)
+        ));
     }
 
     #[test]

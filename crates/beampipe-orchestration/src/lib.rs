@@ -76,6 +76,8 @@ pub enum OrchestrationError {
     GraphPatchFieldNotFound { node: String, field: String },
     #[error("backend error: {0}")]
     Backend(String),
+    #[error("submission outcome is uncertain: {0}")]
+    SubmissionUncertain(String),
     #[error(transparent)]
     Daliuge(#[from] DaliugeClientError),
 }
@@ -145,6 +147,7 @@ pub struct BackendSubmit {
     pub scheduler_job_id: Option<String>,
     pub session_id: Option<String>,
     pub remote_session_dir: Option<String>,
+    pub staging_root: Option<String>,
     pub physical_graph: Option<Value>,
     pub workflow_manifest: Value,
     pub next_status: ExecutionStatus,
@@ -354,6 +357,7 @@ where
             scheduler_job_id: Some(session_id.clone()),
             session_id: Some(session_id),
             remote_session_dir: None,
+            staging_root: None,
             physical_graph: Some(Value::Array(translated.pg_spec)),
             workflow_manifest,
             next_status: ExecutionStatus::Running,
@@ -426,7 +430,7 @@ where
                 parsed.slurm_job_id
             }
         };
-        let workflow_manifest = beampipe_domain::run_record::merge_slurm_submit_into_manifest(
+        let mut workflow_manifest = beampipe_domain::run_record::merge_slurm_submit_into_manifest(
             Some(manifest),
             &session_id,
             &slurm_job_id,
@@ -435,15 +439,52 @@ where
             self.remote_user.as_deref(),
         );
         let remote_session_dir = slurm::parse_scheduler_job_id(&scheduler_job_id).session_dir;
+        let staging_root = remote_session_dir
+            .as_deref()
+            .map(|session_dir| format!("{}/wallaby-staging", session_dir.trim_end_matches('/')));
+        record_slurm_paths(
+            &mut workflow_manifest,
+            remote_session_dir.as_deref(),
+            staging_root.as_deref(),
+        );
         Ok(BackendSubmit {
             scheduler_name: "slurm".into(),
             scheduler_job_id: Some(scheduler_job_id),
             session_id: Some(session_id),
             remote_session_dir,
+            staging_root,
             physical_graph: Some(physical_graph),
             workflow_manifest,
             next_status: ExecutionStatus::AwaitingScheduler,
         })
+    }
+}
+
+fn record_slurm_paths(
+    manifest: &mut Value,
+    session_dir: Option<&str>,
+    staging_root: Option<&str>,
+) {
+    let Some(slurm) = manifest
+        .get_mut("beampipe_run_record")
+        .and_then(Value::as_object_mut)
+        .and_then(|run_record| run_record.get_mut("slurm"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let paths = slurm
+        .entry("paths")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !paths.is_object() {
+        *paths = Value::Object(serde_json::Map::new());
+    }
+    let paths = paths.as_object_mut().expect("paths reset to an object above");
+    if let Some(session_dir) = session_dir.filter(|value| !value.trim().is_empty()) {
+        paths.insert("session_dir".into(), Value::String(session_dir.into()));
+    }
+    if let Some(staging_root) = staging_root.filter(|value| !value.trim().is_empty()) {
+        paths.insert("staging_root".into(), Value::String(staging_root.into()));
     }
 }
 
@@ -766,6 +807,31 @@ fn value_key(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn slurm_receipt_manifest_records_execution_specific_paths() {
+        let mut manifest = beampipe_domain::run_record::merge_slurm_submit_into_manifest(
+            None,
+            "execution-a",
+            "42",
+            "execution-a:42|/dlg/sessions/execution-a",
+            None,
+            None,
+        );
+        record_slurm_paths(
+            &mut manifest,
+            Some("/dlg/sessions/execution-a"),
+            Some("/dlg/sessions/execution-a/wallaby-staging"),
+        );
+
+        assert_eq!(
+            manifest["beampipe_run_record"]["slurm"]["paths"],
+            json!({
+                "session_dir": "/dlg/sessions/execution-a",
+                "staging_root": "/dlg/sessions/execution-a/wallaby-staging",
+            })
+        );
+    }
 
     #[test]
     fn graph_override_sets_matching_field() {

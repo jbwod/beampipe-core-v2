@@ -63,7 +63,13 @@ impl SchedulerAdapterError {
         let detail = bounded_detail(&error.to_string());
         let lower = detail.to_ascii_lowercase();
         let (kind, retryable, message) =
-            if lower.contains("host key") || lower.contains("known_hosts") {
+            if matches!(&error, OrchestrationError::SubmissionUncertain(_)) {
+                (
+                    SchedulerErrorKind::SubmissionUncertain,
+                    false,
+                    "scheduler submission outcome is uncertain",
+                )
+            } else if lower.contains("host key") || lower.contains("known_hosts") {
                 (
                     SchedulerErrorKind::HostVerification,
                     false,
@@ -379,7 +385,7 @@ impl SchedulerAdapter for SshSlurmClient {
             .await
             .map_err(|error| SchedulerAdapterError::backend("connectivity", &display, error))?;
         let mut commands = BTreeMap::new();
-        for command in ["sbatch", "squeue", "sacct", "scancel"] {
+        for command in ["sbatch", "squeue", "sacct", "scancel", "scontrol"] {
             let available = session
                 .run_command(&format!(
                     "command -v {command} >/dev/null 2>&1 && echo yes || echo no"
@@ -449,6 +455,7 @@ impl SchedulerAdapter for SshSlurmClient {
             submitted_at: Utc::now(),
             metadata: serde_json::json!({
                 "legacy_composite_job_id": result.composite_scheduler_job_id,
+                "staging_root": result.staging_root,
             }),
         })
     }
@@ -792,6 +799,19 @@ mod tests {
     fn scheduler_job_ids_are_shell_safe() {
         assert!(validate_job_id("12345_7").is_ok());
         assert!(validate_job_id("123;rm -rf /").is_err());
+    }
+
+    #[test]
+    fn submission_uncertainty_is_preserved_by_scheduler_adapter() {
+        let error = SchedulerAdapterError::backend(
+            "submit",
+            "operator@login.example:22",
+            OrchestrationError::SubmissionUncertain("response lost after dispatch".into()),
+        );
+
+        assert_eq!(error.kind, SchedulerErrorKind::SubmissionUncertain);
+        assert!(!error.retryable);
+        assert_eq!(error.failure_class(), FailureClass::InconsistentState);
     }
 
     #[test]
