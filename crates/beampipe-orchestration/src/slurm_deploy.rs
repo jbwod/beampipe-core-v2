@@ -349,6 +349,11 @@ fn normalized_remote_absolute_path(
             "{label} contains control characters"
         )));
     }
+    if raw_path.contains(',') || raw_path.contains(':') {
+        return Err(OrchestrationError::Backend(format!(
+            "{label} contains a delimiter that is unsafe for container bind paths"
+        )));
+    }
     let path = Path::new(raw_path);
     if !path.is_absolute() {
         return Err(OrchestrationError::Backend(format!(
@@ -623,6 +628,8 @@ mod tests {
             "sessions/execution/jobsub.sh",
             "/dlg/sessions/../outside/jobsub.sh",
             "/dlg/sessions/execution\n/jobsub.sh",
+            "/dlg/sessions/execution,other/jobsub.sh",
+            "/dlg/sessions/execution:other/jobsub.sh",
             "/other/sessions/execution/jobsub.sh",
             "/dlg/jobsub.sh",
         ] {
