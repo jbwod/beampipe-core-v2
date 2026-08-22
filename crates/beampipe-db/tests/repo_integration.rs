@@ -1089,6 +1089,246 @@ fn persisted_execution_scope_parser_rejects_ambiguous_selections() {
     }
 }
 
+async fn prepare_submission_receipt_execution(
+    pool: &sqlx::PgPool,
+    module: &str,
+    backend: &str,
+    session_id: &str,
+) -> beampipe_db::models::ExecutionRow {
+    let execution = repo::create_execution(
+        pool,
+        module,
+        json!([{"source_identifier": "source-1", "sbids": ["1"]}]),
+        "local",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET status = 'running', execution_phase = 'submit',
+            control_phase = 'submission_pending', submission_state = 'preparing',
+            scheduler_state = 'not_submitted', daliuge_state = 'not_created'
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(execution.uuid)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(repo::begin_execution_submission(pool, execution.uuid, backend, session_id, None)
+        .await
+        .unwrap());
+    assert!(!repo::begin_execution_submission(pool, execution.uuid, backend, session_id, None)
+        .await
+        .unwrap());
+    repo::get_execution(pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn slurm_submission_receipt_is_atomic_idempotent_and_conflict_safe() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("receipt_slurm_{}", Uuid::now_v7().simple());
+    let session_id = format!("BeampipeExecution-{}", Uuid::now_v7());
+    let execution =
+        prepare_submission_receipt_execution(&pool, &module, "slurm", &session_id).await;
+    let session_dir = format!("/remote/sessions/{session_id}");
+    let staging_root = format!("{session_dir}/wallaby-staging");
+    let input = repo::SubmissionReceiptInput {
+        scheduler_name: "slurm".into(),
+        scheduler_job_id: Some("4242".into()),
+        daliuge_session_id: Some(session_id.clone()),
+        remote_session_dir: Some(session_dir.clone()),
+        staging_root: Some(staging_root.clone()),
+        workflow_manifest: json!({
+            "sources": [],
+            "beampipe_run_record": {"slurm": {"job_id": "4242"}},
+        }),
+        physical_graph: json!([{"oid": "drop-1"}]),
+        next_status: ExecutionStatus::AwaitingScheduler,
+        actor: "system:test".into(),
+        correlation_id: Some("receipt-test".into()),
+        poll_job: None,
+    };
+
+    let recorded = repo::record_submission_receipt(&pool, execution.uuid, input.clone())
+        .await
+        .unwrap();
+    assert!(!recorded.replayed);
+    assert_eq!(recorded.execution.status, "awaiting_scheduler");
+    assert_eq!(recorded.execution.control_phase.as_deref(), Some("submitted"));
+    assert_eq!(
+        recorded.execution.submission_state.as_deref(),
+        Some("submitted")
+    );
+    assert_eq!(recorded.execution.scheduler_state.as_deref(), Some("pending"));
+    assert_eq!(
+        recorded.execution.daliuge_state.as_deref(),
+        Some("not_created")
+    );
+    assert_eq!(
+        recorded.execution.remote_session_dir.as_deref(),
+        Some(session_dir.as_str())
+    );
+    assert_eq!(
+        recorded.execution.physical_graph_sha256.as_deref(),
+        Some(recorded.physical_graph_artifact.sha256.as_str())
+    );
+    assert_eq!(
+        recorded.physical_graph_artifact.metadata["staging_root"],
+        staging_root
+    );
+    assert!(recorded.physical_graph_artifact.metadata["submission_receipt_sha256"]
+        .as_str()
+        .is_some_and(|value| value.len() == 64));
+
+    let artifact_count = repo::list_execution_artifacts(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .len();
+    let observation_count = repo::list_execution_observations(&pool, execution.uuid, 100, 0)
+        .await
+        .unwrap()
+        .len();
+    let provenance_count = repo::list_provenance_events_for_execution(&pool, execution.uuid, 100)
+        .await
+        .unwrap()
+        .len();
+    let submission_events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_type == "execution.submission_recorded")
+        .count();
+    assert_eq!(submission_events, 1);
+
+    sqlx::query(
+        "UPDATE batch_execution_record SET workflow_manifest = '{\"poll_round\":1}'::jsonb WHERE uuid = $1",
+    )
+    .bind(execution.uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let replayed = repo::record_submission_receipt(&pool, execution.uuid, input.clone())
+        .await
+        .unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(
+        replayed.physical_graph_artifact.uuid,
+        recorded.physical_graph_artifact.uuid
+    );
+    assert_eq!(
+        repo::list_execution_artifacts(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .len(),
+        artifact_count
+    );
+    assert_eq!(
+        repo::list_execution_observations(&pool, execution.uuid, 100, 0)
+            .await
+            .unwrap()
+            .len(),
+        observation_count
+    );
+    assert_eq!(
+        repo::list_provenance_events_for_execution(&pool, execution.uuid, 100)
+            .await
+            .unwrap()
+            .len(),
+        provenance_count
+    );
+
+    let mut conflicts = Vec::new();
+    let mut changed_id = input.clone();
+    changed_id.scheduler_job_id = Some("9999".into());
+    conflicts.push(changed_id);
+    let mut changed_graph = input.clone();
+    changed_graph.physical_graph = json!([{"oid": "different"}]);
+    conflicts.push(changed_graph);
+    let mut changed_manifest = input.clone();
+    changed_manifest.workflow_manifest = json!({"changed": true});
+    conflicts.push(changed_manifest);
+    let mut changed_path = input;
+    changed_path.remote_session_dir = Some("/remote/sessions/other".into());
+    changed_path.staging_root = Some("/remote/sessions/other/wallaby-staging".into());
+    conflicts.push(changed_path);
+    for conflict in conflicts {
+        let error = repo::record_submission_receipt(&pool, execution.uuid, conflict)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("conflict"));
+    }
+    let unchanged = repo::get_execution(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.scheduler_job_id.as_deref(), Some("4242"));
+    assert_eq!(unchanged.physical_graph_sha256, recorded.execution.physical_graph_sha256);
+}
+
+#[tokio::test]
+async fn rest_submission_receipt_persists_axes_and_poll_job_atomically() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("receipt_rest_{}", Uuid::now_v7().simple());
+    let session_id = format!("BeampipeExecution-{}", Uuid::now_v7());
+    let execution =
+        prepare_submission_receipt_execution(&pool, &module, "daliuge", &session_id).await;
+    let result = repo::record_submission_receipt(
+        &pool,
+        execution.uuid,
+        repo::SubmissionReceiptInput {
+            scheduler_name: "daliuge".into(),
+            scheduler_job_id: None,
+            daliuge_session_id: Some(session_id.clone()),
+            remote_session_dir: None,
+            staging_root: None,
+            workflow_manifest: json!({"sources": []}),
+            physical_graph: json!([{"oid": "drop-rest"}]),
+            next_status: ExecutionStatus::Running,
+            actor: "system:test".into(),
+            correlation_id: None,
+            poll_job: Some(repo::SubmissionReceiptPollJob {
+                payload: json!({"execution_id": execution.uuid, "poll_round": 0}),
+                worker_pool: "default".into(),
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.execution.status, "running");
+    assert_eq!(
+        result.execution.scheduler_state.as_deref(),
+        Some("not_submitted")
+    );
+    assert_eq!(result.execution.daliuge_state.as_deref(), Some("running"));
+    assert_eq!(
+        result.execution.daliuge_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert!(result.execution.remote_session_dir.is_none());
+    let poll_jobs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM jobs WHERE execution_id = $1 AND kind = 'dim_poll' AND status = 'queued'",
+    )
+    .bind(execution.uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(poll_jobs, 1);
+}
+
 #[tokio::test]
 async fn ignored_terminal_overwrite_does_not_emit_false_provenance() {
     let Some(pool) = test_pool().await else {

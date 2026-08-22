@@ -2936,16 +2936,31 @@ async fn run_execute(
             );
             return Ok(());
         }
-        let submission_is_uncertain = current
-            .and_then(|row| row.submission_state)
-            .as_deref()
+        let submission_state = current
+            .as_ref()
+            .and_then(|row| row.submission_state.as_deref())
             .and_then(SubmissionState::parse)
-            == Some(SubmissionState::Uncertain);
-        if submission_is_uncertain {
+            .unwrap_or(SubmissionState::NotStarted);
+        if submission_state_holds_automatic_work(Some(submission_state)) {
+            if submission_state == SubmissionState::InFlight {
+                let _ = repo::apply_execution_state_patch(
+                    pool,
+                    execution_id,
+                    ExecutionStatePatch {
+                        submission_state: Some(SubmissionState::Uncertain),
+                        failure_class: Some(FailureClass::InconsistentState),
+                        last_error: Some(msg.clone()),
+                        last_reconciled_at: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
             warn!(
                 execution_id = %execution_id,
                 project_module,
                 error = %msg,
+                submission_state = submission_state.as_str(),
                 event = "execute_submission_uncertain"
             );
             beampipe_db::provenance::record_provenance_event(
@@ -2958,6 +2973,7 @@ async fn run_execute(
                 Some(&execution_id.to_string()),
                 &json!({
                     "error": msg,
+                    "submission_state": submission_state.as_str(),
                     "system_action": "submission is held for reconciliation and will not be repeated automatically",
                 }),
             )
@@ -2974,6 +2990,17 @@ async fn run_execute(
         .await?;
     }
     Ok(())
+}
+
+fn submission_state_holds_automatic_work(state: Option<SubmissionState>) -> bool {
+    matches!(
+        state,
+        Some(
+            SubmissionState::InFlight
+                | SubmissionState::Uncertain
+                | SubmissionState::Submitted
+        )
+    )
 }
 
 type ExecutionDatasetScope = BTreeMap<(String, String), BTreeSet<String>>;
@@ -3263,6 +3290,21 @@ async fn run_execute_body(
         .get("use_real_backends")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(config.use_real_backends);
+    let persisted_submission_state = execution
+        .submission_state
+        .as_deref()
+        .and_then(SubmissionState::parse);
+    if submission_state_holds_automatic_work(persisted_submission_state) {
+        info!(
+            event = "execute_submission_reconciliation_guard",
+            execution_id = %execution_id,
+            submission_state = persisted_submission_state
+                .map(SubmissionState::as_str)
+                .unwrap_or("unknown"),
+            "submission may already exist; automatic execution is held"
+        );
+        return Ok(());
+    }
     let phase_is_submit = execution.phase_enum() == Some(ExecutionPhase::Submit);
     let replay_manifest = phase_is_submit && execution.workflow_manifest.is_some();
     let project_config_row = repo::get_project_config_for_execution(pool, execution)
@@ -3278,21 +3320,6 @@ async fn run_execute_body(
         .as_ref()
         .and_then(|row| deployment_kind(&row.deployment))
         .unwrap_or("rest_remote");
-    if execution
-        .submission_state
-        .as_deref()
-        .and_then(SubmissionState::parse)
-        == Some(SubmissionState::Submitted)
-        && (execution.scheduler_job_id.is_some() || execution.daliuge_session_id.is_some())
-    {
-        info!(
-            event = "execute_submit_already_recorded",
-            execution_id = %execution_id,
-            scheduler_job_id = execution.scheduler_job_id.as_deref().unwrap_or_default(),
-            daliuge_session_id = execution.daliuge_session_id.as_deref().unwrap_or_default(),
-        );
-        return Ok(());
-    }
     let requires_casda = execution_requires_casda(execution, project_config.as_ref());
     let casda_client = CasdaStagingClient::from_env();
     ensure_execution_active(pool, execution_id, true).await?;
@@ -3498,17 +3525,6 @@ async fn run_execute_body(
     )
     .await
     .map_err(|e| e.to_string())?;
-    repo::apply_execution_state_patch(
-        pool,
-        execution_id,
-        ExecutionStatePatch {
-            control_phase: Some(ControlPhase::SubmissionPending),
-            submission_state: Some(SubmissionState::Preparing),
-            ..Default::default()
-        },
-    )
-    .await
-    .map_err(|error| error.to_string())?;
     ensure_execution_active(pool, execution_id, false).await?;
     run_submit_phase(
         pool,
@@ -3601,7 +3617,7 @@ fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
                 || !matches!(error.operation.as_str(), "unroll_and_partition" | "map")
         }
         OrchestrationError::SubmissionUncertain(_) => true,
-        OrchestrationError::Backend(_) => true,
+        OrchestrationError::Backend(_) => false,
     }
 }
 
@@ -3637,43 +3653,27 @@ async fn run_submit_phase(
                 DeploymentConfig::SlurmRemote(_) => None,
             })
     });
-    repo::apply_execution_state_patch(
+    let began_submission = repo::begin_execution_submission(
         pool,
         execution_id,
-        ExecutionStatePatch {
-            control_phase: Some(ControlPhase::SubmissionPending),
-            submission_state: Some(SubmissionState::InFlight),
-            scheduler_name: Some(if backend_kind == "slurm_remote" {
-                "slurm".into()
-            } else {
-                "daliuge".into()
-            }),
-            daliuge_session_id: Some(expected_session_id.clone()),
-            daliuge_manager_url,
-            daliuge_state: Some(DaliugeState::NotCreated),
-            ..Default::default()
+        if backend_kind == "slurm_remote" {
+            "slurm"
+        } else {
+            "daliuge"
         },
+        &expected_session_id,
+        daliuge_manager_url.as_deref(),
     )
     .await
     .map_err(|error| error.to_string())?;
-    repo::record_execution_observation(
-        pool,
-        execution_id,
-        ExecutionObservationInput {
-            kind: "daliuge_session".into(),
-            normalized_state: SubmissionState::InFlight.as_str().into(),
-            raw_state: Some("intent_persisted".into()),
-            reason: None,
-            payload: json!({
-                "daliuge_session_id": expected_session_id,
-                "backend": backend_kind,
-            }),
-            source_version: None,
-            observed_at: Some(Utc::now()),
-        },
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    if !began_submission {
+        warn!(
+            event = "execute_submit_duplicate_guard",
+            execution_id = %execution_id,
+            "another worker already began or recorded this submission"
+        );
+        return Ok(());
+    }
     async {
         let submitted = match backend
             .submit(&execution_id.to_string(), manifest, graph)
@@ -3708,10 +3708,10 @@ async fn run_submit_phase(
         apply_submit_result(
             pool,
             execution_id,
-            execution,
             submitted,
             use_real,
             worker_pool,
+            correlation_id,
         )
         .await
         .map_err(|e| e.to_string())
@@ -3731,10 +3731,10 @@ async fn run_submit_phase(
 async fn apply_submit_result(
     pool: &PgPool,
     execution_id: uuid::Uuid,
-    execution: &beampipe_db::models::ExecutionRow,
     submitted: beampipe_orchestration::BackendSubmit,
     use_real: bool,
     worker_pool: &str,
+    correlation_id: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let scheduler_name = submitted.scheduler_name.clone();
     let legacy_scheduler_job_id = submitted.scheduler_job_id.clone();
@@ -3756,127 +3756,42 @@ async fn apply_submit_result(
             .and_then(|parsed| parsed.session_dir.clone())
     });
     let daliuge_session_id = submitted.session_id.clone();
-    let workflow_manifest = submitted.workflow_manifest;
-    repo::apply_execution_patch_with_correlation(
-        pool,
-        execution_id,
-        LedgerPatch {
-            status: Some(submitted.next_status),
-            scheduler_name: Some(submitted.scheduler_name),
-            scheduler_job_id: scheduler_job_id.clone(),
-            workflow_manifest: Some(workflow_manifest),
-            execution_phase: Some(Some(ExecutionPhase::Submit)),
-            ..LedgerPatch::default()
-        },
-        None,
-    )
-    .await?;
-    let physical_graph_sha256 = if let Some(physical_graph) = submitted.physical_graph.as_ref() {
-        Some(
-            persist_inline_json_artifact(
-                pool,
-                execution_id,
-                "physical_graph",
-                "translated",
-                physical_graph,
-                json!({"backend": scheduler_name}),
-            )
-            .await
-            .map_err(sqlx::Error::Protocol)?,
-        )
+    let physical_graph = submitted.physical_graph.ok_or_else(|| {
+        sqlx::Error::Protocol("backend submission receipt omitted the physical graph".into())
+    })?;
+    let poll_job = if scheduler_name != "slurm" && !use_real {
+        Some(repo::SubmissionReceiptPollJob {
+            payload: metrics::payload_with_trace(
+                json!({
+                    "execution_id": execution_id,
+                    "poll_round": 0,
+                    "use_real_backends": use_real,
+                }),
+                &metrics::correlation_only(execution_id.to_string()),
+            ),
+            worker_pool: worker_pool.to_string(),
+        })
     } else {
         None
     };
-    repo::apply_execution_provenance_patch(
+    repo::record_submission_receipt(
         pool,
         execution_id,
-        ExecutionProvenancePatch {
-            physical_graph_sha256,
-            ..Default::default()
-        },
-    )
-    .await?;
-    repo::apply_execution_state_patch(
-        pool,
-        execution_id,
-        ExecutionStatePatch {
-            control_phase: Some(ControlPhase::Submitted),
-            submission_state: Some(SubmissionState::Submitted),
-            scheduler_name: Some(scheduler_name.clone()),
-            scheduler_job_id: scheduler_job_id.clone(),
-            scheduler_state: Some(if scheduler_name == "slurm" {
-                SchedulerState::Pending
-            } else {
-                SchedulerState::NotSubmitted
-            }),
-            daliuge_session_id: daliuge_session_id.clone(),
-            daliuge_state: Some(if scheduler_name == "slurm" {
-                DaliugeState::NotCreated
-            } else {
-                DaliugeState::Running
-            }),
+        repo::SubmissionReceiptInput {
+            scheduler_name,
+            scheduler_job_id,
+            daliuge_session_id,
             remote_session_dir,
-            ..Default::default()
+            staging_root: submitted.staging_root,
+            workflow_manifest: submitted.workflow_manifest,
+            physical_graph,
+            next_status: submitted.next_status,
+            actor: "system:execute".into(),
+            correlation_id: correlation_id.map(str::to_string),
+            poll_job,
         },
     )
     .await?;
-    if let Some(job_id) = scheduler_job_id {
-        repo::record_execution_observation(
-            pool,
-            execution_id,
-            ExecutionObservationInput {
-                kind: "scheduler".into(),
-                normalized_state: SchedulerState::Pending.as_str().into(),
-                raw_state: Some("SUBMITTED".into()),
-                reason: None,
-                payload: json!({"scheduler_job_id": job_id}),
-                source_version: None,
-                observed_at: Some(Utc::now()),
-            },
-        )
-        .await?;
-    }
-    if scheduler_name != "slurm" {
-        if let Some(session_id) = daliuge_session_id {
-            repo::record_execution_observation(
-                pool,
-                execution_id,
-                ExecutionObservationInput {
-                    kind: "daliuge_session".into(),
-                    normalized_state: DaliugeState::Running.as_str().into(),
-                    raw_state: Some("deployed".into()),
-                    reason: None,
-                    payload: json!({"daliuge_session_id": session_id}),
-                    source_version: None,
-                    observed_at: Some(Utc::now()),
-                },
-            )
-            .await?;
-        }
-    }
-    if scheduler_name != "slurm" && !use_real {
-        let job_payload = metrics::payload_with_trace(
-            json!({
-                "execution_id": execution_id,
-                "poll_round": 0,
-                "use_real_backends": use_real,
-            }),
-            &metrics::correlation_only(execution_id.to_string()),
-        );
-        repo::enqueue_job_with_options(
-            pool,
-            "dim_poll",
-            job_payload,
-            repo::JobEnqueueOptions {
-                execution_id: Some(execution_id),
-                idempotency_key: Some(format!("dim_poll:{execution_id}:0")),
-                pool: Some(worker_pool.to_string()),
-                ..Default::default()
-            },
-        )
-        .await?;
-    }
-    let _ = execution;
     Ok(())
 }
 
@@ -5275,6 +5190,38 @@ mod tests {
             SchedulerState::from_normalized(&result.normalized_state),
             SchedulerState::Unknown
         );
+    }
+
+    #[test]
+    fn persisted_submission_states_hold_automatic_work() {
+        for state in [
+            SubmissionState::InFlight,
+            SubmissionState::Uncertain,
+            SubmissionState::Submitted,
+        ] {
+            assert!(submission_state_holds_automatic_work(Some(state)));
+        }
+        for state in [
+            SubmissionState::NotStarted,
+            SubmissionState::Preparing,
+            SubmissionState::Failed,
+        ] {
+            assert!(!submission_state_holds_automatic_work(Some(state)));
+        }
+        assert!(!submission_state_holds_automatic_work(None));
+    }
+
+    #[test]
+    fn only_explicit_or_post_side_effect_submission_errors_are_uncertain() {
+        assert!(submission_error_is_uncertain(
+            &OrchestrationError::SubmissionUncertain("lost sbatch response".into())
+        ));
+        assert!(!submission_error_is_uncertain(
+            &OrchestrationError::Backend("definite local failure".into())
+        ));
+        assert!(!submission_error_is_uncertain(
+            &OrchestrationError::GraphNotObject
+        ));
     }
 
     #[test]

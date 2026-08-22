@@ -2577,6 +2577,594 @@ fn validate_artifact(artifact: &ExecutionArtifactInput) -> Result<(), sqlx::Erro
     Ok(())
 }
 
+/// Persist the submission intent immediately before the worker calls an
+/// external backend. Only one worker may advance `preparing` to `in_flight`;
+/// stale or duplicate workers must stop before translation/deployment.
+pub async fn begin_execution_submission(
+    pool: &PgPool,
+    execution_id: Uuid,
+    scheduler_name: &str,
+    daliuge_session_id: &str,
+    daliuge_manager_url: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    if !matches!(scheduler_name, "slurm" | "daliuge") {
+        return Err(sqlx::Error::Protocol(format!(
+            "unsupported submission backend '{scheduler_name}'"
+        )));
+    }
+    if daliuge_session_id.trim().is_empty() {
+        return Err(sqlx::Error::Protocol(
+            "submission intent requires daliuge_session_id".into(),
+        ));
+    }
+
+    let mut tx = pool.begin().await?;
+    let Some(locked) = sqlx::query_as::<_, ExecutionRow>(
+        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    if locked
+        .status_enum()
+        .is_some_and(ExecutionStatus::is_terminal)
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let submission = locked
+        .submission_state
+        .as_deref()
+        .and_then(SubmissionState::parse)
+        .unwrap_or(SubmissionState::NotStarted);
+    if matches!(
+        submission,
+        SubmissionState::InFlight | SubmissionState::Uncertain | SubmissionState::Submitted
+    ) {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    if !matches!(
+        submission,
+        SubmissionState::NotStarted | SubmissionState::Preparing | SubmissionState::Failed
+    ) {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(format!(
+            "execution {execution_id} cannot begin submission from {}",
+            submission.as_str()
+        )));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET control_phase = 'submission_pending',
+            submission_state = 'in_flight',
+            scheduler_name = $2,
+            daliuge_session_id = $3,
+            daliuge_manager_url = $4,
+            daliuge_state = 'not_created',
+            phase_timestamps = CASE
+                WHEN phase_timestamps ? 'submission_pending' THEN phase_timestamps
+                ELSE phase_timestamps || jsonb_build_object('submission_pending', to_jsonb(now()))
+            END,
+            last_reconciled_at = now(),
+            updated_at = now()
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(execution_id)
+    .bind(scheduler_name)
+    .bind(daliuge_session_id)
+    .bind(daliuge_manager_url)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO execution_observations (
+            uuid, execution_id, kind, normalized_state, raw_state, reason,
+            payload, source_version, observed_at
+        )
+        VALUES ($1, $2, 'daliuge_session', $3, 'intent_persisted', NULL, $4, NULL, now())
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution_id)
+    .bind(SubmissionState::InFlight.as_str())
+    .bind(json!({
+        "daliuge_session_id": daliuge_session_id,
+        "backend": scheduler_name,
+    }))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmissionReceiptPollJob {
+    pub payload: Value,
+    pub worker_pool: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmissionReceiptInput {
+    pub scheduler_name: String,
+    pub scheduler_job_id: Option<String>,
+    pub daliuge_session_id: Option<String>,
+    pub remote_session_dir: Option<String>,
+    pub staging_root: Option<String>,
+    pub workflow_manifest: Value,
+    pub physical_graph: Value,
+    pub next_status: ExecutionStatus,
+    pub actor: String,
+    pub correlation_id: Option<String>,
+    pub poll_job: Option<SubmissionReceiptPollJob>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmissionReceiptResult {
+    pub execution: ExecutionRow,
+    pub physical_graph_artifact: ExecutionArtifactRow,
+    pub replayed: bool,
+}
+
+fn json_payload_sha256(value: &Value) -> Result<(String, i64), sqlx::Error> {
+    let bytes = serde_json::to_vec(value).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    Ok((format!("{:x}", Sha256::digest(&bytes)), bytes.len() as i64))
+}
+
+fn receipt_nonempty<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, sqlx::Error> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| sqlx::Error::Protocol(format!("submission receipt requires {field}")))
+}
+
+fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sqlx::Error> {
+    if !input.workflow_manifest.is_object() {
+        return Err(sqlx::Error::Protocol(
+            "submission receipt workflow_manifest must be a JSON object".into(),
+        ));
+    }
+    if input.physical_graph.is_null() {
+        return Err(sqlx::Error::Protocol(
+            "submission receipt requires a physical graph".into(),
+        ));
+    }
+    let session_id = receipt_nonempty(
+        input.daliuge_session_id.as_deref(),
+        "daliuge_session_id",
+    )?;
+    match input.scheduler_name.as_str() {
+        "slurm" => {
+            receipt_nonempty(input.scheduler_job_id.as_deref(), "scheduler_job_id")?;
+            let session_dir = receipt_nonempty(
+                input.remote_session_dir.as_deref(),
+                "remote_session_dir",
+            )?;
+            let staging_root =
+                receipt_nonempty(input.staging_root.as_deref(), "staging_root")?;
+            let expected_staging_root =
+                format!("{}/wallaby-staging", session_dir.trim_end_matches('/'));
+            if staging_root != expected_staging_root {
+                return Err(sqlx::Error::Protocol(format!(
+                    "submission receipt staging_root must be the execution session child '{expected_staging_root}'"
+                )));
+            }
+            if input.next_status != ExecutionStatus::AwaitingScheduler {
+                return Err(sqlx::Error::Protocol(
+                    "Slurm submission receipt must enter awaiting_scheduler".into(),
+                ));
+            }
+            if input.poll_job.is_some() {
+                return Err(sqlx::Error::Protocol(
+                    "Slurm submission receipt cannot enqueue a DIM poll job".into(),
+                ));
+            }
+        }
+        "daliuge" => {
+            if input.scheduler_job_id.is_some()
+                || input.remote_session_dir.is_some()
+                || input.staging_root.is_some()
+            {
+                return Err(sqlx::Error::Protocol(
+                    "REST/DIM submission receipt cannot contain Slurm job or path fields".into(),
+                ));
+            }
+            if input.next_status != ExecutionStatus::Running {
+                return Err(sqlx::Error::Protocol(
+                    "REST/DIM submission receipt must enter running".into(),
+                ));
+            }
+        }
+        other => {
+            return Err(sqlx::Error::Protocol(format!(
+                "unsupported submission receipt backend '{other}'"
+            )))
+        }
+    }
+    if session_id.len() > 512 {
+        return Err(sqlx::Error::Protocol(
+            "submission receipt daliuge_session_id is too long".into(),
+        ));
+    }
+    if let Some(poll_job) = &input.poll_job {
+        if poll_job.worker_pool.trim().is_empty() {
+            return Err(sqlx::Error::Protocol(
+                "submission receipt poll worker pool must be non-empty".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Atomically record the durable evidence returned after an external backend
+/// accepts a submission. The receipt fingerprint is stored with the immutable
+/// physical-graph artifact so later workflow-manifest polling updates do not
+/// weaken exact replay/conflict detection.
+pub async fn record_submission_receipt(
+    pool: &PgPool,
+    execution_id: Uuid,
+    input: SubmissionReceiptInput,
+) -> Result<SubmissionReceiptResult, sqlx::Error> {
+    validate_submission_receipt(&input)?;
+    let (physical_graph_sha256, physical_graph_size) =
+        json_payload_sha256(&input.physical_graph)?;
+    let (workflow_manifest_sha256, _) = json_payload_sha256(&input.workflow_manifest)?;
+    let receipt_document = json!({
+        "schema": "beampipe-submission-receipt/v1",
+        "scheduler_name": input.scheduler_name,
+        "scheduler_job_id": input.scheduler_job_id,
+        "daliuge_session_id": input.daliuge_session_id,
+        "remote_session_dir": input.remote_session_dir,
+        "staging_root": input.staging_root,
+        "workflow_manifest_sha256": workflow_manifest_sha256,
+        "physical_graph_sha256": physical_graph_sha256,
+        "next_status": input.next_status.as_str(),
+    });
+    let (receipt_sha256, _) = json_payload_sha256(&receipt_document)?;
+    let artifact_metadata = json!({
+        "backend": input.scheduler_name,
+        "scheduler_job_id": input.scheduler_job_id,
+        "daliuge_session_id": input.daliuge_session_id,
+        "remote_session_dir": input.remote_session_dir,
+        "staging_root": input.staging_root,
+        "workflow_manifest_sha256": workflow_manifest_sha256,
+        "submission_receipt_sha256": receipt_sha256,
+    });
+    let artifact_input = ExecutionArtifactInput {
+        kind: "physical_graph".into(),
+        storage_kind: "database".into(),
+        uri: None,
+        inline_json: Some(input.physical_graph.clone()),
+        media_type: "application/json".into(),
+        sha256: physical_graph_sha256.clone(),
+        size_bytes: Some(physical_graph_size),
+        producer_phase: "translated".into(),
+        metadata: artifact_metadata,
+    };
+    validate_artifact(&artifact_input)?;
+
+    let mut tx = pool.begin().await?;
+    let Some(locked) = sqlx::query_as::<_, ExecutionRow>(
+        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(format!(
+            "execution {execution_id} does not exist"
+        )));
+    };
+
+    let scope = parse_execution_source_scope(&locked.sources).map_err(sqlx::Error::Protocol)?;
+    let source_identifiers = scope.source_identifiers();
+    let current_submission = locked
+        .submission_state
+        .as_deref()
+        .and_then(SubmissionState::parse)
+        .unwrap_or(SubmissionState::NotStarted);
+    let intent_conflicts = locked
+        .scheduler_name
+        .as_deref()
+        .is_some_and(|value| value != input.scheduler_name)
+        || locked
+            .scheduler_job_id
+            .as_deref()
+            .is_some_and(|value| Some(value) != input.scheduler_job_id.as_deref())
+        || locked
+            .daliuge_session_id
+            .as_deref()
+            .is_some_and(|value| Some(value) != input.daliuge_session_id.as_deref())
+        || locked
+            .remote_session_dir
+            .as_deref()
+            .is_some_and(|value| Some(value) != input.remote_session_dir.as_deref());
+    if intent_conflicts {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "submission receipt conflicts with the persisted submission intent".into(),
+        ));
+    }
+
+    if current_submission == SubmissionState::Submitted {
+        let artifact = sqlx::query_as::<_, ExecutionArtifactRow>(
+            r#"
+            SELECT * FROM execution_artifacts
+            WHERE execution_id = $1 AND kind = 'physical_graph' AND sha256 = $2
+            "#,
+        )
+        .bind(execution_id)
+        .bind(&physical_graph_sha256)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let exact = locked.scheduler_name.as_deref() == Some(input.scheduler_name.as_str())
+            && locked.scheduler_job_id == input.scheduler_job_id
+            && locked.daliuge_session_id == input.daliuge_session_id
+            && locked.remote_session_dir == input.remote_session_dir
+            && locked.physical_graph_sha256.as_deref() == Some(physical_graph_sha256.as_str())
+            && artifact.as_ref().is_some_and(|artifact| {
+                artifact.storage_kind == "database"
+                    && artifact.inline_json.as_ref() == Some(&input.physical_graph)
+                    && artifact.media_type == "application/json"
+                    && artifact.size_bytes == Some(physical_graph_size)
+                    && artifact.producer_phase == "translated"
+                    && artifact
+                        .metadata
+                        .get("submission_receipt_sha256")
+                        .and_then(Value::as_str)
+                        == Some(receipt_sha256.as_str())
+            });
+        if !exact {
+            tx.rollback().await?;
+            return Err(sqlx::Error::Protocol(
+                "conflicting submission receipt for an already submitted execution".into(),
+            ));
+        }
+        let artifact = artifact.expect("exact receipt requires the physical graph artifact");
+        tx.commit().await?;
+        return Ok(SubmissionReceiptResult {
+            execution: locked,
+            physical_graph_artifact: artifact,
+            replayed: true,
+        });
+    }
+    if !matches!(
+        current_submission,
+        SubmissionState::InFlight | SubmissionState::Uncertain
+    ) {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(format!(
+            "execution {execution_id} is not awaiting a submission receipt (submission_state={})",
+            current_submission.as_str()
+        )));
+    }
+
+    let current_status = locked.status_enum().unwrap_or(ExecutionStatus::Pending);
+    let preserve_terminal = current_status.is_terminal();
+    if !preserve_terminal
+        && current_status != input.next_status
+        && !current_status.allows(input.next_status)
+    {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(format!(
+            "invalid submission receipt ledger transition from {} to {}",
+            current_status.as_str(),
+            input.next_status.as_str()
+        )));
+    }
+
+    if sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM execution_artifacts WHERE execution_id = $1 AND kind = 'physical_graph'",
+    )
+    .bind(execution_id)
+    .fetch_one(&mut *tx)
+    .await?
+        > 0
+    {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "execution already has physical graph evidence without a completed submission receipt"
+                .into(),
+        ));
+    }
+
+    let artifact = sqlx::query_as::<_, ExecutionArtifactRow>(
+        r#"
+        INSERT INTO execution_artifacts (
+            uuid, execution_id, kind, storage_kind, uri, inline_json, media_type,
+            sha256, size_bytes, producer_phase, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING *
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution_id)
+    .bind(&artifact_input.kind)
+    .bind(&artifact_input.storage_kind)
+    .bind(&artifact_input.uri)
+    .bind(&artifact_input.inline_json)
+    .bind(&artifact_input.media_type)
+    .bind(&artifact_input.sha256)
+    .bind(artifact_input.size_bytes)
+    .bind(&artifact_input.producer_phase)
+    .bind(&artifact_input.metadata)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let next_status = if preserve_terminal {
+        current_status
+    } else {
+        input.next_status
+    };
+    let scheduler_state = if input.scheduler_name == "slurm" {
+        SchedulerState::Pending
+    } else {
+        SchedulerState::NotSubmitted
+    };
+    let daliuge_state = if input.scheduler_name == "slurm" {
+        DaliugeState::NotCreated
+    } else {
+        DaliugeState::Running
+    };
+    let execution = sqlx::query_as::<_, ExecutionRow>(
+        r#"
+        UPDATE batch_execution_record
+        SET status = $2,
+            execution_phase = CASE WHEN $3 THEN execution_phase ELSE 'submit' END,
+            workflow_manifest = $4,
+            physical_graph_sha256 = $5,
+            control_phase = CASE WHEN $3 THEN control_phase ELSE 'submitted' END,
+            submission_state = 'submitted',
+            scheduler_name = $6,
+            scheduler_job_id = $7,
+            scheduler_state = $8,
+            daliuge_session_id = $9,
+            daliuge_state = $10,
+            remote_session_dir = $11,
+            terminal_outcome = CASE WHEN $3 THEN terminal_outcome ELSE NULL END,
+            failure_class = CASE WHEN $3 THEN failure_class ELSE NULL END,
+            last_error = CASE WHEN $3 THEN last_error ELSE NULL END,
+            phase_timestamps = CASE
+                WHEN phase_timestamps ? 'submitted' THEN phase_timestamps
+                ELSE phase_timestamps || jsonb_build_object('submitted', to_jsonb(now()))
+            END,
+            last_reconciled_at = now(),
+            updated_at = now()
+        WHERE uuid = $1
+        RETURNING *
+        "#,
+    )
+    .bind(execution_id)
+    .bind(status_str(next_status))
+    .bind(preserve_terminal)
+    .bind(&input.workflow_manifest)
+    .bind(&physical_graph_sha256)
+    .bind(&input.scheduler_name)
+    .bind(&input.scheduler_job_id)
+    .bind(scheduler_state.as_str())
+    .bind(&input.daliuge_session_id)
+    .bind(daliuge_state.as_str())
+    .bind(&input.remote_session_dir)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let observation = if input.scheduler_name == "slurm" {
+        ExecutionObservationInput {
+            kind: "scheduler".into(),
+            normalized_state: scheduler_state.as_str().into(),
+            raw_state: Some("SUBMITTED".into()),
+            reason: None,
+            payload: receipt_document.clone(),
+            source_version: None,
+            observed_at: None,
+        }
+    } else {
+        ExecutionObservationInput {
+            kind: "daliuge_session".into(),
+            normalized_state: daliuge_state.as_str().into(),
+            raw_state: Some("deployed".into()),
+            reason: None,
+            payload: receipt_document.clone(),
+            source_version: None,
+            observed_at: None,
+        }
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO execution_observations (
+            uuid, execution_id, kind, normalized_state, raw_state, reason,
+            payload, source_version, observed_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution_id)
+    .bind(&observation.kind)
+    .bind(&observation.normalized_state)
+    .bind(&observation.raw_state)
+    .bind(&observation.reason)
+    .bind(&observation.payload)
+    .bind(&observation.source_version)
+    .execute(&mut *tx)
+    .await?;
+
+    let correlation_id = input
+        .correlation_id
+        .clone()
+        .unwrap_or_else(|| execution_id.to_string());
+    insert_provenance_event(
+        &mut *tx,
+        "execution.submission_recorded",
+        &execution.project_module,
+        source_identifiers.first().map(String::as_str),
+        Some(execution_id),
+        Some(&input.actor),
+        Some(correlation_id.as_str()),
+        &json!({
+            "submission_receipt_sha256": receipt_sha256,
+            "receipt": receipt_document,
+        }),
+    )
+    .await?;
+    if !preserve_terminal
+        && current_status != ExecutionStatus::AwaitingScheduler
+        && next_status == ExecutionStatus::AwaitingScheduler
+    {
+        insert_provenance_event(
+            &mut *tx,
+            beampipe_domain::provenance::ProvenanceEventType::ExecutionAwaitingScheduler.as_str(),
+            &execution.project_module,
+            source_identifiers.first().map(String::as_str),
+            Some(execution_id),
+            Some(&input.actor),
+            Some(correlation_id.as_str()),
+            &json!({
+                "from_status": current_status.as_str(),
+                "to_status": next_status.as_str(),
+                "submission_receipt_sha256": receipt_sha256,
+            }),
+        )
+        .await?;
+    }
+
+    if let Some(poll_job) = input.poll_job {
+        sqlx::query(
+            r#"
+            INSERT INTO jobs (
+                uuid, kind, payload, execution_id, idempotency_key, next_run_at,
+                pool, required_capability, required_labels, priority
+            )
+            VALUES ($1, 'dim_poll', $2, $3, $4, now(), $5, 'daliuge-deployment', '{}'::jsonb, 0)
+            ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(poll_job.payload)
+        .bind(execution_id)
+        .bind(format!("dim_poll:{execution_id}:0"))
+        .bind(poll_job.worker_pool)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(SubmissionReceiptResult {
+        execution,
+        physical_graph_artifact: artifact,
+        replayed: false,
+    })
+}
+
 #[derive(Debug)]
 struct SuccessfulSourceFinalization {
     source_identifiers: Vec<String>,
