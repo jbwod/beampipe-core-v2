@@ -2504,6 +2504,22 @@ pub async fn verify_execution_outputs(
                 .into(),
         ));
     }
+    let inventory_sha256 = artifact
+        .metadata
+        .get("inventory_sha256")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            VerifyExecutionOutputsError::Rejected(
+                "verification artifact metadata requires a lowercase inventory_sha256".into(),
+            )
+        })?
+        .to_owned();
     let mut tx = pool.begin().await?;
     let execution = sqlx::query_as::<_, ExecutionRow>(
         "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
@@ -2666,7 +2682,8 @@ pub async fn verify_execution_outputs(
     .bind(execution_id)
     .bind(json!({
         "artifact_id": stored.uuid,
-        "inventory_sha256": stored.sha256,
+        "inventory_sha256": inventory_sha256,
+        "report_sha256": stored.sha256,
         "destination_uri": stored.uri,
     }))
     .bind(expected_schema)
@@ -2682,7 +2699,8 @@ pub async fn verify_execution_outputs(
         correlation_id,
         &json!({
             "artifact_id": stored.uuid,
-            "inventory_sha256": stored.sha256,
+            "inventory_sha256": inventory_sha256,
+            "report_sha256": stored.sha256,
             "destination_uri": stored.uri,
             "inventory_schema": expected_schema,
         }),

@@ -87,6 +87,7 @@ pub struct ExecutionRow {
     pub daliuge_raw_status: Option<Value>,
     pub output_state: Option<String>,
     pub output_verification_required: bool,
+    #[serde(default = "default_output_verification_policy")]
     pub output_verification_policy: Value,
     pub remote_session_dir: Option<String>,
     pub terminal_outcome: Option<String>,
@@ -103,6 +104,13 @@ pub struct ExecutionRow {
     pub updated_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+fn default_output_verification_policy() -> Value {
+    serde_json::json!({
+        "required": false,
+        "inventory_schema": "wallaby-hires-output-inventory/v1",
+    })
 }
 
 impl ExecutionRow {

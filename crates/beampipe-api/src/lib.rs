@@ -3095,6 +3095,8 @@ pub struct OutputPublicationAcknowledgement {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionOutputVerificationRequest {
     pub schema: String,
+    pub patterns: Vec<String>,
+    pub pattern_counts: BTreeMap<String, u64>,
     pub products: Vec<OutputInventoryProduct>,
     pub inventory_sha256: String,
     pub durable_destination_uri: String,
@@ -3114,19 +3116,50 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, ApiError> {
+    fn write(value: &Value, output: &mut String) -> Result<(), serde_json::Error> {
+        match value {
+            Value::Null => output.push_str("null"),
+            Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+            Value::Number(value) => output.push_str(&value.to_string()),
+            Value::String(value) => output.push_str(&serde_json::to_string(value)?),
+            Value::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write(value, output)?;
+                }
+                output.push(']');
+            }
+            Value::Object(values) => {
+                output.push('{');
+                let mut keys: Vec<_> = values.keys().collect();
+                keys.sort_unstable();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    output.push_str(&serde_json::to_string(key)?);
+                    output.push(':');
+                    write(&values[key], output)?;
+                }
+                output.push('}');
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = String::new();
+    write(value, &mut output).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(output.into_bytes())
+}
+
 fn canonical_products_sha256(products: &[OutputInventoryProduct]) -> Result<String, ApiError> {
-    let canonical: Vec<BTreeMap<&str, Value>> = products
-        .iter()
-        .map(|product| {
-            BTreeMap::from([
-                ("bytes", Value::from(product.bytes)),
-                ("path", Value::from(product.path.clone())),
-                ("sha256", Value::from(product.sha256.clone())),
-            ])
-        })
-        .collect();
-    let bytes =
-        serde_json::to_vec(&canonical).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let value =
+        serde_json::to_value(products).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let bytes = canonical_json_bytes(&value)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -3168,6 +3201,30 @@ fn validate_output_verification_request(
             "inventory schema '{}' does not match pinned schema '{expected_schema}'",
             request.schema
         )));
+    }
+    if request.patterns.is_empty() {
+        return Err(ApiError::BadRequest(
+            "patterns must contain at least one Wallaby output pattern".into(),
+        ));
+    }
+    let unique_patterns: BTreeSet<_> = request.patterns.iter().collect();
+    if unique_patterns.len() != request.patterns.len()
+        || request.pattern_counts.len() != request.patterns.len()
+        || request.patterns.iter().any(|pattern| {
+            !request.pattern_counts.contains_key(pattern)
+                || pattern.trim().is_empty()
+                || pattern.starts_with('/')
+                || pattern.contains('\\')
+                || pattern
+                    .split('/')
+                    .any(|component| matches!(component, ".."))
+        })
+        || request.pattern_counts.values().any(|count| *count == 0)
+    {
+        return Err(ApiError::BadRequest(
+            "patterns must be unique safe relative patterns and pattern_counts must contain one positive count for each pattern"
+                .into(),
+        ));
     }
     if request.products.is_empty() || request.products.len() > 100_000 {
         return Err(ApiError::BadRequest(
@@ -3255,6 +3312,36 @@ fn validate_output_verification_request(
     Ok(total_bytes)
 }
 
+fn output_inventory_artifact(
+    request: &ExecutionOutputVerificationRequest,
+    total_product_bytes: u64,
+) -> Result<ExecutionArtifactInput, ApiError> {
+    let report =
+        serde_json::to_value(request).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let report_bytes = canonical_json_bytes(&report)?;
+    let report_sha256 = format!("{:x}", Sha256::digest(&report_bytes));
+    Ok(ExecutionArtifactInput {
+        kind: "output_inventory".into(),
+        storage_kind: "remote".into(),
+        uri: Some(request.durable_destination_uri.clone()),
+        inline_json: Some(report),
+        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        sha256: report_sha256,
+        size_bytes: Some(
+            i64::try_from(report_bytes.len())
+                .map_err(|_| ApiError::BadRequest("output inventory report is too large".into()))?,
+        ),
+        producer_phase: "publication_acknowledged".into(),
+        metadata: json!({
+            "inventory_schema": request.schema,
+            "inventory_sha256": request.inventory_sha256,
+            "product_count": request.products.len(),
+            "total_product_bytes": total_product_bytes,
+            "publication": request.publication,
+        }),
+    })
+}
+
 #[utoipa::path(
     post,
     path = "/api/v2/executions/{id}/outputs/verify",
@@ -3284,30 +3371,7 @@ async fn verify_execution_outputs(
         execution.output_verification_required,
         &execution.output_verification_policy,
     )?;
-    let report =
-        serde_json::to_value(&request).map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    let report_size = serde_json::to_vec(&request)
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?
-        .len();
-    let artifact = ExecutionArtifactInput {
-        kind: "output_inventory".into(),
-        storage_kind: "remote".into(),
-        uri: Some(request.durable_destination_uri.clone()),
-        inline_json: Some(report),
-        media_type: "application/vnd.wallaby.output-inventory+json".into(),
-        sha256: request.inventory_sha256.clone(),
-        size_bytes: Some(
-            i64::try_from(report_size)
-                .map_err(|_| ApiError::BadRequest("output inventory report is too large".into()))?,
-        ),
-        producer_phase: "publication_acknowledged".into(),
-        metadata: json!({
-            "inventory_schema": request.schema,
-            "product_count": request.products.len(),
-            "total_product_bytes": total_product_bytes,
-            "publication": request.publication,
-        }),
-    };
+    let artifact = output_inventory_artifact(&request, total_product_bytes)?;
     let actor = format!("trusted-publisher:{}", user.0.uuid);
     let (execution, artifact) = repo::verify_execution_outputs(
         &state.pool,
@@ -4366,6 +4430,8 @@ adapters:
         let inventory_sha256 = canonical_products_sha256(&products).unwrap();
         ExecutionOutputVerificationRequest {
             schema: beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA.into(),
+            patterns: vec!["**/image.*.fits".into()],
+            pattern_counts: BTreeMap::from([("**/image.*.fits".into(), 1)]),
             products,
             inventory_sha256,
             durable_destination_uri: "file:///durable/wallaby/run-1".into(),
@@ -4425,5 +4491,46 @@ adapters:
             validate_output_verification_request(&request, true, &policy),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn output_report_accepts_wallaby_v1_inventory_fields_and_hashes_stored_report() {
+        let inventory: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/wallaby-output-inventory-v1.json"
+        ))
+        .unwrap();
+        let mut request = inventory.as_object().unwrap().clone();
+        request.insert(
+            "durable_destination_uri".into(),
+            json!("file:///durable/wallaby/run-fixture"),
+        );
+        request.insert(
+            "publication".into(),
+            json!({
+                "acknowledged": true,
+                "publisher": "wallaby-publisher",
+                "receipt_id": "fixture-publication",
+                "published_at": Utc::now(),
+            }),
+        );
+        let request: ExecutionOutputVerificationRequest =
+            serde_json::from_value(Value::Object(request)).unwrap();
+        let policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+        });
+        let total = validate_output_verification_request(&request, true, &policy).unwrap();
+        assert_eq!(total, 28);
+
+        let artifact = output_inventory_artifact(&request, total).unwrap();
+        let stored = artifact.inline_json.as_ref().unwrap();
+        let canonical = canonical_json_bytes(stored).unwrap();
+        assert_eq!(artifact.size_bytes, i64::try_from(canonical.len()).ok());
+        assert_eq!(artifact.sha256, format!("{:x}", Sha256::digest(canonical)));
+        assert_ne!(artifact.sha256, request.inventory_sha256);
+        assert_eq!(
+            artifact.metadata["inventory_sha256"],
+            request.inventory_sha256
+        );
     }
 }

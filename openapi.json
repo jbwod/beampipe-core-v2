@@ -1021,6 +1021,20 @@
           "inventory_sha256": {
             "type": "string"
           },
+          "pattern_counts": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "products": {
             "items": {
               "$ref": "#/components/schemas/OutputInventoryProduct"
@@ -1036,6 +1050,8 @@
         },
         "required": [
           "schema",
+          "patterns",
+          "pattern_counts",
           "products",
           "inventory_sha256",
           "durable_destination_uri",

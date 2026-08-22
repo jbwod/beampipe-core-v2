@@ -26,6 +26,8 @@ The endpoint is authenticated and restricted to superusers. Its JSON body uses:
 ```json
 {
   "schema": "wallaby-hires-output-inventory/v1",
+  "patterns": ["**/image.*.10arc.final_mosaic.fits"],
+  "pattern_counts": {"**/image.*.10arc.final_mosaic.fits": 1},
   "products": [
     {
       "path": "HIPASSJ1318-21/image.final_mosaic.fits",
@@ -46,9 +48,14 @@ The endpoint is authenticated and restricted to superusers. Its JSON body uses:
 
 `inventory_sha256` is SHA-256 over compact JSON for the `products` array with
 object keys sorted (`bytes`, `path`, `sha256`) and array order preserved. The API
-requires at least one non-empty product, lowercase SHA-256 values, unique safe
-relative paths, and an `s3`, `gs`, `https`, or absolute `file` destination URI.
-It stores the full report as the immutable `output_inventory` execution artifact.
+accepts Wallaby's complete v1 inventory, including `patterns` and
+`pattern_counts`, and requires at least one non-empty product, lowercase SHA-256
+values, unique safe relative paths, and an `s3`, `gs`, `https`, or absolute
+`file` destination URI. It stores the full report as the immutable
+`output_inventory` execution artifact. The artifact `sha256` and `size_bytes`
+describe the canonical compact, recursively sorted-key report JSON;
+`inventory_sha256` remains separately recorded in the report and artifact
+metadata.
 
 ## Trust boundary
 

@@ -508,11 +508,12 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
             "inventory_sha256": inventory_sha256,
         })),
         media_type: "application/vnd.wallaby.output-inventory+json".into(),
-        sha256: inventory_sha256,
+        sha256: "e".repeat(64),
         size_bytes: Some(512),
         producer_phase: "publication_acknowledged".into(),
         metadata: json!({
             "inventory_schema": "wallaby-hires-output-inventory/v1",
+            "inventory_sha256": inventory_sha256,
             "publication": {"acknowledged": true, "receipt_id": "receipt-1"},
         }),
     };
@@ -587,7 +588,8 @@ async fn output_verification_opt_out_cannot_be_marked_verified() {
             size_bytes: Some(1),
             producer_phase: "publication_acknowledged".into(),
             metadata: json!({
-                "inventory_schema": "wallaby-hires-output-inventory/v1"
+                "inventory_schema": "wallaby-hires-output-inventory/v1",
+                "inventory_sha256": "d".repeat(64)
             }),
         },
         "trusted-publisher:test",
