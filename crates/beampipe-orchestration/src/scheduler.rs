@@ -545,18 +545,16 @@ impl SchedulerAdapter for SshSlurmClient {
             .run_command(&format!("squeue -h --name={quoted_name} -o '%i|%j|%T|%R'"))
             .await
             .map_err(|error| SchedulerAdapterError::backend("find_by_name", &display, error))?;
-        let mut observations = parse_named_jobs(&squeue, job_name, "squeue");
-        if observations.is_empty() {
-            let sacct = session
-                .run_command(&format!(
-                    "sacct -n -X --name={quoted_name} --starttime=now-7days -o 'JobIDRaw,JobName,State,Reason' -P"
-                ))
-                .await
-                .map_err(|error| {
-                    SchedulerAdapterError::backend("find_by_name", &display, error)
-                })?;
-            observations = parse_named_jobs(&sacct, job_name, "sacct");
-        }
+        let sacct = session
+            .run_command(&format!(
+                "sacct -n -X --name={quoted_name} --starttime=now-7days -o 'JobIDRaw,JobName,State,Reason' -P"
+            ))
+            .await
+            .map_err(|error| SchedulerAdapterError::backend("find_by_name", &display, error))?;
+        let observations = merge_named_job_observations(
+            parse_named_jobs(&squeue, job_name, "squeue"),
+            parse_named_jobs(&sacct, job_name, "sacct"),
+        );
         let _ = session.close().await;
         Ok(observations)
     }
@@ -739,6 +737,22 @@ fn parse_named_jobs(
         .collect()
 }
 
+fn merge_named_job_observations(
+    squeue: Vec<SchedulerJobObservation>,
+    sacct: Vec<SchedulerJobObservation>,
+) -> Vec<SchedulerJobObservation> {
+    let mut observations = BTreeMap::new();
+    for observation in sacct {
+        observations.insert(observation.external_job_id.clone(), observation);
+    }
+    // Live queue state is authoritative when accounting has already observed
+    // the same allocation during a state transition.
+    for observation in squeue {
+        observations.insert(observation.external_job_id.clone(), observation);
+    }
+    observations.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +837,46 @@ mod tests {
         );
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].external_job_id, "123");
+        assert_eq!(observations[0].state, SchedulerState::Running);
+    }
+
+    #[test]
+    fn named_job_lookup_unions_queue_and_accounting_results() {
+        let observations = merge_named_job_observations(
+            parse_named_jobs(
+                "123|BeampipeExecution-abc|RUNNING|None\n",
+                "BeampipeExecution-abc",
+                "squeue",
+            ),
+            parse_named_jobs(
+                "124|BeampipeExecution-abc|COMPLETED|None\n",
+                "BeampipeExecution-abc",
+                "sacct",
+            ),
+        );
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].external_job_id, "123");
+        assert_eq!(observations[1].external_job_id, "124");
+    }
+
+    #[test]
+    fn named_job_lookup_deduplicates_with_live_queue_precedence() {
+        let observations = merge_named_job_observations(
+            parse_named_jobs(
+                "123|BeampipeExecution-abc|RUNNING|None\n",
+                "BeampipeExecution-abc",
+                "squeue",
+            ),
+            parse_named_jobs(
+                "123|BeampipeExecution-abc|PENDING|Resources\n",
+                "BeampipeExecution-abc",
+                "sacct",
+            ),
+        );
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].source, "squeue");
         assert_eq!(observations[0].state, SchedulerState::Running);
     }
 }
