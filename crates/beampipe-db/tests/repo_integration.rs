@@ -3,7 +3,7 @@ use beampipe_db::{
     models::{ExecutionArtifactInput, ExecutionStatePatch, WorkerRegistration},
     repo,
 };
-use beampipe_domain::{DaliugeState, ExecutionStatus, LedgerPatch};
+use beampipe_domain::{ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch};
 use chrono::{Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -801,6 +801,72 @@ async fn ignored_terminal_overwrite_does_not_emit_false_provenance() {
     assert!(!events
         .iter()
         .any(|event| event.correlation_id.as_deref() == Some("late:worker")));
+}
+
+#[tokio::test]
+async fn incomplete_axes_do_not_regress_running_or_duplicate_provenance() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("active_axes_{}", Uuid::now_v7());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::apply_execution_patch_with_correlation(
+        &pool,
+        execution.uuid,
+        LedgerPatch {
+            status: Some(ExecutionStatus::Running),
+            ..LedgerPatch::default()
+        },
+        Some("execute:first"),
+    )
+    .await
+    .unwrap();
+
+    let reconciled = repo::apply_execution_state_patch(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::GraphPatched),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(reconciled.status_enum(), Some(ExecutionStatus::Running));
+
+    repo::apply_execution_patch_with_correlation(
+        &pool,
+        execution.uuid,
+        LedgerPatch {
+            status: Some(ExecutionStatus::Running),
+            ..LedgerPatch::default()
+        },
+        Some("execute:submit"),
+    )
+    .await
+    .unwrap();
+    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "execution.running")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

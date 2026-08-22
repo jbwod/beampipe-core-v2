@@ -2231,7 +2231,10 @@ pub async fn apply_execution_state_patch(
 
     let decision = projected.axes().reconcile();
     let current_status = locked.status_enum().unwrap_or(ExecutionStatus::Pending);
-    let aggregate_status = if current_status.is_locked_terminal() {
+    let aggregate_status = if current_status.is_locked_terminal()
+        || (decision.status == ExecutionStatus::Pending
+            && current_status != ExecutionStatus::Pending)
+    {
         current_status
     } else {
         decision.status
