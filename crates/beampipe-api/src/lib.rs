@@ -3218,12 +3218,16 @@ async fn execute_execution(
         "do_submit": req.do_submit,
     });
     let payload = metrics::payload_with_trace(payload, &tc);
-    let job = repo::enqueue_job(
+    let job = repo::enqueue_job_with_options(
         &state.pool,
         "execute",
         payload,
-        Some(id),
-        Some(&idempotency_key),
+        repo::JobEnqueueOptions {
+            execution_id: Some(id),
+            idempotency_key: Some(idempotency_key.clone()),
+            required_capability: Some(repo::execution_required_capability(&execution).to_string()),
+            ..Default::default()
+        },
     )
     .await?;
     let queued_stage = job

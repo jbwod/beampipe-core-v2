@@ -390,6 +390,15 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     )
     .await
     .unwrap();
+    let execute_job = repo::enqueue_job(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid}),
+        Some(execution.uuid),
+        Some(&format!("execute:cancel:{}", execution.uuid)),
+    )
+    .await
+    .unwrap();
     let cancelled = repo::cancel_execution_with_correlation(
         &pool,
         execution.uuid,
@@ -403,6 +412,17 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     assert_eq!(cancelled.terminal_outcome.as_deref(), Some("cancelled"));
     assert_eq!(cancelled.control_phase.as_deref(), Some("terminal"));
     assert!(cancelled.completed_at.is_some());
+    let invalidated =
+        repo::get_job_by_idempotency_key(&pool, execute_job.idempotency_key.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(invalidated.status, "cancelled");
+    assert!(invalidated.lease_token.is_none());
+    assert!(repo::get_active_job_for_execution(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .is_none());
 
     let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
         .await
@@ -413,6 +433,79 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
         .expect("cancellation provenance event");
     assert_eq!(event.actor.as_deref(), Some("user:test"));
     assert_eq!(event.correlation_id.as_deref(), Some("cancel:test"));
+    assert_eq!(event.payload["invalidated_execute_jobs"], 1);
+}
+
+#[tokio::test]
+async fn execution_source_readiness_is_rechecked_after_admission() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("dispatch_ready_{}", Uuid::now_v7().simple());
+    let source = "source-1";
+    repo::upsert_source(&pool, &module, source, true)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE source_registry SET last_checked_at = now(), discovery_signature = 'ready' WHERE project_module = $1 AND source_identifier = $2",
+    )
+    .bind(&module)
+    .bind(source)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO archive_metadata (uuid, project_module, source_identifier, sbid, metadata_json)
+        VALUES ($1, $2, $3, '1', '{"discovery_flags":{"ready":true}}'::jsonb)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(&module)
+    .bind(source)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": source, "sbids": ["1"]}]),
+        "local",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(repo::execution_source_readiness_errors(&pool, &execution)
+        .await
+        .unwrap()
+        .is_empty());
+
+    sqlx::query(
+        "UPDATE source_registry SET enabled = false WHERE project_module = $1 AND source_identifier = $2",
+    )
+    .bind(&module)
+    .bind(source)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let errors = repo::execution_source_readiness_errors(&pool, &execution)
+        .await
+        .unwrap();
+    assert!(errors.iter().any(|error| error.contains("disabled")));
+
+    sqlx::query("DELETE FROM source_registry WHERE project_module = $1 AND source_identifier = $2")
+        .bind(&module)
+        .bind(source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let errors = repo::execution_source_readiness_errors(&pool, &execution)
+        .await
+        .unwrap();
+    assert!(errors.iter().any(|error| error.contains("not registered")));
 }
 
 #[tokio::test]
@@ -916,12 +1009,24 @@ async fn failed_pre_submission_execution_retries_atomically_from_submit() {
     repo::upsert_source(&pool, &module, source, true)
         .await
         .unwrap();
+    let profile = repo::create_deployment_profile(
+        &pool,
+        &format!("slurm-retry-{}", Uuid::now_v7()),
+        None,
+        Some(&module),
+        false,
+        None,
+        json!({}),
+        json!({"kind": "slurm_remote", "login_node": "login.example"}),
+    )
+    .await
+    .unwrap();
     let execution = repo::create_execution(
         &pool,
         &module,
         json!([{"source_identifier": source}]),
         "casda",
-        None,
+        Some(profile.uuid),
         None,
         None,
     )
@@ -972,6 +1077,10 @@ async fn failed_pre_submission_execution_retries_atomically_from_submit() {
     assert!(retried.execution.completed_at.is_none());
     assert_eq!(retried.job.status, "queued");
     assert_eq!(retried.job.pool, original.pool);
+    assert_eq!(
+        retried.job.required_capability.as_deref(),
+        Some("slurm-remote")
+    );
     assert_eq!(retried.job.payload["do_stage"], false);
     assert_eq!(retried.job.payload["do_submit"], true);
 }

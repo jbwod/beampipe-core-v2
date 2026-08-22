@@ -880,6 +880,106 @@ pub async fn partition_sources_ready_for_execution(
     Ok((valid, skipped))
 }
 
+/// Revalidate the immutable source selection immediately before an execution
+/// performs any external work. Unlike scheduler admission this does not mutate
+/// source pending flags and treats a source disappearing from the registry as a
+/// hard failure.
+pub async fn execution_source_readiness_errors(
+    pool: &PgPool,
+    execution: &ExecutionRow,
+) -> Result<Vec<String>, sqlx::Error> {
+    let source_specs: Vec<(String, Option<Vec<String>>)> = execution
+        .sources
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|source| {
+            let sid = source.get("source_identifier")?.as_str()?.to_string();
+            let sbids = source.get("sbids").and_then(Value::as_array).map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            });
+            Some((sid, sbids))
+        })
+        .collect();
+    if source_specs.is_empty() {
+        return Ok(vec!["execution has no source selections".into()]);
+    }
+    let source_identifiers: Vec<String> = source_specs
+        .iter()
+        .map(|(source, _)| source.clone())
+        .collect();
+    let registry_rows: Vec<SourceRegistryRow> = sqlx::query_as(
+        r#"
+        SELECT *
+        FROM source_registry
+        WHERE project_module = $1 AND source_identifier = ANY($2)
+        "#,
+    )
+    .bind(&execution.project_module)
+    .bind(&source_identifiers)
+    .fetch_all(pool)
+    .await?;
+    let metadata_rows =
+        list_archive_metadata_for_sources(pool, &execution.project_module, &source_identifiers)
+            .await?;
+    let mut errors = Vec::new();
+    let mut signatures = BTreeMap::new();
+    for (sid, sbids) in source_specs {
+        let registry = registry_rows
+            .iter()
+            .find(|row| row.source_identifier == sid);
+        let readiness = registry.map(|row| RegisteredSourceReadiness {
+            enabled: row.enabled,
+            last_checked_at_present: row.last_checked_at.is_some(),
+            discovery_signature: row.discovery_signature.clone(),
+            discovery_claim_token: row.discovery_claim_token.clone(),
+        });
+        let metadata: Vec<ArchiveMetadataReadiness> = metadata_rows
+            .iter()
+            .filter(|row| row.source_identifier == sid)
+            .map(|row| ArchiveMetadataReadiness {
+                sbid: row.sbid.clone(),
+                metadata_json: row.metadata_json.clone(),
+            })
+            .collect();
+        if let Some(error) =
+            parsed_source_readiness_error(&sid, sbids.as_deref(), readiness.as_ref(), &metadata)
+        {
+            errors.push(error);
+        }
+        if let Some(signature) = registry.and_then(|row| row.discovery_signature.clone()) {
+            signatures.insert(sid, Value::String(signature));
+        }
+    }
+    if errors.is_empty() {
+        let current = discovery_signature(&signatures);
+        if execution.discovery_signature.as_deref() != Some(current.as_str()) {
+            errors.push(
+                "source discovery state changed after execution admission; prepare a new execution"
+                    .into(),
+            );
+        }
+    }
+    Ok(errors)
+}
+
+/// Worker capability required by the backend pinned into an execution.
+pub fn execution_required_capability(execution: &ExecutionRow) -> &'static str {
+    match execution
+        .deployment_profile_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.pointer("/deployment/kind"))
+        .and_then(Value::as_str)
+    {
+        Some("slurm_remote") => "slurm-remote",
+        _ => "daliuge-deployment",
+    }
+}
+
 fn signature_options_from_config(config: Option<&SignatureConfig>) -> SignatureOptions {
     config
         .map(|c| SignatureOptions {
@@ -1700,6 +1800,7 @@ pub async fn retry_execution(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(RetryExecutionError::NotFound)?;
+    let required_capability = execution_required_capability(&execution);
     let plan = plan_execution_retry(ExecutionRetryContext {
         status: execution.status_enum().unwrap_or(ExecutionStatus::Pending),
         phase: execution.phase_enum(),
@@ -1855,7 +1956,7 @@ pub async fn retry_execution(
             uuid, kind, payload, execution_id, idempotency_key, next_run_at,
             pool, required_capability, required_labels, priority
         )
-        VALUES ($1, 'execute', $2, $3, $4, now(), $5, 'daliuge-deployment', $6, $7)
+        VALUES ($1, 'execute', $2, $3, $4, now(), $5, $6, $7, $8)
         RETURNING *
         "#,
     )
@@ -1864,6 +1965,7 @@ pub async fn retry_execution(
     .bind(id)
     .bind(format!("execute:{id}:retry:{retry_count}"))
     .bind(worker_pool)
+    .bind(required_capability)
     .bind(required_labels)
     .bind(priority)
     .fetch_one(&mut *tx)
@@ -2421,6 +2523,27 @@ pub async fn cancel_execution_with_correlation(
             ))),
         };
     };
+    let invalidated_jobs = sqlx::query(
+        r#"
+        UPDATE jobs
+        SET status = 'cancelled',
+            locked_until = NULL,
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            last_error = NULL,
+            failure_class = NULL,
+            updated_at = now()
+        WHERE execution_id = $1
+          AND kind = 'execute'
+          AND status IN ('queued', 'running')
+        "#,
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     insert_provenance_event(
         &mut *tx,
         "execution.cancelled",
@@ -2432,6 +2555,7 @@ pub async fn cancel_execution_with_correlation(
         &serde_json::json!({
             "scheduler_job_id": row.scheduler_job_id,
             "daliuge_session_id": row.daliuge_session_id,
+            "invalidated_execute_jobs": invalidated_jobs,
         }),
     )
     .await?;

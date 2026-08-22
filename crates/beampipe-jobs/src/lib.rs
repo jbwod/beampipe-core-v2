@@ -2822,6 +2822,41 @@ async fn preflight_execute(
     Ok(())
 }
 
+async fn ensure_execution_active(
+    pool: &PgPool,
+    execution_id: uuid::Uuid,
+    recheck_sources: bool,
+) -> Result<beampipe_db::models::ExecutionRow, String> {
+    let execution = repo::get_execution(pool, execution_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("execution {execution_id} no longer exists"))?;
+    let status = execution.status_enum().ok_or_else(|| {
+        format!(
+            "execution {execution_id} has unknown status '{}'",
+            execution.status
+        )
+    })?;
+    if status.is_terminal() {
+        return Err(format!(
+            "execution {execution_id} became terminal ({}) before dispatch",
+            status.as_str()
+        ));
+    }
+    if recheck_sources {
+        let errors = repo::execution_source_readiness_errors(pool, &execution)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !errors.is_empty() {
+            return Err(format!(
+                "execution source readiness check failed: {}",
+                errors.join("; ")
+            ));
+        }
+    }
+    Ok(execution)
+}
+
 async fn run_execute(
     pool: &PgPool,
     config: &WorkerConfig,
@@ -2837,6 +2872,17 @@ async fn run_execute(
     let Some(execution) = repo::get_execution(pool, execution_id).await? else {
         return Ok(());
     };
+    if execution
+        .status_enum()
+        .is_some_and(ExecutionStatus::is_terminal)
+    {
+        info!(
+            event = "execute_terminal_guard",
+            execution_id = %execution_id,
+            status = %execution.status,
+        );
+        return Ok(());
+    }
     let project_module = execution.project_module.clone();
     let source_identifiers = source_identifiers_from_json(&execution.sources);
     let result = run_execute_body(
@@ -2850,8 +2896,21 @@ async fn run_execute(
     .await;
     metrics::record_execute_duration("total", started.elapsed().as_secs_f64());
     if let Err(msg) = result {
-        let submission_is_uncertain = repo::get_execution(pool, execution_id)
-            .await?
+        let current = repo::get_execution(pool, execution_id).await?;
+        if current
+            .as_ref()
+            .and_then(|row| row.status_enum())
+            .is_some_and(ExecutionStatus::is_terminal)
+        {
+            info!(
+                event = "execute_terminal_guard",
+                execution_id = %execution_id,
+                error = %msg,
+                "discarding worker result because the execution is terminal"
+            );
+            return Ok(());
+        }
+        let submission_is_uncertain = current
             .and_then(|row| row.submission_state)
             .as_deref()
             .and_then(SubmissionState::parse)
@@ -2943,6 +3002,7 @@ async fn run_execute_body(
     }
     let requires_casda = execution_requires_casda(execution, project_config.as_ref());
     let casda_client = CasdaStagingClient::from_env();
+    ensure_execution_active(pool, execution_id, true).await?;
     preflight_execute(
         do_stage,
         do_submit,
@@ -3013,6 +3073,7 @@ async fn run_execute_body(
                     .unwrap_or_default()
             })
             .collect();
+        ensure_execution_active(pool, execution_id, false).await?;
         let (metadata, skipped_sbids) = run_stage_phase(
             execution_id,
             do_stage,
@@ -3169,6 +3230,7 @@ async fn run_execute_body(
     )
     .await
     .map_err(|error| error.to_string())?;
+    ensure_execution_active(pool, execution_id, false).await?;
     run_submit_phase(
         pool,
         execution_id,
