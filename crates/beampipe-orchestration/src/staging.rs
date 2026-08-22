@@ -170,7 +170,8 @@ impl StagingClient for CasdaStagingClient {
             &checksum_urls,
             &eval_urls,
             &eval_checksum_urls,
-        );
+        )
+        .map_err(OrchestrationError::Backend)?;
 
         Ok(StageOutcome {
             staged_count: staged_metadata.len(),
@@ -430,50 +431,69 @@ fn apply_url_maps(
     checksum_urls: &HashMap<String, String>,
     eval_urls: &HashMap<String, String>,
     eval_checksum_urls: &HashMap<String, String>,
-) {
+) -> Result<(), String> {
     for rec in metadata.iter_mut() {
-        let Some(obj) = rec.as_object_mut() else {
-            continue;
-        };
+        let obj = rec
+            .as_object_mut()
+            .ok_or_else(|| "CASDA staged metadata record is not an object".to_string())?;
         let scan_id = obj
             .get("scan_id")
             .and_then(Value::as_str)
-            .map(str::to_string)
+            .map(|value| extract_scan_id(value).unwrap_or_else(|| value.to_string()))
             .or_else(|| {
                 obj.get("obs_publisher_did")
                     .and_then(Value::as_str)
                     .and_then(extract_scan_id)
-            });
-        if let Some(scan_id) = scan_id {
-            if let Some(url) = staged_urls.get(&scan_id) {
-                obj.insert("staged_url".into(), Value::String(url.clone()));
-            }
-            if let Some(url) = checksum_urls.get(&scan_id) {
-                let dataset_name = obj
-                    .get("dataset_id")
-                    .or_else(|| obj.get("name"))
-                    .or_else(|| obj.get("visibility_filename"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if url.contains(dataset_name) || dataset_name.is_empty() {
-                    obj.insert("checksum_url".into(), Value::String(url.clone()));
-                } else {
-                    obj.insert("checksum_url".into(), Value::String(String::new()));
-                }
-            }
+            })
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "CASDA staged metadata record is missing scan_id".to_string())?;
+        let sbid = obj
+            .get("sbid")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "CASDA staged metadata record is missing sbid".to_string())?;
+        let dataset_name = obj
+            .get("dataset_id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("visibility_filename"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!("CASDA staged metadata for scan {scan_id} has no dataset name")
+            })?;
+
+        let staged_url = required_http_map_value(staged_urls, &scan_id, "visibility data")?;
+        let checksum_url = required_http_map_value(checksum_urls, &scan_id, "visibility checksum")?;
+        if !checksum_url.contains(dataset_name) {
+            return Err(format!(
+                "CASDA visibility checksum for scan {scan_id} does not match dataset {dataset_name}"
+            ));
         }
-        if let Some(sbid) = obj.get("sbid").and_then(Value::as_str).map(str::to_string) {
-            if let Some(url) = eval_urls.get(&sbid) {
-                obj.insert("evaluation_file_url".into(), Value::String(url.clone()));
-            }
-            if let Some(url) = eval_checksum_urls.get(&sbid) {
-                obj.insert(
-                    "evaluation_file_checksum_url".into(),
-                    Value::String(url.clone()),
-                );
-            }
-        }
+        let eval_url = required_http_map_value(eval_urls, sbid, "evaluation archive")?;
+        let eval_checksum_url =
+            required_http_map_value(eval_checksum_urls, sbid, "evaluation checksum")?;
+
+        obj.insert("staged_url".into(), Value::String(staged_url));
+        obj.insert("checksum_url".into(), Value::String(checksum_url));
+        obj.insert("evaluation_file_url".into(), Value::String(eval_url));
+        obj.insert(
+            "evaluation_file_checksum_url".into(),
+            Value::String(eval_checksum_url),
+        );
     }
+    Ok(())
+}
+
+fn required_http_map_value(
+    values: &HashMap<String, String>,
+    key: &str,
+    label: &str,
+) -> Result<String, String> {
+    let value = values
+        .get(key)
+        .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+        .ok_or_else(|| format!("CASDA staging result is missing HTTP(S) {label} URL for {key}"))?;
+    Ok(value.clone())
 }
 
 #[cfg(test)]
@@ -496,6 +516,41 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "SBID 72962 is missing evaluation_file_access_url");
+    }
+
+    #[test]
+    fn staged_metadata_requires_complete_visibility_and_evaluation_evidence() {
+        let mut metadata = vec![serde_json::json!({
+            "sbid": "72962",
+            "scan_id": "scan-9",
+            "dataset_id": "HIPASSJ1317-16_SB72962.ms.tar"
+        })];
+        let data = HashMap::from([(
+            "9".into(),
+            "https://example.test/HIPASSJ1317-16_SB72962.ms.tar".into(),
+        )]);
+        let checksum = HashMap::from([(
+            "9".into(),
+            "https://example.test/HIPASSJ1317-16_SB72962.ms.tar.checksum".into(),
+        )]);
+        let eval = HashMap::from([(
+            "72962".into(),
+            "https://example.test/calibration-SB72962.tar".into(),
+        )]);
+        let eval_checksum = HashMap::from([(
+            "72962".into(),
+            "https://example.test/calibration-SB72962.tar.checksum".into(),
+        )]);
+
+        apply_url_maps(&mut metadata, &data, &checksum, &eval, &eval_checksum).unwrap();
+        assert!(metadata[0]["staged_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://"));
+
+        let error = apply_url_maps(&mut metadata, &data, &HashMap::new(), &eval, &eval_checksum)
+            .unwrap_err();
+        assert!(error.contains("visibility checksum"));
     }
 
     #[tokio::test]
