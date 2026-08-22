@@ -93,6 +93,51 @@ async fn job_queue_deferred_enqueue() {
 }
 
 #[tokio::test]
+async fn manual_discovery_requeues_its_completed_trigger() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("manual_{}", Uuid::now_v7());
+    let source = format!("source-{}", Uuid::now_v7());
+    repo::upsert_source(&pool, &module, &source, true)
+        .await
+        .unwrap();
+    let key = format!("discover_trigger:{module}");
+    let (_, first) = repo::mark_sources_and_enqueue_discovery_tick(
+        &pool,
+        &module,
+        Some(std::slice::from_ref(&source)),
+        json!({"project_module": module}),
+        &key,
+    )
+    .await
+    .unwrap();
+    let first = first.unwrap();
+    repo::complete_job(&pool, first.uuid).await.unwrap();
+
+    let (_, second) = repo::mark_sources_and_enqueue_discovery_tick(
+        &pool,
+        &module,
+        Some(std::slice::from_ref(&source)),
+        json!({"project_module": module, "manual": true}),
+        &key,
+    )
+    .await
+    .unwrap();
+    let second = second.unwrap();
+    assert_eq!(second.uuid, first.uuid);
+    assert_eq!(second.status, "queued");
+    assert_eq!(second.attempts, 0);
+    assert_eq!(second.payload["manual"], true);
+
+    repo::complete_job(&pool, second.uuid).await.unwrap();
+    repo::delete_all_sources_for_project_module(&pool, &module)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn queue_gauges_only_include_runnable_jobs() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
@@ -172,6 +217,258 @@ async fn deployment_profile_default_fallback() {
         .await
         .unwrap();
     assert_eq!(found.unwrap().uuid, profile.uuid);
+}
+
+#[tokio::test]
+async fn deployment_profile_rejects_duplicate_default_in_same_scope() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("default_scope_{}", Uuid::now_v7());
+    let first = repo::create_deployment_profile(
+        &pool,
+        &format!("profile-{}", Uuid::now_v7()),
+        None,
+        Some(&module),
+        true,
+        None,
+        json!({}),
+        json!({"kind": "rest_remote"}),
+    )
+    .await
+    .unwrap();
+    let error = repo::create_deployment_profile(
+        &pool,
+        &format!("profile-{}", Uuid::now_v7()),
+        None,
+        Some(&module),
+        true,
+        None,
+        json!({}),
+        json!({"kind": "rest_remote"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("already the default"));
+    repo::delete_deployment_profile(&pool, first.uuid)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn execution_create_idempotency_is_scoped_and_payload_bound() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = repo::create_user(
+        &pool,
+        "Idempotency Test",
+        &format!("u{}", &suffix[..12]),
+        &format!("{}@test.invalid", &suffix[..20]),
+        "unused",
+        false,
+    )
+    .await
+    .unwrap();
+    let module = format!("idempotency_{}", &suffix[..12]);
+    let sources = json!([{"source_identifier": "source-1"}]);
+    let key = format!("create-{}", &suffix[..16]);
+    let (first, created) = repo::create_execution_idempotent_with_correlation(
+        &pool,
+        &module,
+        sources.clone(),
+        "casda",
+        None,
+        None,
+        Some(user.id),
+        Some("test:create"),
+        Some(&key),
+        Some("request-hash-a"),
+    )
+    .await
+    .unwrap();
+    assert!(created);
+
+    let (replayed, created) = repo::create_execution_idempotent_with_correlation(
+        &pool,
+        &module,
+        sources.clone(),
+        "casda",
+        None,
+        None,
+        Some(user.id),
+        Some("test:replay"),
+        Some(&key),
+        Some("request-hash-a"),
+    )
+    .await
+    .unwrap();
+    assert!(!created);
+    assert_eq!(replayed.uuid, first.uuid);
+
+    let error = repo::create_execution_idempotent_with_correlation(
+        &pool,
+        &module,
+        sources,
+        "casda",
+        None,
+        None,
+        Some(user.id),
+        Some("test:conflict"),
+        Some(&key),
+        Some("request-hash-b"),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("different request"));
+}
+
+#[tokio::test]
+async fn successful_reconciliation_clears_transient_error() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("completion_{}", Uuid::now_v7());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::apply_execution_patch(
+        &pool,
+        execution.uuid,
+        LedgerPatch {
+            status: Some(ExecutionStatus::Running),
+            error: Some("transient DALiuGE status failure".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let completed = repo::apply_execution_state_patch(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            daliuge_session_id: Some(format!("session-{}", execution.uuid)),
+            daliuge_state: Some(DaliugeState::Finished),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.terminal_outcome.as_deref(), Some("succeeded"));
+    assert!(completed.last_error.is_none());
+}
+
+#[tokio::test]
+async fn cancellation_updates_ledger_and_provenance_atomically() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("cancel_{}", Uuid::now_v7());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let cancelled = repo::cancel_execution_with_correlation(
+        &pool,
+        execution.uuid,
+        "user:test",
+        Some("cancel:test"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(cancelled.terminal_outcome.as_deref(), Some("cancelled"));
+    assert_eq!(cancelled.control_phase.as_deref(), Some("terminal"));
+    assert!(cancelled.completed_at.is_some());
+
+    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
+        .await
+        .unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event_type == "execution.cancelled")
+        .expect("cancellation provenance event");
+    assert_eq!(event.actor.as_deref(), Some("user:test"));
+    assert_eq!(event.correlation_id.as_deref(), Some("cancel:test"));
+}
+
+#[tokio::test]
+async fn ignored_terminal_overwrite_does_not_emit_false_provenance() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("terminal_{}", Uuid::now_v7());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    for status in [ExecutionStatus::Running, ExecutionStatus::Completed] {
+        repo::apply_execution_patch(
+            &pool,
+            execution.uuid,
+            LedgerPatch {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    repo::apply_execution_patch_with_correlation(
+        &pool,
+        execution.uuid,
+        LedgerPatch {
+            status: Some(ExecutionStatus::Running),
+            ..Default::default()
+        },
+        Some("late:worker"),
+    )
+    .await
+    .unwrap();
+    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "execution.running")
+            .count(),
+        1
+    );
+    assert!(!events
+        .iter()
+        .any(|event| event.correlation_id.as_deref() == Some("late:worker")));
 }
 
 #[tokio::test]

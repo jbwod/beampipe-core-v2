@@ -94,6 +94,8 @@ pub struct ExecutionRow {
     pub last_reconciled_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     pub created_by_id: Option<i32>,
+    pub create_idempotency_key: Option<String>,
+    pub create_request_sha256: Option<String>,
     pub status: String,
     pub retry_count: i32,
     pub created_at: DateTime<Utc>,

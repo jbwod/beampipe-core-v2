@@ -7,7 +7,7 @@ mod route_metrics;
 use axum::{
     body::Body,
     extract::{FromRef, FromRequestParts, Path, Query, State},
-    http::{request::Parts, HeaderValue, Request, StatusCode},
+    http::{request::Parts, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -21,8 +21,7 @@ use beampipe_domain::{
         parsed_source_readiness_error, source_execution_status, ArchiveMetadataReadiness,
         RegisteredSourceReadiness, SourceExecutionStatus,
     },
-    DaliugeState, ExecutionStatus, Failure, FailureClass, LedgerPatch, RetryDisposition,
-    SchedulerState,
+    DaliugeState, ExecutionStatus, Failure, FailureClass, RetryDisposition, SchedulerState,
 };
 use beampipe_jobs::{spawn_workers, WorkerConfig};
 use beampipe_metrics as metrics;
@@ -95,7 +94,8 @@ pub struct AppState {
         RefreshRequest, LogoutRequest,
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
         DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
-        ExecutionCreate, ExecutionPatchRequest, ExecuteRequest, ExecutionRetryRequest,
+        ExecutionCreate, ExecutionSourceSelection, ExecutionPatchRequest, ExecuteRequest,
+        ExecutionRetryRequest,
         ExecutionRetryResponse, GraphPrepareRequest, GraphPrepareResponse, ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
         ProjectConfig, ValidationReport, ValidationDiagnostic, DiagnosticSeverity,
@@ -179,6 +179,8 @@ pub fn router(state: AppState) -> Router {
     let cors = cors_layer(&state.settings);
     let sensitive = Router::new()
         .route("/api/v2/login", post(login))
+        .route("/api/v2/refresh", post(refresh))
+        .route("/api/v2/logout", post(logout))
         .route("/api/v2/executions", post(create_execution))
         .route("/api/v2/project-configs", post(upload_project_config))
         .route(
@@ -201,8 +203,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/ready", get(ready))
         .route("/api/v2/diagnostics", get(diagnostics))
         .route("/api/v2/overview", get(operator_overview))
-        .route("/api/v2/refresh", post(refresh))
-        .route("/api/v2/logout", post(logout))
         .route("/api/v2/user/me", get(current_user))
         .route("/api/v2/sources", post(create_source).get(list_sources))
         .route("/api/v2/sources/bulk", post(bulk_create_sources))
@@ -438,6 +438,8 @@ pub enum ApiError {
     Unauthorized(String),
     #[error("forbidden: {0}")]
     Forbidden(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error("auth error: {0}")]
@@ -511,6 +513,15 @@ fn api_failure(error: &ApiError) -> Failure {
             "the requested operation was not applied",
         )
         .with_operator_action("use an account with the required role"),
+        ApiError::Conflict(message) => Failure::new(
+            "conflict",
+            "api",
+            FailureClass::InconsistentState,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the request was not applied",
+        )
+        .with_operator_action("refresh the resource state before trying another operation"),
         ApiError::Db(_) => Failure::new(
             "database_error",
             "postgres",
@@ -579,6 +590,7 @@ impl IntoResponse for ApiError {
             ApiError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) | ApiError::Project(_) | ApiError::Validation(_) => {
                 StatusCode::BAD_REQUEST
@@ -1667,14 +1679,42 @@ async fn logout(
     Json(req): Json<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
     let _ = repo::cleanup_expired_blacklisted_tokens(&state.pool).await;
-    let exp = chrono::Utc::now() + chrono::Duration::days(state.settings.refresh_token_expire_days);
-    if let Some(token) = req.access_token {
-        repo::blacklist_token(&state.pool, &beampipe_auth::token_hash(&token), exp).await?;
-    }
-    if let Some(token) = req.refresh_token {
+    let validated = validate_logout_tokens(req, &state.settings.jwt_secret)?;
+    for (token, claims) in validated {
+        let exp = chrono::DateTime::<Utc>::from_timestamp(claims.exp as i64, 0)
+            .ok_or_else(|| ApiError::BadRequest("token expiration is invalid".into()))?;
         repo::blacklist_token(&state.pool, &beampipe_auth::token_hash(&token), exp).await?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_logout_tokens(
+    req: LogoutRequest,
+    jwt_secret: &str,
+) -> Result<Vec<(String, beampipe_auth::Claims)>, ApiError> {
+    if req.access_token.is_none() && req.refresh_token.is_none() {
+        return Err(ApiError::BadRequest(
+            "access_token or refresh_token required".into(),
+        ));
+    }
+    let mut validated = Vec::new();
+    if let Some(token) = req.access_token {
+        let claims = beampipe_auth::decode_access_token(&token, jwt_secret)?;
+        validated.push((token, claims));
+    }
+    if let Some(token) = req.refresh_token {
+        let claims = beampipe_auth::decode_refresh_token(&token, jwt_secret)?;
+        validated.push((token, claims));
+    }
+    if validated
+        .windows(2)
+        .any(|pair| pair[0].1.sub != pair[1].1.sub)
+    {
+        return Err(ApiError::Unauthorized(
+            "logout tokens belong to different users".into(),
+        ));
+    }
+    Ok(validated)
 }
 
 #[utoipa::path(get, path = "/api/v2/executions", tag = "executions")]
@@ -1741,6 +1781,7 @@ pub struct LedgerSnapshotResponse {
 )]
 async fn execution_ledger_snapshot(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
     Query(query): Query<LedgerSnapshotQuery>,
 ) -> Result<Json<LedgerSnapshotResponse>, ApiError> {
@@ -1753,23 +1794,13 @@ async fn execution_ledger_snapshot(
         .and_then(beampipe_domain::run_record::extract_beampipe_run_record);
     let run_record_phases =
         beampipe_domain::run_record::summarize_run_record_phases(run_record.as_ref());
-    let config_version = repo::get_active_project_config(&state.pool, &row.project_module)
-        .await?
-        .map(|c| c.version);
-    let source_id = row
-        .sources
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_str());
-    let discovery_signature = if let Some(sid) = source_id {
-        repo::get_source_by_identifier(&state.pool, &row.project_module, sid)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.discovery_signature)
-    } else {
-        None
+    let config_version = match row.project_config_id {
+        Some(config_id) => repo::get_project_config_by_uuid(&state.pool, config_id)
+            .await?
+            .map(|config| config.version),
+        None => None,
     };
+    let discovery_signature = row.discovery_signature.clone();
     let trace = repo::execution_trace_summary(&state.pool, id, 5).await?;
     let recent_events: Vec<observability::ProvenanceEventResponse> = trace
         .events
@@ -1872,10 +1903,14 @@ async fn login(
 ) -> Result<Json<TokenResponse>, ApiError> {
     let user = repo::get_user_by_username(&state.pool, &req.username).await?;
     let Some(user) = user else {
-        return Err(ApiError::BadRequest("invalid username or password".into()));
+        return Err(ApiError::Unauthorized(
+            "invalid username or password".into(),
+        ));
     };
     if !beampipe_auth::verify_password(&req.password, &user.hashed_password) {
-        return Err(ApiError::BadRequest("invalid username or password".into()));
+        return Err(ApiError::Unauthorized(
+            "invalid username or password".into(),
+        ));
     }
     let pair = beampipe_auth::issue_token_pair(
         &user.username,
@@ -1944,7 +1979,16 @@ pub struct SourceBulkCreateResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SourceUpdate {
     pub enabled: Option<bool>,
-    pub stale_after_hours: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub stale_after_hours: Option<Option<i32>>,
+}
+
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -2207,10 +2251,19 @@ async fn list_source_executions(
     ))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSourceSelection {
+    pub source_identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sbids: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionCreate {
     pub project_module: String,
-    pub sources: Vec<Value>,
+    pub sources: Vec<ExecutionSourceSelection>,
     pub archive_name: String,
     pub deployment_profile_id: Option<Uuid>,
     pub deployment_profile_name: Option<String>,
@@ -2235,6 +2288,7 @@ pub struct ExecutionRead {
     pub scheduler_reason: Option<String>,
     pub daliuge_state: Option<String>,
     pub output_state: Option<String>,
+    pub output_verification_required: bool,
     pub terminal_outcome: Option<String>,
     pub failure_class: Option<String>,
     pub discovery_signature: Option<String>,
@@ -2338,20 +2392,225 @@ async fn prepare_execution(
     AuthUser(_user): AuthUser,
     Json(req): Json<ExecutionCreate>,
 ) -> Result<Json<ExecutionPrepareResponse>, ApiError> {
-    let sids = source_identifiers_from_values(&req.sources);
-    let rows =
-        repo::list_archive_metadata_for_sources(&state.pool, &req.project_module, &sids).await?;
+    Ok(Json(
+        validate_execution_admission(&state.pool, &req)
+            .await?
+            .response,
+    ))
+}
+
+struct ExecutionAdmission {
+    response: ExecutionPrepareResponse,
+    deployment_profile_id: Option<Uuid>,
+    project_config_id: Option<Uuid>,
+    sources: Vec<ExecutionSourceSelection>,
+}
+
+async fn validate_execution_admission(
+    pool: &PgPool,
+    req: &ExecutionCreate,
+) -> Result<ExecutionAdmission, ApiError> {
+    let project_module = req.project_module.trim();
+    let archive_name = req.archive_name.trim();
     let mut errors = Vec::new();
+    if project_module.is_empty() {
+        errors.push("project_module must be non-empty".into());
+    }
+    if archive_name.is_empty() {
+        errors.push("archive_name must be non-empty".into());
+    }
+    if req.sources.is_empty() {
+        errors.push("at least one source is required".into());
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut sids = Vec::with_capacity(req.sources.len());
+    let mut normalized_sources = Vec::with_capacity(req.sources.len());
+    for (index, selection) in req.sources.iter().enumerate() {
+        let sid = selection.source_identifier.trim();
+        if sid.is_empty() {
+            errors.push(format!(
+                "sources[{index}].source_identifier must be non-empty"
+            ));
+            continue;
+        }
+        if !seen.insert(sid.to_string()) {
+            errors.push(format!("source '{sid}' is selected more than once"));
+            continue;
+        }
+        let normalized_sbids = selection.sbids.as_ref().map(|sbids| {
+            sbids
+                .iter()
+                .map(|sbid| sbid.trim().to_string())
+                .collect::<Vec<_>>()
+        });
+        if let Some(sbids) = normalized_sbids.as_ref() {
+            if sbids.is_empty() || sbids.iter().any(|sbid| sbid.trim().is_empty()) {
+                errors.push(format!(
+                    "sources[{index}].sbids must contain at least one non-empty SBID when set"
+                ));
+            }
+            let unique = sbids.iter().collect::<std::collections::BTreeSet<_>>();
+            if unique.len() != sbids.len() {
+                errors.push(format!("sources[{index}].sbids contains duplicates"));
+            }
+        }
+        sids.push(sid.to_string());
+        normalized_sources.push(ExecutionSourceSelection {
+            source_identifier: sid.to_string(),
+            sbids: normalized_sbids,
+        });
+    }
+
+    let project_config = if project_module.is_empty() {
+        None
+    } else {
+        repo::get_active_project_config(pool, project_module).await?
+    };
+    let parsed_config = match project_config.as_ref() {
+        Some(row) => match serde_json::from_value::<ProjectConfig>(row.spec.clone()) {
+            Ok(config) => {
+                let report = config.validate_report();
+                if !report.valid {
+                    let summary = report
+                        .errors
+                        .iter()
+                        .take(3)
+                        .map(|error| format!("{}: {}", error.path, error.message))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    errors.push(format!(
+                        "active project configuration is invalid: {summary}"
+                    ));
+                }
+                if config.metadata.id != project_module {
+                    errors.push(format!(
+                        "active project configuration identifies '{}' instead of '{project_module}'",
+                        config.metadata.id
+                    ));
+                }
+                Some(config)
+            }
+            Err(error) => {
+                errors.push(format!("active project configuration is invalid: {error}"));
+                None
+            }
+        },
+        None => {
+            if !project_module.is_empty() {
+                errors.push(format!(
+                    "project '{project_module}' has no active configuration"
+                ));
+            }
+            None
+        }
+    };
+    if let Some(config) = parsed_config.as_ref() {
+        if !archive_name.is_empty()
+            && !config
+                .adapters
+                .required
+                .iter()
+                .any(|adapter| adapter == archive_name)
+        {
+            errors.push(format!(
+                "archive '{archive_name}' is not enabled by project '{project_module}'"
+            ));
+        }
+    }
+
+    let profile = if req.deployment_profile_id.is_some()
+        && req.deployment_profile_name.as_deref().is_some()
+    {
+        errors.push("provide only one of deployment_profile_id or deployment_profile_name".into());
+        None
+    } else if let Some(id) = req.deployment_profile_id {
+        match repo::get_deployment_profile(pool, id).await? {
+            Some(profile) => Some(profile),
+            None => {
+                errors.push(format!("deployment profile '{id}' does not exist"));
+                None
+            }
+        }
+    } else if let Some(raw_name) = req.deployment_profile_name.as_deref() {
+        let name = raw_name.trim();
+        if name.is_empty() {
+            errors.push("deployment_profile_name must be non-empty when provided".into());
+            None
+        } else {
+            match repo::get_deployment_profile_by_name(pool, name).await? {
+                Some(profile) => Some(profile),
+                None => {
+                    errors.push(format!("deployment profile '{name}' does not exist"));
+                    None
+                }
+            }
+        }
+    } else if project_module.is_empty() {
+        None
+    } else {
+        match repo::get_default_deployment_profile(pool, project_module).await? {
+            Some(profile) => Some(profile),
+            None => {
+                errors.push(format!(
+                    "project '{project_module}' has no default deployment profile; select one explicitly"
+                ));
+                None
+            }
+        }
+    };
+    if let Some(profile) = profile.as_ref() {
+        if profile
+            .project_module
+            .as_deref()
+            .is_some_and(|module| module != project_module)
+        {
+            errors.push(format!(
+                "deployment profile '{}' belongs to project '{}'",
+                profile.name,
+                profile.project_module.as_deref().unwrap_or_default()
+            ));
+        }
+        let profile_spec = json!({
+            "name": profile.name,
+            "description": profile.description,
+            "project_module": profile.project_module,
+            "is_default": profile.is_default,
+            "max_concurrent_executions": profile.max_concurrent_executions,
+            "translation": profile.translation,
+            "deployment": profile.deployment,
+        });
+        match serde_json::from_value::<DeploymentProfile>(profile_spec) {
+            Ok(parsed) => {
+                if let Err(error) = parsed.validate() {
+                    errors.push(format!(
+                        "deployment profile '{}' is invalid: {error}",
+                        profile.name
+                    ));
+                }
+            }
+            Err(error) => errors.push(format!(
+                "deployment profile '{}' is invalid: {error}",
+                profile.name
+            )),
+        }
+    }
+
+    let rows = repo::list_archive_metadata_for_sources(pool, project_module, &sids).await?;
     let mut preview = Vec::new();
     let mut total_datasets = 0usize;
 
-    for sid in sids {
+    for selection in &normalized_sources {
+        let sid = selection.source_identifier.trim();
+        if sid.is_empty() {
+            continue;
+        }
         let source = sqlx::query_as::<_, SourceRegistryRow>(
             "SELECT * FROM source_registry WHERE project_module = $1 AND source_identifier = $2",
         )
-        .bind(&req.project_module)
-        .bind(&sid)
-        .fetch_optional(&state.pool)
+        .bind(project_module)
+        .bind(sid)
+        .fetch_optional(pool)
         .await?;
         let reg = source.as_ref().map(|s| RegisteredSourceReadiness {
             enabled: s.enabled,
@@ -2361,13 +2620,27 @@ async fn prepare_execution(
         });
         let metadata: Vec<ArchiveMetadataReadiness> = rows
             .iter()
-            .filter(|r| r.source_identifier == sid)
+            .filter(|r| {
+                r.source_identifier == sid
+                    && selection.sbids.as_ref().is_none_or(|selected| {
+                        selected
+                            .iter()
+                            .any(|selected_sbid| selected_sbid == &r.sbid)
+                    })
+            })
             .map(|r| ArchiveMetadataReadiness {
                 sbid: r.sbid.clone(),
                 metadata_json: r.metadata_json.clone(),
             })
             .collect();
-        if let Some(err) = parsed_source_readiness_error(&sid, None, reg.as_ref(), &metadata) {
+        if let Some(selected) = selection.sbids.as_ref() {
+            for sbid in selected {
+                if !metadata.iter().any(|item| &item.sbid == sbid) {
+                    errors.push(format!("source '{sid}' has no discovered SBID '{sbid}'"));
+                }
+            }
+        }
+        if let Some(err) = parsed_source_readiness_error(sid, None, reg.as_ref(), &metadata) {
             errors.push(err);
             continue;
         }
@@ -2384,47 +2657,130 @@ async fn prepare_execution(
         }));
     }
 
-    Ok(Json(ExecutionPrepareResponse {
-        project_module: req.project_module,
-        valid: errors.is_empty(),
-        errors,
-        total_datasets,
-        sources_preview: preview,
-    }))
+    Ok(ExecutionAdmission {
+        response: ExecutionPrepareResponse {
+            project_module: req.project_module.clone(),
+            valid: errors.is_empty(),
+            errors,
+            total_datasets,
+            sources_preview: preview,
+        },
+        deployment_profile_id: profile.map(|profile| profile.uuid),
+        project_config_id: project_config.map(|config| config.uuid),
+        sources: normalized_sources,
+    })
 }
 
-#[utoipa::path(post, path = "/api/v2/executions", tag = "executions", request_body = ExecutionCreate, responses((status = 201)))]
+fn execution_create_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    let key = value
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("Idempotency-Key must be valid ASCII".into()))?;
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+    {
+        return Err(ApiError::BadRequest(
+            "Idempotency-Key must be 1-128 visible ASCII characters without whitespace".into(),
+        ));
+    }
+    Ok(Some(key.to_string()))
+}
+
+fn canonical_execution_create(req: &ExecutionCreate) -> Value {
+    json!({
+        "project_module": req.project_module.trim(),
+        "sources": req.sources.iter().map(|source| json!({
+            "source_identifier": source.source_identifier.trim(),
+            "sbids": source.sbids.as_ref().map(|sbids| {
+                sbids.iter().map(|sbid| sbid.trim()).collect::<Vec<_>>()
+            }),
+        })).collect::<Vec<_>>(),
+        "archive_name": req.archive_name.trim(),
+        "deployment_profile_id": req.deployment_profile_id,
+        "deployment_profile_name": req.deployment_profile_name.as_deref().map(str::trim),
+    })
+}
+
+fn execution_create_request_sha256(req: &ExecutionCreate) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(canonical_execution_create(req).to_string().as_bytes())
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions",
+    tag = "executions",
+    request_body = ExecutionCreate,
+    params(("Idempotency-Key" = Option<String>, Header, description = "Optional per-user retry key. Exact replays return the existing execution; reuse with a different request returns 409.")),
+    responses((status = 201), (status = 200), (status = 409))
+)]
 async fn create_execution(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     AuthUser(user): AuthUser,
+    headers: HeaderMap,
     Json(req): Json<ExecutionCreate>,
 ) -> Result<(StatusCode, Json<ExecutionRead>), ApiError> {
-    let deployment_profile_id = if let Some(id) = req.deployment_profile_id {
-        Some(id)
-    } else if let Some(name) = req.deployment_profile_name.as_deref() {
-        repo::get_deployment_profile_by_name(&state.pool, name)
-            .await?
-            .map(|p| p.uuid)
-    } else {
-        None
-    };
-    let project_config_id = repo::get_active_project_config(&state.pool, &req.project_module)
-        .await?
-        .map(|c| c.uuid);
-    let row = repo::create_execution_with_correlation(
+    let idempotency_key = execution_create_idempotency_key(&headers)?;
+    let request_sha256 = execution_create_request_sha256(&req);
+    if let Some(key) = idempotency_key.as_deref() {
+        if let Some(existing) =
+            repo::get_execution_by_create_idempotency_key(&state.pool, user.id, key).await?
+        {
+            if existing.create_request_sha256.as_deref() != Some(request_sha256.as_str()) {
+                return Err(ApiError::Conflict(
+                    "Idempotency-Key was already used for a different execution request".into(),
+                ));
+            }
+            return Ok((
+                StatusCode::OK,
+                Json(enrich_execution(&state.pool, existing).await?),
+            ));
+        }
+    }
+    let admission = validate_execution_admission(&state.pool, &req).await?;
+    if !admission.response.valid {
+        return Err(ApiError::BadRequest(admission.response.errors.join("; ")));
+    }
+    let (row, created) = repo::create_execution_idempotent_with_correlation(
         &state.pool,
-        &req.project_module,
-        Value::Array(req.sources),
-        &req.archive_name,
-        deployment_profile_id,
-        project_config_id,
+        req.project_module.trim(),
+        serde_json::to_value(&admission.sources)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+        req.archive_name.trim(),
+        admission.deployment_profile_id,
+        admission.project_config_id,
         Some(user.id),
         Some(ctx.correlation_id()),
+        idempotency_key.as_deref(),
+        idempotency_key.as_ref().map(|_| request_sha256.as_str()),
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        if error
+            .to_string()
+            .contains("idempotency key was already used")
+        {
+            ApiError::Conflict(
+                "Idempotency-Key was already used for a different execution request".into(),
+            )
+        } else {
+            ApiError::Db(error)
+        }
+    })?;
     Ok((
-        StatusCode::CREATED,
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
         Json(enrich_execution(&state.pool, row).await?),
     ))
 }
@@ -2473,6 +2829,7 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
         scheduler_reason: row.scheduler_reason,
         daliuge_state: row.daliuge_state,
         output_state: row.output_state,
+        output_verification_required: row.output_verification_required,
         terminal_outcome: row.terminal_outcome,
         failure_class: row.failure_class,
         discovery_signature: row.discovery_signature,
@@ -2683,58 +3040,57 @@ async fn execution_artifacts(
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPatchRequest {
-    pub status: Option<ExecutionStatus>,
-    pub scheduler_name: Option<String>,
-    pub scheduler_job_id: Option<String>,
-    pub workflow_manifest: Option<Value>,
-    pub last_error: Option<String>,
+    pub status: ExecutionStatus,
 }
 
 #[utoipa::path(patch, path = "/api/v2/executions/{id}", tag = "executions", request_body = ExecutionPatchRequest, responses((status = 200), (status = 404)))]
 async fn patch_execution(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<ExecutionPatchRequest>,
 ) -> Result<Json<ExecutionRead>, ApiError> {
-    if req.status == Some(ExecutionStatus::Cancelled) {
-        let execution = repo::get_execution(&state.pool, id)
-            .await?
-            .ok_or(ApiError::NotFound)?;
-        if matches!(
-            execution.status_enum(),
-            Some(ExecutionStatus::AwaitingScheduler) | Some(ExecutionStatus::Running)
-        ) {
-            cancel_execution_scheduler(&state.pool, id).await?;
-            repo::insert_provenance_event(
-                &state.pool,
-                "execution.cancelled",
-                &execution.project_module,
-                None,
-                Some(id),
-                Some(&format!("user:{}", user.uuid)),
-                Some(&id.to_string()),
-                &json!({
-                    "scheduler_job_id": execution.scheduler_job_id,
-                    "daliuge_session_id": execution.daliuge_session_id,
-                }),
-            )
-            .await?;
-        }
+    if req.status != ExecutionStatus::Cancelled {
+        return Err(ApiError::BadRequest(
+            "the public execution patch endpoint only supports status=cancelled".into(),
+        ));
     }
-    let patch = LedgerPatch {
-        status: req.status,
-        scheduler_name: req.scheduler_name,
-        scheduler_job_id: req.scheduler_job_id,
-        workflow_manifest: req.workflow_manifest,
-        error: req.last_error,
-        execution_phase: None,
-        clear_error: false,
-    };
-    let row = repo::apply_execution_patch_with_correlation(&state.pool, id, patch, None)
+    let execution = repo::get_execution(&state.pool, id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let current = execution
+        .status_enum()
+        .ok_or_else(|| ApiError::Conflict("execution has an unknown ledger status".into()))?;
+    if current.is_terminal() {
+        return Err(ApiError::Conflict(format!(
+            "execution is already terminal ({})",
+            current.as_str()
+        )));
+    }
+    if matches!(
+        current,
+        ExecutionStatus::AwaitingScheduler | ExecutionStatus::Running
+    ) {
+        cancel_execution_scheduler(&state.pool, id).await?;
+    }
+    let row = repo::cancel_execution_with_correlation(
+        &state.pool,
+        id,
+        &format!("user:{}", user.uuid),
+        Some(ctx.correlation_id()),
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("cannot be cancelled") {
+            ApiError::Conflict(error.to_string())
+        } else {
+            ApiError::Db(error)
+        }
+    })?
+    .ok_or(ApiError::NotFound)?;
     Ok(Json(enrich_execution(&state.pool, row).await?))
 }
 
@@ -2813,6 +3169,48 @@ async fn execute_execution(
     Path(id): Path<Uuid>,
     Json(req): Json<ExecuteRequest>,
 ) -> Result<(StatusCode, Json<ExecuteResponse>), ApiError> {
+    let execution = repo::get_execution(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let idempotency_key = format!("execute:{id}");
+    if let Some(existing) = repo::get_job_by_idempotency_key(&state.pool, &idempotency_key).await? {
+        let existing_stage = existing
+            .payload
+            .get("do_stage")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let existing_submit = existing
+            .payload
+            .get("do_submit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if (existing_stage, existing_submit) != (req.do_stage, req.do_submit) {
+            return Err(ApiError::Conflict(
+                "execution was already queued with different do_stage/do_submit options".into(),
+            ));
+        }
+        if matches!(existing.status.as_str(), "queued" | "running") {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(ExecuteResponse {
+                    status: "accepted".into(),
+                    execution_id: id,
+                    job_id: existing.uuid,
+                    do_stage: req.do_stage,
+                    do_submit: req.do_submit,
+                }),
+            ));
+        }
+    }
+    let status = execution
+        .status_enum()
+        .ok_or_else(|| ApiError::Conflict("execution has an unknown ledger status".into()))?;
+    if status != ExecutionStatus::Pending {
+        return Err(ApiError::Conflict(format!(
+            "execution cannot be started from status '{}'",
+            status.as_str()
+        )));
+    }
     let tc = ctx.trace_context();
     let payload = json!({
         "execution_id": id,
@@ -2825,9 +3223,30 @@ async fn execute_execution(
         "execute",
         payload,
         Some(id),
-        Some(&format!("execute:{id}")),
+        Some(&idempotency_key),
     )
     .await?;
+    let queued_stage = job
+        .payload
+        .get("do_stage")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let queued_submit = job
+        .payload
+        .get("do_submit")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if (queued_stage, queued_submit) != (req.do_stage, req.do_submit) {
+        return Err(ApiError::Conflict(
+            "a concurrent start request queued different do_stage/do_submit options".into(),
+        ));
+    }
+    if !matches!(job.status.as_str(), "queued" | "running") {
+        return Err(ApiError::Conflict(format!(
+            "execution start request already finished with job status '{}'; use the retry endpoint before starting again",
+            job.status
+        )));
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(ExecuteResponse {
@@ -3233,7 +3652,8 @@ async fn create_deployment_profile(
         serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
         serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )
-    .await?;
+    .await
+    .map_err(map_deployment_profile_write_error)?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
@@ -3299,10 +3719,19 @@ async fn update_deployment_profile(
         serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
         serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )
-    .await?;
+    .await
+    .map_err(map_deployment_profile_write_error)?;
     row.map(DeploymentProfileResponse::from)
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+fn map_deployment_profile_write_error(error: sqlx::Error) -> ApiError {
+    if error.to_string().contains("already the default") {
+        ApiError::Conflict(error.to_string())
+    } else {
+        ApiError::Db(error)
+    }
 }
 
 #[utoipa::path(delete, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", responses((status = 204), (status = 404)))]
@@ -3521,5 +3950,80 @@ adapters:
             .expect("legacy diagnostic");
         assert_eq!(diagnostic.path, "apiVersion");
         assert!(diagnostic.hint.as_deref().unwrap().contains("convert"));
+    }
+
+    #[test]
+    fn source_update_distinguishes_omitted_null_and_value() {
+        let omitted: SourceUpdate = serde_json::from_value(json!({})).unwrap();
+        let cleared: SourceUpdate =
+            serde_json::from_value(json!({"stale_after_hours": null})).unwrap();
+        let set: SourceUpdate = serde_json::from_value(json!({"stale_after_hours": 12})).unwrap();
+        assert_eq!(omitted.stale_after_hours, None);
+        assert_eq!(cleared.stale_after_hours, Some(None));
+        assert_eq!(set.stale_after_hours, Some(Some(12)));
+    }
+
+    #[test]
+    fn logout_rejects_unvalidated_token_material() {
+        let result = validate_logout_tokens(
+            LogoutRequest {
+                access_token: Some("arbitrary attacker-controlled text".into()),
+                refresh_token: None,
+            },
+            "01234567890123456789012345678901",
+        );
+        assert!(matches!(result, Err(ApiError::Auth(_))));
+    }
+
+    #[test]
+    fn execution_create_idempotency_key_is_bounded_and_visible() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("create-01-test"),
+        );
+        assert_eq!(
+            execution_create_idempotency_key(&headers)
+                .unwrap()
+                .as_deref(),
+            Some("create-01-test")
+        );
+
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("contains space"),
+        );
+        assert!(matches!(
+            execution_create_idempotency_key(&headers),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn execution_create_request_hash_is_semantic_and_stable() {
+        let request = ExecutionCreate {
+            project_module: " wallaby_hires ".into(),
+            sources: vec![ExecutionSourceSelection {
+                source_identifier: " source-1 ".into(),
+                sbids: Some(vec![" 123 ".into()]),
+            }],
+            archive_name: " casda ".into(),
+            deployment_profile_id: None,
+            deployment_profile_name: Some(" dlg-dim ".into()),
+        };
+        let equivalent = ExecutionCreate {
+            project_module: "wallaby_hires".into(),
+            sources: vec![ExecutionSourceSelection {
+                source_identifier: "source-1".into(),
+                sbids: Some(vec!["123".into()]),
+            }],
+            archive_name: "casda".into(),
+            deployment_profile_id: None,
+            deployment_profile_name: Some("dlg-dim".into()),
+        };
+        assert_eq!(
+            execution_create_request_sha256(&request),
+            execution_create_request_sha256(&equivalent)
+        );
     }
 }

@@ -130,20 +130,21 @@ pub async fn update_source(
     pool: &PgPool,
     id: Uuid,
     enabled: Option<bool>,
-    stale_after_hours: Option<i32>,
+    stale_after_hours: Option<Option<i32>>,
 ) -> Result<Option<SourceRegistryRow>, sqlx::Error> {
     sqlx::query_as::<_, SourceRegistryRow>(
         r#"
         UPDATE source_registry
         SET enabled = COALESCE($2, enabled),
-            stale_after_hours = COALESCE($3, stale_after_hours)
+            stale_after_hours = CASE WHEN $3 THEN $4 ELSE stale_after_hours END
         WHERE uuid = $1
         RETURNING *
         "#,
     )
     .bind(id)
     .bind(enabled)
-    .bind(stale_after_hours)
+    .bind(stale_after_hours.is_some())
+    .bind(stale_after_hours.flatten())
     .fetch_optional(pool)
     .await
 }
@@ -1345,6 +1346,42 @@ pub async fn create_execution_with_correlation(
     created_by_id: Option<i32>,
     correlation_id: Option<&str>,
 ) -> Result<ExecutionRow, sqlx::Error> {
+    let (row, _) = create_execution_idempotent_with_correlation(
+        pool,
+        project_module,
+        sources,
+        archive_name,
+        deployment_profile_id,
+        project_config_id,
+        created_by_id,
+        correlation_id,
+        None,
+        None,
+    )
+    .await?;
+    Ok(row)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_execution_idempotent_with_correlation(
+    pool: &PgPool,
+    project_module: &str,
+    sources: Value,
+    archive_name: &str,
+    deployment_profile_id: Option<Uuid>,
+    project_config_id: Option<Uuid>,
+    created_by_id: Option<i32>,
+    correlation_id: Option<&str>,
+    idempotency_key: Option<&str>,
+    request_sha256: Option<&str>,
+) -> Result<(ExecutionRow, bool), sqlx::Error> {
+    if idempotency_key.is_some() != request_sha256.is_some()
+        || idempotency_key.is_some() != created_by_id.is_some()
+    {
+        return Err(sqlx::Error::Protocol(
+            "execution idempotency requires a user, key, and request hash".into(),
+        ));
+    }
     let resolved_profile = match deployment_profile_id {
         Some(id) => get_deployment_profile(pool, id).await?,
         None => get_default_deployment_profile(pool, project_module).await?,
@@ -1383,6 +1420,34 @@ pub async fn create_execution_with_correlation(
     });
 
     let mut tx = pool.begin().await?;
+    if let (Some(user_id), Some(key), Some(request_hash)) =
+        (created_by_id, idempotency_key, request_sha256)
+    {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("beampipe:execution-create:{user_id}:{key}"))
+            .execute(&mut *tx)
+            .await?;
+        if let Some(existing) = sqlx::query_as::<_, ExecutionRow>(
+            r#"
+            SELECT *
+            FROM batch_execution_record
+            WHERE created_by_id = $1 AND create_idempotency_key = $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            if existing.create_request_sha256.as_deref() != Some(request_hash) {
+                return Err(sqlx::Error::Protocol(
+                    "execution idempotency key was already used for a different request".into(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok((existing, false));
+        }
+    }
     if let Some(profile) = resolved_profile
         .as_ref()
         .filter(|profile| profile.max_concurrent_executions.is_some())
@@ -1454,11 +1519,13 @@ pub async fn create_execution_with_correlation(
             uuid, project_module, sources, archive_name, deployment_profile_id,
             deployment_profile_revision, deployment_profile_snapshot,
             project_config_id, discovery_signature, created_by_id, status,
-            control_phase, submission_state, scheduler_state, daliuge_state, output_state
+            control_phase, submission_state, scheduler_state, daliuge_state, output_state,
+            output_verification_required, create_idempotency_key, create_request_sha256
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending',
-            'discovered', 'not_started', 'not_submitted', 'not_created', 'not_started'
+            'discovered', 'not_started', 'not_submitted', 'not_created', 'not_started', false,
+            $11, $12
         )
         RETURNING *
         "#,
@@ -1473,9 +1540,16 @@ pub async fn create_execution_with_correlation(
     .bind(project_config_id)
     .bind(combined_discovery_signature)
     .bind(created_by_id)
+    .bind(idempotency_key)
+    .bind(request_sha256)
     .fetch_one(&mut *tx)
     .await?;
-    let payload = serde_json::json!({"archive_name": archive_name, "sources": sources});
+    let payload = serde_json::json!({
+        "archive_name": archive_name,
+        "sources": sources,
+        "output_verification_required": false,
+        "output_verification_policy": "not_configured",
+    });
     insert_provenance_event(
         &mut *tx,
         "execution.created",
@@ -1488,7 +1562,25 @@ pub async fn create_execution_with_correlation(
     )
     .await?;
     tx.commit().await?;
-    Ok(row)
+    Ok((row, true))
+}
+
+pub async fn get_execution_by_create_idempotency_key(
+    pool: &PgPool,
+    created_by_id: i32,
+    key: &str,
+) -> Result<Option<ExecutionRow>, sqlx::Error> {
+    sqlx::query_as::<_, ExecutionRow>(
+        r#"
+        SELECT *
+        FROM batch_execution_record
+        WHERE created_by_id = $1 AND create_idempotency_key = $2
+        "#,
+    )
+    .bind(created_by_id)
+    .bind(key)
+    .fetch_optional(pool)
+    .await
 }
 
 pub async fn purge_provenance_events_older_than(
@@ -1893,6 +1985,14 @@ pub async fn apply_execution_state_patch(
         UPDATE batch_execution_record
         SET status = $2,
             terminal_outcome = COALESCE($3, terminal_outcome),
+            last_error = CASE
+                WHEN $3 = 'succeeded' THEN NULL
+                ELSE last_error
+            END,
+            failure_class = CASE
+                WHEN $3 = 'succeeded' THEN NULL
+                ELSE failure_class
+            END,
             control_phase = CASE WHEN $4 THEN 'terminal' ELSE control_phase END,
             phase_timestamps = CASE
                 WHEN $4 AND NOT (phase_timestamps ? 'terminal')
@@ -2160,13 +2260,20 @@ pub async fn apply_execution_patch_with_correlation(
     patch: LedgerPatch,
     correlation_id: Option<&str>,
 ) -> Result<Option<ExecutionRow>, sqlx::Error> {
-    let Some(row) = get_execution(pool, id).await? else {
+    let mut tx = pool.begin().await?;
+    let Some(row) = sqlx::query_as::<_, ExecutionRow>(
+        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
         return Ok(None);
     };
     let prev_status = row.status_enum().unwrap_or(ExecutionStatus::Pending);
     let prev_phase = row.phase_enum();
     let project_module = row.project_module.clone();
-    let patch_status = patch.status;
     let patch_phase = patch.execution_phase;
     let mut state = LedgerState {
         status: prev_status,
@@ -2188,34 +2295,33 @@ pub async fn apply_execution_patch_with_correlation(
         .map(str::to_string)
         .or_else(|| Some(id.to_string()));
 
-    if let Some(next) = patch_status {
-        if next != prev_status {
-            let event_type = match next {
-                ExecutionStatus::Running => {
-                    Some(beampipe_domain::provenance::ProvenanceEventType::ExecutionRunning)
-                }
-                ExecutionStatus::AwaitingScheduler => Some(
-                    beampipe_domain::provenance::ProvenanceEventType::ExecutionAwaitingScheduler,
-                ),
-                _ => None,
-            };
-            if let Some(ev) = event_type {
-                let payload = serde_json::json!({
-                    "from_status": prev_status.as_str(),
-                    "to_status": next.as_str(),
-                });
-                crate::provenance::record_provenance_event(
-                    pool,
-                    ev.as_str(),
-                    &project_module,
-                    None,
-                    Some(id),
-                    Some("system:execution"),
-                    correlation.as_deref(),
-                    &payload,
-                )
-                .await;
+    let next_status = state.status;
+    if next_status != prev_status {
+        let event_type = match next_status {
+            ExecutionStatus::Running => {
+                Some(beampipe_domain::provenance::ProvenanceEventType::ExecutionRunning)
             }
+            ExecutionStatus::AwaitingScheduler => {
+                Some(beampipe_domain::provenance::ProvenanceEventType::ExecutionAwaitingScheduler)
+            }
+            _ => None,
+        };
+        if let Some(ev) = event_type {
+            let payload = serde_json::json!({
+                "from_status": prev_status.as_str(),
+                "to_status": next_status.as_str(),
+            });
+            insert_provenance_event(
+                &mut *tx,
+                ev.as_str(),
+                &project_module,
+                None,
+                Some(id),
+                Some("system:execution"),
+                correlation.as_deref(),
+                &payload,
+            )
+            .await?;
         }
     }
     if patch_phase.is_some() {
@@ -2224,8 +2330,8 @@ pub async fn apply_execution_patch_with_correlation(
             let payload = serde_json::json!({
                 "execution_phase": "submit",
             });
-            crate::provenance::record_provenance_event(
-                pool,
+            insert_provenance_event(
+                &mut *tx,
                 beampipe_domain::provenance::ProvenanceEventType::ExecutionExecuteStarted.as_str(),
                 &project_module,
                 None,
@@ -2234,11 +2340,11 @@ pub async fn apply_execution_patch_with_correlation(
                 correlation.as_deref(),
                 &payload,
             )
-            .await;
+            .await?;
         }
     }
 
-    sqlx::query_as::<_, ExecutionRow>(
+    let updated = sqlx::query_as::<_, ExecutionRow>(
         r#"
         UPDATE batch_execution_record
         SET status = $2,
@@ -2265,8 +2371,72 @@ pub async fn apply_execution_patch_with_correlation(
     .bind(state.last_error)
     .bind(state.started_at)
     .bind(state.completed_at)
-    .fetch_optional(pool)
-    .await
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(updated)
+}
+
+pub async fn cancel_execution_with_correlation(
+    pool: &PgPool,
+    id: Uuid,
+    actor: &str,
+    correlation_id: Option<&str>,
+) -> Result<Option<ExecutionRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query_as::<_, ExecutionRow>(
+        r#"
+        UPDATE batch_execution_record
+        SET status = 'cancelled',
+            execution_phase = NULL,
+            control_phase = 'terminal',
+            terminal_outcome = 'cancelled',
+            last_error = NULL,
+            failure_class = NULL,
+            phase_timestamps = CASE
+                WHEN phase_timestamps ? 'terminal' THEN phase_timestamps
+                ELSE jsonb_set(phase_timestamps, '{terminal}', to_jsonb(now()), true)
+            END,
+            completed_at = COALESCE(completed_at, now()),
+            updated_at = now()
+        WHERE uuid = $1
+          AND status IN ('pending', 'running', 'awaiting_scheduler', 'retrying', 'cancelled')
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = updated else {
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT status FROM batch_execution_record WHERE uuid = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        tx.rollback().await?;
+        return match current {
+            None => Ok(None),
+            Some(status) => Err(sqlx::Error::Protocol(format!(
+                "execution cannot be cancelled from terminal status '{status}'"
+            ))),
+        };
+    };
+    insert_provenance_event(
+        &mut *tx,
+        "execution.cancelled",
+        &row.project_module,
+        None,
+        Some(id),
+        Some(actor),
+        correlation_id,
+        &serde_json::json!({
+            "scheduler_job_id": row.scheduler_job_id,
+            "daliuge_session_id": row.daliuge_session_id,
+        }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some(row))
 }
 
 pub async fn get_enabled_project_modules(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
@@ -2544,6 +2714,16 @@ pub async fn get_active_job_for_execution(
     .await
 }
 
+pub async fn get_job_by_idempotency_key(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<Option<JobRow>, sqlx::Error> {
+    sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE idempotency_key = $1")
+        .bind(idempotency_key)
+        .fetch_optional(pool)
+        .await
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionTraceSummary {
     pub correlation_id: Option<String>,
@@ -2611,7 +2791,60 @@ pub async fn mark_sources_and_enqueue_discovery_tick(
         INSERT INTO jobs (uuid, kind, payload, idempotency_key, next_run_at)
         VALUES ($1, $2, $3, $4, now())
         ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
-        DO UPDATE SET updated_at = now()
+        DO UPDATE SET
+            status = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN 'queued'
+                ELSE jobs.status
+            END,
+            payload = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN EXCLUDED.payload
+                ELSE jobs.payload
+            END,
+            next_run_at = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN now()
+                ELSE jobs.next_run_at
+            END,
+            attempts = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN 0
+                ELSE jobs.attempts
+            END,
+            locked_until = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.locked_until
+            END,
+            lease_owner = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.lease_owner
+            END,
+            lease_token = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.lease_token
+            END,
+            lease_expires_at = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.lease_expires_at
+            END,
+            heartbeat_at = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.heartbeat_at
+            END,
+            last_error = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.last_error
+            END,
+            failure_class = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.failure_class
+            END,
+            dead_lettered_at = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.dead_lettered_at
+            END,
+            dead_letter_reason = CASE
+                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN NULL
+                ELSE jobs.dead_letter_reason
+            END,
+            updated_at = now()
         RETURNING *
         "#,
     )
@@ -2668,28 +2901,11 @@ pub async fn enqueue_recurring_job_with_options(
                 WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN 'queued'
                 ELSE jobs.status
             END,
-            payload = CASE
-                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN EXCLUDED.payload
-                ELSE jobs.payload
-            END,
-            pool = CASE
-                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN EXCLUDED.pool
-                ELSE jobs.pool
-            END,
-            required_capability = CASE
-                WHEN jobs.status IN ('completed', 'failed', 'dead_letter')
-                    THEN EXCLUDED.required_capability
-                ELSE jobs.required_capability
-            END,
-            required_labels = CASE
-                WHEN jobs.status IN ('completed', 'failed', 'dead_letter')
-                    THEN EXCLUDED.required_labels
-                ELSE jobs.required_labels
-            END,
-            priority = CASE
-                WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN EXCLUDED.priority
-                ELSE jobs.priority
-            END,
+            payload = EXCLUDED.payload,
+            pool = EXCLUDED.pool,
+            required_capability = EXCLUDED.required_capability,
+            required_labels = EXCLUDED.required_labels,
+            priority = EXCLUDED.priority,
             next_run_at = CASE
                 WHEN jobs.status IN ('completed', 'failed', 'dead_letter') THEN now()
                 ELSE jobs.next_run_at
@@ -2884,7 +3100,12 @@ pub async fn create_deployment_profile(
         &translation,
         &deployment,
     );
-    sqlx::query_as::<_, DeploymentProfileRow>(
+    let mut tx = pool.begin().await?;
+    if is_default {
+        lock_default_profile_scope(&mut tx, project_module).await?;
+        ensure_default_profile_available(&mut tx, project_module, None).await?;
+    }
+    let row = sqlx::query_as::<_, DeploymentProfileRow>(
         r#"
         INSERT INTO daliuge_deployment_profile
             (uuid, name, description, project_module, is_default,
@@ -2902,8 +3123,10 @@ pub async fn create_deployment_profile(
     .bind(translation)
     .bind(deployment)
     .bind(spec_sha256)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row)
 }
 
 pub async fn list_deployment_profiles(
@@ -2945,7 +3168,22 @@ pub async fn update_deployment_profile(
         &translation,
         &deployment,
     );
-    sqlx::query_as::<_, DeploymentProfileRow>(
+    let mut tx = pool.begin().await?;
+    let exists = sqlx::query_scalar::<_, Uuid>(
+        "SELECT uuid FROM daliuge_deployment_profile WHERE uuid = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if exists.is_none() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    if is_default {
+        lock_default_profile_scope(&mut tx, project_module).await?;
+        ensure_default_profile_available(&mut tx, project_module, Some(id)).await?;
+    }
+    let row = sqlx::query_as::<_, DeploymentProfileRow>(
         r#"
         UPDATE daliuge_deployment_profile
         SET name = $2,
@@ -2971,8 +3209,52 @@ pub async fn update_deployment_profile(
     .bind(translation)
     .bind(deployment)
     .bind(spec_sha256)
-    .fetch_optional(pool)
-    .await
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row)
+}
+
+async fn lock_default_profile_scope(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    project_module: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "beampipe:default-profile:{}",
+            project_module.unwrap_or("<global>")
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn ensure_default_profile_available(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    project_module: Option<&str>,
+    excluding: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    let existing: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT name
+        FROM daliuge_deployment_profile
+        WHERE is_default = true
+          AND project_module IS NOT DISTINCT FROM $1
+          AND ($2::uuid IS NULL OR uuid <> $2)
+        LIMIT 1
+        "#,
+    )
+    .bind(project_module)
+    .bind(excluding)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(name) = existing {
+        return Err(sqlx::Error::Protocol(format!(
+            "deployment profile '{name}' is already the default for {}",
+            project_module.unwrap_or("the global scope")
+        )));
+    }
+    Ok(())
 }
 
 pub fn deployment_profile_spec_sha256(

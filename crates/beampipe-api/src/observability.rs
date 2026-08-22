@@ -181,11 +181,30 @@ fn merge_notification_config(existing: &Value, patch: &Value) -> Value {
             continue;
         }
         if key == "headers" {
-            let existing_headers = out.get(key).cloned().unwrap_or_else(|| json!({}));
-            out.insert(
-                key.clone(),
-                merge_notification_config(&existing_headers, value),
-            );
+            if value.is_null() {
+                out.remove(key);
+                continue;
+            }
+            let Some(patch_headers) = value.as_object() else {
+                out.insert(key.clone(), value.clone());
+                continue;
+            };
+            let mut headers = out
+                .get(key)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for (header, header_value) in patch_headers {
+                if header_value.as_str() == Some(REDACTED) {
+                    continue;
+                }
+                if header_value.is_null() {
+                    headers.remove(header);
+                } else {
+                    headers.insert(header.clone(), header_value.clone());
+                }
+            }
+            out.insert(key.clone(), Value::Object(headers));
             continue;
         }
         out.insert(key.clone(), value.clone());
@@ -205,8 +224,12 @@ fn default_cooldown() -> i32 {
     60
 }
 
-fn validate_notification_config(kind: &str, config: &Value) -> Result<(), ApiError> {
-    let policy = SecretPolicy::from_process_env();
+fn validate_notification_config(
+    environment: &str,
+    kind: &str,
+    config: &Value,
+) -> Result<(), ApiError> {
+    let policy = SecretPolicy::from_env_name(environment);
     let inline = unsafe_inline_secret_paths(config, policy);
     if !inline.is_empty() {
         beampipe_metrics::record_unsafe_inline_secret_rejected("notification_channel");
@@ -274,7 +297,7 @@ pub async fn create_notification_channel(
     if !matches!(req.kind.as_str(), "webhook" | "email") {
         return Err(ApiError::BadRequest("kind must be webhook or email".into()));
     }
-    validate_notification_config(&req.kind, &req.config)?;
+    validate_notification_config(&state.settings.beampipe_env, &req.kind, &req.config)?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -311,7 +334,7 @@ pub async fn update_notification_channel(
             .await?
             .ok_or(ApiError::NotFound)?;
         let merged = merge_notification_config(&row.config, config);
-        validate_notification_config(&row.kind, &merged)?;
+        validate_notification_config(&state.settings.beampipe_env, &row.kind, &merged)?;
         repo::update_notification_channel(
             &state.pool,
             id,
@@ -604,14 +627,12 @@ mod tests {
 
     #[test]
     fn production_rejects_inline_notification_secret() {
-        std::env::set_var("BEAMPIPE_ENV", "production");
         std::env::remove_var("BEAMPIPE_ALLOW_INLINE_SECRETS");
         let config = json!({
             "smtp_host": "smtp.example.test",
             "password": "plain"
         });
-        assert!(validate_notification_config("email", &config).is_err());
-        std::env::remove_var("BEAMPIPE_ENV");
+        assert!(validate_notification_config("production", "email", &config).is_err());
     }
 
     #[test]
@@ -632,5 +653,23 @@ mod tests {
         assert_eq!(merged["headers"]["Authorization"], "Bearer old");
         assert_eq!(merged["headers"]["X-Trace"], "keep");
         assert_eq!(merged["headers"]["X-New"], "1");
+    }
+
+    #[test]
+    fn merge_deletes_explicitly_null_headers() {
+        let existing = json!({
+            "url": "https://example.test/hook",
+            "headers": {"Authorization": "Bearer secret", "X-Trace": "old"}
+        });
+        let patch = json!({
+            "headers": {"Authorization": REDACTED, "X-Trace": null, "X-New": "new"}
+        });
+        let merged = merge_notification_config(&existing, &patch);
+        assert_eq!(merged["headers"]["Authorization"], "Bearer secret");
+        assert!(merged["headers"].get("X-Trace").is_none());
+        assert_eq!(merged["headers"]["X-New"], "new");
+
+        let cleared = merge_notification_config(&existing, &json!({"headers": null}));
+        assert!(cleared.get("headers").is_none());
     }
 }
