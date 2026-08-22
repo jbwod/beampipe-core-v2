@@ -26,14 +26,14 @@ SOURCE=$(curl -fsS -X POST "$BASE/api/v2/sources" \
   -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{
     "project_module":"wallaby_hires",
-    "source_identifier":"HIPASSJ1313-15",
+    "source_identifier":"HIPASSJ1318-21",
     "enabled":true
   }')
 SOURCE_ID=$(jq -r .uuid <<<"$SOURCE")
 
 curl -fsS -X POST "$BASE/api/v2/sources/discover" \
   -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1313-15"}' \
+  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1318-21"}' \
   | jq .
 ```
 
@@ -54,7 +54,7 @@ curl -fsS -X POST "$BASE/api/v2/executions/prepare" \
   -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{
     "project_module":"wallaby_hires",
-    "sources":[{"source_identifier":"HIPASSJ1313-15"}],
+    "sources":[{"source_identifier":"HIPASSJ1318-21"}],
     "archive_name":"casda",
     "deployment_profile_name":"slurm-remote"
   }' | jq .
@@ -65,7 +65,7 @@ Build the manifest and patched graph without external submission:
 ```bash
 beampipe graph prepare \
   --project wallaby_hires \
-  --source HIPASSJ1313-15
+  --source HIPASSJ1318-21
 ```
 
 Confirm the output includes the active project revision, manifest checksum, source graph checksum, patched graph checksum, and graph-patch summary.

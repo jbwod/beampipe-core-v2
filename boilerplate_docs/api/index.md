@@ -63,12 +63,12 @@ Init, import, and `copy-id` remain CLI. Empty credential roots return `{ "slots"
 ```bash
 SOURCE=$(curl -fsS -X POST "$BASE/api/v2/sources" \
   -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1313-15","enabled":true}')
+  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1318-21","enabled":true}')
 SOURCE_ID=$(jq -r .uuid <<<"$SOURCE")
 
 curl -fsS -X POST "$BASE/api/v2/sources/discover" \
   -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1313-15"}' | jq .
+  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1318-21"}' | jq .
 
 curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/status" -H "$AUTH" | jq .
 curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/metadata" -H "$AUTH" | jq .
@@ -85,7 +85,7 @@ Use the same body for preflight and creation:
 cat > /tmp/execution.json <<'JSON'
 {
   "project_module": "wallaby_hires",
-  "sources": [{"source_identifier": "HIPASSJ1313-15"}],
+  "sources": [{"source_identifier": "HIPASSJ1318-21"}],
   "archive_name": "casda",
   "deployment_profile_name": "slurm-remote"
 }

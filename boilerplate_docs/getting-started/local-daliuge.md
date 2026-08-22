@@ -191,7 +191,9 @@ docker compose -f docker-compose.yml -f compose.dlg-local.yml run --rm api \
 
 Do not enable submission until the profile doctor can reach both TM and DIM.
 The setup above deliberately leaves `BEAMPIPE_USE_REAL_BACKENDS=false`. After
-the doctor passes, edit the isolated checkout's `.env` and set:
+the doctor reports successful translator and manager checks (not merely an
+overall zero exit while live checks are optional), edit the isolated checkout's
+`.env` and set:
 
 ```text
 BEAMPIPE_USE_REAL_BACKENDS=true
