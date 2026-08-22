@@ -4306,7 +4306,58 @@ fn minimum_poll_interval(current: Option<i64>, candidate: i64) -> Option<i64> {
 }
 
 fn slurm_active_poll_budget_reached(next_round: i64, max_rounds: i64) -> bool {
-    max_rounds > 0 && next_round == max_rounds
+    max_rounds > 0 && next_round >= max_rounds
+}
+
+struct SlurmPollProgress {
+    manifest: Value,
+    next_round: i64,
+    operator_escalated: bool,
+}
+
+fn slurm_poll_operator_escalated(existing: Option<&Value>) -> bool {
+    existing
+        .and_then(|manifest| manifest.get("beampipe_run_record"))
+        .and_then(|run_record| run_record.get("slurm_poll"))
+        .and_then(|poll| poll.get("operator_escalation"))
+        .is_some()
+}
+
+fn advance_slurm_poll_progress(
+    existing: Option<Value>,
+    poll_round: i64,
+    max_rounds: i64,
+    escalation_reason: &str,
+) -> SlurmPollProgress {
+    let already_escalated = slurm_poll_operator_escalated(existing.as_ref());
+    let next_round = poll_round.saturating_add(1);
+    let operator_escalated =
+        slurm_active_poll_budget_reached(next_round, max_rounds) && !already_escalated;
+    let mut manifest = merge_slurm_poll_tick_round(existing, next_round);
+    if operator_escalated {
+        if let Some(poll) = manifest
+            .get_mut("beampipe_run_record")
+            .and_then(Value::as_object_mut)
+            .and_then(|run_record| run_record.get_mut("slurm_poll"))
+            .and_then(Value::as_object_mut)
+        {
+            poll.insert(
+                "operator_escalation".into(),
+                json!({
+                    "reason": escalation_reason,
+                    "round": next_round,
+                    "max_rounds": max_rounds,
+                    "recorded_at": Utc::now().to_rfc3339(),
+                    "terminalized": false,
+                }),
+            );
+        }
+    }
+    SlurmPollProgress {
+        manifest,
+        next_round,
+        operator_escalated,
+    }
 }
 
 fn slurm_job_id_from_scheduler(scheduler_job_id: &str) -> String {
@@ -4323,7 +4374,7 @@ fn slurm_job_id_from_scheduler(scheduler_job_id: &str) -> String {
 }
 
 fn slurm_poll_is_unknown(result: &SlurmJobPollResult) -> bool {
-    result.normalized_state == "UNKNOWN" && result.source == "none"
+    result.normalized_state == "UNKNOWN"
 }
 
 fn terminal_reason(state: &str) -> Option<&'static str> {
@@ -4377,6 +4428,42 @@ fn manifest_for_slurm_poll(
             diagnostics: stderr_diagnostics(remote_session_dir),
         },
     )
+}
+
+async fn record_slurm_poll_escalation(
+    pool: &PgPool,
+    execution_id: uuid::Uuid,
+    scheduler_state: SchedulerState,
+    next_round: i64,
+    max_rounds: i64,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    let detail = format!(
+        "Slurm polling reached its configured budget at round {next_round} while the scheduler state remained {}; manual reconciliation is required",
+        scheduler_state.as_str()
+    );
+    repo::record_execution_observation(
+        pool,
+        execution_id,
+        ExecutionObservationInput {
+            kind: "scheduler".into(),
+            normalized_state: scheduler_state.as_str().into(),
+            raw_state: Some("poll_budget_escalation".into()),
+            reason: Some(detail),
+            payload: json!({
+                "operator_action_required": true,
+                "escalation_reason": reason,
+                "poll_round": next_round,
+                "max_rounds": max_rounds,
+                "terminalized": false,
+            }),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    metrics::record_reconciliation_result("slurm", "operator_escalation");
+    Ok(())
 }
 
 async fn apply_slurm_poll_update(
@@ -4451,16 +4538,39 @@ async fn apply_slurm_poll_update(
         );
         let manifest =
             manifest_for_slurm_poll(&reconciled, result, &scheduler_job_id, false, None, None);
+        let progress = advance_slurm_poll_progress(
+            Some(manifest),
+            poll_round,
+            max_rounds,
+            "scheduler_state_unknown",
+        );
         repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
-                workflow_manifest: Some(manifest),
+                workflow_manifest: Some(progress.manifest),
                 ..LedgerPatch::default()
             },
             correlation_id,
         )
         .await?;
+        if progress.operator_escalated {
+            warn!(
+                execution_id = %execution_id,
+                slurm_job_id = %parsed.slurm_job_id,
+                max_rounds,
+                "event=slurm_poll_budget_exhausted_state_unknown"
+            );
+            record_slurm_poll_escalation(
+                pool,
+                execution_id,
+                scheduler_state,
+                progress.next_round,
+                max_rounds,
+                "scheduler_state_unknown",
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -4481,10 +4591,15 @@ async fn apply_slurm_poll_update(
                 "event=slurm_job_running"
             );
         }
-        let mut manifest =
+        let manifest =
             manifest_for_slurm_poll(&reconciled, result, &scheduler_job_id, false, None, None);
-        let next_round = poll_round + 1;
-        if slurm_active_poll_budget_reached(next_round, max_rounds) {
+        let progress = advance_slurm_poll_progress(
+            Some(manifest),
+            poll_round,
+            max_rounds,
+            "scheduler_job_still_active",
+        );
+        if progress.operator_escalated {
             warn!(
                 execution_id = %execution_id,
                 slurm_job_id = %parsed.slurm_job_id,
@@ -4493,17 +4608,27 @@ async fn apply_slurm_poll_update(
                 "event=slurm_poll_budget_exhausted_but_job_active"
             );
         }
-        manifest = merge_slurm_poll_tick_round(Some(manifest), next_round);
         repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
-                workflow_manifest: Some(manifest),
+                workflow_manifest: Some(progress.manifest),
                 ..LedgerPatch::default()
             },
             correlation_id,
         )
         .await?;
+        if progress.operator_escalated {
+            record_slurm_poll_escalation(
+                pool,
+                execution_id,
+                scheduler_state,
+                progress.next_round,
+                max_rounds,
+                "scheduler_job_still_active",
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -4568,6 +4693,118 @@ async fn apply_slurm_poll_update(
     Ok(())
 }
 
+fn classify_slurm_poll_failure(error: &str) -> FailureClass {
+    let error = error.to_ascii_lowercase();
+    if error.contains("host key") || error.contains("known_hosts") {
+        FailureClass::Authorization
+    } else if error.contains("auth") || error.contains("credential") {
+        FailureClass::Authentication
+    } else if error.contains("timed out") || error.contains("timeout") {
+        FailureClass::Timeout
+    } else if error.contains("connect") || error.contains("unreachable") {
+        FailureClass::Connectivity
+    } else {
+        FailureClass::DependencyUnavailable
+    }
+}
+
+async fn record_slurm_poll_failure(
+    pool: &PgPool,
+    execution: &beampipe_db::models::ExecutionRow,
+    operation: &str,
+    error_kind: &str,
+    error: &str,
+    failure_class: FailureClass,
+    retryable: bool,
+) -> Result<(), sqlx::Error> {
+    let detail = beampipe_security::redact_string(error);
+    let policy = poll_policy_for_execution(pool, execution).await?;
+    let max_rounds = policy.slurm_max_rounds.unwrap_or(480);
+    let poll_round = slurm_poll_round_from_manifest(execution.workflow_manifest.as_ref());
+    let scheduler_job_id = execution.scheduler_job_id.clone().unwrap_or_default();
+    let result = SlurmJobPollResult {
+        raw_state: error_kind.into(),
+        normalized_state: "UNKNOWN".into(),
+        source: "poll_error",
+        exit_code: None,
+        raw_line: None,
+    };
+    let manifest = manifest_for_slurm_poll(
+        execution,
+        &result,
+        &scheduler_job_id,
+        false,
+        None,
+        Some(error_kind),
+    );
+    let progress = advance_slurm_poll_progress(
+        Some(manifest),
+        poll_round,
+        max_rounds,
+        "scheduler_poll_error",
+    );
+
+    repo::record_execution_observation(
+        pool,
+        execution.uuid,
+        ExecutionObservationInput {
+            kind: "scheduler".into(),
+            normalized_state: SchedulerState::Unknown.as_str().into(),
+            raw_state: Some(error_kind.into()),
+            reason: Some(detail.clone()),
+            payload: json!({
+                "operation": operation,
+                "error_kind": error_kind,
+                "retryable": retryable,
+                "failure_class": failure_class.as_str(),
+                "poll_round": progress.next_round,
+                "operator_escalated": progress.operator_escalated,
+            }),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    repo::apply_execution_state_patch(
+        pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            scheduler_state: Some(SchedulerState::Unknown),
+            scheduler_raw_state: Some(error_kind.into()),
+            scheduler_reason: Some(detail.clone()),
+            failure_class: Some(failure_class),
+            last_error: Some(detail),
+            last_reconciled_at: Some(Utc::now()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let correlation_id = execution.uuid.to_string();
+    repo::apply_execution_patch_with_correlation(
+        pool,
+        execution.uuid,
+        LedgerPatch {
+            workflow_manifest: Some(progress.manifest),
+            ..LedgerPatch::default()
+        },
+        Some(&correlation_id),
+    )
+    .await?;
+    if progress.operator_escalated {
+        record_slurm_poll_escalation(
+            pool,
+            execution.uuid,
+            SchedulerState::Unknown,
+            progress.next_round,
+            max_rounds,
+            "scheduler_poll_error",
+        )
+        .await?;
+    }
+    metrics::record_reconciliation_result("slurm", error_kind);
+    Ok(())
+}
+
 struct SlurmPollExec {
     execution: beampipe_db::models::ExecutionRow,
     slurm_job_id: String,
@@ -4589,20 +4826,101 @@ async fn run_slurm_poll_tick(
 
     let mut by_target: HashMap<SlurmTarget, Vec<SlurmPollExec>> = HashMap::new();
     for execution in executions {
-        let scheduler_job_id = match execution.scheduler_job_id.as_deref() {
-            Some(id) if !id.is_empty() => id,
-            _ => continue,
+        if execution.deployment_profile_snapshot.is_some()
+            && profile_from_execution_snapshot(&execution).is_none()
+        {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "status_batch",
+                "invalid_deployment_profile_snapshot",
+                "the persisted deployment profile snapshot is incomplete or invalid",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
+            continue;
+        }
+        let scheduler_job_id = match execution
+            .scheduler_job_id
+            .as_deref()
+            .filter(|job_id| !job_id.trim().is_empty())
+        {
+            Some(id) => id,
+            None => {
+                record_slurm_poll_failure(
+                    pool,
+                    &execution,
+                    "status_batch",
+                    "missing_scheduler_job_id",
+                    "the Slurm execution has no scheduler job ID to poll",
+                    FailureClass::Configuration,
+                    false,
+                )
+                .await?;
+                continue;
+            }
         };
         let slurm_job_id = slurm_job_id_from_scheduler(scheduler_job_id);
+        if let Err(error) =
+            beampipe_orchestration::slurm_ssh::validate_slurm_job_id(&slurm_job_id)
+        {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "status_batch",
+                "invalid_scheduler_job_id",
+                &error.to_string(),
+                FailureClass::Validation,
+                false,
+            )
+            .await?;
+            continue;
+        }
         let profile = deployment_profile_for_execution(pool, &execution).await?;
         let Some(profile) = profile else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "status_batch",
+                "missing_deployment_profile",
+                "no deployment profile is available for this Slurm execution",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
             continue;
         };
-        let Ok(DeploymentConfig::SlurmRemote(deployment)) =
-            serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
-        else {
-            continue;
-        };
+        let deployment =
+            match serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()) {
+                Ok(DeploymentConfig::SlurmRemote(deployment)) => deployment,
+                Ok(_) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "status_batch",
+                        "invalid_deployment_profile_kind",
+                        "the execution deployment profile is not a Slurm remote profile",
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(error) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "status_batch",
+                        "invalid_deployment_profile",
+                        &format!("the Slurm deployment profile is invalid: {error}"),
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
         let username = resolve_remote_user(&deployment);
         let target = SlurmTarget::from_deployment(&deployment, &username);
         by_target.entry(target).or_default().push(SlurmPollExec {
@@ -4618,30 +4936,34 @@ async fn run_slurm_poll_tick(
         );
         let job_ids: Vec<String> = group.iter().map(|e| e.slurm_job_id.clone()).collect();
         let poll_map: HashMap<String, SlurmJobPollResult> = if use_real {
-            let lock_key = target.advisory_lock_key();
-            let mut lock_tx = pool.begin().await?;
-            let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .fetch_one(&mut *lock_tx)
-                .await?;
-            if !locked {
-                lock_tx.rollback().await?;
-                debug!(
-                    login_node = %target.login_node,
-                    "event=slurm_poll_tick_lock_busy"
-                );
-                metrics::record_slurm_poll_error("advisory_lock_busy");
-                continue;
-            }
-            let batch_result = SLURM_SSH_POOL
-                .query_slurm_states(&target, &job_ids)
-                .await
-                .map_err(|e| {
+            match SLURM_SSH_POOL.query_slurm_states(&target, &job_ids).await {
+                Ok(poll_map) => poll_map,
+                Err(error) => {
                     metrics::record_slurm_poll_error("ssh_batch_failed");
-                    sqlx::Error::Protocol(e.to_string())
-                });
-            lock_tx.commit().await?;
-            batch_result?
+                    let detail = error.to_string();
+                    let redacted = beampipe_security::redact_string(&detail);
+                    let failure_class = classify_slurm_poll_failure(&detail);
+                    warn!(
+                        login_node = %target.login_node,
+                        error = %redacted,
+                        affected_executions = group.len(),
+                        "event=slurm_poll_target_failed"
+                    );
+                    for item in group {
+                        record_slurm_poll_failure(
+                            pool,
+                            &item.execution,
+                            "status_batch",
+                            "target_query_failed",
+                            &detail,
+                            failure_class,
+                            true,
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+            }
         } else {
             job_ids
                 .iter()
@@ -4701,14 +5023,79 @@ async fn reconcile_uncertain_slurm_submissions(
             .daliuge_session_id
             .as_deref()
             .filter(|session_id| !session_id.is_empty())
+            .map(str::to_string)
         else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_daliuge_session_id",
+                "the uncertain Slurm submission has no stable DALiuGE session name",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
             continue;
         };
+        if execution.deployment_profile_snapshot.is_some()
+            && profile_from_execution_snapshot(&execution).is_none()
+        {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "invalid_deployment_profile_snapshot",
+                "the persisted deployment profile snapshot is incomplete or invalid",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
+            continue;
+        }
         let Some(profile) = deployment_profile_for_execution(pool, &execution).await? else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_deployment_profile",
+                "no deployment profile is available for uncertain Slurm submission reconciliation",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
             continue;
         };
+        match serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()) {
+            Ok(DeploymentConfig::SlurmRemote(_)) => {}
+            Ok(_) => {
+                record_slurm_poll_failure(
+                    pool,
+                    &execution,
+                    "find_by_name",
+                    "invalid_deployment_profile_kind",
+                    "the execution deployment profile is not a Slurm remote profile",
+                    FailureClass::Configuration,
+                    false,
+                )
+                .await?;
+                continue;
+            }
+            Err(error) => {
+                record_slurm_poll_failure(
+                    pool,
+                    &execution,
+                    "find_by_name",
+                    "invalid_deployment_profile",
+                    &format!("the Slurm deployment profile is invalid: {error}"),
+                    FailureClass::Configuration,
+                    false,
+                )
+                .await?;
+                continue;
+            }
+        }
         let client = slurm_backend_from_profile(Some(&profile), true, execution.created_at).slurm;
-        let matches = match client.find_by_name(session_id).await {
+        let matches = match client.find_by_name(&session_id).await {
             Ok(matches) => matches,
             Err(error) => {
                 let detail = beampipe_security::redact_string(&error.to_string());
@@ -4721,7 +5108,7 @@ async fn reconcile_uncertain_slurm_submissions(
                         raw_state: Some(format!("{:?}", error.kind).to_ascii_lowercase()),
                         reason: Some(detail.clone()),
                         payload: json!({
-                            "daliuge_session_id": session_id,
+                            "daliuge_session_id": &session_id,
                             "operation": "find_by_name",
                             "retryable": error.retryable,
                         }),
@@ -4758,7 +5145,7 @@ async fn reconcile_uncertain_slurm_submissions(
                         reason: Some(
                             "no scheduler job currently matches the stable session name".into(),
                         ),
-                        payload: json!({"daliuge_session_id": session_id}),
+                        payload: json!({"daliuge_session_id": &session_id}),
                         source_version: None,
                         observed_at: Some(Utc::now()),
                     },
@@ -4788,7 +5175,7 @@ async fn reconcile_uncertain_slurm_submissions(
                         reason: observation.reason.clone(),
                         payload: json!({
                             "scheduler_job_id": observation.external_job_id,
-                            "daliuge_session_id": session_id,
+                            "daliuge_session_id": &session_id,
                             "recovered_after_lost_response": true,
                             "source": observation.source,
                         }),
@@ -5176,6 +5563,46 @@ mod tests {
         Some(pool)
     }
 
+    async fn slurm_poll_execution(
+        pool: &sqlx::PgPool,
+        suffix: &str,
+    ) -> beampipe_db::models::ExecutionRow {
+        let module = format!("jobs_slurm_poll_{suffix}_{}", Uuid::now_v7().simple());
+        let execution = repo::create_execution(
+            pool,
+            &module,
+            json!([{"source_identifier": "source-1"}]),
+            "local",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'awaiting_scheduler',
+                scheduler_name = 'slurm',
+                scheduler_job_id = '4242',
+                submission_state = 'submitted',
+                scheduler_state = 'pending',
+                daliuge_state = 'not_created',
+                output_verification_required = false,
+                output_state = 'not_started'
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(execution.uuid)
+        .execute(pool)
+        .await
+        .unwrap();
+        repo::get_execution(pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
     #[test]
     fn slurm_unknown_does_not_map_to_terminal() {
         let result = SlurmJobPollResult {
@@ -5344,7 +5771,194 @@ mod tests {
     #[test]
     fn active_slurm_job_remains_nonterminal_at_poll_budget() {
         assert!(slurm_active_poll_budget_reached(480, 480));
+        assert!(slurm_active_poll_budget_reached(481, 480));
+        assert!(!slurm_active_poll_budget_reached(479, 480));
         assert!(SchedulerState::from_normalized("RUNNING").is_active());
+    }
+
+    #[test]
+    fn slurm_poll_progress_advances_unknown_and_escalates_only_once() {
+        let first = advance_slurm_poll_progress(None, 479, 480, "scheduler_state_unknown");
+        assert_eq!(first.next_round, 480);
+        assert!(first.operator_escalated);
+        assert_eq!(
+            slurm_poll_round_from_manifest(Some(&first.manifest)),
+            480
+        );
+        assert_eq!(
+            first.manifest["beampipe_run_record"]["slurm_poll"]["operator_escalation"]
+                ["terminalized"],
+            false
+        );
+
+        let second = advance_slurm_poll_progress(
+            Some(first.manifest),
+            480,
+            480,
+            "scheduler_state_unknown",
+        );
+        assert_eq!(second.next_round, 481);
+        assert!(!second.operator_escalated);
+        assert_eq!(
+            second.manifest["beampipe_run_record"]["slurm_poll"]["operator_escalation"]["round"],
+            480
+        );
+    }
+
+    #[test]
+    fn slurm_poll_failure_classification_is_specific() {
+        assert_eq!(
+            classify_slurm_poll_failure("known_hosts rejected host key"),
+            FailureClass::Authorization
+        );
+        assert_eq!(
+            classify_slurm_poll_failure("SSH authentication failed"),
+            FailureClass::Authentication
+        );
+        assert_eq!(
+            classify_slurm_poll_failure("connection timed out"),
+            FailureClass::Timeout
+        );
+        assert_eq!(
+            classify_slurm_poll_failure("connection refused"),
+            FailureClass::Connectivity
+        );
+        assert_eq!(
+            classify_slurm_poll_failure("scheduler command failed"),
+            FailureClass::DependencyUnavailable
+        );
+    }
+
+    #[test]
+    fn unknown_scheduler_state_does_not_false_terminalize() {
+        let decision = beampipe_domain::ExecutionAxes {
+            control_phase: ControlPhase::Monitoring,
+            submission: SubmissionState::Submitted,
+            scheduler: SchedulerState::Unknown,
+            daliuge: DaliugeState::Running,
+            outputs: OutputState::NotStarted,
+            output_verification_required: false,
+        }
+        .reconcile();
+
+        assert!(!decision.status.is_terminal());
+        assert!(decision.terminal_outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_slurm_round_and_operator_escalation_are_durable() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let execution = slurm_poll_execution(&pool, "unknown").await;
+        let unknown = SlurmJobPollResult {
+            raw_state: String::new(),
+            normalized_state: "UNKNOWN".into(),
+            source: "none",
+            exit_code: None,
+            raw_line: None,
+        };
+        let policy = PollPolicy {
+            slurm_max_rounds: Some(1),
+            ..Default::default()
+        };
+
+        apply_slurm_poll_update(
+            &pool,
+            execution.uuid,
+            &execution,
+            &unknown,
+            0,
+            &policy,
+        )
+        .await
+        .unwrap();
+        let first = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!first.status_enum().unwrap().is_terminal());
+        assert_eq!(
+            slurm_poll_round_from_manifest(first.workflow_manifest.as_ref()),
+            1
+        );
+        assert!(slurm_poll_operator_escalated(
+            first.workflow_manifest.as_ref()
+        ));
+
+        apply_slurm_poll_update(&pool, first.uuid, &first, &unknown, 1, &policy)
+            .await
+            .unwrap();
+        let second = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!second.status_enum().unwrap().is_terminal());
+        assert_eq!(
+            slurm_poll_round_from_manifest(second.workflow_manifest.as_ref()),
+            2
+        );
+        let observations = repo::list_execution_observations(&pool, execution.uuid, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| {
+                    observation.raw_state.as_deref() == Some("poll_budget_escalation")
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn slurm_poll_failure_is_redacted_and_persisted_as_unknown() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let execution = slurm_poll_execution(&pool, "failure").await;
+        record_slurm_poll_failure(
+            &pool,
+            &execution,
+            "status_batch",
+            "target_query_failed",
+            "SSH connection failed token=supersecret",
+            FailureClass::Connectivity,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let updated = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.scheduler_state.as_deref(), Some("unknown"));
+        assert_eq!(updated.failure_class.as_deref(), Some("connectivity"));
+        assert!(!updated
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("supersecret"));
+        assert_eq!(
+            slurm_poll_round_from_manifest(updated.workflow_manifest.as_ref()),
+            1
+        );
+        let observations = repo::list_execution_observations(&pool, execution.uuid, 100, 0)
+            .await
+            .unwrap();
+        let failure = observations
+            .iter()
+            .find(|observation| observation.raw_state.as_deref() == Some("target_query_failed"))
+            .unwrap();
+        assert!(!failure
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("supersecret"));
     }
 
     #[test]
