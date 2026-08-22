@@ -3,7 +3,7 @@
 use crate::OrchestrationError;
 use beampipe_profiles::ProfileValidationError;
 use beampipe_security::{
-    allow_inline_secrets_override, bool_env, is_process_production, process_env_name,
+    allow_inline_secrets_override, bool_env, is_runtime_production, runtime_env_name,
 };
 use russh::keys::{decode_secret_key, load_secret_key, PrivateKey};
 use serde::Serialize;
@@ -102,11 +102,11 @@ impl SlurmKeySource {
 }
 
 pub fn beampipe_env() -> String {
-    process_env_name()
+    runtime_env_name()
 }
 
 pub fn is_production_env() -> bool {
-    is_process_production()
+    is_runtime_production()
 }
 
 fn parse_bool_env(name: &str) -> Option<bool> {

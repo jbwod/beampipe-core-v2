@@ -2,11 +2,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::{LazyLock, RwLock};
 use thiserror::Error;
 use utoipa::ToSchema;
 use zeroize::Zeroizing;
 
 pub const REDACTED: &str = "[REDACTED]";
+
+static RUNTIME_ENV_NAME: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretPolicy {
@@ -25,6 +28,11 @@ impl SecretPolicy {
 
     pub fn from_process_env() -> Self {
         Self::from_env_name(&std::env::var("BEAMPIPE_ENV").unwrap_or_else(|_| "development".into()))
+    }
+
+    /// Resolve the effective runtime environment selected by fully resolved settings.
+    pub fn from_runtime_env() -> Self {
+        Self::from_env_name(&runtime_env_name())
     }
 
     pub fn allow_inline(self) -> bool {
@@ -50,6 +58,26 @@ pub fn process_env_name() -> String {
 
 pub fn is_process_production() -> bool {
     is_production_env_name(&process_env_name())
+}
+
+/// Install the environment selected by the application's resolved settings without mutating
+/// the process environment. Reconfiguration is supported for tests and embedded runtimes.
+pub fn configure_runtime_env(env: &str) {
+    *RUNTIME_ENV_NAME
+        .write()
+        .expect("runtime environment lock poisoned") = Some(normalize_env_name(env));
+}
+
+pub fn runtime_env_name() -> String {
+    RUNTIME_ENV_NAME
+        .read()
+        .expect("runtime environment lock poisoned")
+        .clone()
+        .unwrap_or_else(process_env_name)
+}
+
+pub fn is_runtime_production() -> bool {
+    is_production_env_name(&runtime_env_name())
 }
 
 pub fn parse_bool_value(value: &str) -> Option<bool> {

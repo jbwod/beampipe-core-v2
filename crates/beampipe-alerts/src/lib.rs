@@ -259,7 +259,7 @@ async fn deliver_webhook(config: &Value, body: &Value) -> Result<(), AlertError>
 }
 
 fn secret_policy() -> SecretPolicy {
-    SecretPolicy::from_process_env()
+    SecretPolicy::from_runtime_env()
 }
 
 fn resolve_secret_field(

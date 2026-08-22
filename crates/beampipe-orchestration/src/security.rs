@@ -10,11 +10,11 @@ use beampipe_security::bool_env;
 
 const DEV_JWT_SECRETS: &[&str] = &["secret-key", "local-dev-jwt-secret-change-me"];
 
-fn security_strict_enabled() -> bool {
+fn security_strict_enabled(settings: &Settings) -> bool {
     if let Some(v) = bool_env("BEAMPIPE_SECURITY_STRICT") {
         return v;
     }
-    is_production_env()
+    beampipe_security::is_production_env_name(&settings.beampipe_env)
 }
 
 fn use_real_backends() -> bool {
@@ -148,7 +148,8 @@ fn push_resolved_slurm_issues(errors: &mut Vec<String>, creds: &SlurmSshCredenti
 }
 
 pub fn validate_security(settings: &Settings) -> Result<(), Vec<String>> {
-    if !security_strict_enabled() {
+    beampipe_security::configure_runtime_env(&settings.beampipe_env);
+    if !security_strict_enabled(settings) {
         return Ok(());
     }
     let errors = collect_security_issues(settings);

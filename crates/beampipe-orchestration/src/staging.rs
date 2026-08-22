@@ -28,7 +28,7 @@ pub fn casda_password_from_env() -> Option<String> {
     match std::env::var("CASDA_PASSWORD_FILE") {
         Ok(path) if !path.trim().is_empty() => resolve_secret(
             &SecretRef::File { file: path },
-            SecretPolicy::from_process_env(),
+            SecretPolicy::from_runtime_env(),
         )
         .ok()
         .map(|secret| secret.expose().to_string()),
