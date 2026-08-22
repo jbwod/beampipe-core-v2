@@ -390,6 +390,11 @@ fn derive_session_paths(
 ) -> Result<(String, String), OrchestrationError> {
     let jobsub_path = normalized_remote_absolute_path(jobsub_path, "job submission script path")?;
     let dlg_root = normalized_remote_absolute_path(dlg_root, "DLG_ROOT")?;
+    if dlg_root == Path::new("/") {
+        return Err(OrchestrationError::Backend(
+            "DLG_ROOT must be a dedicated directory, not the remote filesystem root".into(),
+        ));
+    }
     if !jobsub_path.starts_with(&dlg_root) || jobsub_path == dlg_root {
         return Err(OrchestrationError::Backend(
             "job submission script path must be beneath DLG_ROOT".into(),
@@ -646,6 +651,7 @@ mod tests {
                 "accepted {jobsub_path:?}"
             );
         }
+        assert!(derive_session_paths("/sessions/execution/jobsub.sh", "/").is_err());
     }
 
     #[test]
