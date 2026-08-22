@@ -23,6 +23,17 @@ pub struct SlurmSubmitResult {
     pub composite_scheduler_job_id: String,
 }
 
+/// DALiuGE uses the first PGT array item as the physical-graph filename. Bind it
+/// before Core hashes the immutable artifact and repeat this at the transport
+/// boundary so the stored evidence and uploaded payload cannot drift.
+pub fn bind_physical_graph_to_session(pgt_json: &mut Value, session_id: &str) {
+    if let Value::Array(items) = pgt_json {
+        if let Some(graph_name) = items.first_mut() {
+            *graph_name = Value::String(format!("{session_id}.pgt.graph"));
+        }
+    }
+}
+
 pub fn render_generated_ini(
     deployment: &SlurmRemoteDeploymentConfig,
     username: &str,
@@ -445,11 +456,7 @@ pub async fn submit_slurm_session(
         .filter(|t| !t.trim().is_empty())
         .map(|_| format!("{staging_dir}/BeampipeExecution_{execution_id}.slurm"));
 
-    if let Value::Array(ref mut arr) = pgt_json {
-        if !arr.is_empty() {
-            arr[0] = Value::String(format!("{session_id}.pgt.graph"));
-        }
-    }
+    bind_physical_graph_to_session(&mut pgt_json, &session_id);
 
     let target = SlurmTarget::from_deployment(&deployment, &username);
     let mut session = SlurmSshSession::connect(&target).await?;
@@ -615,6 +622,18 @@ mod tests {
             parse_dispatched_sbatch_job_id("module ready\n123456;setonix\n").unwrap(),
             "123456"
         );
+    }
+
+    #[test]
+    fn physical_graph_session_binding_is_deterministic_and_idempotent() {
+        let mut physical_graph = serde_json::json!(["translator-name.pgt.graph", {"oid": "a"}]);
+
+        bind_physical_graph_to_session(&mut physical_graph, "beampipe-session-1");
+        let dispatched = physical_graph.clone();
+        bind_physical_graph_to_session(&mut physical_graph, "beampipe-session-1");
+
+        assert_eq!(physical_graph, dispatched);
+        assert_eq!(physical_graph[0], "beampipe-session-1.pgt.graph");
     }
 
     #[test]

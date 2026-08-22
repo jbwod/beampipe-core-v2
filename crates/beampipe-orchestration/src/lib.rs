@@ -414,9 +414,10 @@ where
             .translator
             .translate(graph, &self.translate_config)
             .await?;
-        let pgt_json = translated.pgt_json.ok_or_else(|| {
+        let mut pgt_json = translated.pgt_json.ok_or_else(|| {
             OrchestrationError::Backend("slurm translate missing pgt_json".into())
         })?;
+        slurm_deploy::bind_physical_graph_to_session(&mut pgt_json, &session_id);
         let physical_graph = pgt_json.clone();
         let scheduler_job_id = self
             .slurm
