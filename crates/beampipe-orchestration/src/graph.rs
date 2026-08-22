@@ -2,7 +2,7 @@ use crate::OrchestrationError;
 use beampipe_project::{GraphConfig, ProjectConfig};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
@@ -30,7 +30,7 @@ async fn resolve_graph_config_with_limits(
     let bytes = if let Some(url) = graph.url.as_deref().filter(|url| !url.trim().is_empty()) {
         fetch_graph(url, timeout, max_bytes).await?
     } else if let Some(path) = graph.path.as_deref().filter(|path| !path.trim().is_empty()) {
-        read_graph(Path::new(path), max_bytes).await?
+        read_graph(&resolve_local_graph_path(path), max_bytes).await?
     } else {
         return Err(OrchestrationError::Backend(
             "graph must specify url or path".into(),
@@ -41,6 +41,24 @@ async fn resolve_graph_config_with_limits(
     serde_json::from_slice(&bytes).map_err(|error| {
         OrchestrationError::Backend(format!("graph contains invalid JSON: {error}"))
     })
+}
+
+fn resolve_local_graph_path(path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    resolve_local_graph_path_with_home(
+        path,
+        std::env::var_os("BEAMPIPE_HOME")
+            .filter(|home| !home.is_empty())
+            .as_deref()
+            .map(Path::new),
+    )
+}
+
+fn resolve_local_graph_path_with_home(path: &Path, home: Option<&Path>) -> PathBuf {
+    home.map_or_else(|| path.to_path_buf(), |home| home.join(path))
 }
 
 async fn fetch_graph(
@@ -145,6 +163,21 @@ mod tests {
             path: None,
             sha256: Some(digest(bytes)),
         }
+    }
+
+    #[test]
+    fn relative_graph_paths_resolve_from_the_installation_home() {
+        assert_eq!(
+            resolve_local_graph_path_with_home(
+                Path::new("config/graphs/wallaby.graph"),
+                Some(Path::new("/srv/beampipe")),
+            ),
+            PathBuf::from("/srv/beampipe/config/graphs/wallaby.graph")
+        );
+        assert_eq!(
+            resolve_local_graph_path_with_home(Path::new("config/graph.json"), None),
+            PathBuf::from("config/graph.json")
+        );
     }
 
     #[tokio::test]

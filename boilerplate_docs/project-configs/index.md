@@ -141,8 +141,10 @@ The bundled WALLABY examples use graph files vendored from
 `6cc5c4cdc49c39a843b81ab14543d1c9c71b015f`. Setup materializes both the
 qualified Setonix graph and the no-download E2E graph under `config/graphs`;
 Compose mounts that directory read-only into API, scheduler, and worker roles.
-The configured SHA-256 remains authoritative and prevents a modified local
-file from executing.
+Relative graph paths resolve from `BEAMPIPE_HOME` for native installations and
+from the process working directory when no installation is selected. The
+configured SHA-256 remains authoritative and prevents a modified local file
+from executing.
 
 ## Automation
 
