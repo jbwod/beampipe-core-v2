@@ -2257,6 +2257,16 @@ pub async fn apply_execution_state_patch_with_transition(
         return Ok(None);
     };
 
+    let current_status = locked.status_enum().unwrap_or(ExecutionStatus::Pending);
+    if current_status.is_terminal() {
+        tx.commit().await?;
+        return Ok(Some(ExecutionStateApplyResult {
+            row: locked,
+            previous_status: current_status,
+            entered_terminal: false,
+        }));
+    }
+
     let previous_phase = locked.control_phase.clone();
     let control_phase = patch.control_phase.map(|value| value.as_str());
     let submission_state = patch.submission_state.map(|value| value.as_str());
@@ -2325,24 +2335,14 @@ pub async fn apply_execution_state_patch_with_transition(
     .await?;
 
     let decision = projected.axes().reconcile();
-    let current_status = locked.status_enum().unwrap_or(ExecutionStatus::Pending);
-    let preserve_terminal = current_status.is_terminal();
-    let aggregate_status = if preserve_terminal
-        || (decision.status == ExecutionStatus::Pending
-            && current_status != ExecutionStatus::Pending)
+    let aggregate_status = if decision.status == ExecutionStatus::Pending
+        && current_status != ExecutionStatus::Pending
     {
         current_status
     } else {
         decision.status
     };
-    let aggregate_outcome = if preserve_terminal {
-        projected
-            .terminal_outcome
-            .as_deref()
-            .and_then(TerminalOutcome::parse)
-    } else {
-        decision.terminal_outcome
-    };
+    let aggregate_outcome = decision.terminal_outcome;
     let decision_outcome = aggregate_outcome.map(|value| value.as_str());
     let terminal = aggregate_status.is_terminal();
     let row = sqlx::query_as::<_, ExecutionRow>(
@@ -2956,15 +2956,33 @@ pub async fn record_submission_receipt(
 
     let current_status = locked.status_enum().unwrap_or(ExecutionStatus::Pending);
     let preserve_terminal = current_status.is_terminal();
+    let recovered_scheduler_state = (current_submission == SubmissionState::Uncertain
+        && input.scheduler_name == "slurm"
+        && locked.scheduler_job_id == input.scheduler_job_id)
+        .then(|| {
+            locked
+                .scheduler_state
+                .as_deref()
+                .and_then(SchedulerState::parse)
+        })
+        .flatten();
+    let receipt_status = if let Some(state) = recovered_scheduler_state {
+        let mut axes = locked.axes();
+        axes.submission = SubmissionState::Submitted;
+        axes.scheduler = state;
+        axes.reconcile().status
+    } else {
+        input.next_status
+    };
     if !preserve_terminal
-        && current_status != input.next_status
-        && !current_status.allows(input.next_status)
+        && current_status != receipt_status
+        && !current_status.allows(receipt_status)
     {
         tx.rollback().await?;
         return Err(sqlx::Error::Protocol(format!(
             "invalid submission receipt ledger transition from {} to {}",
             current_status.as_str(),
-            input.next_status.as_str()
+            receipt_status.as_str()
         )));
     }
 
@@ -3010,14 +3028,28 @@ pub async fn record_submission_receipt(
     let next_status = if preserve_terminal {
         current_status
     } else {
-        input.next_status
+        receipt_status
     };
-    let scheduler_state = if input.scheduler_name == "slurm" {
-        SchedulerState::Pending
+    let scheduler_state = if preserve_terminal {
+        locked
+            .scheduler_state
+            .as_deref()
+            .and_then(SchedulerState::parse)
+            .unwrap_or_default()
     } else {
-        SchedulerState::NotSubmitted
+        recovered_scheduler_state.unwrap_or(if input.scheduler_name == "slurm" {
+            SchedulerState::Pending
+        } else {
+            SchedulerState::NotSubmitted
+        })
     };
-    let daliuge_state = if input.scheduler_name == "slurm" {
+    let daliuge_state = if preserve_terminal {
+        locked
+            .daliuge_state
+            .as_deref()
+            .and_then(DaliugeState::parse)
+            .unwrap_or_default()
+    } else if input.scheduler_name == "slurm" {
         DaliugeState::NotCreated
     } else {
         DaliugeState::Running
@@ -3764,6 +3796,22 @@ pub async fn apply_execution_patch_with_correlation(
             last_error = $8,
             started_at = $9,
             completed_at = $10,
+            control_phase = CASE
+                WHEN $2 IN ('completed', 'failed', 'cancelled', 'not_submitted') THEN 'terminal'
+                ELSE control_phase
+            END,
+            terminal_outcome = CASE
+                WHEN $2 = 'completed' THEN COALESCE(terminal_outcome, 'succeeded')
+                WHEN $2 = 'failed' THEN COALESCE(terminal_outcome, 'failed')
+                WHEN $2 = 'cancelled' THEN COALESCE(terminal_outcome, 'cancelled')
+                ELSE terminal_outcome
+            END,
+            phase_timestamps = CASE
+                WHEN $2 IN ('completed', 'failed', 'cancelled', 'not_submitted')
+                    AND NOT (phase_timestamps ? 'terminal')
+                THEN phase_timestamps || jsonb_build_object('terminal', to_jsonb(now()))
+                ELSE phase_timestamps
+            END,
             updated_at = now()
         WHERE uuid = $1
         RETURNING *
@@ -3791,6 +3839,71 @@ pub async fn cancel_execution_with_correlation(
     actor: &str,
     correlation_id: Option<&str>,
 ) -> Result<Option<ExecutionRow>, sqlx::Error> {
+    cancel_execution_with_correlation_inner(pool, id, actor, correlation_id, None).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmedExternalCancellation {
+    Slurm {
+        scheduler_job_id: String,
+        exact_job_id: String,
+    },
+    Daliuge { session_id: String },
+}
+
+pub async fn cancel_execution_with_confirmed_external_cancellation(
+    pool: &PgPool,
+    id: Uuid,
+    actor: &str,
+    correlation_id: Option<&str>,
+    confirmation: ConfirmedExternalCancellation,
+) -> Result<Option<ExecutionRow>, sqlx::Error> {
+    match &confirmation {
+        ConfirmedExternalCancellation::Slurm { exact_job_id, .. }
+            if exact_job_id.is_empty()
+                || !exact_job_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit()) =>
+        {
+            return Err(sqlx::Error::Protocol(
+                "confirmed Slurm cancellation requires an exact ASCII-digit job ID".into(),
+            ));
+        }
+        ConfirmedExternalCancellation::Daliuge { session_id } if session_id.trim().is_empty() => {
+            return Err(sqlx::Error::Protocol(
+                "confirmed DALiuGE cancellation requires an exact session ID".into(),
+            ));
+        }
+        _ => {}
+    }
+    cancel_execution_with_correlation_inner(pool, id, actor, correlation_id, Some(confirmation))
+        .await
+}
+
+async fn cancel_execution_with_correlation_inner(
+    pool: &PgPool,
+    id: Uuid,
+    actor: &str,
+    correlation_id: Option<&str>,
+    confirmation: Option<ConfirmedExternalCancellation>,
+) -> Result<Option<ExecutionRow>, sqlx::Error> {
+    let (confirmed_backend, confirmed_external_id, confirmed_exact_external_id) =
+        match confirmation.as_ref() {
+            Some(ConfirmedExternalCancellation::Slurm {
+                scheduler_job_id,
+                exact_job_id,
+            }) => (
+                Some("slurm"),
+                Some(scheduler_job_id.as_str()),
+                Some(exact_job_id.as_str()),
+            ),
+            Some(ConfirmedExternalCancellation::Daliuge { session_id }) => (
+                Some("daliuge"),
+                Some(session_id.as_str()),
+                Some(session_id.as_str()),
+            ),
+            None => (None, None, None),
+        };
     let mut tx = pool.begin().await?;
     let updated = sqlx::query_as::<_, ExecutionRow>(
         r#"
@@ -3799,6 +3912,29 @@ pub async fn cancel_execution_with_correlation(
             execution_phase = NULL,
             control_phase = 'terminal',
             terminal_outcome = 'cancelled',
+            scheduler_state = CASE
+                WHEN $2 = 'slurm' THEN 'cancelled'
+                ELSE scheduler_state
+            END,
+            scheduler_raw_state = CASE
+                WHEN $2 = 'slurm' THEN 'CANCELLED_CONFIRMED'
+                ELSE scheduler_raw_state
+            END,
+            scheduler_reason = CASE
+                WHEN $2 = 'slurm' THEN 'external cancellation confirmed'
+                ELSE scheduler_reason
+            END,
+            daliuge_state = CASE
+                WHEN $2 = 'daliuge' THEN 'cancelled'
+                ELSE daliuge_state
+            END,
+            daliuge_raw_status = CASE
+                WHEN $2 = 'daliuge' THEN jsonb_build_object(
+                    'state', 'cancelled',
+                    'confirmation', 'external cancellation confirmed'
+                )
+                ELSE daliuge_raw_status
+            END,
             last_error = NULL,
             failure_class = NULL,
             phase_timestamps = CASE
@@ -3809,11 +3945,29 @@ pub async fn cancel_execution_with_correlation(
             updated_at = now()
         WHERE uuid = $1
           AND status IN ('pending', 'running', 'awaiting_scheduler', 'retrying', 'cancelled')
-          AND COALESCE(submission_state, 'not_started') NOT IN ('in_flight', 'uncertain')
+          AND (
+              $2::TEXT IS NULL
+              OR ($2 = 'slurm' AND scheduler_name = 'slurm' AND scheduler_job_id = $3)
+              OR ($2 = 'daliuge' AND scheduler_name = 'daliuge' AND daliuge_session_id = $3)
+          )
+          AND (
+              COALESCE(submission_state, 'not_started') NOT IN ('in_flight', 'uncertain')
+              OR (
+                  $2 = 'slurm'
+                  AND submission_state = 'uncertain'
+                  AND scheduler_name = 'slurm'
+                  AND scheduler_job_id ~ '^[0-9]+$'
+                  AND scheduler_job_id = $3
+                  AND scheduler_job_id = $4
+              )
+          )
         RETURNING *
         "#,
     )
     .bind(id)
+    .bind(confirmed_backend)
+    .bind(confirmed_external_id)
+    .bind(confirmed_exact_external_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = updated else {
@@ -3860,6 +4014,34 @@ pub async fn cancel_execution_with_correlation(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    if let (Some(backend), Some(external_id)) = (confirmed_backend, confirmed_external_id) {
+        let (kind, raw_state) = if backend == "slurm" {
+            ("scheduler", "CANCELLED_CONFIRMED")
+        } else {
+            ("daliuge_session", "cancelled_confirmed")
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO execution_observations (
+                uuid, execution_id, kind, normalized_state, raw_state, reason,
+                payload, source_version, observed_at
+            )
+            VALUES ($1, $2, $3, 'cancelled', $4, 'external cancellation confirmed',
+                    $5, NULL, now())
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(id)
+        .bind(kind)
+        .bind(raw_state)
+        .bind(json!({
+            "backend": backend,
+            "external_id": external_id,
+            "exact_external_id": confirmed_exact_external_id,
+        }))
+        .execute(&mut *tx)
+        .await?;
+    }
     insert_provenance_event(
         &mut *tx,
         "execution.cancelled",
@@ -3871,6 +4053,10 @@ pub async fn cancel_execution_with_correlation(
         &serde_json::json!({
             "scheduler_job_id": row.scheduler_job_id,
             "daliuge_session_id": row.daliuge_session_id,
+            "external_cancellation_confirmed": confirmation.is_some(),
+            "confirmed_backend": confirmed_backend,
+            "confirmed_external_id": confirmed_external_id,
+            "confirmed_exact_external_id": confirmed_exact_external_id,
             "invalidated_execute_jobs": invalidated_jobs,
         }),
     )
@@ -5577,15 +5763,27 @@ pub async fn list_slurm_executions_pending_poll(
 ) -> Result<Vec<crate::models::ExecutionRow>, sqlx::Error> {
     sqlx::query_as::<_, crate::models::ExecutionRow>(
         r#"
-        SELECT *
-        FROM batch_execution_record
-        WHERE scheduler_name = 'slurm'
-          AND scheduler_job_id IS NOT NULL
-          AND status IN ('awaiting_scheduler', 'running')
-          AND COALESCE(scheduler_state, 'unknown') NOT IN (
+        SELECT execution.*
+        FROM batch_execution_record AS execution
+        WHERE execution.scheduler_name = 'slurm'
+          AND execution.scheduler_job_id IS NOT NULL
+          AND execution.status IN ('awaiting_scheduler', 'running')
+          AND COALESCE(execution.scheduler_state, 'unknown') NOT IN (
               'succeeded', 'failed', 'cancelled', 'timed_out'
           )
-        ORDER BY created_at ASC
+          AND NOT EXISTS (
+              SELECT 1
+              FROM jobs AS active_execute
+              WHERE active_execute.execution_id = execution.uuid
+                AND active_execute.kind = 'execute'
+                AND active_execute.status = 'running'
+                AND COALESCE(
+                    active_execute.lease_expires_at,
+                    active_execute.locked_until,
+                    '-infinity'::TIMESTAMPTZ
+                ) > now()
+          )
+        ORDER BY execution.created_at ASC
         "#,
     )
     .fetch_all(pool)
@@ -5597,14 +5795,27 @@ pub async fn list_slurm_submissions_pending_reconciliation(
 ) -> Result<Vec<crate::models::ExecutionRow>, sqlx::Error> {
     sqlx::query_as::<_, crate::models::ExecutionRow>(
         r#"
-        SELECT *
-        FROM batch_execution_record
-        WHERE scheduler_name = 'slurm'
-          AND scheduler_job_id IS NULL
-          AND daliuge_session_id IS NOT NULL
-          AND submission_state IN ('in_flight', 'uncertain')
-          AND terminal_outcome IS NULL
-        ORDER BY created_at ASC
+        SELECT execution.*
+        FROM batch_execution_record AS execution
+        WHERE execution.scheduler_name = 'slurm'
+          AND execution.scheduler_job_id IS NULL
+          AND execution.daliuge_session_id IS NOT NULL
+          AND execution.submission_state IN ('in_flight', 'uncertain')
+          AND execution.status NOT IN ('completed', 'failed', 'cancelled', 'not_submitted')
+          AND execution.terminal_outcome IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM jobs AS active_execute
+              WHERE active_execute.execution_id = execution.uuid
+                AND active_execute.kind = 'execute'
+                AND active_execute.status = 'running'
+                AND COALESCE(
+                    active_execute.lease_expires_at,
+                    active_execute.locked_until,
+                    '-infinity'::TIMESTAMPTZ
+                ) > now()
+          )
+        ORDER BY execution.created_at ASC
         "#,
     )
     .fetch_all(pool)
@@ -5617,17 +5828,30 @@ pub async fn list_rest_executions_pending_poll(
 ) -> Result<Vec<crate::models::ExecutionRow>, sqlx::Error> {
     sqlx::query_as::<_, crate::models::ExecutionRow>(
         r#"
-        SELECT *
-        FROM batch_execution_record
-        WHERE scheduler_name = 'daliuge'
-          AND daliuge_session_id IS NOT NULL
+        SELECT execution.*
+        FROM batch_execution_record AS execution
+        WHERE execution.scheduler_name = 'daliuge'
+          AND execution.daliuge_session_id IS NOT NULL
           AND (
-              status = 'running'
-              OR submission_state IN ('in_flight', 'uncertain')
+              execution.status = 'running'
+              OR execution.submission_state IN ('in_flight', 'uncertain')
           )
-          AND terminal_outcome IS NULL
-          AND COALESCE(daliuge_state, 'unknown') NOT IN ('finished', 'failed', 'cancelled')
-        ORDER BY created_at ASC
+          AND execution.status NOT IN ('completed', 'failed', 'cancelled', 'not_submitted')
+          AND execution.terminal_outcome IS NULL
+          AND COALESCE(execution.daliuge_state, 'unknown') NOT IN ('finished', 'failed', 'cancelled')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM jobs AS active_execute
+              WHERE active_execute.execution_id = execution.uuid
+                AND active_execute.kind = 'execute'
+                AND active_execute.status = 'running'
+                AND COALESCE(
+                    active_execute.lease_expires_at,
+                    active_execute.locked_until,
+                    '-infinity'::TIMESTAMPTZ
+                ) > now()
+          )
+        ORDER BY execution.created_at ASC
         "#,
     )
     .fetch_all(pool)

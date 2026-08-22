@@ -4017,14 +4017,6 @@ async fn apply_dim_poll_update(
                         Some(SchedulerState::Succeeded | SchedulerState::NotSubmitted)
                     ),
             )),
-            submission_state: matches!(
-                execution
-                    .submission_state
-                    .as_deref()
-                    .and_then(SubmissionState::parse),
-                Some(SubmissionState::InFlight | SubmissionState::Uncertain)
-            )
-            .then_some(SubmissionState::Submitted),
             daliuge_state: Some(daliuge_state),
             daliuge_raw_status: poll_summary.get("status").cloned(),
             last_reconciled_at: Some(Utc::now()),
@@ -4033,6 +4025,14 @@ async fn apply_dim_poll_update(
     )
     .await?
     .ok_or_else(|| sqlx::Error::Protocol("execution disappeared during DIM poll".into()))?;
+    if transition.previous_status.is_terminal() {
+        debug!(
+            execution_id = %execution_id,
+            status = transition.previous_status.as_str(),
+            "event=dim_poll_late_observation_ignored"
+        );
+        return Ok(());
+    }
     let entered_terminal = transition.entered_terminal;
     let reconciled = transition.row;
     metrics::record_reconciliation_result("daliuge", "observed");
@@ -4098,6 +4098,16 @@ async fn apply_dim_poll_update(
     if poll_round + 1 >= max_rounds {
         let timed_out =
             merge_scheduler_timeout_into_manifest(Some(manifest), "DIM poll exceeded max rounds");
+        repo::apply_execution_state_patch(
+            pool,
+            execution_id,
+            ExecutionStatePatch {
+                failure_class: Some(FailureClass::Timeout),
+                last_error: Some("DIM poll timeout".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
         repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
@@ -4108,18 +4118,6 @@ async fn apply_dim_poll_update(
                 ..LedgerPatch::default()
             },
             correlation_id,
-        )
-        .await?;
-        repo::apply_execution_state_patch(
-            pool,
-            execution_id,
-            ExecutionStatePatch {
-                control_phase: Some(ControlPhase::Terminal),
-                terminal_outcome: Some(TerminalOutcome::Failed),
-                failure_class: Some(FailureClass::Timeout),
-                last_error: Some("DIM poll timeout".into()),
-                ..Default::default()
-            },
         )
         .await?;
         let sources = source_identifiers_from_json(&execution.sources);
@@ -4542,6 +4540,14 @@ async fn apply_slurm_poll_update(
     )
     .await?
     .ok_or_else(|| sqlx::Error::Protocol("execution disappeared during Slurm poll".into()))?;
+    if transition.previous_status.is_terminal() {
+        debug!(
+            execution_id = %execution_id,
+            status = transition.previous_status.as_str(),
+            "event=slurm_poll_late_observation_ignored"
+        );
+        return Ok(());
+    }
     let entered_terminal = transition.entered_terminal;
     let reconciled = transition.row;
     metrics::record_reconciliation_result("slurm", scheduler_state.as_str());
@@ -5190,6 +5196,27 @@ async fn reconcile_uncertain_slurm_submissions(
                 .await?;
             }
             [observation] => {
+                if let Err(error) =
+                    beampipe_orchestration::slurm_ssh::validate_slurm_job_id(
+                        &observation.external_job_id,
+                    )
+                {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "find_by_name",
+                        "invalid_recovered_scheduler_job_id",
+                        &error.to_string(),
+                        FailureClass::Validation,
+                        false,
+                    )
+                    .await?;
+                    metrics::record_reconciliation_result(
+                        "slurm_submission",
+                        "invalid_exact_job_id",
+                    );
+                    continue;
+                }
                 repo::record_execution_observation(
                     pool,
                     execution.uuid,
@@ -5203,6 +5230,8 @@ async fn reconcile_uncertain_slurm_submissions(
                             "daliuge_session_id": &session_id,
                             "recovered_after_lost_response": true,
                             "source": observation.source,
+                            "submission_receipt_present": false,
+                            "submission_state": SubmissionState::Uncertain.as_str(),
                         }),
                         source_version: None,
                         observed_at: Some(observation.observed_at),
@@ -5213,8 +5242,7 @@ async fn reconcile_uncertain_slurm_submissions(
                     pool,
                     execution.uuid,
                     ExecutionStatePatch {
-                        control_phase: Some(ControlPhase::Submitted),
-                        submission_state: Some(SubmissionState::Submitted),
+                        submission_state: Some(SubmissionState::Uncertain),
                         scheduler_job_id: Some(observation.external_job_id.clone()),
                         scheduler_state: Some(observation.state),
                         scheduler_raw_state: Some(observation.raw_state.clone()),
@@ -5225,7 +5253,10 @@ async fn reconcile_uncertain_slurm_submissions(
                     },
                 )
                 .await?;
-                metrics::record_reconciliation_result("slurm_submission", "recovered");
+                metrics::record_reconciliation_result(
+                    "slurm_submission",
+                    "recovered_unreceipted",
+                );
             }
             observations => {
                 let job_ids: Vec<_> = observations
@@ -6048,6 +6079,252 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("supersecret"));
+    }
+
+    #[tokio::test]
+    async fn dim_observations_do_not_forge_a_submission_receipt() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+
+        for submission in [SubmissionState::InFlight, SubmissionState::Uncertain] {
+            let suffix = submission.as_str();
+            let module = format!("jobs_dim_unreceipt_{suffix}");
+            let execution = repo::create_execution(
+                &pool,
+                &module,
+                json!([{"source_identifier": format!("source-{suffix}")}]),
+                "local",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let session_id = format!("BeampipeExecution-{}", execution.uuid);
+            assert!(repo::begin_execution_submission(
+                &pool,
+                execution.uuid,
+                "daliuge",
+                &session_id,
+                Some("http://dim.invalid"),
+            )
+            .await
+            .unwrap());
+            if submission == SubmissionState::Uncertain {
+                repo::apply_execution_state_patch(
+                    &pool,
+                    execution.uuid,
+                    ExecutionStatePatch {
+                        submission_state: Some(SubmissionState::Uncertain),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let before = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            apply_dim_poll_update(
+                &pool,
+                execution.uuid,
+                &before,
+                BackendPoll {
+                    status: ExecutionStatus::Running,
+                    poll_summary: json!({
+                        "status": 2,
+                        "normalized_session_state": "running",
+                    }),
+                },
+                0,
+                &PollPolicy::default(),
+                None,
+                None,
+                true,
+                false,
+                false,
+                "test",
+            )
+            .await
+            .unwrap();
+            let observed = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                observed.submission_state.as_deref(),
+                Some(submission.as_str())
+            );
+            assert!(observed.physical_graph_sha256.is_none());
+            assert!(repo::list_execution_artifacts(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .iter()
+                .all(|artifact| artifact.kind != "physical_graph"));
+        }
+    }
+
+    #[tokio::test]
+    async fn late_polls_after_confirmed_cancellation_only_append_observations() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+
+        let slurm = slurm_poll_execution(&pool, "late").await;
+        sqlx::query(
+            "UPDATE batch_execution_record SET workflow_manifest = '{\"sentinel\":\"slurm-before-cancel\"}'::jsonb WHERE uuid = $1",
+        )
+        .bind(slurm.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stale_slurm = repo::get_execution(&pool, slurm.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled_slurm = repo::cancel_execution_with_confirmed_external_cancellation(
+            &pool,
+            slurm.uuid,
+            "system:test",
+            Some("cancel:slurm-race"),
+            repo::ConfirmedExternalCancellation::Slurm {
+                scheduler_job_id: "4242".into(),
+                exact_job_id: "4242".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        apply_slurm_poll_update(
+            &pool,
+            slurm.uuid,
+            &stale_slurm,
+            &SlurmJobPollResult {
+                raw_state: "COMPLETED".into(),
+                normalized_state: "COMPLETED".into(),
+                source: "sacct",
+                exit_code: Some(0),
+                raw_line: Some("4242|COMPLETED|0:0".into()),
+            },
+            0,
+            &PollPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let after_slurm = repo::get_execution(&pool, slurm.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_slurm.status, "cancelled");
+        assert_eq!(after_slurm.control_phase, cancelled_slurm.control_phase);
+        assert_eq!(after_slurm.scheduler_state, cancelled_slurm.scheduler_state);
+        assert_eq!(after_slurm.daliuge_state, cancelled_slurm.daliuge_state);
+        assert_eq!(after_slurm.output_state, cancelled_slurm.output_state);
+        assert_eq!(after_slurm.workflow_manifest, cancelled_slurm.workflow_manifest);
+        assert_eq!(
+            after_slurm.workflow_manifest,
+            Some(json!({"sentinel": "slurm-before-cancel"}))
+        );
+
+        let dim = repo::create_execution(
+            &pool,
+            &format!("jobs_dim_late_{}", Uuid::now_v7().simple()),
+            json!([{"source_identifier": "source-dim"}]),
+            "local",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'running',
+                control_phase = 'monitoring',
+                submission_state = 'submitted',
+                scheduler_name = 'daliuge',
+                scheduler_state = 'not_submitted',
+                daliuge_session_id = 'BeampipeExecution-dim-late',
+                daliuge_state = 'running',
+                workflow_manifest = '{"sentinel":"dim-before-cancel"}'::jsonb
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(dim.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stale_dim = repo::get_execution(&pool, dim.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled_dim = repo::cancel_execution_with_confirmed_external_cancellation(
+            &pool,
+            dim.uuid,
+            "system:test",
+            Some("cancel:dim-race"),
+            repo::ConfirmedExternalCancellation::Daliuge {
+                session_id: "BeampipeExecution-dim-late".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        apply_dim_poll_update(
+            &pool,
+            dim.uuid,
+            &stale_dim,
+            BackendPoll {
+                status: ExecutionStatus::Completed,
+                poll_summary: json!({
+                    "status": 3,
+                    "normalized_session_state": "finished",
+                    "error_drop_uids": [],
+                }),
+            },
+            0,
+            &PollPolicy::default(),
+            None,
+            None,
+            true,
+            false,
+            false,
+            "test",
+        )
+        .await
+        .unwrap();
+        let after_dim = repo::get_execution(&pool, dim.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_dim.status, "cancelled");
+        assert_eq!(after_dim.control_phase, cancelled_dim.control_phase);
+        assert_eq!(after_dim.scheduler_state, cancelled_dim.scheduler_state);
+        assert_eq!(after_dim.daliuge_state, cancelled_dim.daliuge_state);
+        assert_eq!(after_dim.output_state, cancelled_dim.output_state);
+        assert_eq!(after_dim.workflow_manifest, cancelled_dim.workflow_manifest);
+        assert_eq!(
+            after_dim.workflow_manifest,
+            Some(json!({"sentinel": "dim-before-cancel"}))
+        );
+
+        let slurm_observations = repo::list_execution_observations(&pool, slurm.uuid, 100, 0)
+            .await
+            .unwrap();
+        assert!(slurm_observations.iter().any(|observation| {
+            observation.raw_state.as_deref() == Some("COMPLETED")
+        }));
+        let dim_observations = repo::list_execution_observations(&pool, dim.uuid, 100, 0)
+            .await
+            .unwrap();
+        assert!(dim_observations.iter().any(|observation| {
+            observation.normalized_state == "finished"
+        }));
     }
 
     #[test]

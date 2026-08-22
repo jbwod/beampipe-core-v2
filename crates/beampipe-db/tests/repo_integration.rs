@@ -1,6 +1,9 @@
 use beampipe_db::{
     connect, migrate,
-    models::{ExecutionArtifactInput, ExecutionStatePatch, WorkerRegistration},
+    models::{
+        ExecutionArtifactInput, ExecutionObservationInput, ExecutionStatePatch,
+        WorkerRegistration,
+    },
     repo,
 };
 use beampipe_domain::{
@@ -844,6 +847,24 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     )
     .await
     .unwrap();
+    let stale_success_patch = ExecutionStatePatch {
+        control_phase: Some(ControlPhase::OutputVerification),
+        submission_state: Some(SubmissionState::Submitted),
+        scheduler_name: Some("slurm".into()),
+        scheduler_job_id: Some("9999".into()),
+        scheduler_state: Some(beampipe_domain::SchedulerState::Succeeded),
+        scheduler_raw_state: Some("COMPLETED".into()),
+        scheduler_reason: Some("late scheduler success".into()),
+        daliuge_session_id: Some("late-session".into()),
+        daliuge_manager_url: Some("http://late.invalid".into()),
+        daliuge_state: Some(DaliugeState::Finished),
+        daliuge_raw_status: Some(json!({"status": 3})),
+        remote_session_dir: Some("/late/session".into()),
+        output_state: Some(beampipe_domain::OutputState::Verified),
+        terminal_outcome: Some(beampipe_domain::TerminalOutcome::Succeeded),
+        clear_failure_context: true,
+        ..Default::default()
+    };
     let cancelled = repo::cancel_execution_with_correlation(
         &pool,
         execution.uuid,
@@ -869,26 +890,49 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
         .unwrap()
         .is_none());
 
+    repo::record_execution_observation(
+        &pool,
+        execution.uuid,
+        ExecutionObservationInput {
+            kind: "scheduler".into(),
+            normalized_state: "succeeded".into(),
+            raw_state: Some("COMPLETED".into()),
+            reason: Some("late scheduler evidence".into()),
+            payload: json!({"captured_before_cancellation": true}),
+            source_version: None,
+            observed_at: Some(chrono::Utc::now()),
+        },
+    )
+    .await
+    .unwrap();
     let stale_success = repo::apply_execution_state_patch_with_transition(
         &pool,
         execution.uuid,
-        ExecutionStatePatch {
-            control_phase: Some(ControlPhase::OutputVerification),
-            scheduler_state: Some(beampipe_domain::SchedulerState::Succeeded),
-            daliuge_state: Some(DaliugeState::Finished),
-            ..Default::default()
-        },
+        stale_success_patch,
     )
     .await
     .unwrap()
     .unwrap();
     assert!(!stale_success.entered_terminal);
     assert_eq!(stale_success.row.status, "cancelled");
-    assert_eq!(stale_success.row.control_phase.as_deref(), Some("terminal"));
+    assert_eq!(stale_success.row.control_phase, cancelled.control_phase);
+    assert_eq!(stale_success.row.submission_state, cancelled.submission_state);
+    assert_eq!(stale_success.row.scheduler_name, cancelled.scheduler_name);
+    assert_eq!(stale_success.row.scheduler_job_id, cancelled.scheduler_job_id);
+    assert_eq!(stale_success.row.scheduler_state, cancelled.scheduler_state);
     assert_eq!(
-        stale_success.row.terminal_outcome.as_deref(),
-        Some("cancelled")
+        stale_success.row.scheduler_raw_state,
+        cancelled.scheduler_raw_state
     );
+    assert_eq!(stale_success.row.scheduler_reason, cancelled.scheduler_reason);
+    assert_eq!(
+        stale_success.row.daliuge_session_id,
+        cancelled.daliuge_session_id
+    );
+    assert_eq!(stale_success.row.daliuge_state, cancelled.daliuge_state);
+    assert_eq!(stale_success.row.daliuge_raw_status, cancelled.daliuge_raw_status);
+    assert_eq!(stale_success.row.output_state, cancelled.output_state);
+    assert_eq!(stale_success.row.terminal_outcome, cancelled.terminal_outcome);
 
     let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
         .await
@@ -900,6 +944,13 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     assert_eq!(event.actor.as_deref(), Some("user:test"));
     assert_eq!(event.correlation_id.as_deref(), Some("cancel:test"));
     assert_eq!(event.payload["invalidated_execute_jobs"], 1);
+    let observations = repo::list_execution_observations(&pool, execution.uuid, 20, 0)
+        .await
+        .unwrap();
+    assert!(observations.iter().any(|observation| {
+        observation.raw_state.as_deref() == Some("COMPLETED")
+            && observation.payload["captured_before_cancellation"] == true
+    }));
 }
 
 #[tokio::test]
@@ -965,6 +1016,150 @@ async fn cancellation_refuses_unresolved_external_submission() {
         assert_eq!(current.submission_state.as_deref(), Some(state.as_str()));
         assert!(current.completed_at.is_none());
     }
+}
+
+#[tokio::test]
+async fn confirmed_exact_slurm_cancellation_wins_over_a_stale_running_patch() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("can_exact_{}", Uuid::now_v7());
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([{"source_identifier": "source-1"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let execute_job = repo::enqueue_job(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid}),
+        Some(execution.uuid),
+        Some(&format!("execute:cancel-exact:{}", execution.uuid)),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET status = 'awaiting_scheduler',
+            control_phase = 'submission_pending',
+            submission_state = 'uncertain',
+            scheduler_name = 'slurm',
+            scheduler_job_id = '4242',
+            scheduler_state = 'running',
+            scheduler_raw_state = 'RUNNING',
+            daliuge_session_id = 'BeampipeExecution-cancel-exact'
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(execution.uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stale_running_patch = ExecutionStatePatch {
+        control_phase: Some(ControlPhase::Monitoring),
+        scheduler_state: Some(beampipe_domain::SchedulerState::Running),
+        scheduler_raw_state: Some("RUNNING".into()),
+        scheduler_reason: Some("stale poll".into()),
+        ..Default::default()
+    };
+
+    let wrong_identity = repo::cancel_execution_with_confirmed_external_cancellation(
+        &pool,
+        execution.uuid,
+        "user:test",
+        Some("cancel:wrong-id"),
+        repo::ConfirmedExternalCancellation::Slurm {
+            scheduler_job_id: "9999".into(),
+            exact_job_id: "9999".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(wrong_identity.to_string().contains("submission outcome"));
+    let before = repo::get_execution(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.status, "awaiting_scheduler");
+    assert_eq!(before.scheduler_state.as_deref(), Some("running"));
+
+    let cancelled = repo::cancel_execution_with_confirmed_external_cancellation(
+        &pool,
+        execution.uuid,
+        "user:test",
+        Some("cancel:exact"),
+        repo::ConfirmedExternalCancellation::Slurm {
+            scheduler_job_id: "4242".into(),
+            exact_job_id: "4242".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(cancelled.control_phase.as_deref(), Some("terminal"));
+    assert_eq!(cancelled.submission_state.as_deref(), Some("uncertain"));
+    assert_eq!(cancelled.scheduler_job_id.as_deref(), Some("4242"));
+    assert_eq!(cancelled.scheduler_state.as_deref(), Some("cancelled"));
+    assert_eq!(cancelled.terminal_outcome.as_deref(), Some("cancelled"));
+
+    let ignored = repo::apply_execution_state_patch_with_transition(
+        &pool,
+        execution.uuid,
+        stale_running_patch,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ignored.row.status, "cancelled");
+    assert_eq!(ignored.row.control_phase.as_deref(), Some("terminal"));
+    assert_eq!(ignored.row.scheduler_state.as_deref(), Some("cancelled"));
+    assert_eq!(
+        ignored.row.scheduler_raw_state.as_deref(),
+        Some("CANCELLED_CONFIRMED")
+    );
+    let cancelled_job = repo::get_job_by_idempotency_key(
+        &pool,
+        execute_job.idempotency_key.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(cancelled_job.status, "cancelled");
+
+    let session_dir = "/remote/sessions/BeampipeExecution-cancel-exact";
+    let late_receipt = repo::record_submission_receipt(
+        &pool,
+        execution.uuid,
+        repo::SubmissionReceiptInput {
+            scheduler_name: "slurm".into(),
+            scheduler_job_id: Some("4242".into()),
+            daliuge_session_id: Some("BeampipeExecution-cancel-exact".into()),
+            remote_session_dir: Some(session_dir.into()),
+            staging_root: Some(format!("{session_dir}/wallaby-staging")),
+            workflow_manifest: json!({"late_receipt": true}),
+            physical_graph: json!([{"oid": "drop-after-cancel"}]),
+            next_status: ExecutionStatus::AwaitingScheduler,
+            actor: "system:late-worker".into(),
+            correlation_id: Some("receipt:after-cancel".into()),
+            poll_job: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(late_receipt.execution.status, "cancelled");
+    assert_eq!(late_receipt.execution.control_phase.as_deref(), Some("terminal"));
+    assert_eq!(late_receipt.execution.submission_state.as_deref(), Some("submitted"));
+    assert_eq!(late_receipt.execution.scheduler_state.as_deref(), Some("cancelled"));
+    assert_eq!(late_receipt.execution.terminal_outcome.as_deref(), Some("cancelled"));
 }
 
 #[tokio::test]
@@ -1344,6 +1539,90 @@ async fn slurm_submission_receipt_is_atomic_idempotent_and_conflict_safe() {
 }
 
 #[tokio::test]
+async fn recovered_exact_slurm_id_stays_uncertain_until_the_receipt_commits() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("receipt_recovered_{}", Uuid::now_v7().simple());
+    let session_id = format!("BeampipeExecution-{}", Uuid::now_v7());
+    let execution =
+        prepare_submission_receipt_execution(&pool, &module, "slurm", &session_id).await;
+    repo::apply_execution_state_patch(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            submission_state: Some(SubmissionState::Uncertain),
+            scheduler_job_id: Some("4242".into()),
+            scheduler_state: Some(beampipe_domain::SchedulerState::Running),
+            scheduler_raw_state: Some("RUNNING".into()),
+            scheduler_reason: Some("Resources".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let recovered = repo::get_execution(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.status, "awaiting_scheduler");
+    assert_eq!(recovered.control_phase.as_deref(), Some("submission_pending"));
+    assert_eq!(recovered.submission_state.as_deref(), Some("uncertain"));
+    assert_eq!(recovered.scheduler_job_id.as_deref(), Some("4242"));
+    assert_eq!(recovered.scheduler_state.as_deref(), Some("running"));
+    assert!(recovered.physical_graph_sha256.is_none());
+    assert!(!repo::begin_execution_submission(
+        &pool,
+        execution.uuid,
+        "slurm",
+        &session_id,
+        None,
+    )
+    .await
+    .unwrap());
+    assert!(!repo::list_slurm_submissions_pending_reconciliation(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == execution.uuid));
+    assert!(repo::list_slurm_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == execution.uuid));
+
+    let session_dir = format!("/remote/sessions/{session_id}");
+    let recorded = repo::record_submission_receipt(
+        &pool,
+        execution.uuid,
+        repo::SubmissionReceiptInput {
+            scheduler_name: "slurm".into(),
+            scheduler_job_id: Some("4242".into()),
+            daliuge_session_id: Some(session_id),
+            remote_session_dir: Some(session_dir.clone()),
+            staging_root: Some(format!("{session_dir}/wallaby-staging")),
+            workflow_manifest: json!({
+                "sources": [],
+                "beampipe_run_record": {"slurm": {"job_id": "4242"}},
+            }),
+            physical_graph: json!([{"oid": "drop-recovered"}]),
+            next_status: ExecutionStatus::AwaitingScheduler,
+            actor: "system:test".into(),
+            correlation_id: Some("receipt-recovered".into()),
+            poll_job: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(recorded.execution.status, "running");
+    assert_eq!(recorded.execution.control_phase.as_deref(), Some("submitted"));
+    assert_eq!(recorded.execution.submission_state.as_deref(), Some("submitted"));
+    assert_eq!(recorded.execution.scheduler_state.as_deref(), Some("running"));
+    assert!(recorded.execution.physical_graph_sha256.is_some());
+}
+
+#[tokio::test]
 async fn rest_submission_receipt_persists_axes_and_poll_job_atomically() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
@@ -1682,6 +1961,219 @@ fn worker_registration(id: Uuid, pool: &str, capabilities: &[&str]) -> WorkerReg
         version: env!("CARGO_PKG_VERSION").into(),
         concurrency_limit: 1,
     }
+}
+
+#[tokio::test]
+async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+
+    let slurm_queue = format!("selector_slurm_{}", Uuid::now_v7().simple());
+    let slurm_worker = Uuid::now_v7();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(slurm_worker, &slurm_queue, &["daliuge-deployment"]),
+    )
+    .await
+    .unwrap();
+    let slurm_execution = repo::create_execution(
+        &pool,
+        &format!("sel_slurm_{}", Uuid::now_v7().simple()),
+        json!([{"source_identifier": "source-slurm"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(repo::begin_execution_submission(
+        &pool,
+        slurm_execution.uuid,
+        "slurm",
+        "BeampipeExecution-selector-slurm",
+        None,
+    )
+    .await
+    .unwrap());
+    let slurm_execute = repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": slurm_execution.uuid}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(slurm_execution.uuid),
+            idempotency_key: Some(format!("selector:slurm:{}", slurm_execution.uuid)),
+            pool: Some(slurm_queue.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    repo::claim_next_job_for_worker(
+        &pool,
+        slurm_worker,
+        &slurm_queue,
+        &["daliuge-deployment".into()],
+        60,
+    )
+    .await
+    .unwrap()
+    .expect("execute job must be actively leased");
+    assert!(!repo::list_slurm_submissions_pending_reconciliation(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == slurm_execution.uuid));
+
+    set_job_lease_expired(&pool, slurm_execute.uuid).await;
+    assert!(repo::list_slurm_submissions_pending_reconciliation(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == slurm_execution.uuid));
+
+    repo::apply_execution_state_patch(
+        &pool,
+        slurm_execution.uuid,
+        ExecutionStatePatch {
+            submission_state: Some(SubmissionState::Uncertain),
+            scheduler_job_id: Some("4242".into()),
+            scheduler_state: Some(beampipe_domain::SchedulerState::Running),
+            scheduler_raw_state: Some("RUNNING".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    set_job_lease_active(&pool, slurm_execute.uuid).await;
+    assert!(!repo::list_slurm_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == slurm_execution.uuid));
+    set_job_lease_expired(&pool, slurm_execute.uuid).await;
+    assert!(repo::list_slurm_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == slurm_execution.uuid));
+    repo::complete_job(&pool, slurm_execute.uuid).await.unwrap();
+
+    let rest_queue = format!("selector_rest_{}", Uuid::now_v7().simple());
+    let rest_worker = Uuid::now_v7();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(rest_worker, &rest_queue, &["daliuge-deployment"]),
+    )
+    .await
+    .unwrap();
+    let rest_execution = repo::create_execution(
+        &pool,
+        &format!("sel_rest_{}", Uuid::now_v7().simple()),
+        json!([{"source_identifier": "source-rest"}]),
+        "casda",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(repo::begin_execution_submission(
+        &pool,
+        rest_execution.uuid,
+        "daliuge",
+        "BeampipeExecution-selector-rest",
+        Some("http://dim.invalid"),
+    )
+    .await
+    .unwrap());
+    let rest_execute = repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": rest_execution.uuid}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(rest_execution.uuid),
+            idempotency_key: Some(format!("selector:rest:{}", rest_execution.uuid)),
+            pool: Some(rest_queue.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    repo::claim_next_job_for_worker(
+        &pool,
+        rest_worker,
+        &rest_queue,
+        &["daliuge-deployment".into()],
+        60,
+    )
+    .await
+    .unwrap()
+    .expect("REST execute job must be actively leased");
+    assert!(!repo::list_rest_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == rest_execution.uuid));
+    set_job_lease_expired(&pool, rest_execute.uuid).await;
+    assert!(repo::list_rest_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == rest_execution.uuid));
+    repo::complete_job(&pool, rest_execute.uuid).await.unwrap();
+
+    let dim_poll = repo::enqueue_job_with_options(
+        &pool,
+        "dim_poll",
+        json!({"execution_id": rest_execution.uuid}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(rest_execution.uuid),
+            idempotency_key: Some(format!("selector:dim-poll:{}", rest_execution.uuid)),
+            pool: Some(rest_queue.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let claimed_dim = repo::claim_next_job_for_worker(
+        &pool,
+        rest_worker,
+        &rest_queue,
+        &["daliuge-deployment".into()],
+        60,
+    )
+    .await
+    .unwrap()
+    .expect("DIM poll job must be actively leased");
+    assert_eq!(claimed_dim.uuid, dim_poll.uuid);
+    assert!(repo::list_rest_executions_pending_poll(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.uuid == rest_execution.uuid));
+}
+
+async fn set_job_lease_active(pool: &sqlx::PgPool, job_id: Uuid) {
+    sqlx::query(
+        "UPDATE jobs SET status = 'running', lease_expires_at = now() + interval '60 seconds', locked_until = now() + interval '60 seconds' WHERE uuid = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn set_job_lease_expired(pool: &sqlx::PgPool, job_id: Uuid) {
+    sqlx::query(
+        "UPDATE jobs SET lease_expires_at = now() - interval '1 second', locked_until = now() - interval '1 second' WHERE uuid = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

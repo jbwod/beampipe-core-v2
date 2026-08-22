@@ -3450,44 +3450,91 @@ async fn patch_execution(
             current.as_str()
         )));
     }
-    if cancellation_submission_is_unresolved(execution.submission_state.as_deref()) {
+    let recovered_uncertain_slurm = cancellation_is_recovered_uncertain_slurm(
+        execution.submission_state.as_deref(),
+        execution.scheduler_name.as_deref(),
+        execution.scheduler_job_id.as_deref(),
+    );
+    if cancellation_submission_is_blocked(
+        execution.submission_state.as_deref(),
+        execution.scheduler_name.as_deref(),
+        execution.scheduler_job_id.as_deref(),
+    ) {
         return Err(ApiError::Conflict(
             "execution submission outcome is unresolved; wait for reconciliation to record an exact external job before cancelling"
                 .into(),
         ));
     }
-    if execution_cancel_requires_external(
-        current,
-        execution.scheduler_job_id.as_deref(),
-        execution.scheduler_state.as_deref(),
-        execution.daliuge_session_id.as_deref(),
-        execution.daliuge_state.as_deref(),
-    ) {
-        cancel_execution_scheduler(&state.pool, id).await?;
-    }
-    let row = repo::cancel_execution_with_correlation(
-        &state.pool,
-        id,
-        &format!("user:{}", user.uuid),
-        Some(ctx.correlation_id()),
-    )
-    .await
-    .map_err(|error| {
-        if error.to_string().contains("cannot be cancelled") {
-            ApiError::Conflict(error.to_string())
-        } else {
-            ApiError::Db(error)
-        }
-    })?
-    .ok_or(ApiError::NotFound)?;
+    let external_cancellation_required = recovered_uncertain_slurm
+        || execution_cancel_requires_external(
+            current,
+            execution.scheduler_job_id.as_deref(),
+            execution.scheduler_state.as_deref(),
+            execution.daliuge_session_id.as_deref(),
+            execution.daliuge_state.as_deref(),
+        );
+    let external_confirmation = if external_cancellation_required {
+        Some(cancel_execution_scheduler(&state.pool, id).await?)
+    } else {
+        None
+    };
+    let actor = format!("user:{}", user.uuid);
+    let cancellation = if let Some(confirmation) = external_confirmation {
+        repo::cancel_execution_with_confirmed_external_cancellation(
+            &state.pool,
+            id,
+            &actor,
+            Some(ctx.correlation_id()),
+            confirmation,
+        )
+        .await
+    } else {
+        repo::cancel_execution_with_correlation(
+            &state.pool,
+            id,
+            &actor,
+            Some(ctx.correlation_id()),
+        )
+        .await
+    };
+    let row = cancellation
+        .map_err(|error| {
+            if error.to_string().contains("cannot be cancelled") {
+                ApiError::Conflict(error.to_string())
+            } else {
+                ApiError::Db(error)
+            }
+        })?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(enrich_execution(&state.pool, row).await?))
 }
 
-fn cancellation_submission_is_unresolved(submission_state: Option<&str>) -> bool {
-    matches!(
-        submission_state.and_then(SubmissionState::parse),
-        Some(SubmissionState::InFlight | SubmissionState::Uncertain)
-    )
+fn cancellation_is_recovered_uncertain_slurm(
+    submission_state: Option<&str>,
+    scheduler_name: Option<&str>,
+    scheduler_job_id: Option<&str>,
+) -> bool {
+    submission_state.and_then(SubmissionState::parse) == Some(SubmissionState::Uncertain)
+        && scheduler_name == Some("slurm")
+        && scheduler_job_id.is_some_and(|job_id| {
+            beampipe_orchestration::slurm_ssh::validate_slurm_job_id(job_id).is_ok()
+        })
+}
+
+fn cancellation_submission_is_blocked(
+    submission_state: Option<&str>,
+    scheduler_name: Option<&str>,
+    scheduler_job_id: Option<&str>,
+) -> bool {
+    match submission_state.and_then(SubmissionState::parse) {
+        Some(SubmissionState::InFlight) => true,
+        Some(SubmissionState::Uncertain) => !cancellation_is_recovered_uncertain_slurm(
+            submission_state,
+            scheduler_name,
+            scheduler_job_id,
+        ),
+        _ => false,
+    }
 }
 
 fn execution_cancel_requires_external(
@@ -3527,9 +3574,12 @@ fn execution_cancel_requires_external(
     scheduler_active || daliuge_active
 }
 
-async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
+async fn cancel_execution_scheduler(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<repo::ConfirmedExternalCancellation, ApiError> {
     let Some(execution) = repo::get_execution(pool, id).await? else {
-        return Ok(());
+        return Err(ApiError::NotFound);
     };
     let deployment = deployment_for_execution(pool, &execution)
         .await?
@@ -3538,9 +3588,46 @@ async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiEr
         deployment.clone(),
     )
     .map_err(|error| ApiError::BadRequest(format!("invalid pinned deployment profile: {error}")))?;
+    let confirmation = match &deployment_kind {
+        beampipe_profiles::DeploymentConfig::SlurmRemote(_) => {
+            let scheduler_job_id = execution
+                .scheduler_job_id
+                .clone()
+                .filter(|job_id| !job_id.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::Conflict(
+                        "Slurm cancellation requires an exact scheduler job ID".into(),
+                    )
+                })?;
+            let parsed = beampipe_domain::slurm::parse_scheduler_job_id(&scheduler_job_id);
+            let exact_job_id = if parsed.slurm_job_id.is_empty() {
+                scheduler_job_id.clone()
+            } else {
+                parsed.slurm_job_id
+            };
+            beampipe_orchestration::slurm_ssh::validate_slurm_job_id(&exact_job_id)
+                .map_err(|error| ApiError::Conflict(error.to_string()))?;
+            repo::ConfirmedExternalCancellation::Slurm {
+                scheduler_job_id,
+                exact_job_id,
+            }
+        }
+        beampipe_profiles::DeploymentConfig::RestRemote(_) => {
+            let session_id = execution
+                .daliuge_session_id
+                .clone()
+                .filter(|session_id| !session_id.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::Conflict(
+                        "DALiuGE cancellation requires an exact session ID".into(),
+                    )
+                })?;
+            repo::ConfirmedExternalCancellation::Daliuge { session_id }
+        }
+    };
     let result = cancel_scheduler_session(CancelParams {
-        scheduler_job_id: execution.scheduler_job_id,
-        daliuge_session_id: execution.daliuge_session_id,
+        scheduler_job_id: execution.scheduler_job_id.clone(),
+        daliuge_session_id: execution.daliuge_session_id.clone(),
         deployment,
     })
     .await
@@ -3551,18 +3638,7 @@ async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiEr
             result.reason.unwrap_or_else(|| "unknown reason".into())
         )));
     }
-    let state_patch = match deployment_kind {
-        beampipe_profiles::DeploymentConfig::RestRemote(_) => ExecutionStatePatch {
-            daliuge_state: Some(DaliugeState::Cancelled),
-            ..Default::default()
-        },
-        beampipe_profiles::DeploymentConfig::SlurmRemote(_) => ExecutionStatePatch {
-            scheduler_state: Some(SchedulerState::Cancelled),
-            ..Default::default()
-        },
-    };
-    repo::apply_execution_state_patch(pool, id, state_patch).await?;
-    Ok(())
+    Ok(confirmation)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -4566,11 +4642,43 @@ adapters:
     }
 
     #[test]
-    fn unresolved_submission_cannot_be_reported_as_cancelled() {
-        assert!(cancellation_submission_is_unresolved(Some("in_flight")));
-        assert!(cancellation_submission_is_unresolved(Some("uncertain")));
-        assert!(!cancellation_submission_is_unresolved(Some("submitted")));
-        assert!(!cancellation_submission_is_unresolved(None));
+    fn only_recovered_exact_slurm_submission_can_attempt_cancellation() {
+        assert!(cancellation_submission_is_blocked(
+            Some("in_flight"),
+            Some("slurm"),
+            Some("4242"),
+        ));
+        assert!(cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("slurm"),
+            None,
+        ));
+        assert!(cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("slurm"),
+            Some("4242; scancel 1"),
+        ));
+        assert!(cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("daliuge"),
+            Some("4242"),
+        ));
+        assert!(!cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("slurm"),
+            Some("4242"),
+        ));
+        assert!(cancellation_is_recovered_uncertain_slurm(
+            Some("uncertain"),
+            Some("slurm"),
+            Some("4242"),
+        ));
+        assert!(!cancellation_submission_is_blocked(
+            Some("submitted"),
+            None,
+            None,
+        ));
+        assert!(!cancellation_submission_is_blocked(None, None, None));
     }
 
     #[test]
