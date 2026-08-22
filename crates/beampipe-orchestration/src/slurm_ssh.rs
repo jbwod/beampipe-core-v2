@@ -301,6 +301,23 @@ impl SlurmSshSession {
         command: &str,
         kind: RemoteCommandKind,
     ) -> Result<String, OrchestrationError> {
+        let output = self.run_command_output_inner(command, kind).await?;
+        command_stdout(command, output)
+    }
+
+    async fn run_command_output(
+        &mut self,
+        command: &str,
+    ) -> Result<RemoteCommandOutput, OrchestrationError> {
+        self.run_command_output_inner(command, RemoteCommandKind::Ordinary)
+            .await
+    }
+
+    async fn run_command_output_inner(
+        &mut self,
+        command: &str,
+        kind: RemoteCommandKind,
+    ) -> Result<RemoteCommandOutput, OrchestrationError> {
         let mut channel = self
             .handle
             .channel_open_session()
@@ -333,12 +350,11 @@ impl SlurmSshSession {
                 format!("remote command ended without an SSH exit status: {command:?}"),
             ));
         };
-        if code != 0 {
-            let out = String::from_utf8_lossy(&stdout);
-            let err = String::from_utf8_lossy(&stderr);
-            return Err(remote_command_exit_error(command, code, &out, &err));
-        }
-        Ok(String::from_utf8_lossy(&stdout).into_owned())
+        Ok(RemoteCommandOutput {
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            exit_status: code,
+        })
     }
 
     /// Upload file content via remote `tee` (shell-escaped path).
@@ -425,6 +441,13 @@ enum RemoteCommandKind {
     Submission,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteCommandOutput {
+    stdout: String,
+    stderr: String,
+    exit_status: u32,
+}
+
 fn remote_command_transport_error(
     kind: RemoteCommandKind,
     detail: String,
@@ -443,6 +466,21 @@ fn remote_command_exit_error(
 ) -> OrchestrationError {
     OrchestrationError::Backend(format!(
         "remote command failed (exit={code}): {command:?}\nstdout: {stdout}\nstderr: {stderr}"
+    ))
+}
+
+fn command_stdout(
+    command: &str,
+    output: RemoteCommandOutput,
+) -> Result<String, OrchestrationError> {
+    if output.exit_status == 0 {
+        return Ok(output.stdout);
+    }
+    Err(remote_command_exit_error(
+        command,
+        output.exit_status,
+        &output.stdout,
+        &output.stderr,
     ))
 }
 
@@ -465,9 +503,14 @@ struct PooledEntry {
     last_used: Instant,
 }
 
+#[derive(Default)]
+struct PooledTargetState {
+    entry: Option<PooledEntry>,
+}
+
 /// Reuse `russh` sessions per login target with idle eviction.
 pub struct SlurmSshPool {
-    inner: Mutex<HashMap<SlurmTarget, PooledEntry>>,
+    inner: Mutex<HashMap<SlurmTarget, Arc<Mutex<PooledTargetState>>>>,
     idle_seconds: u64,
 }
 
@@ -477,10 +520,22 @@ impl SlurmSshPool {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
+        Self::with_idle_seconds(idle_seconds)
+    }
+
+    fn with_idle_seconds(idle_seconds: u64) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             idle_seconds,
         }
+    }
+
+    async fn target_state(&self, target: &SlurmTarget) -> Arc<Mutex<PooledTargetState>> {
+        let mut targets = self.inner.lock().await;
+        targets
+            .entry(target.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(PooledTargetState::default())))
+            .clone()
     }
 
     pub async fn query_slurm_states(
@@ -488,47 +543,86 @@ impl SlurmSshPool {
         target: &SlurmTarget,
         job_ids: &[String],
     ) -> Result<HashMap<String, SlurmJobPollResult>, OrchestrationError> {
-        let mut guard = self.inner.lock().await;
-        self.evict_idle_locked(&mut guard).await;
-        if !guard.contains_key(target) {
-            let session = SlurmSshSession::connect(target).await?;
-            guard.insert(
-                target.clone(),
-                PooledEntry {
-                    session,
-                    last_used: Instant::now(),
-                },
-            );
+        let target_state = self.target_state(target).await;
+        let mut state = target_state.lock().await;
+        let idle = Duration::from_secs(self.idle_seconds);
+        if state
+            .entry
+            .as_ref()
+            .is_some_and(|entry| entry.last_used.elapsed() > idle)
+        {
+            if let Some(stale) = state.entry.take() {
+                let _ = stale.session.close().await;
+            }
         }
-        let entry = guard.get_mut(target).expect("session inserted above");
+        if state.entry.is_none() {
+            let session = SlurmSshSession::connect(target).await?;
+            state.entry = Some(PooledEntry {
+                session,
+                last_used: Instant::now(),
+            });
+        }
+        let entry = state.entry.as_mut().expect("session inserted above");
         entry.last_used = Instant::now();
         let result = query_slurm_states_batch(&mut entry.session, job_ids).await;
         if result.is_err() {
-            if let Some(removed) = guard.remove(target) {
-                let _ = removed.session.close().await;
+            if let Some(failed) = state.entry.take() {
+                let _ = failed.session.close().await;
             }
         }
         result
     }
 
     pub fn active_session_count(&self) -> usize {
-        self.inner.try_lock().map(|g| g.len()).unwrap_or(0)
+        self.inner
+            .try_lock()
+            .map(|targets| {
+                targets
+                    .values()
+                    .filter(|target| {
+                        target
+                            .try_lock()
+                            .map(|state| state.entry.is_some())
+                            .unwrap_or(true)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
+}
 
-    async fn evict_idle_locked(&self, guard: &mut HashMap<SlurmTarget, PooledEntry>) {
-        let idle = Duration::from_secs(self.idle_seconds);
-        let now = Instant::now();
-        let stale: Vec<SlurmTarget> = guard
-            .iter()
-            .filter(|(_, e)| now.duration_since(e.last_used) > idle)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in stale {
-            if let Some(entry) = guard.remove(&key) {
-                let _ = entry.session.close().await;
-            }
-        }
+fn squeue_query_command(job_ids: &str) -> String {
+    format!("squeue -h -j {job_ids} -o {SQUEUE_FORMAT}")
+}
+
+fn sacct_query_command(job_ids: &str) -> String {
+    format!("sacct -j {job_ids} --format={SACCT_FORMAT} -P -n")
+}
+
+fn is_missing_squeue_job_error(stderr: &str) -> bool {
+    let mut lines = stderr.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    std::iter::once(first).chain(lines).all(|line| {
+        line.to_ascii_lowercase()
+            .ends_with("invalid job id specified")
+    })
+}
+
+fn squeue_stdout(
+    command: &str,
+    output: RemoteCommandOutput,
+) -> Result<String, OrchestrationError> {
+    if output.exit_status == 0 || is_missing_squeue_job_error(&output.stderr) {
+        return Ok(output.stdout);
     }
+    Err(remote_command_exit_error(
+        command,
+        output.exit_status,
+        &output.stdout,
+        &output.stderr,
+    ))
 }
 
 pub async fn query_slurm_states_batch(
@@ -545,8 +639,11 @@ pub async fn query_slurm_states_batch(
     let mut sacct_all = HashMap::new();
     for chunk in chunk_job_ids(job_ids) {
         let joined = chunk.join(",");
-        let squeue_cmd = format!("squeue -h -j {joined} -o {SQUEUE_FORMAT} 2>/dev/null || true");
-        let squeue_out = session.run_command(&squeue_cmd).await?;
+        let squeue_cmd = squeue_query_command(&joined);
+        let squeue_out = squeue_stdout(
+            &squeue_cmd,
+            session.run_command_output(&squeue_cmd).await?,
+        )?;
         squeue_all.extend(parse_squeue_batch(&squeue_out));
 
         let missing: Vec<String> = chunk
@@ -556,9 +653,7 @@ pub async fn query_slurm_states_batch(
             .collect();
         if !missing.is_empty() {
             let sacct_joined = missing.join(",");
-            let sacct_cmd = format!(
-                "sacct -j {sacct_joined} --format={SACCT_FORMAT} -P -n 2>/dev/null || true"
-            );
+            let sacct_cmd = sacct_query_command(&sacct_joined);
             let sacct_out = session.run_command(&sacct_cmd).await?;
             sacct_all.extend(parse_sacct_batch(&sacct_out));
         }
@@ -583,11 +678,14 @@ pub fn scancel_command(job_id: &str) -> Result<String, OrchestrationError> {
 #[cfg(test)]
 mod tests {
     use super::{
+        command_stdout, is_missing_squeue_job_error,
         known_host_patterns_match, known_hosts_has_target, load_known_host_keys, scancel_command,
-        remote_command_exit_error, remote_command_transport_error, upload_text_command,
-        validate_slurm_job_id, RemoteCommandKind,
+        remote_command_transport_error, sacct_query_command, squeue_query_command, squeue_stdout,
+        upload_text_command, validate_slurm_job_id, RemoteCommandKind, RemoteCommandOutput,
+        SlurmSshPool, SlurmTarget,
     };
     use crate::OrchestrationError;
+    use std::sync::Arc;
 
     fn generate_public_key(dir: &tempfile::TempDir) -> String {
         let key_path = dir.path().join("id_test");
@@ -649,9 +747,80 @@ mod tests {
     #[test]
     fn explicit_nonzero_submission_exit_is_deterministic() {
         assert!(matches!(
-            remote_command_exit_error("sbatch --parsable job.sh", 1, "", "invalid account"),
-            OrchestrationError::Backend(_)
+            command_stdout(
+                "sbatch --parsable job.sh",
+                RemoteCommandOutput {
+                    stdout: String::new(),
+                    stderr: "invalid account".into(),
+                    exit_status: 1,
+                }
+            ),
+            Err(OrchestrationError::Backend(_))
         ));
+    }
+
+    #[test]
+    fn scheduler_poll_commands_do_not_mask_failures() {
+        for command in [squeue_query_command("123"), sacct_query_command("123")] {
+            assert!(!command.contains("2>/dev/null"));
+            assert!(!command.contains("|| true"));
+        }
+    }
+
+    #[test]
+    fn only_the_exact_missing_squeue_diagnostic_falls_back() {
+        assert!(is_missing_squeue_job_error(
+            "slurm_load_jobs error: Invalid job id specified\n"
+        ));
+        let output = squeue_stdout(
+            "squeue -j 123,456",
+            RemoteCommandOutput {
+                stdout: "456|RUNNING|None\n".into(),
+                stderr: "slurm_load_jobs error: Invalid job id specified\n".into(),
+                exit_status: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(output, "456|RUNNING|None\n");
+
+        for stderr in [
+            "permission denied",
+            "Invalid job id specified\npermission denied",
+            "",
+        ] {
+            assert!(matches!(
+                squeue_stdout(
+                    "squeue -j 123",
+                    RemoteCommandOutput {
+                        stdout: String::new(),
+                        stderr: stderr.into(),
+                        exit_status: 1,
+                    }
+                ),
+                Err(OrchestrationError::Backend(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_pool_uses_independent_locks_per_target() {
+        let pool = SlurmSshPool::with_idle_seconds(300);
+        let target_a = SlurmTarget {
+            login_node: "login-a.example".into(),
+            ssh_port: 22,
+            remote_user: "operator".into(),
+            credential_slot: None,
+        };
+        let target_b = SlurmTarget {
+            login_node: "login-b.example".into(),
+            ..target_a.clone()
+        };
+
+        let first_a = pool.target_state(&target_a).await;
+        let second_a = pool.target_state(&target_a).await;
+        let first_b = pool.target_state(&target_b).await;
+        assert!(Arc::ptr_eq(&first_a, &second_a));
+        assert!(!Arc::ptr_eq(&first_a, &first_b));
     }
 
     #[test]
