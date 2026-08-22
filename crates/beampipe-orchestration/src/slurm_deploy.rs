@@ -58,7 +58,19 @@ pub fn render_generated_ini(
     lines.join("\n")
 }
 
-pub fn env_prelude(deployment: &SlurmRemoteDeploymentConfig) -> String {
+const FORWARDED_ENVIRONMENT: [&str; 2] = ["BEAMPIPE_SLURM_ACCOUNT", "BEAMPIPE_ASKAPSOFT_SIF"];
+
+pub fn env_prelude(deployment: &SlurmRemoteDeploymentConfig) -> Result<String, OrchestrationError> {
+    env_prelude_with(deployment, |name| std::env::var(name).ok())
+}
+
+fn env_prelude_with<F>(
+    deployment: &SlurmRemoteDeploymentConfig,
+    mut read_environment: F,
+) -> Result<String, OrchestrationError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
     let mut parts = vec!["set -euo pipefail".to_string()];
     if let Some(modules) = deployment.modules.as_deref() {
         parts.push("set +u".into());
@@ -72,7 +84,24 @@ pub fn env_prelude(deployment: &SlurmRemoteDeploymentConfig) -> String {
         parts.push(venv.trim().to_string());
         parts.push("set -u".into());
     }
-    parts.join("\n")
+    if let Some(setup) = deployment.environment_setup.as_deref() {
+        for name in FORWARDED_ENVIRONMENT {
+            if setup.contains(name) {
+                let value = read_environment(name)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        OrchestrationError::Backend(format!(
+                            "deployment.environment_setup requires non-empty {name}"
+                        ))
+                    })?;
+                parts.push(format!("export {name}={}", shell_quote(&value)));
+            }
+        }
+        for line in setup.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            parts.push(line.to_string());
+        }
+    }
+    Ok(parts.join("\n"))
 }
 
 pub fn create_dlg_job_argv(
@@ -188,7 +217,7 @@ pub async fn submit_slurm_session(
     );
     let inner = format!(
         "{}\nexport DLG_ROOT={}\n{}",
-        env_prelude(&deployment),
+        env_prelude(&deployment)?,
         shell_quote(&dlg_root),
         argv.iter()
             .map(|a| shell_quote(a))
@@ -281,7 +310,40 @@ mod tests {
 
     #[test]
     fn render_ini_contains_account() {
-        let dep = SlurmRemoteDeploymentConfig {
+        let dep = deployment();
+        let ini = render_generated_ini(&dep, "user", "/path.pgt", "/dlg");
+        assert!(ini.contains("ACCOUNT = myacct"));
+    }
+
+    #[test]
+    fn environment_setup_forwards_required_process_values_safely() {
+        let mut dep = deployment();
+        dep.environment_setup = Some(
+            "export BEAMPIPE_SLURM_ACCOUNT=\"$BEAMPIPE_SLURM_ACCOUNT\"\n\
+             export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\""
+                .into(),
+        );
+        let prelude = env_prelude_with(&dep, |name| match name {
+            "BEAMPIPE_SLURM_ACCOUNT" => Some("science-account".into()),
+            "BEAMPIPE_ASKAPSOFT_SIF" => Some("/images/askap soft's.sif".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert!(prelude.contains("export BEAMPIPE_SLURM_ACCOUNT=science-account"));
+        assert!(prelude.contains("export BEAMPIPE_ASKAPSOFT_SIF='/images/askap soft'\\''s.sif'"));
+        assert!(prelude.contains("export BEAMPIPE_SLURM_ACCOUNT=\"$BEAMPIPE_SLURM_ACCOUNT\""));
+    }
+
+    #[test]
+    fn environment_setup_rejects_missing_forwarded_values() {
+        let mut dep = deployment();
+        dep.environment_setup = Some("echo $BEAMPIPE_ASKAPSOFT_SIF".into());
+        let error = env_prelude_with(&dep, |_| None).unwrap_err();
+        assert!(error.to_string().contains("BEAMPIPE_ASKAPSOFT_SIF"));
+    }
+
+    fn deployment() -> SlurmRemoteDeploymentConfig {
+        SlurmRemoteDeploymentConfig {
             login_node: "login".into(),
             ssh_port: 22,
             remote_user: None,
@@ -309,8 +371,6 @@ mod tests {
             manager_topology: Default::default(),
             container_runtime: None,
             environment_setup: None,
-        };
-        let ini = render_generated_ini(&dep, "user", "/path.pgt", "/dlg");
-        assert!(ini.contains("ACCOUNT = myacct"));
+        }
     }
 }
