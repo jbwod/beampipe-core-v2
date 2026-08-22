@@ -109,6 +109,7 @@ pub struct WorkerConfig {
 
 impl WorkerConfig {
     pub fn from_settings(settings: &Settings) -> Self {
+        beampipe_security::configure_runtime_env(&settings.beampipe_env);
         Self {
             poll_interval: Duration::from_millis(settings.worker_poll_interval_ms),
             lock_seconds: settings.worker_lock_seconds,
@@ -3550,7 +3551,7 @@ async fn run_dim_poll(
     let Some(execution) = repo::get_execution(pool, execution_id).await? else {
         return Ok(());
     };
-    let policy = poll_policy_for_module(pool, &execution.project_module).await?;
+    let policy = poll_policy_for_execution(pool, &execution).await?;
     let session_id = execution
         .daliuge_session_id
         .clone()
@@ -3646,7 +3647,7 @@ async fn run_dim_poll_tick(
             let execution_id = item.execution.uuid;
             let poll_round =
                 dim_poll_round_from_manifest(item.execution.workflow_manifest.as_ref());
-            let policy = poll_policy_for_module(pool, &item.execution.project_module).await?;
+            let policy = poll_policy_for_execution(pool, &item.execution).await?;
             let poll_result = if use_real {
                 dim.poll(&item.session_id).await
             } else {
@@ -3954,7 +3955,7 @@ async fn dim_poll_tick_interval_secs(
     if let Some(secs) = config.dim_poll_interval_seconds {
         return Ok((secs as i64).max(1));
     }
-    let mut min_interval = 3_i64;
+    let mut min_interval = None;
     let configs = repo::list_active_project_configs(pool).await?;
     for row in configs {
         if let Ok(cfg) = serde_json::from_value::<ProjectConfig>(row.spec) {
@@ -3962,13 +3963,13 @@ async fn dim_poll_tick_interval_secs(
                 if let Some(secs) = exec.execution_rest_remote_poll_interval_seconds {
                     let s = secs.round() as i64;
                     if s >= 1 {
-                        min_interval = min_interval.min(s);
+                        min_interval = minimum_poll_interval(min_interval, s);
                     }
                 }
             }
         }
     }
-    Ok(min_interval.max(1))
+    Ok(min_interval.unwrap_or(3).max(1))
 }
 
 async fn slurm_poll_tick_interval_secs(
@@ -3978,18 +3979,29 @@ async fn slurm_poll_tick_interval_secs(
     if let Some(secs) = config.slurm_poll_interval_seconds {
         return Ok((secs as i64).max(5));
     }
-    let mut min_interval = 30_i64;
+    let mut min_interval = None;
     let configs = repo::list_active_project_configs(pool).await?;
     for row in configs {
         if let Ok(cfg) = serde_json::from_value::<ProjectConfig>(row.spec) {
             if let Some(exec) = cfg.automation.execution {
                 if let Some(secs) = exec.execution_slurm_remote_poll_interval_seconds {
-                    min_interval = min_interval.min(secs as i64);
+                    let seconds = secs.round() as i64;
+                    if seconds >= 1 {
+                        min_interval = minimum_poll_interval(min_interval, seconds);
+                    }
                 }
             }
         }
     }
-    Ok(min_interval.max(5))
+    Ok(min_interval.unwrap_or(30).max(5))
+}
+
+fn minimum_poll_interval(current: Option<i64>, candidate: i64) -> Option<i64> {
+    Some(current.map_or(candidate, |value| value.min(candidate)))
+}
+
+fn slurm_active_poll_budget_reached(next_round: i64, max_rounds: i64) -> bool {
+    max_rounds > 0 && next_round == max_rounds
 }
 
 fn slurm_job_id_from_scheduler(scheduler_job_id: &str) -> String {
@@ -4173,28 +4185,14 @@ async fn apply_slurm_poll_update(
         let mut manifest =
             manifest_for_slurm_poll(execution, result, &scheduler_job_id, false, None, None);
         let next_round = poll_round + 1;
-        if next_round >= max_rounds {
-            let timed_out = merge_scheduler_timeout_into_manifest(
-                Some(manifest),
-                "Slurm poll exceeded max rounds",
+        if slurm_active_poll_budget_reached(next_round, max_rounds) {
+            warn!(
+                execution_id = %execution_id,
+                slurm_job_id = %parsed.slurm_job_id,
+                state,
+                max_rounds,
+                "event=slurm_poll_budget_exhausted_but_job_active"
             );
-            repo::apply_execution_patch_with_correlation(
-                pool,
-                execution_id,
-                LedgerPatch {
-                    status: Some(ExecutionStatus::Failed),
-                    workflow_manifest: Some(timed_out),
-                    error: Some("Slurm poll timeout".into()),
-                    ..LedgerPatch::default()
-                },
-                None,
-            )
-            .await?;
-            let sources = source_identifiers_from_json(&execution.sources);
-            repo::mark_sources_pending_workflow_run(pool, &execution.project_module, &sources)
-                .await?;
-            metrics::record_execute_terminal(&execution.project_module, "failed");
-            return Ok(());
         }
         manifest = merge_slurm_poll_tick_round(Some(manifest), next_round);
         repo::apply_execution_patch_with_correlation(
@@ -4365,7 +4363,7 @@ async fn run_slurm_poll_tick(
             let execution_id = item.execution.uuid;
             let poll_round =
                 slurm_poll_round_from_manifest(item.execution.workflow_manifest.as_ref());
-            let policy = poll_policy_for_module(pool, &item.execution.project_module).await?;
+            let policy = poll_policy_for_execution(pool, &item.execution).await?;
             let result = poll_map
                 .get(&item.slurm_job_id)
                 .cloned()
@@ -4565,12 +4563,16 @@ struct PollPolicy {
     slurm_interval_secs: Option<f64>,
 }
 
-async fn poll_policy_for_module(
+async fn poll_policy_for_execution(
     pool: &PgPool,
-    project_module: &str,
+    execution: &beampipe_db::models::ExecutionRow,
 ) -> Result<PollPolicy, sqlx::Error> {
     let mut policy = PollPolicy::default();
-    if let Some(row) = repo::get_active_project_config(pool, project_module).await? {
+    let config = match execution.project_config_id {
+        Some(id) => repo::get_project_config_by_uuid(pool, id).await?,
+        None => repo::get_active_project_config(pool, &execution.project_module).await?,
+    };
+    if let Some(row) = config {
         if let Ok(cfg) = serde_json::from_value::<ProjectConfig>(row.spec) {
             if let Some(exec) = cfg.automation.execution {
                 policy.rest_max_rounds = exec.execution_rest_remote_poll_max_rounds;
@@ -4865,6 +4867,30 @@ mod tests {
             terminal_ledger_and_reason("TIMEOUT"),
             ("failed", Some("timeout"))
         );
+    }
+
+    #[test]
+    fn configured_poll_interval_is_not_capped_by_the_default() {
+        let interval = minimum_poll_interval(None, 60).unwrap_or(30).max(5);
+        assert_eq!(interval, 60);
+        let interval = minimum_poll_interval(Some(interval), 90)
+            .unwrap_or(30)
+            .max(5);
+        assert_eq!(interval, 60);
+        let interval = minimum_poll_interval(Some(interval), 15)
+            .unwrap_or(30)
+            .max(5);
+        assert_eq!(interval, 15);
+    }
+
+    #[test]
+    fn active_slurm_job_remains_nonterminal_at_poll_budget() {
+        assert!(slurm_active_poll_budget_reached(480, 480));
+        assert_eq!(
+            execution_status_for_slurm_state("RUNNING"),
+            ExecutionStatus::Running
+        );
+        assert!(!execution_status_for_slurm_state("RUNNING").is_terminal());
     }
 
     #[test]
