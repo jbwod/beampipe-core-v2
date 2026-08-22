@@ -12,6 +12,7 @@ use tracing::debug;
 
 const CASDA_ASYNC_SERVICE: &str = "async_service";
 const DEFAULT_CASDA_LOGIN_URL: &str = "https://data.csiro.au/casda_vo_proxy/vo/tap/availability";
+type StagingUrlMaps = (HashMap<String, String>, HashMap<String, String>);
 
 #[derive(Debug, Clone)]
 pub struct CasdaStagingClient {
@@ -186,10 +187,7 @@ impl StagingClient for CasdaStagingClient {
 }
 
 impl CasdaStagingClient {
-    async fn stage_visibility_batch(
-        &self,
-        records: &[Value],
-    ) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
+    async fn stage_visibility_batch(&self, records: &[Value]) -> Result<StagingUrlMaps, String> {
         let access_urls = collect_access_urls(records, &["access_url"]);
         if access_urls.is_empty() {
             return Err("no access_url in metadata for CASDA visibility staging".into());
@@ -201,7 +199,7 @@ impl CasdaStagingClient {
     async fn stage_eval_batch(
         &self,
         inputs: &BTreeMap<String, (String, String)>,
-    ) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
+    ) -> Result<StagingUrlMaps, String> {
         let mut seen_urls = HashSet::new();
         let mut access_urls = Vec::new();
         for (_, access_url) in inputs.values() {
@@ -279,12 +277,14 @@ impl CasdaStagingClient {
     }
 
     async fn run_soda_job(&self, job_url: &str) -> Result<String, String> {
-        self.client
+        let run_response = self
+            .client
             .post(format!("{job_url}/phase"))
             .form(&[("phase", "RUN")])
             .send()
             .await
             .map_err(|e| e.to_string())?;
+        ensure_casda_http_status(run_response.status(), "run staging job")?;
 
         for _ in 0..60 {
             let poll = self
@@ -293,19 +293,19 @@ impl CasdaStagingClient {
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
+            ensure_casda_http_status(poll.status(), "poll staging job")?;
             let body = poll.text().await.map_err(|e| e.to_string())?;
             match read_job_phase(&body) {
                 Some(phase) if phase == "COMPLETED" => {
                     let results_url = format!("{job_url}/results");
-                    return self
+                    let results = self
                         .client
                         .get(&results_url)
                         .send()
                         .await
-                        .map_err(|e| e.to_string())?
-                        .text()
-                        .await
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.to_string())?;
+                    ensure_casda_http_status(results.status(), "fetch staging results")?;
+                    return results.text().await.map_err(|e| e.to_string());
                 }
                 Some(phase) if matches!(phase.as_str(), "ERROR" | "ABORTED") => {
                     return Err(format!("CASDA staging job ended with status {phase}"));
@@ -315,6 +315,14 @@ impl CasdaStagingClient {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
         Err("CASDA staging job timed out".into())
+    }
+}
+
+fn ensure_casda_http_status(status: reqwest::StatusCode, operation: &str) -> Result<(), String> {
+    if status.is_success() || status.is_redirection() {
+        Ok(())
+    } else {
+        Err(format!("CASDA {operation} failed: HTTP {status}"))
     }
 }
 
@@ -365,7 +373,7 @@ fn map_eval_staging_results(
     inputs: &BTreeMap<String, (String, String)>,
     by_filename: &HashMap<String, String>,
     by_filename_checksum: &HashMap<String, String>,
-) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
+) -> Result<StagingUrlMaps, String> {
     let mut by_sbid = HashMap::new();
     let mut by_sbid_checksum = HashMap::new();
     for (sbid, (filename, _)) in inputs {
@@ -504,6 +512,13 @@ mod tests {
     fn read_completed_job_phase() {
         let xml = r#"<?xml version="1.0"?><uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"><uws:phase>COMPLETED</uws:phase></uws:job>"#;
         assert_eq!(read_job_phase(xml).as_deref(), Some("COMPLETED"));
+    }
+
+    #[test]
+    fn staging_http_failures_are_not_parsed_as_uws_responses() {
+        assert!(ensure_casda_http_status(reqwest::StatusCode::OK, "poll").is_ok());
+        let error = ensure_casda_http_status(reqwest::StatusCode::BAD_GATEWAY, "poll").unwrap_err();
+        assert_eq!(error, "CASDA poll failed: HTTP 502 Bad Gateway");
     }
 
     #[test]
