@@ -40,7 +40,8 @@ pub use manifest::{
 pub use scheduler::{
     SchedulerAdapter, SchedulerAdapterError, SchedulerCapacity, SchedulerConnectivity,
     SchedulerErrorKind, SchedulerJobObservation, SchedulerKind, SchedulerLogLocations,
-    SchedulerQueueInfo, SchedulerResourceRequest, SchedulerSubmission, SchedulerSubmissionRequest,
+    SchedulerNameLookup, SchedulerNameLookupSourceCompletion, SchedulerQueueInfo,
+    SchedulerResourceRequest, SchedulerSubmission, SchedulerSubmissionRequest,
 };
 pub use security::{collect_security_issues, validate_security};
 pub use slurm_batch::SlurmJobPollResult;

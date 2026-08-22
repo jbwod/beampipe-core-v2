@@ -5177,11 +5177,11 @@ async fn reconcile_uncertain_slurm_submissions(
         let client = slurm_backend_from_profile(Some(&profile), true, execution.created_at).slurm;
         let matches = match within_slurm_target_timeout(
             SLURM_TARGET_WALL_CLOCK_TIMEOUT,
-            client.find_by_name(&session_id),
+            client.find_by_name(&session_id, execution.created_at),
         )
         .await
         {
-            Ok(Ok(matches)) => matches,
+            Ok(Ok(lookup)) => lookup.matches,
             Ok(Err(error)) => {
                 record_slurm_poll_failure(
                     pool,

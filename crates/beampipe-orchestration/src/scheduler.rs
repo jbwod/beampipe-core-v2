@@ -9,7 +9,9 @@ use thiserror::Error;
 
 use crate::clients::SshSlurmClient;
 use crate::slurm_deploy::{resolve_remote_user, submit_slurm_session, SlurmSubmitParams};
-use crate::slurm_ssh::{query_slurm_states_batch, SlurmSshSession, SlurmTarget};
+use crate::slurm_ssh::{
+    query_slurm_states_batch, validate_slurm_job_id, SlurmSshSession, SlurmTarget,
+};
 use crate::{OrchestrationError, SlurmJobPollResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +119,23 @@ impl SchedulerAdapterError {
         }
     }
 
+    fn invalid_response(
+        operation: &str,
+        target: &str,
+        detail: impl Into<String>,
+    ) -> Self {
+        let detail = detail.into();
+        Self {
+            scheduler: SchedulerKind::SlurmRemote,
+            operation: operation.into(),
+            target: target.into(),
+            kind: SchedulerErrorKind::InvalidResponse,
+            message: "scheduler returned an invalid response".into(),
+            retryable: false,
+            detail: Some(bounded_detail(&detail)),
+        }
+    }
+
     pub fn failure_class(&self) -> FailureClass {
         match self.kind {
             SchedulerErrorKind::Configuration => FailureClass::Configuration,
@@ -197,6 +216,22 @@ pub struct SchedulerJobObservation {
     pub observed_at: DateTime<Utc>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerNameLookupSourceCompletion {
+    pub squeue_completed: bool,
+    pub sacct_completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerNameLookup {
+    pub job_name: String,
+    pub accounting_not_before: DateTime<Utc>,
+    pub query_started_at: DateTime<Utc>,
+    pub query_completed_at: DateTime<Utc>,
+    pub source_completion: SchedulerNameLookupSourceCompletion,
+    pub matches: Vec<SchedulerJobObservation>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -328,7 +363,8 @@ pub trait SchedulerAdapter: Send + Sync {
     async fn find_by_name(
         &self,
         job_name: &str,
-    ) -> Result<Vec<SchedulerJobObservation>, SchedulerAdapterError>;
+        not_before: DateTime<Utc>,
+    ) -> Result<SchedulerNameLookup, SchedulerAdapterError>;
     async fn accounting(
         &self,
         external_job_id: &str,
@@ -534,8 +570,11 @@ impl SchedulerAdapter for SshSlurmClient {
     async fn find_by_name(
         &self,
         job_name: &str,
-    ) -> Result<Vec<SchedulerJobObservation>, SchedulerAdapterError> {
+        not_before: DateTime<Utc>,
+    ) -> Result<SchedulerNameLookup, SchedulerAdapterError> {
         validate_job_name(job_name)?;
+        let accounting_not_before = slurm_accounting_not_before(not_before);
+        let query_started_at = Utc::now();
         let (target, display) = self.scheduler_target("find_by_name")?;
         let mut session = SlurmSshSession::connect(&target)
             .await
@@ -546,17 +585,22 @@ impl SchedulerAdapter for SshSlurmClient {
             .await
             .map_err(|error| SchedulerAdapterError::backend("find_by_name", &display, error))?;
         let sacct = session
-            .run_command(&format!(
-                "sacct -n -X --name={quoted_name} --starttime=now-7days -o 'JobIDRaw,JobName,State,Reason' -P"
-            ))
+            .run_command(&sacct_name_lookup_command(job_name, &accounting_not_before))
             .await
             .map_err(|error| SchedulerAdapterError::backend("find_by_name", &display, error))?;
-        let observations = merge_named_job_observations(
-            parse_named_jobs(&squeue, job_name, "squeue"),
-            parse_named_jobs(&sacct, job_name, "sacct"),
-        );
         let _ = session.close().await;
-        Ok(observations)
+        let query_completed_at = Utc::now();
+        complete_named_job_lookup(
+            job_name,
+            accounting_not_before,
+            query_started_at,
+            query_completed_at,
+            &squeue,
+            &sacct,
+        )
+        .map_err(|error| {
+            SchedulerAdapterError::invalid_response("find_by_name", &display, error.to_string())
+        })
     }
 
     async fn accounting(
@@ -699,42 +743,127 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn slurm_accounting_not_before(requested: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(requested.timestamp(), 0)
+        .expect("a chrono UTC timestamp remains valid when truncated to whole seconds")
+}
+
+fn sacct_name_lookup_command(job_name: &str, not_before: &DateTime<Utc>) -> String {
+    let quoted_name = shell_quote(job_name);
+    let quoted_not_before = shell_quote(&not_before.format("%Y-%m-%dT%H:%M:%S").to_string());
+    format!(
+        "TZ=UTC sacct -n -X --name={quoted_name} --starttime={quoted_not_before} -o 'JobIDRaw,JobName,State,Reason' -P"
+    )
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[error("{query_source} line {line_number}: {message}")]
+struct NamedJobParseError {
+    query_source: String,
+    line_number: usize,
+    message: String,
+}
+
+impl NamedJobParseError {
+    fn new(source: &str, line_number: usize, message: impl Into<String>) -> Self {
+        Self {
+            query_source: source.into(),
+            line_number,
+            message: message.into(),
+        }
+    }
+}
+
 fn parse_named_jobs(
     output: &str,
     expected_name: &str,
     source: &str,
-) -> Vec<SchedulerJobObservation> {
-    let observed_at = Utc::now();
-    output
-        .lines()
-        .filter_map(|line| {
-            let fields: Vec<_> = line.trim().split('|').collect();
-            if fields.len() < 3 || fields[1].trim() != expected_name {
-                return None;
-            }
-            let external_job_id = fields[0].trim();
-            if validate_job_id(external_job_id).is_err() || external_job_id.contains('.') {
-                return None;
-            }
-            let raw_state = fields[2].split_whitespace().next()?.to_string();
-            let reason = fields
-                .get(3)
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty() && *value != "None")
-                .map(str::to_string);
-            Some(SchedulerJobObservation {
-                scheduler: SchedulerKind::SlurmRemote,
-                external_job_id: external_job_id.to_string(),
-                state: SchedulerState::from_normalized(&raw_state),
-                raw_state,
-                reason,
-                source: source.into(),
-                exit_code: None,
-                observed_at,
-                metadata: serde_json::json!({"job_name": expected_name}),
-            })
-        })
-        .collect()
+    observed_at: DateTime<Utc>,
+) -> Result<Vec<SchedulerJobObservation>, NamedJobParseError> {
+    let mut observations = Vec::new();
+    for (index, raw_line) in output.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split('|').collect();
+        if fields.len() != 4 {
+            return Err(NamedJobParseError::new(
+                source,
+                line_number,
+                format!("expected 4 pipe-delimited fields, received {}", fields.len()),
+            ));
+        }
+        let returned_name = fields[1].trim();
+        if returned_name.is_empty() {
+            return Err(NamedJobParseError::new(
+                source,
+                line_number,
+                "job name is empty",
+            ));
+        }
+        if returned_name != expected_name {
+            continue;
+        }
+        let external_job_id = fields[0].trim();
+        if validate_slurm_job_id(external_job_id).is_err() {
+            return Err(NamedJobParseError::new(
+                source,
+                line_number,
+                "exact-name row contains an invalid allocation job ID",
+            ));
+        }
+        let Some(raw_state) = fields[2].split_whitespace().next().map(str::to_string) else {
+            return Err(NamedJobParseError::new(
+                source,
+                line_number,
+                "exact-name row contains an empty state",
+            ));
+        };
+        let reason = fields[3].trim();
+        let reason = (!reason.is_empty() && reason != "None").then(|| reason.to_string());
+        observations.push(SchedulerJobObservation {
+            scheduler: SchedulerKind::SlurmRemote,
+            external_job_id: external_job_id.to_string(),
+            state: SchedulerState::from_normalized(&raw_state),
+            raw_state,
+            reason,
+            source: source.into(),
+            exit_code: None,
+            observed_at,
+            metadata: serde_json::json!({"job_name": expected_name}),
+        });
+    }
+    Ok(observations)
+}
+
+fn complete_named_job_lookup(
+    job_name: &str,
+    accounting_not_before: DateTime<Utc>,
+    query_started_at: DateTime<Utc>,
+    query_completed_at: DateTime<Utc>,
+    squeue_output: &str,
+    sacct_output: &str,
+) -> Result<SchedulerNameLookup, NamedJobParseError> {
+    let squeue = parse_named_jobs(
+        squeue_output,
+        job_name,
+        "squeue",
+        query_completed_at,
+    )?;
+    let sacct = parse_named_jobs(sacct_output, job_name, "sacct", query_completed_at)?;
+    Ok(SchedulerNameLookup {
+        job_name: job_name.into(),
+        accounting_not_before,
+        query_started_at,
+        query_completed_at,
+        source_completion: SchedulerNameLookupSourceCompletion {
+            squeue_completed: true,
+            sacct_completed: true,
+        },
+        matches: merge_named_job_observations(squeue, sacct),
+    })
 }
 
 fn merge_named_job_observations(
@@ -757,6 +886,13 @@ fn merge_named_job_observations(
 mod tests {
     use super::*;
     use beampipe_profiles::{DaliugeManagerTopologyConfig, SlurmResourceConfig};
+    use chrono::TimeZone;
+
+    fn timestamp(minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 22, 10, minute, 0)
+            .single()
+            .expect("valid timestamp")
+    }
 
     fn profile() -> SlurmRemoteDeploymentConfig {
         SlurmRemoteDeploymentConfig {
@@ -816,6 +952,19 @@ mod tests {
     }
 
     #[test]
+    fn accounting_lookup_uses_and_reports_its_utc_lower_bound() {
+        let requested = timestamp(0) + chrono::Duration::milliseconds(987);
+        let accounting_not_before = slurm_accounting_not_before(requested);
+        let command = sacct_name_lookup_command("BeampipeExecution-abc", &accounting_not_before);
+
+        assert_eq!(accounting_not_before, timestamp(0));
+        assert!(command.starts_with("TZ=UTC sacct "));
+        assert!(command.contains("--name='BeampipeExecution-abc'"));
+        assert!(command.contains("--starttime='2026-08-22T10:00:00'"));
+        assert!(!command.contains("now-7days"));
+    }
+
+    #[test]
     fn submission_uncertainty_is_preserved_by_scheduler_adapter() {
         let error = SchedulerAdapterError::backend(
             "submit",
@@ -834,7 +983,9 @@ mod tests {
             "123|BeampipeExecution-abc|RUNNING|None\n124|other|PENDING|Resources\n",
             "BeampipeExecution-abc",
             "squeue",
-        );
+            timestamp(1),
+        )
+        .expect("valid scheduler output");
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].external_job_id, "123");
         assert_eq!(observations[0].state, SchedulerState::Running);
@@ -847,12 +998,16 @@ mod tests {
                 "123|BeampipeExecution-abc|RUNNING|None\n",
                 "BeampipeExecution-abc",
                 "squeue",
-            ),
+                timestamp(1),
+            )
+            .expect("valid squeue output"),
             parse_named_jobs(
                 "124|BeampipeExecution-abc|COMPLETED|None\n",
                 "BeampipeExecution-abc",
                 "sacct",
-            ),
+                timestamp(1),
+            )
+            .expect("valid sacct output"),
         );
 
         assert_eq!(observations.len(), 2);
@@ -867,16 +1022,101 @@ mod tests {
                 "123|BeampipeExecution-abc|RUNNING|None\n",
                 "BeampipeExecution-abc",
                 "squeue",
-            ),
+                timestamp(1),
+            )
+            .expect("valid squeue output"),
             parse_named_jobs(
                 "123|BeampipeExecution-abc|PENDING|Resources\n",
                 "BeampipeExecution-abc",
                 "sacct",
-            ),
+                timestamp(1),
+            )
+            .expect("valid sacct output"),
         );
 
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].source, "squeue");
         assert_eq!(observations[0].state, SchedulerState::Running);
+    }
+
+    #[test]
+    fn named_job_lookup_envelope_proves_complete_union_scope() {
+        let lookup = complete_named_job_lookup(
+            "BeampipeExecution-abc",
+            timestamp(0),
+            timestamp(1),
+            timestamp(2),
+            "123|BeampipeExecution-abc|RUNNING|None\n",
+            "123|BeampipeExecution-abc|PENDING|Resources\n124|BeampipeExecution-abc|COMPLETED|None\n",
+        )
+        .expect("valid scheduler output");
+
+        assert_eq!(lookup.job_name, "BeampipeExecution-abc");
+        assert_eq!(lookup.accounting_not_before, timestamp(0));
+        assert_eq!(lookup.query_started_at, timestamp(1));
+        assert_eq!(lookup.query_completed_at, timestamp(2));
+        assert_eq!(
+            lookup.source_completion,
+            SchedulerNameLookupSourceCompletion {
+                squeue_completed: true,
+                sacct_completed: true,
+            }
+        );
+        assert_eq!(lookup.matches.len(), 2);
+        assert_eq!(lookup.matches[0].external_job_id, "123");
+        assert_eq!(lookup.matches[0].source, "squeue");
+        assert_eq!(lookup.matches[1].external_job_id, "124");
+        assert!(lookup
+            .matches
+            .iter()
+            .all(|observation| observation.observed_at == timestamp(2)));
+    }
+
+    #[test]
+    fn named_job_lookup_rejects_malformed_nonempty_output() {
+        let error = parse_named_jobs(
+            "this is not a parsable scheduler row\n",
+            "BeampipeExecution-abc",
+            "sacct",
+            timestamp(1),
+        )
+        .expect_err("malformed output must not become negative evidence");
+
+        assert_eq!(error.query_source, "sacct");
+        assert_eq!(error.line_number, 1);
+        assert!(error.message.contains("4 pipe-delimited fields"));
+    }
+
+    #[test]
+    fn named_job_lookup_rejects_invalid_exact_name_job_id() {
+        for invalid_id in ["123.batch", "123_4", "not-a-job", "123;touch"] {
+            let output = format!("{invalid_id}|BeampipeExecution-abc|COMPLETED|None\n");
+            let error = parse_named_jobs(
+                &output,
+                "BeampipeExecution-abc",
+                "sacct",
+                timestamp(1),
+            )
+            .expect_err("invalid IDs must not become matches or negative evidence");
+
+            assert!(error.message.contains("invalid allocation job ID"));
+        }
+    }
+
+    #[test]
+    fn named_job_lookup_accepts_complete_empty_results() {
+        let lookup = complete_named_job_lookup(
+            "BeampipeExecution-abc",
+            timestamp(0),
+            timestamp(1),
+            timestamp(2),
+            "\n",
+            "",
+        )
+        .expect("empty output from both completed queries is valid negative evidence");
+
+        assert!(lookup.matches.is_empty());
+        assert!(lookup.source_completion.squeue_completed);
+        assert!(lookup.source_completion.sacct_completed);
     }
 }
