@@ -9,6 +9,7 @@ x-beampipe-shaping: &beampipe-shaping
 # TAP endpoints. Export BEAMPIPE_USE_REAL_BACKENDS=true only after `beampipe doctor` passes.
 x-beampipe-backend-env: &beampipe-backend-env
   BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-false}
+  BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED: ${BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED:-false}
   BEAMPIPE_CASDA_TAP_URL: ${BEAMPIPE_CASDA_TAP_URL:-https://casda.csiro.au/casda_vo_tools/tap/sync}
   BEAMPIPE_VIZIER_TAP_URL: ${BEAMPIPE_VIZIER_TAP_URL:-https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync}
   CASDA_LOGIN_URL: ${CASDA_LOGIN_URL:-https://data.csiro.au/casda_vo_proxy/vo/tap/availability}

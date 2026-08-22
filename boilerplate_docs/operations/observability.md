@@ -36,7 +36,7 @@ Do not disable metrics to hide the collision.
 | API traffic | Is operator/API demand healthy? | request rate, error ratio, p50/p95 latency, route and status |
 | Queue | Is work arriving faster than it completes? | queued/running jobs, oldest age, retries, dead letters |
 | Workers | Is capacity healthy and correctly routed? | active workers, heartbeats, leases, utilization by pool/capability |
-| Dependencies | Is pressure external? | global TAP health plus TM, DIM, and real SSH/Slurm probes for default or in-flight deployment profiles |
+| Dependencies | Is pressure external? | global TAP health plus TM and DIM probes; opt-in live SSH/Slurm probes for default or in-flight deployment profiles |
 | Discovery | Are sources becoming ready? | checked/changed/error outcomes, duration, pending sources |
 | Execution | Are runs progressing safely? | control phase, terminal outcomes, uncertain submissions, poll errors |
 | Security | Are production policies being rejected? | security-check failures and inline-secret rejections |
@@ -44,6 +44,23 @@ Do not disable metrics to hide the collision.
 Do not put high-cardinality source IDs, execution IDs, session IDs, URLs, or error strings into metric labels. Those belong in events and structured logs.
 In-flight source gauges are aggregated by project and phase; deployment
 dependency gauges are bounded by the configured profile registry.
+
+### Live Slurm dependency probes
+
+Metrics refresh is passive with respect to Slurm by default. Neither the
+background metrics server nor `GET /api/v2/metrics` opens an SSH connection for
+a Slurm deployment profile unless both controls are explicitly enabled:
+
+```dotenv
+BEAMPIPE_USE_REAL_BACKENDS=true
+BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED=true
+```
+
+Keep the metrics-specific flag `false` for mock/local operation. Enabling real
+backends alone does not authorize background SSH. Run `beampipe doctor
+--profile NAME` for an explicit operator-initiated qualification check. When
+live metrics probes are enabled, each refresh may connect to active/default
+Slurm profiles, so choose the refresh and scrape exposure accordingly.
 
 ## Prometheus and alerts
 

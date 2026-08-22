@@ -10,8 +10,13 @@ use beampipe_orchestration::tm_health::{probe_dim_reachable, probe_tm_reachable,
 use beampipe_profiles::{DaliugeTranslationConfig, DeploymentConfig, SlurmRemoteDeploymentConfig};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
+
+const LIVE_SLURM_PROBE_ENABLED_ENV: &str =
+    "BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED";
+const USE_REAL_BACKENDS_ENV: &str = "BEAMPIPE_USE_REAL_BACKENDS";
 
 static LAST_SOURCE_PROCESSING_KEYS: LazyLock<Mutex<HashSet<(String, String)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -173,27 +178,77 @@ fn profile_probes(
     Ok(probes)
 }
 
-async fn run_profile_probe(probe: &ProfileProbe, timeout: Duration) -> bool {
+fn explicit_env_true(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
+}
+
+fn live_slurm_dependency_probes_enabled_from_values(
+    live_probe_enabled: Option<&str>,
+    use_real_backends: Option<&str>,
+) -> bool {
+    explicit_env_true(live_probe_enabled) && explicit_env_true(use_real_backends)
+}
+
+fn live_slurm_dependency_probes_enabled() -> bool {
+    let live_probe_enabled = std::env::var(LIVE_SLURM_PROBE_ENABLED_ENV).ok();
+    let use_real_backends = std::env::var(USE_REAL_BACKENDS_ENV).ok();
+    live_slurm_dependency_probes_enabled_from_values(
+        live_probe_enabled.as_deref(),
+        use_real_backends.as_deref(),
+    )
+}
+
+async fn run_profile_probe_with<F, Fut>(
+    probe: &ProfileProbe,
+    timeout: Duration,
+    live_slurm_probes_enabled: bool,
+    slurm_probe: F,
+) -> Option<bool>
+where
+    F: FnOnce(SlurmRemoteDeploymentConfig, Duration) -> Fut,
+    Fut: Future<Output = bool>,
+{
     match probe {
         ProfileProbe::Http {
             dependency: "tm",
             url,
-        } => matches!(
+        } => Some(matches!(
             probe_tm_reachable(url, timeout).await,
             TmProbeResult::Ok | TmProbeResult::NotConfigured
-        ),
-        ProfileProbe::Http { url, .. } => matches!(
+        )),
+        ProfileProbe::Http { url, .. } => Some(matches!(
             probe_dim_reachable(url, timeout).await,
             TmProbeResult::Ok | TmProbeResult::NotConfigured
-        ),
+        )),
+        ProfileProbe::Slurm(_) if !live_slurm_probes_enabled => None,
         ProfileProbe::Slurm(slurm) => {
-            let username = resolve_remote_user(slurm);
-            matches!(
-                tokio::time::timeout(timeout, probe_slurm_login(slurm, &username)).await,
-                Ok(Ok(()))
-            )
+            let slurm = (**slurm).clone();
+            Some(slurm_probe(slurm, timeout).await)
         }
     }
+}
+
+async fn run_profile_probe(
+    probe: &ProfileProbe,
+    timeout: Duration,
+    live_slurm_probes_enabled: bool,
+) -> Option<bool> {
+    run_profile_probe_with(
+        probe,
+        timeout,
+        live_slurm_probes_enabled,
+        |slurm, timeout| async move {
+            let username = resolve_remote_user(&slurm);
+            matches!(
+                tokio::time::timeout(timeout, probe_slurm_login(&slurm, &username)).await,
+                Ok(Ok(()))
+            )
+        },
+    )
+    .await
 }
 
 async fn refresh_profile_dependencies(
@@ -212,6 +267,7 @@ async fn refresh_profile_dependencies(
     let mut current = HashSet::new();
     let mut tasks = tokio::task::JoinSet::new();
     let mut slurm_credentials_configured = true;
+    let live_slurm_probes_enabled = live_slurm_dependency_probes_enabled();
     for profile in profiles {
         let probes = match profile_probes(&profile, fallback_tm_url, fallback_dim_url) {
             Ok(probes) => probes,
@@ -230,22 +286,32 @@ async fn refresh_profile_dependencies(
             if let ProfileProbe::Slurm(slurm) = &probe {
                 slurm_credentials_configured &=
                     SlurmSshCredentials::resolve_for(slurm.ssh_credential.as_deref()).is_ok();
+                if !live_slurm_probes_enabled {
+                    tracing::debug!(
+                        event = "metrics_live_slurm_probe_disabled",
+                        profile = %profile.name,
+                        opt_in = LIVE_SLURM_PROBE_ENABLED_ENV,
+                    );
+                    continue;
+                }
             }
             let profile_name = profile.name.clone();
             let dependency = probe.dependency().to_string();
             current.insert((profile_name.clone(), dependency.clone()));
             tasks.spawn(async move {
-                let up = run_profile_probe(&probe, timeout).await;
-                (profile_name, dependency, up)
+                run_profile_probe(&probe, timeout, live_slurm_probes_enabled)
+                    .await
+                    .map(|up| (profile_name, dependency, up))
             });
         }
     }
     crate::set_slurm_ssh_configured(slurm_credentials_configured);
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok((profile, dependency, up)) => {
+            Ok(Some((profile, dependency, up))) => {
                 crate::set_deployment_profile_dependency_up(&profile, &dependency, up);
             }
+            Ok(None) => {}
             Err(error) => tracing::warn!(event = "metrics_profile_probe_join_failed", %error),
         }
     }
@@ -452,6 +518,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
     #[test]
@@ -532,8 +599,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn slurm_profile_creates_a_real_ssh_probe() {
+    fn slurm_profile_probe() -> ProfileProbe {
         let row = profile(
             json!({"tm_url": "http://profile-tm:9000"}),
             json!({
@@ -546,10 +612,77 @@ mod tests {
                 "dlg_root": "/scratch/project/dlg"
             }),
         );
-        let probes = profile_probes(&row, None, None).unwrap();
-        assert_eq!(probes.len(), 2);
-        assert!(
-            matches!(&probes[1], ProfileProbe::Slurm(slurm) if slurm.login_node == "login.example.org")
-        );
+        profile_probes(&row, None, None).unwrap().pop().unwrap()
+    }
+
+    #[test]
+    fn live_slurm_probe_policy_is_fail_closed() {
+        assert!(!live_slurm_dependency_probes_enabled_from_values(
+            None, None
+        ));
+        assert!(!live_slurm_dependency_probes_enabled_from_values(
+            Some("false"),
+            Some("true")
+        ));
+        assert!(!live_slurm_dependency_probes_enabled_from_values(
+            Some("true"),
+            Some("false")
+        ));
+        assert!(!live_slurm_dependency_probes_enabled_from_values(
+            Some("invalid"),
+            Some("true")
+        ));
+        assert!(live_slurm_dependency_probes_enabled_from_values(
+            Some("true"),
+            Some("1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn disabled_slurm_probe_never_invokes_runner() {
+        let probe = slurm_profile_probe();
+        let calls = AtomicUsize::new(0);
+        let result = run_profile_probe_with(
+            &probe,
+            Duration::from_secs(7),
+            false,
+            |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(true)
+            },
+        )
+        .await;
+
+        assert_eq!(result, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn enabled_slurm_probe_invokes_runner_once_and_returns_result() {
+        let probe = slurm_profile_probe();
+        let calls = AtomicUsize::new(0);
+        let result = run_profile_probe_with(
+            &probe,
+            Duration::from_secs(7),
+            true,
+            |slurm, timeout| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(slurm.login_node, "login.example.org");
+                assert_eq!(timeout, Duration::from_secs(7));
+                std::future::ready(false)
+            },
+        )
+        .await;
+
+        assert_eq!(result, Some(false));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn slurm_profile_builds_an_inert_probe_descriptor() {
+        assert!(matches!(
+            slurm_profile_probe(),
+            ProfileProbe::Slurm(slurm) if slurm.login_node == "login.example.org"
+        ));
     }
 }
