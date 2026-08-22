@@ -313,13 +313,16 @@ impl SlurmSshSession {
     }
 
     /// Upload file content via remote `tee` (shell-escaped path).
+    ///
+    /// Submission artifacts can contain short-lived signed data URLs. Apply a
+    /// restrictive umask in the same remote shell that creates the file so a
+    /// permissive login-node default cannot expose them to group/other users.
     pub async fn upload_text(
         &mut self,
         remote_path: &str,
         content: &str,
     ) -> Result<(), OrchestrationError> {
-        let escaped = shell_escape_single(remote_path);
-        let cmd = format!("tee {escaped}");
+        let cmd = upload_text_command(remote_path);
         let mut channel = self
             .handle
             .channel_open_session()
@@ -395,6 +398,10 @@ fn shell_escape_single(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', "'\"'\"'"))
     }
+}
+
+fn upload_text_command(remote_path: &str) -> String {
+    format!("umask 077 && tee {}", shell_escape_single(remote_path))
 }
 
 struct PooledEntry {
@@ -502,7 +509,7 @@ pub async fn query_slurm_states_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::{known_hosts_has_target, load_known_host_keys};
+    use super::{known_hosts_has_target, load_known_host_keys, upload_text_command};
 
     fn generate_public_key(dir: &tempfile::TempDir) -> String {
         let key_path = dir.path().join("id_test");
@@ -520,6 +527,13 @@ mod tests {
             .expect("ssh-keygen");
         assert!(status.success(), "ssh-keygen failed");
         std::fs::read_to_string(key_path.with_extension("pub")).unwrap()
+    }
+
+    #[test]
+    fn uploaded_submission_artifacts_are_created_private() {
+        let command = upload_text_command("/scratch/session graph.pgt");
+        assert!(command.starts_with("umask 077 && tee "));
+        assert!(command.contains("'/scratch/session graph.pgt'"));
     }
 
     #[test]

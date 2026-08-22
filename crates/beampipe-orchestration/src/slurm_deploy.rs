@@ -1,3 +1,4 @@
+use crate::scheduler::SchedulerResourceRequest;
 use crate::slurm_ssh::{SlurmSshSession, SlurmTarget};
 use crate::OrchestrationError;
 use beampipe_profiles::{DaliugeAlgo, SlurmRemoteDeploymentConfig};
@@ -30,10 +31,15 @@ pub fn render_generated_ini(
         "remote = False".into(),
         "submit = False".into(),
         "[ENGINE]".into(),
-        format!("NUM_NODES = {}", deployment.num_nodes),
-        format!("NUM_ISLANDS = {}", deployment.num_islands),
+        format!("NUM_NODES = {}", deployment.effective_nodes()),
+        format!("NUM_ISLANDS = {}", deployment.effective_islands()),
+        format!("JOB_DUR = {}", deployment.effective_wall_time_minutes()),
         format!("MAX_THREADS = {}", deployment.max_threads),
         format!("VERBOSE_LEVEL = {}", deployment.verbose_level),
+        format!(
+            "ALL_NICS = {}",
+            if deployment.all_nics { "True" } else { "False" }
+        ),
         "[GRAPH]".into(),
         format!("PHYSICAL_GRAPH = {pgt_remote_path}"),
         "[FACILITY]".into(),
@@ -45,17 +51,19 @@ pub fn render_generated_ini(
         format!("LOG_DIR = {}", deployment.log_dir),
         format!("EXEC_PREFIX = {}", deployment.exec_prefix),
     ];
-    if let Some(modules) = deployment.modules.as_deref() {
-        lines.push(format!("MODULES = {modules}"));
-    }
-    if let Some(venv) = deployment.venv.as_deref() {
-        lines.push(format!("VENV = {venv}"));
-    }
-    if deployment.all_nics {
-        lines.push("[ENGINE]".into());
-        lines.push("ALL_NICS = True".into());
-    }
+    push_ini_value(&mut lines, "MODULES", deployment.modules.as_deref());
+    push_ini_value(&mut lines, "VENV", deployment.venv.as_deref());
     lines.join("\n")
+}
+
+fn push_ini_value(lines: &mut Vec<String>, key: &str, value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    let mut value_lines = value.lines();
+    let first = value_lines.next().unwrap_or_default();
+    lines.push(format!("{key} = {first}"));
+    lines.extend(value_lines.map(|line| format!("    {line}")));
 }
 
 const SLURM_ACCOUNT_ENV: &str = "BEAMPIPE_SLURM_ACCOUNT";
@@ -135,12 +143,44 @@ where
     {
         exported.push("BEAMPIPE_ASKAPSOFT_SIF");
     }
+    let resources = SchedulerResourceRequest::from_slurm_profile(deployment);
+    let mut argv = vec![
+        "sbatch".to_string(),
+        format!("--export={}", exported.join(",")),
+        "--parsable".to_string(),
+        format!("--job-name={session_id}"),
+        format!("--account={}", resources.account),
+        format!("--nodes={}", resources.nodes),
+        format!(
+            "--time={:02}:{:02}:00",
+            resources.wall_time_minutes / 60,
+            resources.wall_time_minutes % 60
+        ),
+    ];
+    for (flag, value) in [
+        ("partition", resources.partition.as_deref()),
+        ("mem", resources.memory.as_deref()),
+        ("constraint", resources.constraint.as_deref()),
+        ("qos", resources.quality_of_service.as_deref()),
+    ] {
+        if let Some(value) = value {
+            argv.push(format!("--{flag}={value}"));
+        }
+    }
+    if let Some(tasks) = resources.tasks {
+        argv.push(format!("--ntasks={tasks}"));
+    }
+    if let Some(cpus) = resources.cpus_per_task {
+        argv.push(format!("--cpus-per-task={cpus}"));
+    }
+    argv.push(jobsub_path.to_string());
     let inner = format!(
-        "{}\nsbatch --export={} --parsable --job-name={} {}",
+        "{}\n{}",
         env_prelude_with(deployment, read_environment)?,
-        exported.join(","),
-        shell_quote(session_id),
-        shell_quote(jobsub_path)
+        argv.iter()
+            .map(|argument| shell_quote(argument))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
     Ok(format!("bash -lc {}", shell_quote(&inner)))
 }
@@ -357,9 +397,20 @@ mod tests {
 
     #[test]
     fn render_ini_contains_account() {
-        let dep = deployment();
+        let mut dep = deployment();
+        dep.resources.nodes = Some(3);
+        dep.resources.wall_time_minutes = Some(125);
+        dep.manager_topology.islands = Some(2);
+        dep.all_nics = true;
+        dep.modules = Some("module load singularity\nmodule load python".into());
         let ini = render_generated_ini(&dep, "user", "/path.pgt", "/dlg");
         assert!(ini.contains("ACCOUNT = myacct"));
+        assert!(ini.contains("NUM_NODES = 3"));
+        assert!(ini.contains("NUM_ISLANDS = 2"));
+        assert!(ini.contains("JOB_DUR = 125"));
+        assert_eq!(ini.matches("[ENGINE]").count(), 1);
+        assert!(ini.contains("ALL_NICS = True"));
+        assert!(ini.contains("MODULES = module load singularity\n    module load python"));
     }
 
     #[test]
@@ -394,6 +445,14 @@ mod tests {
     fn sbatch_runs_with_exports_in_the_same_remote_shell() {
         let mut dep = deployment();
         dep.environment_setup = Some("test -n \"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
+        dep.resources.partition = Some("work".into());
+        dep.resources.nodes = Some(2);
+        dep.resources.tasks = Some(2);
+        dep.resources.cpus_per_task = Some(4);
+        dep.resources.memory = Some("12G".into());
+        dep.resources.wall_time_minutes = Some(50);
+        dep.resources.constraint = Some("cpu".into());
+        dep.resources.quality_of_service = Some("normal".into());
         let command = sbatch_command_with(&dep, "session id", "/dlg/job sub.sh", |name| {
             (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into())
         })
@@ -402,11 +461,29 @@ mod tests {
         assert!(command.starts_with("bash -lc "));
         assert!(command.contains("export BEAMPIPE_SLURM_ACCOUNT=myacct"));
         assert!(command.contains("export BEAMPIPE_ASKAPSOFT_SIF="));
-        assert!(command
-            .contains("sbatch --export=BEAMPIPE_SLURM_ACCOUNT,BEAMPIPE_ASKAPSOFT_SIF --parsable"));
+        for expected in [
+            "--export=BEAMPIPE_SLURM_ACCOUNT,BEAMPIPE_ASKAPSOFT_SIF",
+            "--parsable",
+            "--job-name=session id",
+            "--account=myacct",
+            "--partition=work",
+            "--nodes=2",
+            "--ntasks=2",
+            "--cpus-per-task=4",
+            "--mem=12G",
+            "--time=00:50:00",
+            "--constraint=cpu",
+            "--qos=normal",
+            "/dlg/job sub.sh",
+        ] {
+            assert!(
+                command.contains(expected),
+                "missing {expected:?} in {command}"
+            );
+        }
         assert!(
             command.find("export BEAMPIPE_ASKAPSOFT_SIF").unwrap()
-                < command.find("sbatch --export=").unwrap()
+                < command.find("sbatch").unwrap()
         );
     }
 
