@@ -45,3 +45,42 @@ beampipe worker drain "$WORKER_ID"
 ```
 
 An active lease cannot be stolen. An expired lease can be recovered with a new fence. If a worker process is gone, drain its record before maintenance so operators can distinguish intentional retirement from heartbeat loss.
+
+## PostgreSQL backup and restore drills
+
+Back up the complete database before changing binaries, migrations, project
+revisions, profiles, or secrets. The backup script writes a PostgreSQL custom
+archive to a temporary file, validates its catalog, writes a SHA-256 sidecar,
+and only then publishes the files in the backup directory. It retains 30 days
+by default.
+
+```bash
+DATABASE_URL="$DATABASE_URL" \
+BEAMPIPE_BACKUP_DIR=/srv/beampipe/backups \
+BEAMPIPE_BACKUP_RETENTION_DAYS=30 \
+./scripts/pg-backup.sh
+
+./scripts/pg-restore-verify.sh \
+  /srv/beampipe/backups/beampipe-YYYYMMDDTHHMMSSZ.dump
+```
+
+Copy both the `.dump` and `.dump.sha256` files to storage outside the runtime
+host. A backup is not proven recoverable until it has passed a restore drill.
+Create an empty disposable database whose name starts with
+`beampipe_restore_drill_`, run the drill, inspect it, and then drop it
+explicitly:
+
+```bash
+createdb --maintenance-db="$DATABASE_URL" beampipe_restore_drill_20260822
+
+BEAMPIPE_RESTORE_DRILL_URL="postgresql://postgres@localhost/beampipe_restore_drill_20260822" \
+  ./scripts/pg-restore-drill.sh \
+  /srv/beampipe/backups/beampipe-YYYYMMDDTHHMMSSZ.dump
+
+dropdb --maintenance-db="$DATABASE_URL" beampipe_restore_drill_20260822
+```
+
+The drill refuses a target without the reserved name prefix and refuses any
+database that already contains user tables. It verifies the checksum and dump
+catalog before restoring in one transaction, then checks the core ledger,
+queue, registry, and project-config tables. Never point it at production.
