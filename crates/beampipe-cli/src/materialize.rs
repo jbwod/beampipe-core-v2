@@ -313,6 +313,32 @@ mod tests {
     }
 
     #[test]
+    fn compose_roles_wait_for_the_migrated_api() {
+        for compose in [
+            OPERATOR_COMPOSE,
+            include_str!("../../../docker-compose.yml"),
+        ] {
+            let document: serde_yaml::Value = serde_yaml::from_str(compose).unwrap();
+            let services = &document["services"];
+            assert_eq!(
+                services["api"]["environment"]["BEAMPIPE_MIGRATE_ON_SERVE"].as_str(),
+                Some("true")
+            );
+            assert_eq!(
+                services["api"]["depends_on"]["postgres"]["condition"].as_str(),
+                Some("service_healthy")
+            );
+            for role in ["scheduler", "worker"] {
+                assert_eq!(
+                    services[role]["depends_on"]["api"]["condition"].as_str(),
+                    Some("service_healthy"),
+                    "{role} must not start until the migrated API is healthy"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn materialize_updates_an_unmodified_managed_file() {
         let dir = tempfile::tempdir().unwrap();
         materialize(dir.path(), false).unwrap();
