@@ -232,7 +232,7 @@ mod tests {
                 )
                 .unwrap()
             ),
-            "b3b85695068dee94b1e87f707d8c0ba45afc9e6ce347223ce2194c32f5e33de4"
+            "56faf68f4e22bab5a5976c081f54ad8c2dd4c17c71d02c9b6843c531d2f9a47b"
         );
 
         fs::write(dir.path().join("docker-compose.yml"), "operator-owned\n").unwrap();
