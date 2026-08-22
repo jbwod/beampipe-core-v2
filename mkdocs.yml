@@ -3,7 +3,7 @@ docs_dir: boilerplate_docs
 site_name: beampipe operator docs
 site_description: Operate and extend Beampipe, the Rust control plane for archive-driven radio astronomy workflows.
 site_author: Jack Blackwood
-site_url: https://beampipe-core.readthedocs.io/
+site_url: https://beampipe.jackblackwood.com/
 
 theme:
   name: material
@@ -38,10 +38,12 @@ nav:
   - Start:
       - Quick start: getting-started/index.md
       - Install and configure: getting-started/installation.md
-      - Dashboard tour: getting-started/dashboard.md
+      - Dashboard setup and tour: getting-started/dashboard.md
       - First workflow: getting-started/first-run.md
+      - Local DALiuGE end to end: getting-started/local-daliuge.md
   - Operate:
       - Operator handbook: operations/index.md
+      - Dashboard workflow: operations/dashboard-workflow.md
       - Workers and scheduling: operations/workers-scheduling.md
       - Observability: operations/observability.md
       - Recovery and cancellation: operations/recovery.md
@@ -51,6 +53,9 @@ nav:
       - Graph preparation: project-configs/graph-patches.md
       - Output verification: project-configs/output-verification.md
       - Deployment profiles and SSH: architecture/deployment-profiles.md
+  - Architecture:
+      - Dashboard boundary: architecture/dashboard.md
+      - Dashboard deployment: architecture/dashboard-deployment.md
   - Reference:
       - CLI commands: reference/cli.md
       - API workflow: api/index.md

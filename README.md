@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/jbwod/beampipe-core-v2/actions/workflows/rust.yml"><img src="https://github.com/jbwod/beampipe-core-v2/actions/workflows/rust.yml/badge.svg" alt="Rust CI"></a>
-  <a href="https://beampipe-core.readthedocs.io/"><img src="https://img.shields.io/badge/docs-operator_guide-7fd7e6?style=flat-square&labelColor=050505" alt="Documentation"></a>
+  <a href="https://beampipe.jackblackwood.com/"><img src="https://img.shields.io/badge/docs-operator_guide-7fd7e6?style=flat-square&labelColor=050505" alt="Documentation"></a>
   <img src="https://img.shields.io/badge/API-%2Fapi%2Fv2-d6c178?style=flat-square&labelColor=050505" alt="API v2">
   <img src="https://img.shields.io/badge/config-beampipe.dev%2Fv2-a7cfa3?style=flat-square&labelColor=050505" alt="Project config v2">
 </p>
@@ -137,7 +137,7 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 The API is at `http://127.0.0.1:18080/api/v2`. Files live in `~/beampipe`. You do not need to clone this repository.
 
-Install a deployment profile with `beampipe profile add`, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Continue with the [quick start](https://beampipe-core.readthedocs.io/getting-started/) and [first workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/).
+Install a deployment profile with `beampipe profile add`, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Continue with the [quick start](https://beampipe.jackblackwood.com/getting-started/) and [first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/).
 
 
 ## `Runtime`
@@ -166,11 +166,13 @@ Install a deployment profile with `beampipe profile add`, run `beampipe doctor -
 
 | Task | Page |
 |---|---|
-| Install and reach a healthy system | [Quick start](https://beampipe-core.readthedocs.io/getting-started/) |
-| Run one discovery and graph preparation | [First workflow](https://beampipe-core.readthedocs.io/getting-started/first-run/) |
-| Author project-defined TAP and graph policy | [Project YAML](https://beampipe-core.readthedocs.io/project-configs/) |
-| Integrate over HTTP | [API workflow](https://beampipe-core.readthedocs.io/api/) |
-| Operate and recover work | [Operator handbook](https://beampipe-core.readthedocs.io/operations/) |
+| Install and reach a healthy system | [Quick start](https://beampipe.jackblackwood.com/getting-started/) |
+| Run one discovery and graph preparation | [First workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) |
+| Qualify real local DALiuGE execution | [Local DALiuGE end to end](https://beampipe.jackblackwood.com/getting-started/local-daliuge/) |
+| Install and operate the web console | [Dashboard setup](https://beampipe.jackblackwood.com/getting-started/dashboard/) |
+| Author project-defined TAP and graph policy | [Project YAML](https://beampipe.jackblackwood.com/project-configs/) |
+| Integrate over HTTP | [API workflow](https://beampipe.jackblackwood.com/api/) |
+| Operate and recover work | [Operator handbook](https://beampipe.jackblackwood.com/operations/) |
 
 ## `Development`
 
@@ -182,4 +184,4 @@ beampipe project validate -f config/wallaby_hires.v2.yaml
 make docs-build
 ```
 
-See the [operator docs](https://beampipe-core.readthedocs.io/) and [contributing guide](https://beampipe-core.readthedocs.io/contributing/).
+See the [operator docs](https://beampipe.jackblackwood.com/) and [contributing guide](https://beampipe.jackblackwood.com/contributing/).

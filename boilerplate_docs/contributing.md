@@ -14,6 +14,52 @@ make docs-build
 
 `make docs-build` exports OpenAPI, copies it into the docs tree, and runs MkDocs in strict mode.
 
+## Dashboard checks
+
+Dashboard implementation lives in the `beampipe-dash` repository, while its
+operator documentation is canonical in this Core site. Qualify a Dashboard
+change with Node.js 24:
+
+```bash
+npm ci
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+For deterministic browser checks, start the checked-in fake Core and a Dash
+development server in separate terminals:
+
+```bash
+# Terminal 1
+npm run mock:api
+
+# Terminal 2
+BEAMPIPE_API_URL=http://127.0.0.1:18080 \
+npm run dev -- --hostname 127.0.0.1 --port 3100
+
+# Terminal 3
+BEAMPIPE_DASH_URL=http://127.0.0.1:3100 npm run visual:check
+```
+
+Mutation suites require an explicit guard:
+
+```bash
+export BEAMPIPE_DASH_E2E_CONFIRM_MUTATIONS=1
+npm run studio:check
+npm run profiles:check
+npm run sources:check
+npm run composer:check
+```
+
+Never set that guard while Dash points at production. The fixture binds only
+to loopback and covers desktop/mobile routes, overflow, project YAML round
+trips, EAGLE links, profile connectivity/resources, source discovery,
+preflight blockers, idempotent creation, and execution start. Override the
+screenshot directory with `BEAMPIPE_DASH_SCREENSHOT_DIR` and set `CHROME_PATH`
+when system Chrome is not at the script's platform default.
+
 ## Documentation ownership
 
 | Change | Update |
@@ -25,6 +71,7 @@ make docs-build
 | Execution transition | recovery procedure |
 | Metric or alert | observability dashboard order and alert guidance |
 | Backend behavior | deployment profiles |
+| Dashboard workflow, route, or security boundary | the relevant Core Dashboard page; do not create a second operator guide in Dash |
 
 ## Writing rules
 

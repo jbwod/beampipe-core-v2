@@ -5,6 +5,43 @@ operator console for Beampipe Core. It calls the authenticated `/api/v2`
 interface through a server-side BFF; it does not own a database, execute jobs,
 or infer workflow state independently of Core.
 
+## Install and sign in
+
+Start and check Core first. `beampipe start` returns after starting a Docker
+installation; a native host runtime stays in the foreground.
+
+```bash
+beampipe doctor
+beampipe start
+curl -fsS http://127.0.0.1:18080/api/v2/health
+```
+
+Setup normally creates the first administrator. If an existing database has no
+account, bootstrap one from the Core CLI. Prefer the interactive password
+prompt so the secret does not enter shell history:
+
+```bash
+beampipe admin create-user \
+  --username operator \
+  --email operator@example.org \
+  --name 'Beampipe Operator'
+```
+
+Install Dash on the same Docker host:
+
+```bash
+beampipe setup --dashboard
+
+# Equivalent standalone installer:
+curl -fsSL https://raw.githubusercontent.com/jbwod/beampipe-dash/main/scripts/install.sh | sh
+```
+
+Open `http://127.0.0.1:3000` and sign in with the Core account. The browser
+talks only to Dash. On the shared Compose network, the Dash server uses
+`http://api:8080`; native Dash uses Core's host publish, normally
+`http://127.0.0.1:18080`. `BEAMPIPE_API_URL` is always from the server's
+viewpoint, not the browser's.
+
 The screenshots on this page use Dash's checked-in synthetic Beampipe fixture.
 They are safe documentation examples rather than evidence from a production
 deployment.
@@ -66,3 +103,29 @@ headless `curl` equivalents.
 
 For a single Docker engine, run Dash `scripts/install.sh` (or `beampipe setup --dashboard`). It attaches Dash to Core's private Compose network and sets `BEAMPIPE_API_URL=http://api:8080`. Publish Dash—not the Core API—to the operator LAN or reverse proxy. See [Install and configure](installation.md) for the setup flags.
 
+Open **System** after login and confirm service/PostgreSQL readiness, TAP
+health, intended DALiuGE or Slurm status, a healthy worker pool, and no
+unresolved critical diagnostic. The equivalent headless checks are:
+
+```bash
+beampipe doctor
+beampipe status
+beampipe worker list
+```
+
+Continue with the [Dashboard operator workflow](../operations/dashboard-workflow.md).
+Use [Dashboard deployment and security](../architecture/dashboard-deployment.md)
+for native Node.js, TLS proxy, cookies, and production topology, and
+[Dashboard architecture](../architecture/dashboard.md) for the BFF and data
+ownership boundaries.
+
+## Common startup failures
+
+| Symptom | Check |
+|---|---|
+| Login says Core is unavailable | `BEAMPIPE_API_URL` is reachable from the Dash server/container |
+| Login returns `401` | The Core account exists and the password is correct |
+| Mutations return `403` behind a proxy | Proxy overwrites `Host`, `X-Forwarded-Host`, and `X-Forwarded-Proto` |
+| Session immediately expires over HTTPS | Set `BEAMPIPE_DASH_SECURE_COOKIES=true` |
+| Project save or profile test is disabled | The Core account must be a superuser |
+| Sources never leave discovery | Inspect **Jobs**, **Workers**, TAP health, and discovery capability |
