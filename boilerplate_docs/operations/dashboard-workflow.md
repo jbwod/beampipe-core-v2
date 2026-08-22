@@ -5,26 +5,29 @@ discovers sources, composes a run, and follows durable evidence through Dash.
 For the exact local REST qualification values and matching API commands, use
 [Local DALiuGE end to end](../getting-started/local-daliuge.md).
 
-```mermaid
-flowchart LR
-    SRC["Registered sources"] --> CLAIM["Discovery claim"]
-    CLAIM --> TAP["Project-defined TAP queries"]
-    TAP --> META["Signed archive metadata"]
-    META --> READY["Workflow pending"]
-    READY --> PREP["Prepare execution"]
-    PREP --> ART["Manifest + graph artifacts"]
-    ART --> BACKEND{"Pinned profile"}
-    BACKEND -->|rest_remote| DIM["TM + DIM"]
-    BACKEND -->|slurm_remote| SLURM["SSH + Slurm"]
-    DIM --> LEDGER["Terminal ledger state"]
-    SLURM --> LEDGER
-```
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Dashboard workflow from source registration, discovery, signed metadata, and pinned intent through a REST or Slurm backend, reconciliation and output verification, to terminal ledger evidence">
+  <div class="bp-flow-node" data-tone="cyan"><span>01 / SOURCE</span><strong>registered identity</strong><small>enabled project source</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>02 / DISCOVER</span><strong>TAP facts</strong><small>claim, query, normalize</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>03 / READY</span><strong>signed metadata</strong><small>flags and stable signature</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>04 / PREPARE</span><strong>pinned intent</strong><small>project + profile revision</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="green"><span>05 / BACKEND</span><strong>REST or Slurm</strong><small>TM/DIM or SSH/sbatch</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="cyan"><span>06 / RECONCILE</span><strong>output gate</strong><small>required evidence or explicit exemption</small></div>
+  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
+  <div class="bp-flow-node" data-tone="amber"><span>07 / TERMINAL</span><strong>ledger evidence</strong><small>states, events, artifacts</small></div>
+</div>
 
 ## 1. Prove system readiness
 
-Open **System** and confirm PostgreSQL, queue, TAP, DALiuGE/scheduler, and worker
-status match the intended environment. Resolve critical diagnostics before
-creating external intent.
+Open **System** and confirm PostgreSQL, queue, TAP, and worker status match the
+intended environment. DALiuGE and Slurm tiles show whether a backend is
+configured or profile-managed; they do not prove network connectivity. Use
+**Deployment target > Test profile** for the selected profile and resolve
+critical diagnostics before creating external intent.
 
 Equivalent CLI checks are:
 
@@ -118,15 +121,30 @@ it into a different run or assume no ledger row was created.
 
 ## 6. Interpret the run explorer
 
+<div class="bp-execution-evidence" role="group" aria-label="Execution state and evidence retained through the run">
+  <ol class="bp-execution-evidence__states" aria-label="Execution state sequence">
+    <li><span>01</span><strong>created</strong><small>project and profile revisions pinned</small></li>
+    <li><span>02</span><strong>running</strong><small>leased job, events, backend identity</small></li>
+    <li><span>03</span><strong>reconciled</strong><small>backend observations and output policy resolved</small></li>
+    <li><span>04</span><strong>terminal</strong><small>outcome locked against regression</small></li>
+  </ol>
+  <div class="bp-execution-evidence__artifacts" aria-label="Immutable evidence retained">
+    <span><b>manifest</b><code>sha256 + size</code></span>
+    <span><b>source graph</b><code>sha256 + size</code></span>
+    <span><b>patched graph</b><code>sha256 + size</code></span>
+    <span><b>physical graph</b><code>sha256 + size</code></span>
+    <span><b>timeline</b><code>events + observations</code></span>
+    <span><b>ledger</b><code>snapshot + run record</code></span>
+  </div>
+</div>
+
 | Tab | Evidence |
 |---|---|
 | Overview | Control, submission, scheduler, DALiuGE, output, terminal state; inputs and timing |
-| Timeline | Provenance events in durable order |
-| Observations | Normalized and raw DIM/Slurm observations |
+| Timeline | Provenance events plus normalized and raw DIM/Slurm observations |
 | Artifacts | Manifest and graph kinds, hashes, sizes, and downloads |
-| Manifest + graphs | Structured data exploration and EAGLE links |
-| Ledger | Pinned configuration, active job identity, and compact run state |
-| Run record | Staging, backend merges, scheduler metadata, and timestamps |
+| Manifest + graph | Structured data exploration and EAGLE links |
+| Ledger | Compact snapshot plus run record, staging, backend merges, scheduler metadata, and timestamps |
 
 For the qualified no-download REST run, these simultaneous values are correct:
 

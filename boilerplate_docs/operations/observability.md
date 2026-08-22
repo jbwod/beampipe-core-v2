@@ -12,7 +12,7 @@ loopback by default.
 | Endpoint | Scope |
 |---|---|
 | `GET /api/v2/health` | Process liveness; public |
-| `GET /api/v2/ready` | Authenticated database, workers, queue, and configured dependency detail |
+| `GET /api/v2/ready` | Authenticated database, Redis, TAP, runnable-queue, and running-job detail |
 | `GET /api/v2/metrics` | API exposition; authenticated unless explicitly public |
 | `BEAMPIPE_METRICS_BIND_ADDR/metrics` | Per-process Prometheus listener |
 | `/executions/{id}/events` | Execution provenance |

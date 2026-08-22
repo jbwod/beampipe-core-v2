@@ -7,12 +7,13 @@ or infer workflow state independently of Core.
 
 ## Install and sign in
 
-Start and check Core first. `beampipe start` returns after starting a Docker
-installation; a native host runtime stays in the foreground.
+Start Core, then check it. `beampipe start` returns after starting a Docker
+installation. Native host mode stays in the foreground, so run it in one
+terminal and run the checks and Dashboard setup from another.
 
 ```bash
-beampipe doctor
 beampipe start
+beampipe doctor
 curl -fsS http://127.0.0.1:18080/api/v2/health
 ```
 
@@ -104,13 +105,16 @@ headless `curl` equivalents.
 For a single Docker engine, run Dash `scripts/install.sh` (or `beampipe setup --dashboard`). It attaches Dash to Core's private Compose network and sets `BEAMPIPE_API_URL=http://api:8080`. Publish Dash—not the Core API—to the operator LAN or reverse proxy. See [Install and configure](installation.md) for the setup flags.
 
 Open **System** after login and confirm service/PostgreSQL readiness, TAP
-health, intended DALiuGE or Slurm status, a healthy worker pool, and no
-unresolved critical diagnostic. The equivalent headless checks are:
+health, a healthy worker pool, and no unresolved critical diagnostic. The
+DALiuGE and Slurm tiles report configuration/profile ownership; they do not
+prove backend connectivity. Use **Deployment target > Test profile** for that.
+The equivalent headless checks are:
 
 ```bash
 beampipe doctor
 beampipe status
 beampipe worker list
+beampipe doctor --profile PROFILE_NAME
 ```
 
 Continue with the [Dashboard operator workflow](../operations/dashboard-workflow.md).

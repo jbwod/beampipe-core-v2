@@ -5,51 +5,30 @@ It owns no database, scheduler, worker, credential store, or workflow state.
 Every displayed value and mutation maps to Core `/api/v2`; PostgreSQL remains
 the durable ledger.
 
-```mermaid
-flowchart TB
-    subgraph Client["Operator device"]
-      UI["Browser UI"]
-    end
-    subgraph Dash["Beampipe Dash"]
-      APP["Next.js App Router"]
-      BFF["same-origin /api/beampipe proxy"]
-      COOKIE["HttpOnly access + refresh cookies"]
-      APP --> BFF
-      BFF --- COOKIE
-    end
-    subgraph Core["Beampipe control plane"]
-      API["Rust /api/v2"]
-      DB[("PostgreSQL")]
-      WORK["singleton scheduler + workers"]
-      API <--> DB
-      WORK <--> DB
-    end
-    UI --> APP
-    BFF --> API
-    WORK --> EXT["TAP / TM / DIM / SSH + Slurm"]
-```
+<div class="bp-boundary-map" role="img" aria-label="The operator browser connects to the Dashboard Next.js application and same-origin proxy. Dashboard connects privately to the Core API. Core owns PostgreSQL, the scheduler, workers, and external archive and execution integrations.">
+  <section data-tone="cyan"><span>OPERATOR DEVICE</span><strong>browser UI</strong><small>same-origin requests only</small></section>
+  <span class="bp-boundary-map__link" aria-hidden="true">--&gt;</span>
+  <section data-tone="green"><span>BEAMPIPE DASH</span><strong>Next.js + BFF</strong><small>HttpOnly cookie boundary<br><code>/api/beampipe</code></small></section>
+  <span class="bp-boundary-map__link" aria-hidden="true">--&gt;</span>
+  <section data-tone="amber"><span>CORE CONTROL PLANE</span><strong>Rust <code>/api/v2</code></strong><small>PostgreSQL + scheduler + workers</small></section>
+  <span class="bp-boundary-map__link" aria-hidden="true">--&gt;</span>
+  <section data-tone="cyan"><span>AUTHORITIES</span><strong>TAP + DALiuGE + Slurm</strong><small>archive and runtime facts</small></section>
+</div>
+
+Client JavaScript never reads a Core token: the browser stores access and
+refresh tokens only in HttpOnly cookies set by Dash. Dash forwards authenticated
+intent; Core and its PostgreSQL ledger remain authoritative.
 
 ## Authentication boundary
 
-```mermaid
-sequenceDiagram
-    participant Browser
-    participant Dash as Dashboard BFF
-    participant Core as Beampipe API
-    Browser->>Dash: POST /api/session/login
-    Dash->>Core: POST /api/v2/login
-    Core-->>Dash: access + refresh token
-    Dash-->>Browser: Secure HttpOnly cookies
-    Browser->>Dash: GET /api/beampipe/executions
-    Dash->>Core: Bearer access token
-    alt access token expired
-      Dash->>Core: POST /api/v2/refresh
-      Core-->>Dash: rotated token pair
-      Dash->>Core: retry original request
-    end
-    Core-->>Dash: redacted response
-    Dash-->>Browser: response
-```
+<ol class="bp-sequence-diagram" aria-label="Dashboard authentication and token refresh sequence">
+  <li><span>01</span><strong>Browser &rarr; Dash</strong><code>POST /api/session/login</code><small>credentials stay on the same origin</small></li>
+  <li><span>02</span><strong>Dash &rarr; Core</strong><code>POST /api/v2/login</code><small>server-to-server authentication</small></li>
+  <li><span>03</span><strong>Core &rarr; Dash</strong><code>access + refresh</code><small>Dash writes HttpOnly, SameSite=Lax cookies; Secure is configuration-dependent</small></li>
+  <li><span>04</span><strong>Browser &rarr; Dash &rarr; Core</strong><code>GET /api/beampipe/executions</code><small>the BFF adds the bearer access token</small></li>
+  <li><span>05 / IF EXPIRED</span><strong>Dash &harr; Core</strong><code>POST /api/v2/refresh</code><small>rotate once, then replay the original request</small></li>
+  <li><span>06</span><strong>Core &rarr; Dash &rarr; Browser</strong><code>redacted response</code><small>tokens never enter client JavaScript</small></li>
+</ol>
 
 The generic proxy accepts only `/api/v2/*`, discards caller-supplied
 `Authorization` headers, rejects cross-origin mutations, and never exposes

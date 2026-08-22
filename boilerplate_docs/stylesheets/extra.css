@@ -1344,7 +1344,7 @@ body:has(#redoc-frame) .md-main {
 
 [data-bp-switcher]:not([data-bp-ready]) [data-bp-panel][hidden],
 [data-bp-explorer]:not([data-bp-ready]) [data-bp-panel][hidden] {
-  display: block;
+  display: block !important;
 }
 
 .bp-switcher [data-bp-panel] > :last-child,
@@ -1464,6 +1464,10 @@ body:has(#redoc-frame) .md-main {
   animation-delay: 1.4s;
 }
 
+.bp-flow-diagram--animated .bp-flow-link:nth-of-type(6) {
+  animation-delay: 1.75s;
+}
+
 @keyframes bp-flow-signal {
   0%,
   100% {
@@ -1478,6 +1482,233 @@ body:has(#redoc-frame) .md-main {
     color: var(--bp-code-string);
     transform: translateX(0.18rem);
   }
+}
+
+.bp-interactive-fallback {
+  margin: 0 0 0.85rem;
+  color: var(--bp-muted);
+  font-size: 0.66rem;
+}
+
+.bp-topology-explorer[data-bp-ready] .bp-interactive-fallback {
+  display: none;
+}
+
+.bp-explorer-output [data-bp-panel] h3 {
+  margin: 0.25rem 0 0.8rem;
+  color: var(--bp-text);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.bp-topology-routes {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0 !important;
+  padding: 0 !important;
+  list-style: none !important;
+}
+
+.bp-topology-routes li {
+  display: grid;
+  max-width: none;
+  min-height: 4.4rem;
+  margin: 0;
+  padding: 0.65rem;
+  border: 1px solid var(--bp-border);
+  grid-template-columns: 2rem minmax(8rem, 0.52fr) 2.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.15rem 0.55rem;
+}
+
+.bp-topology-route__index {
+  color: var(--bp-code-name);
+  font-size: 0.62rem;
+}
+
+.bp-topology-routes strong {
+  color: var(--bp-text);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.bp-topology-route__arrow {
+  color: var(--bp-subtle);
+  text-align: center;
+}
+
+.bp-topology-routes code {
+  min-width: 0;
+  color: var(--bp-code-string);
+  overflow-wrap: anywhere;
+}
+
+.bp-topology-routes small {
+  color: var(--bp-muted);
+  font-size: 0.62rem;
+  grid-column: 4;
+}
+
+.bp-boundary-map {
+  display: grid;
+  margin: 1rem 0 1.35rem;
+  overflow-x: auto;
+  grid-template-columns: minmax(8rem, 1fr) auto minmax(8rem, 1fr) auto minmax(8rem, 1fr) auto minmax(8rem, 1fr);
+  align-items: stretch;
+  gap: 0.35rem;
+}
+
+.bp-boundary-map section {
+  display: flex;
+  min-height: 7rem;
+  padding: 0.65rem;
+  border: 1px solid currentColor;
+  background: #020303;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.bp-boundary-map section span {
+  font-size: 0.58rem;
+}
+
+.bp-boundary-map section strong {
+  color: currentColor;
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+.bp-boundary-map section small {
+  color: var(--bp-muted);
+  font-size: 0.61rem;
+  line-height: 1.45;
+}
+
+.bp-boundary-map section code {
+  padding: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.bp-boundary-map__link {
+  display: flex;
+  align-items: center;
+  color: var(--bp-subtle);
+  font-size: 0.65rem;
+}
+
+.bp-sequence-diagram {
+  margin: 1rem 0 1.5rem !important;
+  padding: 0 !important;
+  border-top: 1px solid var(--bp-border);
+  border-left: 1px solid var(--bp-border);
+  list-style: none !important;
+}
+
+.bp-sequence-diagram li {
+  display: grid;
+  max-width: none;
+  min-height: 4.1rem;
+  margin: 0;
+  padding: 0.65rem;
+  border-right: 1px solid var(--bp-border);
+  border-bottom: 1px solid var(--bp-border);
+  grid-template-columns: 5.5rem minmax(10rem, 0.55fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.2rem 0.8rem;
+}
+
+.bp-sequence-diagram li > span {
+  color: var(--bp-code-name);
+  font-size: 0.6rem;
+}
+
+.bp-sequence-diagram strong {
+  color: var(--bp-text);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.bp-sequence-diagram code {
+  min-width: 0;
+  color: var(--bp-code-string);
+  overflow-wrap: anywhere;
+}
+
+.bp-sequence-diagram small {
+  color: var(--bp-muted);
+  font-size: 0.62rem;
+  grid-column: 3;
+}
+
+.bp-execution-evidence {
+  margin: 1rem 0 1.4rem;
+  border: 1px solid var(--bp-border);
+  background: rgba(0, 0, 0, 0.64);
+}
+
+.bp-execution-evidence__states {
+  display: grid;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-bottom: 1px solid var(--bp-border);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none !important;
+}
+
+.bp-execution-evidence__states li {
+  display: flex;
+  max-width: none;
+  min-height: 6rem;
+  margin: 0;
+  padding: 0.65rem;
+  border-right: 1px solid var(--bp-border-soft);
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.bp-execution-evidence__states li:last-child {
+  border-right: 0;
+}
+
+.bp-execution-evidence__states span {
+  color: var(--bp-code-name);
+  font-size: 0.58rem;
+}
+
+.bp-execution-evidence__states strong,
+.bp-execution-evidence__artifacts b {
+  color: var(--bp-text);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.bp-execution-evidence__states small {
+  color: var(--bp-muted);
+  font-size: 0.61rem;
+  line-height: 1.4;
+}
+
+.bp-execution-evidence__artifacts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.bp-execution-evidence__artifacts span {
+  display: flex;
+  min-height: 3.6rem;
+  padding: 0.55rem 0.65rem;
+  border-right: 1px solid var(--bp-border-soft);
+  border-bottom: 1px solid var(--bp-border-soft);
+  flex-direction: column;
+  justify-content: center;
+}
+
+.bp-execution-evidence__artifacts code {
+  padding: 0;
+  color: var(--bp-code-string);
+  background: transparent;
+  font-size: 0.59rem;
 }
 
 .bp-system-map {
@@ -1903,6 +2134,54 @@ body:has(#redoc-frame) .md-main {
     gap: 0.15rem;
   }
 
+  .bp-topology-routes li {
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .bp-topology-route__arrow {
+    display: none;
+  }
+
+  .bp-topology-routes code,
+  .bp-topology-routes small {
+    grid-column: 2;
+  }
+
+  .bp-boundary-map {
+    overflow: visible;
+    grid-template-columns: 1fr;
+  }
+
+  .bp-boundary-map section {
+    min-height: 5.5rem;
+  }
+
+  .bp-boundary-map__link {
+    min-height: 1.2rem;
+    justify-content: center;
+    transform: rotate(90deg);
+  }
+
+  .bp-sequence-diagram li {
+    grid-template-columns: 4.5rem minmax(0, 1fr);
+  }
+
+  .bp-sequence-diagram code,
+  .bp-sequence-diagram small {
+    grid-column: 2;
+  }
+
+  .bp-execution-evidence__states,
+  .bp-execution-evidence__artifacts {
+    grid-template-columns: 1fr;
+  }
+
+  .bp-execution-evidence__states li {
+    min-height: 4.8rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--bp-border-soft);
+  }
+
   .bp-decision-table {
     overflow-x: auto;
   }
@@ -2247,7 +2526,62 @@ body:has(#redoc-frame) .md-main {
     background: #fff;
   }
 
+  .bp-flow-diagram {
+    overflow: visible;
+    background: #fff;
+    flex-wrap: wrap;
+  }
+
+  .bp-boundary-map {
+    overflow: visible;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bp-boundary-map__link {
+    display: none;
+  }
+
+  .bp-flow-node,
+  .bp-terminal-frame,
+  .bp-topology-routes li,
+  .bp-boundary-map section,
+  .bp-sequence-diagram,
+  .bp-execution-evidence {
+    color: #111 !important;
+    background: #fff !important;
+    border-color: #777 !important;
+    break-inside: avoid;
+  }
+
+  .bp-flow-diagram *,
+  .bp-terminal-frame *,
+  .bp-topology-routes li *,
+  .bp-boundary-map section *,
+  .bp-sequence-diagram *,
+  .bp-execution-evidence * {
+    color: #111 !important;
+    border-color: #777 !important;
+  }
+
+  .bp-flow-diagram code,
+  .bp-terminal-frame code,
+  .bp-boundary-map code,
+  .bp-sequence-diagram code,
+  .bp-execution-evidence code {
+    background: transparent !important;
+  }
+
+  .bp-topology-explorer[data-bp-ready] .bp-interactive-fallback {
+    display: block !important;
+  }
+
+  .bp-topology-explorer [data-bp-panel] + [data-bp-panel] {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #777;
+  }
+
   [data-bp-panel][hidden] {
-    display: block;
+    display: block !important;
   }
 }

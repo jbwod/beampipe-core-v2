@@ -10,9 +10,13 @@ Use the password setup printed once. It is not stored in `.env`.
 export BASE=http://127.0.0.1:18080
 export ADMIN_USER="${ADMIN_USER:-admin}"
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:?set to the password setup printed}"
+LOGIN_BODY=$(jq -n \
+  --arg username "$ADMIN_USER" \
+  --arg password "$ADMIN_PASSWORD" \
+  '{username:$username,password:$password}')
 export TOKEN=$(curl -fsS -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
+  -d "$LOGIN_BODY" \
   | jq -er .access_token)
 export AUTH="Authorization: Bearer $TOKEN"
 

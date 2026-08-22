@@ -22,6 +22,32 @@ There are three different network viewpoints. Do not replace these names with
 | Translator Manager | DIM | `dlg-dim:8001` |
 | Beampipe worker | DIM REST API | `dlg-dim.desk:80` through Traefik |
 
+<div class="bp-terminal-frame bp-topology-explorer" role="group" aria-label="DALiuGE topology address explorer" data-title="network viewpoints" data-bp-explorer>
+  <div class="bp-segmented" role="tablist" aria-label="DALiuGE network mode">
+    <button type="button" role="tab" id="bp-topology-qualified-tab" aria-controls="bp-topology-qualified" aria-selected="true" tabindex="0" data-bp-target="bp-topology-qualified">Qualified .desk / Traefik</button>
+    <button type="button" role="tab" id="bp-topology-direct-tab" aria-controls="bp-topology-direct" aria-selected="false" tabindex="-1" data-bp-target="bp-topology-direct">Direct shared network</button>
+  </div>
+  <p class="bp-interactive-fallback">Both valid address sets are listed when scripting is unavailable and in print.</p>
+  <div class="bp-explorer-output">
+    <section id="bp-topology-qualified" role="tabpanel" aria-labelledby="bp-topology-qualified-tab" data-bp-panel tabindex="0">
+      <h3>Qualified host-routed mode</h3>
+      <ol class="bp-topology-routes" aria-label="Qualified DALiuGE request routes">
+        <li><span class="bp-topology-route__index">01</span><strong>Beampipe worker</strong><span class="bp-topology-route__arrow" aria-hidden="true">--&gt;</span><code>http://dlg-tm.desk</code><small>logical graph translation</small></li>
+        <li><span class="bp-topology-route__index">02</span><strong>Translator Manager</strong><span class="bp-topology-route__arrow" aria-hidden="true">--&gt;</span><code>dlg-dim:8001</code><small>DIM address embedded in the translation request</small></li>
+        <li><span class="bp-topology-route__index">03</span><strong>Beampipe worker</strong><span class="bp-topology-route__arrow" aria-hidden="true">--&gt;</span><code>dlg-dim.desk:80</code><small>deploy and poll through Traefik</small></li>
+      </ol>
+    </section>
+    <section id="bp-topology-direct" role="tabpanel" aria-labelledby="bp-topology-direct-tab" data-bp-panel tabindex="0" hidden>
+      <h3>Direct shared-Docker-network mode</h3>
+      <ol class="bp-topology-routes" aria-label="Direct DALiuGE request routes">
+        <li><span class="bp-topology-route__index">01</span><strong>Beampipe worker</strong><span class="bp-topology-route__arrow" aria-hidden="true">--&gt;</span><code>http://dlg-tm:8084</code><small>logical graph translation</small></li>
+        <li><span class="bp-topology-route__index">02</span><strong>Translator Manager</strong><span class="bp-topology-route__arrow" aria-hidden="true">--&gt;</span><code>dlg-dim:8001</code><small>DIM address embedded in the translation request</small></li>
+        <li><span class="bp-topology-route__index">03</span><strong>Beampipe worker</strong><span class="bp-topology-route__arrow" aria-hidden="true">--&gt;</span><code>dlg-dim:8001</code><small>direct deploy and poll on the shared network</small></li>
+      </ol>
+    </section>
+  </div>
+</div>
+
 `translation.tm_url` is resolved by Beampipe. `dim_host_for_tm` is embedded in
 the translation request and must be resolvable by TM. `deploy_host` and
 `deploy_port` are used later by the Beampipe worker. A deployment can therefore
@@ -50,13 +76,21 @@ daliuge/
 
 The WALLABY checkout inside `/dlg/workspace` is the runtime copy seen by all
 DALiuGE containers. Keep it at the same tested commit as the source checkout.
+Prove that before installation:
+
+```bash
+export DALIUGE_ROOT=/path/to/daliuge
+export WALLABY_SOURCE_ROOT=/path/to/workspace/wallaby-hires-beampipe
+export WALLABY_RUNTIME_ROOT="$DALIUGE_ROOT/docker/dlg/workspace/wallaby-hires-beampipe"
+test "$(git -C "$WALLABY_SOURCE_ROOT" rev-parse HEAD)" = \
+  "$(git -C "$WALLABY_RUNTIME_ROOT" rev-parse HEAD)"
+```
 
 ## 1. Start DALiuGE and install the graph applications
 
 From the DALiuGE checkout:
 
 ```bash
-export DALIUGE_ROOT=/path/to/daliuge
 cd "$DALIUGE_ROOT"
 
 make docker-install
@@ -75,14 +109,20 @@ for service in dlg-tm dlg-dim dlg-nm1 dlg-nm2; do
     make install PYTHON=/daliuge/.venv/bin/python
 done
 
+# Restart, do not recreate: restart keeps the package installed in each
+# container's writable layer and forces long-running Python processes to reload.
+docker compose -f docker/docker-compose.yaml \
+  restart dlg-tm dlg-dim dlg-nm1 dlg-nm2
+
 for service in dlg-tm dlg-dim dlg-nm1 dlg-nm2; do
   docker exec "$service" /daliuge/.venv/bin/python -c \
     'import importlib.metadata; print(importlib.metadata.version("wallaby-hires"))'
 done
 ```
 
-All four versions must match. Verify the host-to-Traefik routes even when local
-DNS does not resolve the `.desk` names:
+All four versions must match. These host probes verify Traefik routing, even
+when host DNS does not resolve `.desk`; they do not prove that a Core container
+can resolve the same names:
 
 ```bash
 curl -fsS -H 'Host: dlg-tm.desk' http://127.0.0.1/ >/dev/null
@@ -108,6 +148,35 @@ docker compose -f docker-compose.yml -f compose.dlg-local.yml up -d --wait
 docker compose -f docker-compose.yml -f compose.dlg-local.yml ps
 curl -fsS http://127.0.0.1:18080/api/v2/health | jq .
 ```
+
+Now probe from the callers that will use each address. The TM-to-DIM route must
+work in both modes. The loop selects `.desk` only when API, scheduler, and
+worker containers can all resolve and reach both Traefik routes; otherwise it
+selects the direct shared-network fallback used by the profile step below.
+
+```bash
+docker exec dlg-tm /daliuge/.venv/bin/python -c \
+  'import urllib.request; urllib.request.urlopen("http://dlg-dim:8001/api", timeout=10).read(1)'
+
+if for service in api scheduler worker; do
+  docker compose -f docker-compose.yml -f compose.dlg-local.yml \
+    exec -T "$service" sh -ec '
+      getent hosts dlg-tm.desk >/dev/null
+      getent hosts dlg-dim.desk >/dev/null
+      curl -fsS http://dlg-tm.desk/ >/dev/null
+      curl -fsS http://dlg-dim.desk/api >/dev/null
+    '
+done; then
+  export DALIUGE_ADDRESS_MODE=desk
+else
+  export DALIUGE_ADDRESS_MODE=direct
+  echo 'Using direct dlg-tm/dlg-dim service names on docker_dlg-local'
+fi
+```
+
+Do not treat the earlier forced `Host` header as a substitute for these
+caller-context checks. The direct mode is valid because the overlay attaches
+all three Core roles to `docker_dlg-local`.
 
 The overlay publishes qualification PostgreSQL on `15432`, the API on `18080`,
 and API metrics on `19090`. Stop or re-port any service already using those
@@ -141,9 +210,13 @@ Authenticate and upload it:
 export BASE=http://127.0.0.1:18080
 export ADMIN_USER=operator
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:?export the password you entered}"
+LOGIN_BODY=$(jq -n \
+  --arg username "$ADMIN_USER" \
+  --arg password "$ADMIN_PASSWORD" \
+  '{username:$username,password:$password}')
 export TOKEN=$(curl -fsS -X POST "$BASE/api/v2/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
+  -d "$LOGIN_BODY" \
   | jq -er .access_token)
 export AUTH="Authorization: Bearer $TOKEN"
 
@@ -181,12 +254,28 @@ cat > /tmp/beampipe-dlg-desk-profile.json <<'JSON'
 JSON
 
 jq -e . /tmp/beampipe-dlg-desk-profile.json >/dev/null
+
+export DALIUGE_PROFILE_NAME=dlg-desk
+export DALIUGE_PROFILE_FILE=/tmp/beampipe-dlg-desk-profile.json
+if [ "${DALIUGE_ADDRESS_MODE:-desk}" = direct ]; then
+  export DALIUGE_PROFILE_NAME=dlg-direct
+  export DALIUGE_PROFILE_FILE=/tmp/beampipe-dlg-direct-profile.json
+  jq '
+    .name = "dlg-direct"
+    | .description = "Local DALiuGE qualification on the shared Docker network"
+    | .translation.tm_url = "http://dlg-tm:8084"
+    | .deployment.deploy_host = "dlg-dim"
+    | .deployment.deploy_port = 8001
+  ' /tmp/beampipe-dlg-desk-profile.json >"$DALIUGE_PROFILE_FILE"
+fi
+
+jq -e . "$DALIUGE_PROFILE_FILE" >/dev/null
 curl -fsS -X POST "$BASE/api/v2/deployment-profiles" \
   -H "$AUTH" -H 'Content-Type: application/json' \
-  -d @/tmp/beampipe-dlg-desk-profile.json | jq .
+  -d @"$DALIUGE_PROFILE_FILE" | jq .
 
 docker compose -f docker-compose.yml -f compose.dlg-local.yml run --rm api \
-  doctor --profile dlg-desk
+  doctor --profile "$DALIUGE_PROFILE_NAME"
 ```
 
 Do not enable submission until the profile doctor can reach both TM and DIM.
@@ -203,9 +292,9 @@ Recreate only the Core roles with the same overlay, then rerun the doctor:
 
 ```bash
 docker compose -f docker-compose.yml -f compose.dlg-local.yml \
-  up -d --force-recreate api scheduler worker
+  up -d --wait --force-recreate api scheduler worker
 docker compose -f docker-compose.yml -f compose.dlg-local.yml run --rm api \
-  doctor --profile dlg-desk
+  doctor --profile "$DALIUGE_PROFILE_NAME"
 ```
 
 No execution exists yet and the no-download project's automatic execution
@@ -247,12 +336,39 @@ for attempt in $(seq 1 120); do
   jq -e '.ready_for_execution == true' <<<"$SOURCE_STATUS" >/dev/null && break
   sleep 5
 done
-jq -e '.ready_for_execution == true and .discovery_complete == true' \
+jq -e '.ready_for_execution == true and .discovery_complete == true and
+       ((.discovery_signature // "") | length > 0)' \
   <<<"$SOURCE_STATUS" >/dev/null
+FIRST_DISCOVERY_SIGNATURE=$(jq -er '.discovery_signature' <<<"$SOURCE_STATUS")
 ```
 
 If the loop expires, inspect the source events, worker queue, and TAP health
 instead of creating an execution with incomplete metadata.
+
+Repeat discovery once and require the same non-empty signature. This proves
+that deterministic normalization, rather than the historical dataset count,
+is the acceptance signal:
+
+```bash
+curl -fsS -X POST "$BASE/api/v2/sources/discover" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{
+    "project_module":"wallaby_hires",
+    "source_identifier":"HIPASSJ1318-21"
+  }' | jq .
+
+for attempt in $(seq 1 120); do
+  SOURCE_STATUS=$(curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/status" -H "$AUTH")
+  jq '{ready_for_execution,discovery_complete,discovery_signature,blockers}' \
+    <<<"$SOURCE_STATUS"
+  jq -e '.discovery_complete == true and
+         ((.discovery_signature // "") | length > 0)' \
+    <<<"$SOURCE_STATUS" >/dev/null && break
+  sleep 5
+done
+SECOND_DISCOVERY_SIGNATURE=$(jq -er '.discovery_signature' <<<"$SOURCE_STATUS")
+test "$SECOND_DISCOVERY_SIGNATURE" = "$FIRST_DISCOVERY_SIGNATURE"
+```
 
 ## 5. Preflight and materialize the graph
 
@@ -264,14 +380,12 @@ It does not deploy to DALiuGE.
 docker compose -f docker-compose.yml -f compose.dlg-local.yml run --rm api \
   graph prepare --project wallaby_hires --source HIPASSJ1318-21
 
-cat > /tmp/beampipe-execution.json <<'JSON'
-{
-  "project_module": "wallaby_hires",
-  "sources": [{"source_identifier": "HIPASSJ1318-21"}],
-  "archive_name": "casda",
-  "deployment_profile_name": "dlg-desk"
-}
-JSON
+jq -n --arg profile "$DALIUGE_PROFILE_NAME" '{
+  project_module: "wallaby_hires",
+  sources: [{source_identifier: "HIPASSJ1318-21"}],
+  archive_name: "casda",
+  deployment_profile_name: $profile
+}' >/tmp/beampipe-execution.json
 
 curl -fsS -X POST "$BASE/api/v2/executions/prepare" \
   -H "$AUTH" -H 'Content-Type: application/json' \
@@ -393,7 +507,7 @@ curl -fsS http://127.0.0.1:9099/-/ready
 
 | Symptom | Check |
 |---|---|
-| TM healthy, DIM deploy fails | Re-check both DIM viewpoints: `dlg-dim:8001` for TM and `dlg-dim.desk:80` for the worker |
+| TM healthy, DIM deploy fails | Re-check `dlg-dim:8001` from TM, then the selected worker route: `dlg-dim.desk:80` in `.desk` mode or `dlg-dim:8001` in direct mode |
 | `localhost` connection refused | Replace container-local loopback with a name reachable from the actual caller |
 | Discovery does not finish | Source events, `discover_batch` job, worker capability, CASDA/VizieR health, and public TAP latency |
 | Prepare returns blockers | Wait for the active discovery lease and require a non-empty discovery signature and metadata |
@@ -422,6 +536,7 @@ test "$COMPOSE_PROJECT_NAME" = beampipe-qualification
 docker compose -f docker-compose.yml -f compose.dlg-local.yml \
   down --volumes --remove-orphans
 rm -f /tmp/beampipe-dlg-desk-profile.json \
+  /tmp/beampipe-dlg-direct-profile.json \
   /tmp/beampipe-execution.json \
   /tmp/beampipe-preflight.json \
   /tmp/beampipe-created.json \

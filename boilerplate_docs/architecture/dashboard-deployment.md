@@ -24,10 +24,13 @@ same container.
 Start Core first, then let its setup command install Dash:
 
 ```bash
-beampipe doctor
 beampipe start
+beampipe doctor
 beampipe setup --dashboard
 ```
+
+For native Core, `beampipe start` remains in the foreground; run the doctor
+and Dashboard setup in a second terminal.
 
 Or run the Dashboard installer directly:
 
@@ -110,7 +113,9 @@ Publish Dash, not Core's API port, to the operator LAN. Core itself consumes
 
 ## Session and secret posture
 
-- Access and refresh tokens are Secure/HttpOnly/SameSite cookies.
+- Access and refresh tokens are always `HttpOnly`, `SameSite=Lax`, and scoped
+  to `/`. They are `Secure` only when
+  `BEAMPIPE_DASH_SECURE_COOKIES=true`.
 - Refresh rotates through Core and the original request is retried once.
 - Client JavaScript cannot read or write tokens.
 - Cross-site mutation requests are rejected using fetch metadata and
@@ -138,7 +143,9 @@ beampipe doctor --profile PROFILE_NAME
 |---|---|
 | Dash `/api/health` | Next.js process is serving requests |
 | Dash `/api/connection` | Dash server can reach Core health |
-| Core `/api/v2/ready` | Database, queue, workers, TAP, and runtime readiness |
+| Core `/api/v2/ready` | Authenticated database, Redis, TAP, runnable-queue, and running-job checks |
+| `beampipe worker list` / **Workers** | Worker heartbeat, capability, and pool health |
+| `beampipe doctor --profile NAME` | TM/DIM or SSH/Slurm profile connectivity |
 | Login reports unavailable | Check `BEAMPIPE_API_URL` from inside the Dash process/container |
 | Login returns `401` | Account/password is rejected; bootstrap or reset the Core account |
 | Mutation returns `403` behind proxy | Check overwritten `Host`, `X-Forwarded-Host`, and `X-Forwarded-Proto` |
