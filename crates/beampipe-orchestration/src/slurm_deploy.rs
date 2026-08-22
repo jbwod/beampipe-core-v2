@@ -126,6 +126,47 @@ where
     Ok(parts.join("\n"))
 }
 
+fn slurm_preflight_script_with<F>(
+    deployment: &SlurmRemoteDeploymentConfig,
+    read_environment: F,
+) -> Result<String, OrchestrationError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut lines = vec![env_prelude_with(deployment, read_environment)?];
+    for command in ["sbatch", "squeue", "sacct", "scancel", "srun", "python3"] {
+        lines.push(format!(
+            "command -v {command} >/dev/null 2>&1 || {{ echo 'missing required command: {command}' >&2; exit 127; }}"
+        ));
+    }
+    lines.push(format!(
+        "test -d {root} && test -w {root} || {{ echo 'DLG_ROOT is not a writable directory' >&2; exit 73; }}",
+        root = shell_quote(&deployment.dlg_root)
+    ));
+    lines.push("python3 -c 'import dlg.deploy.create_dlg_job; import wallaby_hires'".to_string());
+    if deployment
+        .environment_setup
+        .as_deref()
+        .is_some_and(|setup| setup.contains("BEAMPIPE_ASKAPSOFT_SIF"))
+    {
+        lines.push(
+            "command -v singularity >/dev/null 2>&1 || { echo 'missing required command: singularity' >&2; exit 127; }"
+                .into(),
+        );
+        lines.push(
+            "test -f \"$BEAMPIPE_ASKAPSOFT_SIF\" && test -r \"$BEAMPIPE_ASKAPSOFT_SIF\" || { echo 'BEAMPIPE_ASKAPSOFT_SIF is not a readable regular file' >&2; exit 66; }"
+                .into(),
+        );
+    }
+    Ok(lines.join("\n"))
+}
+
+fn slurm_preflight_script(
+    deployment: &SlurmRemoteDeploymentConfig,
+) -> Result<String, OrchestrationError> {
+    slurm_preflight_script_with(deployment, |name| std::env::var(name).ok())
+}
+
 fn sbatch_command_with<F>(
     deployment: &SlurmRemoteDeploymentConfig,
     session_id: &str,
@@ -394,9 +435,13 @@ pub async fn probe_slurm_login(
             deployment.login_node, username, deployment.login_node
         )
     })?;
-    session.run_command("echo ok").await.map_err(|e| {
+    let preflight = slurm_preflight_script(deployment).map_err(|error| error.to_string())?;
+    session
+        .run_command(&format!("bash -lc {}", shell_quote(&preflight)))
+        .await
+        .map_err(|e| {
         format!(
-            "Slurm login node {} ({}@{}) unreachable: {e}. Check VPN/SSH before submit.",
+            "Slurm runtime preflight failed on {} ({}@{}): {e}. Check the profile runtime, shared root, and ASKAPsoft image before submit.",
             deployment.login_node, username, deployment.login_node
         )
     })?;
@@ -495,6 +540,37 @@ mod tests {
         dep.environment_setup = Some("echo $BEAMPIPE_ASKAPSOFT_SIF".into());
         let error = env_prelude_with(&dep, |_| None).unwrap_err();
         assert!(error.to_string().contains("BEAMPIPE_ASKAPSOFT_SIF"));
+    }
+
+    #[test]
+    fn preflight_checks_the_exact_runtime_before_submission() {
+        let mut dep = deployment();
+        dep.dlg_root = "/scratch/project/user/dlg root".into();
+        dep.environment_setup =
+            Some("export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
+        let script = slurm_preflight_script_with(&dep, |name| {
+            (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askapsoft.sif".into())
+        })
+        .unwrap();
+
+        for expected in [
+            "command -v sbatch",
+            "command -v squeue",
+            "command -v sacct",
+            "command -v scancel",
+            "command -v srun",
+            "command -v python3",
+            "test -d '/scratch/project/user/dlg root'",
+            "import dlg.deploy.create_dlg_job",
+            "import wallaby_hires",
+            "command -v singularity",
+            "test -f \"$BEAMPIPE_ASKAPSOFT_SIF\"",
+        ] {
+            assert!(
+                script.contains(expected),
+                "missing {expected:?} in {script}"
+            );
+        }
     }
 
     #[test]
