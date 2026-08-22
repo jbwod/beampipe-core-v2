@@ -46,6 +46,7 @@ beampipe worker
 |---|---|---|
 | `BEAMPIPE_WORKER_CONCURRENCY` | one process | Parallel claimed jobs |
 | `BEAMPIPE_WORKER_LOCK_SECONDS` | one claim | Lease duration |
+| `BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS` | `1800` | Maximum wall time for one post-intent backend submission attempt (range `1`–`86400`) |
 | `BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY` | one discovery batch | Concurrent TAP requests |
 | `BEAMPIPE_SHAPING_QUEUE_MAX_DEPTH` | environment | Stop enqueue under backlog |
 | `BEAMPIPE_SHAPING_DISCOVERY_MAX_IN_FLIGHT_BATCHES` | environment | Protect TAP services |

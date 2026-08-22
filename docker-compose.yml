@@ -5,6 +5,7 @@ x-beampipe-shaping: &beampipe-shaping
   BEAMPIPE_SHAPING_EXECUTION_MAX_IN_FLIGHT_RUNS: "10"
   BEAMPIPE_SHAPING_QUEUE_MAX_DEPTH: "5000"
   BEAMPIPE_WORKER_LOCK_SECONDS: "600"
+  BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS: "1800"
 
 # TAP endpoints. Export BEAMPIPE_USE_REAL_BACKENDS=true only after `beampipe doctor` passes.
 x-beampipe-backend-env: &beampipe-backend-env

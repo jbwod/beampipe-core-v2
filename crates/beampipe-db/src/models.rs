@@ -76,6 +76,7 @@ pub struct ExecutionRow {
     pub execution_phase: Option<String>,
     pub control_phase: Option<String>,
     pub submission_state: Option<String>,
+    pub submission_deadline_at: Option<DateTime<Utc>>,
     pub scheduler_name: Option<String>,
     pub scheduler_job_id: Option<String>,
     pub scheduler_state: Option<String>,

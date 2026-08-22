@@ -977,9 +977,11 @@ async fn cancellation_refuses_unresolved_external_submission() {
         "slurm",
         "session-cancel-race",
         None,
+        1_800,
     )
     .await
-    .unwrap());
+    .unwrap()
+    .is_some());
 
     for state in [SubmissionState::InFlight, SubmissionState::Uncertain] {
         if state == SubmissionState::Uncertain {
@@ -1381,16 +1383,51 @@ async fn prepare_submission_receipt_execution(
     .execute(pool)
     .await
     .unwrap();
-    assert!(repo::begin_execution_submission(pool, execution.uuid, backend, session_id, None)
-        .await
-        .unwrap());
-    assert!(!repo::begin_execution_submission(pool, execution.uuid, backend, session_id, None)
-        .await
-        .unwrap());
-    repo::get_execution(pool, execution.uuid)
+    let submission_deadline_at = repo::begin_execution_submission(
+        pool,
+        execution.uuid,
+        backend,
+        session_id,
+        None,
+        1_800,
+    )
+    .await
+    .unwrap()
+    .expect("submission intent deadline");
+    assert!(repo::begin_execution_submission(
+        pool,
+        execution.uuid,
+        backend,
+        session_id,
+        None,
+        1_800,
+    )
         .await
         .unwrap()
+        .is_none());
+    let execution = repo::get_execution(pool, execution.uuid)
+        .await
         .unwrap()
+        .unwrap();
+    assert_eq!(execution.submission_deadline_at, Some(submission_deadline_at));
+    let intent = repo::list_execution_observations(pool, execution.uuid, 10, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|observation| observation.raw_state.as_deref() == Some("intent_persisted"))
+        .expect("submission intent observation");
+    assert_eq!(
+        submission_deadline_at
+            .signed_duration_since(intent.observed_at)
+            .num_seconds(),
+        1_800
+    );
+    assert_eq!(intent.payload["submission_timeout_seconds"], 1_800);
+    assert_eq!(
+        intent.payload["submission_deadline_at"],
+        serde_json::to_value(submission_deadline_at).unwrap()
+    );
+    execution
 }
 
 #[tokio::test]
@@ -1572,15 +1609,17 @@ async fn recovered_exact_slurm_id_stays_uncertain_until_the_receipt_commits() {
     assert_eq!(recovered.scheduler_job_id.as_deref(), Some("4242"));
     assert_eq!(recovered.scheduler_state.as_deref(), Some("running"));
     assert!(recovered.physical_graph_sha256.is_none());
-    assert!(!repo::begin_execution_submission(
+    assert!(repo::begin_execution_submission(
         &pool,
         execution.uuid,
         "slurm",
         &session_id,
         None,
+        1_800,
     )
     .await
-    .unwrap());
+    .unwrap()
+    .is_none());
     assert!(!repo::list_slurm_submissions_pending_reconciliation(&pool)
         .await
         .unwrap()
@@ -1995,9 +2034,11 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         "slurm",
         "BeampipeExecution-selector-slurm",
         None,
+        1_800,
     )
     .await
-    .unwrap());
+    .unwrap()
+    .is_some());
     let slurm_execute = repo::enqueue_job_with_options(
         &pool,
         "execute",
@@ -2086,9 +2127,11 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         "daliuge",
         "BeampipeExecution-selector-rest",
         Some("http://dim.invalid"),
+        1_800,
     )
     .await
-    .unwrap());
+    .unwrap()
+    .is_some());
     let rest_execute = repo::enqueue_job_with_options(
         &pool,
         "execute",

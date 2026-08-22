@@ -2593,7 +2593,8 @@ pub async fn begin_execution_submission(
     scheduler_name: &str,
     daliuge_session_id: &str,
     daliuge_manager_url: Option<&str>,
-) -> Result<bool, sqlx::Error> {
+    submission_timeout_seconds: i64,
+) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
     if !matches!(scheduler_name, "slurm" | "daliuge") {
         return Err(sqlx::Error::Protocol(format!(
             "unsupported submission backend '{scheduler_name}'"
@@ -2602,6 +2603,11 @@ pub async fn begin_execution_submission(
     if daliuge_session_id.trim().is_empty() {
         return Err(sqlx::Error::Protocol(
             "submission intent requires daliuge_session_id".into(),
+        ));
+    }
+    if submission_timeout_seconds <= 0 {
+        return Err(sqlx::Error::Protocol(
+            "submission timeout must be positive".into(),
         ));
     }
 
@@ -2614,14 +2620,14 @@ pub async fn begin_execution_submission(
     .await?
     else {
         tx.rollback().await?;
-        return Ok(false);
+        return Ok(None);
     };
     if locked
         .status_enum()
         .is_some_and(ExecutionStatus::is_terminal)
     {
         tx.rollback().await?;
-        return Ok(false);
+        return Ok(None);
     }
     let submission = locked
         .submission_state
@@ -2633,7 +2639,7 @@ pub async fn begin_execution_submission(
         SubmissionState::InFlight | SubmissionState::Uncertain | SubmissionState::Submitted
     ) {
         tx.rollback().await?;
-        return Ok(false);
+        return Ok(None);
     }
     if !matches!(
         submission,
@@ -2646,11 +2652,22 @@ pub async fn begin_execution_submission(
         )));
     }
 
+    // `now()` is fixed at transaction start and can be stale after waiting for
+    // the execution row lock. Anchor this attempt to a fresh database clock.
+    let submission_started_at =
+        sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
+            .fetch_one(&mut *tx)
+            .await?;
+    let submission_deadline_at = submission_started_at
+        .checked_add_signed(chrono::Duration::seconds(submission_timeout_seconds))
+        .ok_or_else(|| sqlx::Error::Protocol("submission deadline is out of range".into()))?;
+
     sqlx::query(
         r#"
         UPDATE batch_execution_record
         SET control_phase = 'submission_pending',
             submission_state = 'in_flight',
+            submission_deadline_at = $5,
             scheduler_name = $2,
             daliuge_session_id = $3,
             daliuge_manager_url = $4,
@@ -2668,6 +2685,7 @@ pub async fn begin_execution_submission(
     .bind(scheduler_name)
     .bind(daliuge_session_id)
     .bind(daliuge_manager_url)
+    .bind(submission_deadline_at)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -2676,7 +2694,7 @@ pub async fn begin_execution_submission(
             uuid, execution_id, kind, normalized_state, raw_state, reason,
             payload, source_version, observed_at
         )
-        VALUES ($1, $2, 'daliuge_session', $3, 'intent_persisted', NULL, $4, NULL, now())
+        VALUES ($1, $2, 'daliuge_session', $3, 'intent_persisted', NULL, $4, NULL, $5)
         "#,
     )
     .bind(Uuid::now_v7())
@@ -2685,11 +2703,14 @@ pub async fn begin_execution_submission(
     .bind(json!({
         "daliuge_session_id": daliuge_session_id,
         "backend": scheduler_name,
+        "submission_deadline_at": submission_deadline_at,
+        "submission_timeout_seconds": submission_timeout_seconds,
     }))
+    .bind(submission_started_at)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Some(submission_deadline_at))
 }
 
 #[derive(Debug, Clone)]

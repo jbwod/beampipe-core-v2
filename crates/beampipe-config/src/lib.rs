@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub const CONFIG_API_VERSION: &str = "beampipe.dev/config/v1";
 pub const DEFAULT_CONFIG_FILE: &str = "beampipe.yaml";
+const MAX_WORKER_SUBMISSION_TIMEOUT_SECONDS: u64 = 86_400;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -19,6 +20,7 @@ pub struct Settings {
     pub refresh_token_expire_days: i64,
     pub worker_poll_interval_ms: u64,
     pub worker_lock_seconds: i64,
+    pub worker_submission_timeout_seconds: u64,
     pub worker_heartbeat_interval_seconds: u64,
     pub worker_concurrency: u32,
     pub worker_scheduler_enabled: bool,
@@ -208,6 +210,12 @@ impl Settings {
                 "BEAMPIPE_WORKER_LOCK_SECONDS",
                 file.worker.lock_seconds,
                 120,
+            )?,
+            worker_submission_timeout_seconds: resolver.parsed(
+                "worker_submission_timeout_seconds",
+                "BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS",
+                file.worker.submission_timeout_seconds,
+                1_800,
             )?,
             worker_heartbeat_interval_seconds: resolver.parsed(
                 "worker_heartbeat_interval_seconds",
@@ -531,6 +539,7 @@ config_section!(AuthFile {
 struct WorkerFile {
     poll_interval_ms: Option<u64>,
     lock_seconds: Option<i64>,
+    submission_timeout_seconds: Option<u64>,
     heartbeat_interval_seconds: Option<u64>,
     concurrency: Option<u32>,
     scheduler_enabled: Option<bool>,
@@ -897,6 +906,14 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
             value: settings.worker_lock_seconds.to_string(),
         });
     }
+    if settings.worker_submission_timeout_seconds == 0
+        || settings.worker_submission_timeout_seconds > MAX_WORKER_SUBMISSION_TIMEOUT_SECONDS
+    {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS",
+            value: settings.worker_submission_timeout_seconds.to_string(),
+        });
+    }
     if settings.worker_heartbeat_interval_seconds == 0
         || settings.worker_heartbeat_interval_seconds as i64 >= settings.worker_lock_seconds
     {
@@ -1014,6 +1031,24 @@ mod tests {
             2
         );
         assert!(parse_labels("BEAMPIPE_WORKER_LABELS", "site").is_err());
+    }
+
+    #[test]
+    fn submission_timeout_defaults_to_thirty_minutes_and_accepts_yaml_override() {
+        let mut resolver = Resolver::new(None);
+        let default = resolver
+            .parsed::<u64>(
+                "worker_submission_timeout_seconds",
+                "BEAMPIPE_CONFIG_TEST_SUBMISSION_TIMEOUT_UNSET",
+                None,
+                1_800,
+            )
+            .unwrap();
+        assert_eq!(default, 1_800);
+
+        let worker: WorkerFile =
+            serde_yaml::from_str("submission_timeout_seconds: 900\n").unwrap();
+        assert_eq!(worker.submission_timeout_seconds, Some(900));
     }
 
     #[test]

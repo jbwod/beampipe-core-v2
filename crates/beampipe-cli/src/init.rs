@@ -141,6 +141,7 @@ worker:
   concurrency: 2
   heartbeat_interval_seconds: 10
   lock_seconds: 60
+  submission_timeout_seconds: 1800
   scheduler_enabled: true
   capabilities:
     - casda-discovery
@@ -180,6 +181,7 @@ worker:
   concurrency: 4
   heartbeat_interval_seconds: 10
   lock_seconds: 60
+  submission_timeout_seconds: 1800
   scheduler_enabled: true
   capabilities:
     - casda-discovery

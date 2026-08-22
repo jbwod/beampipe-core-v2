@@ -41,7 +41,7 @@ use beampipe_project::{
     apply_field_transform, build_template_context, select_eval_file_row, ExecutionAutomationConfig,
     HookKind, ProjectConfig, TransformRegistry, WasmHost,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -71,6 +71,23 @@ where
     tokio::time::timeout(duration, future).await
 }
 
+async fn within_submission_timeout<F>(
+    duration: Duration,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(duration, future).await
+}
+
+fn submission_timeout_remaining(deadline_at: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
+    deadline_at
+        .signed_duration_since(now)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+}
+
 fn trace_context_for_job(job: &JobRow) -> metrics::TraceContext {
     let fallback = job
         .execution_id
@@ -91,6 +108,7 @@ fn job_phase_label(kind: &str) -> &'static str {
 pub struct WorkerConfig {
     pub poll_interval: Duration,
     pub lock_seconds: i64,
+    pub submission_timeout: Duration,
     pub discovery_batch_size: i64,
     pub discovery_stale_hours: i32,
     pub discovery_claim_ttl_minutes: i64,
@@ -129,6 +147,7 @@ impl WorkerConfig {
         Self {
             poll_interval: Duration::from_millis(settings.worker_poll_interval_ms),
             lock_seconds: settings.worker_lock_seconds,
+            submission_timeout: Duration::from_secs(settings.worker_submission_timeout_seconds),
             discovery_batch_size: 50,
             discovery_stale_hours: 24,
             discovery_claim_ttl_minutes: 180,
@@ -172,6 +191,7 @@ impl WorkerConfig {
             .unwrap_or(Self {
                 poll_interval,
                 lock_seconds,
+                submission_timeout: Duration::from_secs(1_800),
                 discovery_batch_size: 50,
                 discovery_stale_hours: 24,
                 discovery_claim_ttl_minutes: 180,
@@ -3548,6 +3568,7 @@ async fn run_execute_body(
         graph,
         correlation_id,
         &config.pool,
+        config.submission_timeout,
     )
     .await
 }
@@ -3632,6 +3653,15 @@ fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
     }
 }
 
+fn submission_timeout_patch(error: String) -> ExecutionStatePatch {
+    ExecutionStatePatch {
+        submission_state: Some(SubmissionState::Uncertain),
+        failure_class: Some(FailureClass::Timeout),
+        last_error: Some(error),
+        ..Default::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_submit_phase(
     pool: &PgPool,
@@ -3644,6 +3674,7 @@ async fn run_submit_phase(
     graph: Value,
     correlation_id: Option<&str>,
     worker_pool: &str,
+    submission_timeout: Duration,
 ) -> Result<(), String> {
     let tm_url = profile_tm_url(profile).unwrap_or_default();
     info!(
@@ -3664,7 +3695,9 @@ async fn run_submit_phase(
                 DeploymentConfig::SlurmRemote(_) => None,
             })
     });
-    let began_submission = repo::begin_execution_submission(
+    let submission_timeout_seconds = i64::try_from(submission_timeout.as_secs())
+        .map_err(|_| "submission timeout exceeds the supported range".to_string())?;
+    let submission_deadline_at = repo::begin_execution_submission(
         pool,
         execution_id,
         if backend_kind == "slurm_remote" {
@@ -3674,24 +3707,27 @@ async fn run_submit_phase(
         },
         &expected_session_id,
         daliuge_manager_url.as_deref(),
+        submission_timeout_seconds,
     )
     .await
     .map_err(|error| error.to_string())?;
-    if !began_submission {
+    let Some(submission_deadline_at) = submission_deadline_at else {
         warn!(
             event = "execute_submit_duplicate_guard",
             execution_id = %execution_id,
             "another worker already began or recorded this submission"
         );
         return Ok(());
-    }
+    };
     async {
-        let submitted = match backend
-            .submit(&execution_id.to_string(), manifest, graph)
-            .await
+        let submitted = match within_submission_timeout(
+            submission_timeout_remaining(submission_deadline_at, Utc::now()),
+            backend.submit(&execution_id.to_string(), manifest, graph),
+        )
+        .await
         {
-            Ok(submitted) => submitted,
-            Err(error) => {
+            Ok(Ok(submitted)) => submitted,
+            Ok(Err(error)) => {
                 let uncertain = submission_error_is_uncertain(&error);
                 repo::apply_execution_state_patch(
                     pool,
@@ -3714,6 +3750,20 @@ async fn run_submit_phase(
                 .await
                 .map_err(|db_error| db_error.to_string())?;
                 return Err(error.to_string());
+            }
+            Err(_) => {
+                let error = format!(
+                    "backend submission exceeded its persisted wall-clock deadline at {}",
+                    submission_deadline_at.to_rfc3339()
+                );
+                repo::apply_execution_state_patch(
+                    pool,
+                    execution_id,
+                    submission_timeout_patch(error.clone()),
+                )
+                .await
+                .map_err(|db_error| db_error.to_string())?;
+                return Err(error);
             }
         };
         apply_submit_result(
@@ -5899,6 +5949,40 @@ mod tests {
         assert_eq!(SLURM_TARGET_WALL_CLOCK_TIMEOUT, Duration::from_secs(60));
     }
 
+    #[tokio::test]
+    async fn persisted_submission_deadline_bounds_the_whole_backend_future() {
+        let now = Utc::now();
+        assert_eq!(
+            submission_timeout_remaining(now + chrono::Duration::seconds(30), now),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            submission_timeout_remaining(now - chrono::Duration::milliseconds(1), now),
+            Duration::ZERO
+        );
+
+        let timed_out = within_submission_timeout(
+            Duration::from_millis(5),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(timed_out.is_err());
+
+        let completed = within_submission_timeout(
+            Duration::from_secs(1),
+            async { "receipt" },
+        )
+        .await;
+        assert_eq!(completed.unwrap(), "receipt");
+
+        let patch = submission_timeout_patch("deadline exceeded".into());
+        assert_eq!(patch.submission_state, Some(SubmissionState::Uncertain));
+        assert_eq!(patch.failure_class, Some(FailureClass::Timeout));
+        assert!(submission_state_holds_automatic_work(
+            patch.submission_state
+        ));
+    }
+
     #[test]
     fn unknown_scheduler_state_does_not_false_terminalize() {
         let decision = beampipe_domain::ExecutionAxes {
@@ -6109,9 +6193,11 @@ mod tests {
                 "daliuge",
                 &session_id,
                 Some("http://dim.invalid"),
+                1_800,
             )
             .await
-            .unwrap());
+            .unwrap()
+            .is_some());
             if submission == SubmissionState::Uncertain {
                 repo::apply_execution_state_patch(
                     &pool,
