@@ -52,6 +52,7 @@ utoipa-swagger-ui = { version = "7", features = ["axum"] }
 uuid = { version = "1", features = ["serde", "v7", "v4"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+ipnet = "2"
 russh = "0.61"
 ssh-key = "0.7.0-rc.10"
 axum-test = "15"

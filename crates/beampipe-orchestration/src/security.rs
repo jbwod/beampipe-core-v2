@@ -17,10 +17,6 @@ fn security_strict_enabled(settings: &Settings) -> bool {
     beampipe_security::is_production_env_name(&settings.beampipe_env)
 }
 
-fn use_real_backends() -> bool {
-    bool_env("BEAMPIPE_USE_REAL_BACKENDS").unwrap_or(false)
-}
-
 /// Collect security issues (always runs all checks; used by `beampipe security check`).
 pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
     let mut errors = Vec::new();
@@ -66,7 +62,7 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
         }
     }
 
-    if use_real_backends() {
+    if settings.use_real_backends {
         let slots = list_credential_slots();
         if has_global_ssh_key_config() {
             push_slurm_credential_issues(&mut errors, None);

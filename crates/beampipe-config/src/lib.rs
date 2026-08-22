@@ -39,6 +39,8 @@ pub struct Settings {
     pub redis_url: Option<String>,
     pub rate_limit_requests: u64,
     pub rate_limit_period_seconds: u64,
+    /// Proxy networks whose immediate peers may supply X-Forwarded-For.
+    pub trusted_proxy_cidrs: Vec<String>,
     pub metrics_bind_addr: String,
     pub metrics_server_enabled: bool,
     pub metrics_public: bool,
@@ -324,6 +326,12 @@ impl Settings {
                 file.api.rate_limit_period_seconds,
                 3600,
             )?,
+            trusted_proxy_cidrs: resolver.string_list(
+                "trusted_proxy_cidrs",
+                "BEAMPIPE_TRUSTED_PROXY_CIDRS",
+                file.api.trusted_proxy_cidrs.clone(),
+                Vec::new(),
+            ),
             metrics_bind_addr: resolver.string(
                 "metrics_bind_addr",
                 "BEAMPIPE_METRICS_BIND_ADDR",
@@ -509,6 +517,7 @@ config_section!(ApiFile {
     cors_allow_origins: String,
     rate_limit_requests: u64,
     rate_limit_period_seconds: u64,
+    trusted_proxy_cidrs: Vec<String>,
     require_rate_limiter: bool,
 });
 config_section!(AuthFile {
@@ -914,6 +923,40 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
             value: settings.otel_sampler_ratio.to_string(),
         });
     }
+    validate_rate_limit_settings(
+        settings.rate_limit_requests,
+        settings.rate_limit_period_seconds,
+        &settings.trusted_proxy_cidrs,
+    )?;
+    Ok(())
+}
+
+fn validate_rate_limit_settings(
+    requests: u64,
+    period_seconds: u64,
+    trusted_proxy_cidrs: &[String],
+) -> Result<(), SettingsError> {
+    if requests == 0 {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_RATE_LIMIT_REQUESTS",
+            value: requests.to_string(),
+        });
+    }
+    if period_seconds == 0 {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_RATE_LIMIT_PERIOD_SECONDS",
+            value: period_seconds.to_string(),
+        });
+    }
+    if let Some(invalid) = trusted_proxy_cidrs
+        .iter()
+        .find(|cidr| cidr.parse::<ipnet::IpNet>().is_err())
+    {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_TRUSTED_PROXY_CIDRS",
+            value: invalid.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -978,5 +1021,13 @@ mod tests {
         assert!(is_sensitive("jwt_secret"));
         assert!(is_sensitive("database_url"));
         assert!(!is_sensitive("bind_addr"));
+    }
+
+    #[test]
+    fn rate_limit_window_and_proxy_networks_are_validated() {
+        assert!(validate_rate_limit_settings(10, 60, &["10.0.0.0/8".into()]).is_ok());
+        assert!(validate_rate_limit_settings(10, 0, &[]).is_err());
+        assert!(validate_rate_limit_settings(0, 60, &[]).is_err());
+        assert!(validate_rate_limit_settings(10, 60, &["not-a-network".into()]).is_err());
     }
 }

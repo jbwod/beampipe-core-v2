@@ -21,6 +21,7 @@ beampipe-security = { path = "../beampipe-security" }
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
+ipnet.workspace = true
 redis.workspace = true
 serde.workspace = true
 serde_json.workspace = true

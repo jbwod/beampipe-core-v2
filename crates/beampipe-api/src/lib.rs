@@ -6,7 +6,7 @@ mod route_metrics;
 
 use axum::{
     body::Body,
-    extract::{FromRef, FromRequestParts, Path, Query, State},
+    extract::{ConnectInfo, FromRef, FromRequestParts, Path, Query, State},
     http::{request::Parts, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -36,7 +36,7 @@ use beampipe_project::{
 };
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
-use rate_limit::{check_rate_limit, client_ip, RateLimitError, RateLimiter};
+use rate_limit::{check_rate_limit, RateLimitError, RateLimiter};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -382,7 +382,7 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
             WorkerConfig::from_settings(&settings),
         ));
     }
-    let rate_limiter = RateLimiter::from_settings(&settings).await;
+    let rate_limiter = RateLimiter::from_settings(&settings).await?;
     let bind_addr: SocketAddr = settings.bind_addr.parse()?;
     let app = router(AppState {
         pool,
@@ -392,9 +392,12 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
     });
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!(addr = %bind_addr, "event=api_listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     if let Some(workers) = worker_pool {
         workers.shutdown().await;
     }
@@ -668,11 +671,29 @@ async fn rate_limit_middleware(
     next: Next,
 ) -> Result<Response, ApiError> {
     let path = req.uri().path().to_string();
-    let ip = client_ip(req.headers(), "127.0.0.1");
-    if let Err(RateLimitError::Limited) =
-        check_rate_limit(&state.rate_limiter, None, &ip, &path).await
-    {
-        return Err(ApiError::TooManyRequests);
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect| connect.0.ip())
+        .ok_or(ApiError::ServiceUnavailable)?;
+    let ip = state
+        .rate_limiter
+        .client_ip(req.headers(), peer)
+        .to_string();
+    match check_rate_limit(&state.rate_limiter, None, &ip, &path).await {
+        Ok(()) => {}
+        Err(RateLimitError::Limited) => return Err(ApiError::TooManyRequests),
+        Err(RateLimitError::Redis(error)) if state.rate_limiter.fail_closed() => {
+            tracing::warn!(error = %error, "event=rate_limit_redis_unavailable_fail_closed");
+            return Err(ApiError::ServiceUnavailable);
+        }
+        Err(RateLimitError::Redis(error)) => {
+            tracing::warn!(error = %error, "event=rate_limit_redis_unavailable_bypassed_development");
+        }
+        Err(RateLimitError::Configuration(error)) => {
+            tracing::error!(error = %error, "event=rate_limit_configuration_error");
+            return Err(ApiError::ServiceUnavailable);
+        }
     }
     Ok(next.run(req).await)
 }
@@ -746,6 +767,9 @@ async fn ready(
             }
             Err(_) => {
                 metrics::set_dependency_up("redis", false);
+                if state.rate_limiter.fail_closed() {
+                    return Err(ApiError::ServiceUnavailable);
+                }
                 "error".into()
             }
         }

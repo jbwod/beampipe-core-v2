@@ -449,6 +449,7 @@ dependencies = [
  "beampipe-project",
  "beampipe-security",
  "chrono",
+ "ipnet",
  "redis",
  "serde",
  "serde_json",
@@ -519,6 +520,7 @@ name = "beampipe-config"
 version = "0.1.5"
 dependencies = [
  "dotenvy",
+ "ipnet",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -16,6 +16,26 @@ hide:
 
 All roles coordinate through PostgreSQL. The console is a projection of that state plus explicit live probes, not a second control plane.
 
+## API rate limiting and proxy trust
+
+Sensitive API routes can use Redis-backed fixed-window rate limiting. Set
+`BEAMPIPE_REDIS_URL` and, when the limiter is mandatory,
+`BEAMPIPE_REQUIRE_RATE_LIMITER=true`. A required limiter fails startup when
+Redis cannot be reached. Once configured, Redis errors fail requests closed in
+production; development logs the dependency failure before allowing the
+request.
+
+The API always keys direct clients from the TCP peer address. It only consumes
+`X-Forwarded-For` when that peer belongs to a network explicitly listed in
+`BEAMPIPE_TRUSTED_PROXY_CIDRS` (a comma-separated list such as
+`10.20.0.0/16,2001:db8:1::/64`). The chain is walked from right to left and
+stops at the first untrusted address, so a caller cannot select a bucket by
+prepending a spoofed address. Leave the setting empty when no trusted reverse
+proxy is present.
+
+Both `BEAMPIPE_RATE_LIMIT_REQUESTS` and
+`BEAMPIPE_RATE_LIMIT_PERIOD_SECONDS` must be greater than zero.
+
 ## Console
 
 ```bash
