@@ -138,12 +138,20 @@ where
 {
     let mut lines = vec![env_prelude_with(deployment, read_environment)?];
     for command in [
-        "sbatch", "squeue", "sacct", "scancel", "scontrol", "srun", "python3",
+        "sbatch",
+        "squeue",
+        "sacct",
+        "scancel",
+        "scontrol",
+        "srun",
+        "python3",
+        "wallaby_hires",
     ] {
         lines.push(format!(
             "command -v {command} >/dev/null 2>&1 || {{ echo 'missing required command: {command}' >&2; exit 127; }}"
         ));
     }
+    lines.push("wallaby_hires --version >/dev/null".into());
     lines.push(format!(
         "test -d {root} && test -w {root} || {{ echo 'DLG_ROOT is not a writable directory' >&2; exit 73; }}",
         root = shell_quote(&deployment.dlg_root)
@@ -743,6 +751,8 @@ mod tests {
             "command -v scontrol",
             "command -v srun",
             "command -v python3",
+            "command -v wallaby_hires",
+            "wallaby_hires --version",
             "test -d '/scratch/project/user/dlg root'",
             "import dlg.deploy.create_dlg_job",
             "import wallaby_hires",
