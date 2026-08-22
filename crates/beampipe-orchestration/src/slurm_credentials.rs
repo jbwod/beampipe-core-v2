@@ -419,7 +419,7 @@ fn posix_acl_grants_group_or_other(acl: &[u8]) -> bool {
     if version != POSIX_ACL_XATTR_VERSION {
         return true;
     }
-    acl[4..].chunks_exact(8).any(|chunk| {
+    acl[4..].as_chunks::<8>().0.iter().any(|chunk| {
         let tag = u16::from_le_bytes(chunk[0..2].try_into().unwrap_or([0; 2]));
         let perm = u16::from_le_bytes(chunk[2..4].try_into().unwrap_or([0; 2]));
         matches!(tag, ACL_GROUP_OBJ | ACL_GROUP | ACL_OTHER) && perm & (ACL_READ | ACL_WRITE) != 0

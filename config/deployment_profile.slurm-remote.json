@@ -45,6 +45,6 @@
     "zerorun": false,
     "sleepncopy": false,
     "check_with_session": false,
-    "verify_ssl": true
+    "verify_ssl": false
   }
 }
