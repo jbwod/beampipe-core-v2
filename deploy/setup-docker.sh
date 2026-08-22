@@ -42,4 +42,4 @@ fi
 exec docker compose run --rm --no-deps \
   --user "$(id -u):$(id -g)" \
   -v "$root:/checkout" -w /checkout \
-  api setup --runtime docker --no-start "$@"
+  api setup --runtime docker --no-start --directory /checkout "$@"

@@ -55,6 +55,9 @@ jobs:
       - name: Installer target mapping
         run: sh deploy/install-target-test.sh
 
+      - name: Checkout setup command
+        run: sh deploy/setup-docker-test.sh
+
       - name: Materialized release installation
         run: |
           install_home="$RUNNER_TEMP/beampipe-install"
