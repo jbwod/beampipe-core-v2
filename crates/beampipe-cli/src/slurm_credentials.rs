@@ -353,16 +353,24 @@ pub fn sync(context: &InstallationContext, slot: Option<&str>) -> Result<SyncRes
         .is_some_and(|state| state.runtime == RuntimeMode::Docker);
     let (scheduler_readable, worker_readable, message) = match (slot, docker_runtime) {
         (Some(slot), true) => {
-            let path = format!("/run/beampipe/ssh/{slot}/private_key");
-            let scheduler = container_can_read(context, "scheduler", &path)?;
-            let worker = container_can_read(context, "worker", &path)?;
+            let (private_key_path, known_hosts_path) =
+                resolved_container_credential_paths(&context.credential_root, slot);
+            let scheduler = combine_container_readability(
+                container_can_read(context, "scheduler", &private_key_path)?,
+                container_can_read(context, "scheduler", &known_hosts_path)?,
+            );
+            let worker = combine_container_readability(
+                container_can_read(context, "worker", &private_key_path)?,
+                container_can_read(context, "worker", &known_hosts_path)?,
+            );
             let message = if scheduler == Some(true) && worker == Some(true) {
-                "credential slot is visible to the running Docker services".into()
+                "credential key and resolved known_hosts are visible to the running Docker services"
+                    .into()
             } else if scheduler.is_none() || worker.is_none() {
                 "credential files are configured; start the Docker runtime to verify container readability".into()
             } else {
                 bail!(
-                    "credential slot is mounted but unreadable; run `beampipe slurm credentials import --acl ...` or fix uid 10001 ACLs"
+                    "credential key or resolved known_hosts is mounted but unreadable; run `beampipe slurm credentials import --acl ...` or fix uid 10001 ACLs"
                 );
             };
             (scheduler, worker, message)
@@ -389,6 +397,23 @@ pub fn sync(context: &InstallationContext, slot: Option<&str>) -> Result<SyncRes
         worker_readable,
         message,
     })
+}
+
+fn resolved_container_credential_paths(root: &Path, slot: &str) -> (String, String) {
+    let private_key = format!("/run/beampipe/ssh/{slot}/private_key");
+    let known_hosts = if root.join(slot).join("known_hosts").is_file() {
+        format!("/run/beampipe/ssh/{slot}/known_hosts")
+    } else {
+        "/run/beampipe/ssh/known_hosts".into()
+    };
+    (private_key, known_hosts)
+}
+
+fn combine_container_readability(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left && right),
+        _ => None,
+    }
 }
 
 pub fn remove(slot: &str, dir: Option<&Path>, confirmed: bool) -> Result<()> {
@@ -1186,5 +1211,30 @@ mod tests {
         let text = format_credential_next_steps(&result);
         assert!(text.contains("ssh-ed25519"));
         assert!(text.contains("authorized_keys"));
+    }
+
+    #[test]
+    fn sync_checks_the_resolved_root_known_hosts_with_the_slot_key() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("setonix")).unwrap();
+        fs::write(dir.path().join("known_hosts"), "setonix ssh-ed25519 AAAA").unwrap();
+        let paths = resolved_container_credential_paths(dir.path(), "setonix");
+        assert_eq!(paths.0, "/run/beampipe/ssh/setonix/private_key");
+        assert_eq!(paths.1, "/run/beampipe/ssh/known_hosts");
+        assert_eq!(
+            combine_container_readability(Some(true), Some(false)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn sync_prefers_slot_known_hosts_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("setonix");
+        fs::create_dir_all(&slot).unwrap();
+        fs::write(slot.join("known_hosts"), "setonix ssh-ed25519 AAAA").unwrap();
+        let paths = resolved_container_credential_paths(dir.path(), "setonix");
+        assert_eq!(paths.1, "/run/beampipe/ssh/setonix/known_hosts");
+        assert_eq!(combine_container_readability(None, Some(true)), None);
     }
 }
