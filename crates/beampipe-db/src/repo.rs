@@ -3198,6 +3198,29 @@ pub struct SlurmLookupEvidenceAttempt {
     pub eligible_for_abandonment: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SlurmAbandonmentEvidenceExpectation<'a> {
+    pub session_id: &'a str,
+    pub intent_id: Uuid,
+    pub intent_observed_at: DateTime<Utc>,
+    pub profile_sha256: &'a str,
+    pub target_fingerprint: &'a str,
+    pub quiet_eligible_at: DateTime<Utc>,
+    pub now: DateTime<Utc>,
+}
+
+impl SlurmAbandonmentEvidenceExpectation<'_> {
+    fn matches_attempt(&self, attempt: &SlurmLookupEvidenceAttempt) -> bool {
+        attempt.observed_at >= self.quiet_eligible_at
+            && attempt.query_completed_at >= self.quiet_eligible_at
+            && attempt.daliuge_session_id == self.session_id
+            && attempt.intent_observation_id == self.intent_id
+            && attempt.profile_sha256 == self.profile_sha256
+            && attempt.target_fingerprint == self.target_fingerprint
+            && attempt.accounting_not_before == self.intent_observed_at
+    }
+}
+
 fn parse_slurm_lookup_evidence(
     row: &ExecutionObservationRow,
 ) -> Result<SlurmLookupEvidenceAttempt, AbandonSlurmSubmissionError> {
@@ -3263,25 +3286,11 @@ fn parse_slurm_lookup_evidence(
 
 pub fn validate_slurm_abandonment_evidence(
     attempts_newest_first: &[SlurmLookupEvidenceAttempt],
-    expected_session_id: &str,
-    expected_intent_id: Uuid,
-    expected_intent_observed_at: DateTime<Utc>,
-    expected_profile_sha256: &str,
-    expected_target_fingerprint: &str,
-    quiet_eligible_at: DateTime<Utc>,
-    now: DateTime<Utc>,
+    expected: SlurmAbandonmentEvidenceExpectation<'_>,
 ) -> Result<Vec<Uuid>, AbandonSlurmSubmissionError> {
     let mut relevant = attempts_newest_first
         .iter()
-        .filter(|attempt| {
-            attempt.observed_at >= quiet_eligible_at
-                && attempt.query_completed_at >= quiet_eligible_at
-                && attempt.daliuge_session_id == expected_session_id
-                && attempt.intent_observation_id == expected_intent_id
-                && attempt.profile_sha256 == expected_profile_sha256
-                && attempt.target_fingerprint == expected_target_fingerprint
-                && attempt.accounting_not_before == expected_intent_observed_at
-        })
+        .filter(|attempt| expected.matches_attempt(attempt))
         .collect::<Vec<_>>();
     relevant.sort_by_key(|attempt| std::cmp::Reverse(attempt.query_completed_at));
     if relevant.iter().any(|attempt| {
@@ -3316,13 +3325,7 @@ pub fn validate_slurm_abandonment_evidence(
                 && attempt.squeue_complete
                 && attempt.sacct_complete
                 && attempt.eligible_for_abandonment
-                && attempt.observed_at >= quiet_eligible_at
-                && attempt.query_completed_at >= quiet_eligible_at
-                && attempt.daliuge_session_id == expected_session_id
-                && attempt.intent_observation_id == expected_intent_id
-                && attempt.profile_sha256 == expected_profile_sha256
-                && attempt.target_fingerprint == expected_target_fingerprint
-                && attempt.accounting_not_before == expected_intent_observed_at
+                && expected.matches_attempt(attempt)
         })
         .collect::<Vec<_>>();
     eligible.sort_by_key(|attempt| std::cmp::Reverse(attempt.query_completed_at));
@@ -3336,11 +3339,12 @@ pub fn validate_slurm_abandonment_evidence(
         });
     }
     let newest = eligible[0];
-    if now
+    if expected
+        .now
         .signed_duration_since(newest.query_completed_at)
         .num_seconds()
         > SUBMISSION_ABANDONMENT_EVIDENCE_FRESHNESS_SECONDS
-        || newest.query_completed_at > now
+        || newest.query_completed_at > expected.now
     {
         return Err(AbandonSlurmSubmissionError::Conflict {
             code: "submission_abandonment_evidence_stale".into(),
@@ -3619,13 +3623,15 @@ pub async fn abandon_slurm_submission(
         .collect::<Result<Vec<_>, _>>()?;
     let evidence_ids = validate_slurm_abandonment_evidence(
         &lookup_attempts,
-        &input.expected_daliuge_session_id,
-        intent.uuid,
-        intent.observed_at,
-        &expected_profile_sha256,
-        &expected_target_fingerprint,
-        quiet_eligible_at,
-        now,
+        SlurmAbandonmentEvidenceExpectation {
+            session_id: &input.expected_daliuge_session_id,
+            intent_id: intent.uuid,
+            intent_observed_at: intent.observed_at,
+            profile_sha256: &expected_profile_sha256,
+            target_fingerprint: &expected_target_fingerprint,
+            quiet_eligible_at,
+            now,
+        },
     )?;
 
     let invalidated_job_ids = execute_jobs
@@ -7516,7 +7522,7 @@ pub async fn list_alert_deliveries(
 mod tests {
     use super::{
         deployment_profile_spec_sha256, validate_slurm_abandonment_evidence,
-        SlurmLookupEvidenceAttempt,
+        SlurmAbandonmentEvidenceExpectation, SlurmLookupEvidenceAttempt,
     };
     use chrono::{Duration, Utc};
     use serde_json::json;
@@ -7582,6 +7588,24 @@ mod tests {
         }
     }
 
+    fn expected_evidence<'a>(
+        session_id: &'a str,
+        intent_id: Uuid,
+        intent_at: chrono::DateTime<Utc>,
+        quiet_at: chrono::DateTime<Utc>,
+        now: chrono::DateTime<Utc>,
+    ) -> SlurmAbandonmentEvidenceExpectation<'a> {
+        SlurmAbandonmentEvidenceExpectation {
+            session_id,
+            intent_id,
+            intent_observed_at: intent_at,
+            profile_sha256: "profile-sha",
+            target_fingerprint: "target-sha",
+            quiet_eligible_at: quiet_at,
+            now,
+        }
+    }
+
     #[test]
     fn abandonment_requires_three_recent_complete_negatives_spanning_ten_minutes() {
         let now = Utc::now();
@@ -7601,13 +7625,7 @@ mod tests {
         ];
         let ids = validate_slurm_abandonment_evidence(
             &evidence,
-            session_id,
-            intent_id,
-            intent_at,
-            "profile-sha",
-            "target-sha",
-            quiet_at,
-            now,
+            expected_evidence(session_id, intent_id, intent_at, quiet_at, now),
         )
         .unwrap();
         assert_eq!(ids.len(), 3);
@@ -7617,13 +7635,7 @@ mod tests {
         assert_eq!(
             validate_slurm_abandonment_evidence(
                 &partial,
-                session_id,
-                intent_id,
-                intent_at,
-                "profile-sha",
-                "target-sha",
-                quiet_at,
-                now,
+                expected_evidence(session_id, intent_id, intent_at, quiet_at, now),
             )
             .unwrap_err()
             .code(),
@@ -7635,13 +7647,7 @@ mod tests {
         assert_eq!(
             validate_slurm_abandonment_evidence(
                 &wrong_target,
-                session_id,
-                intent_id,
-                intent_at,
-                "profile-sha",
-                "target-sha",
-                quiet_at,
-                now,
+                expected_evidence(session_id, intent_id, intent_at, quiet_at, now),
             )
             .unwrap_err()
             .code(),
@@ -7661,13 +7667,7 @@ mod tests {
         assert_eq!(
             validate_slurm_abandonment_evidence(
                 &with_ambiguous,
-                session_id,
-                intent_id,
-                intent_at,
-                "profile-sha",
-                "target-sha",
-                quiet_at,
-                now,
+                expected_evidence(session_id, intent_id, intent_at, quiet_at, now),
             )
             .unwrap_err()
             .code(),
@@ -7687,13 +7687,7 @@ mod tests {
         assert_eq!(
             validate_slurm_abandonment_evidence(
                 &with_latest_error,
-                session_id,
-                intent_id,
-                intent_at,
-                "profile-sha",
-                "target-sha",
-                quiet_at,
-                now,
+                expected_evidence(session_id, intent_id, intent_at, quiet_at, now),
             )
             .unwrap_err()
             .code(),
@@ -7722,13 +7716,7 @@ mod tests {
         assert_eq!(
             validate_slurm_abandonment_evidence(
                 &dense,
-                session_id,
-                intent_id,
-                intent_at,
-                "profile-sha",
-                "target-sha",
-                quiet_at,
-                now,
+                expected_evidence(session_id, intent_id, intent_at, quiet_at, now),
             )
             .unwrap()
             .len(),

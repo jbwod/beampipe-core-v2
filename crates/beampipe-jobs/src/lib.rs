@@ -5866,19 +5866,22 @@ mod tests {
     #[test]
     fn staging_and_manifest_must_preserve_exact_selected_scope() {
         let selected = scoped_dataset("source-1", "1", "dataset-1");
-        let expected = dataset_scope_from_records(&[selected.clone()], "expected").unwrap();
-        validate_staged_dataset_scope(&[selected.clone()], &[], &expected).unwrap();
+        let expected =
+            dataset_scope_from_records(std::slice::from_ref(&selected), "expected").unwrap();
+        validate_staged_dataset_scope(std::slice::from_ref(&selected), &[], &expected).unwrap();
         validate_manifest_dataset_scope(&scoped_manifest(vec![selected.clone()]), &expected)
             .unwrap();
 
         assert!(validate_staged_dataset_scope(&[], &[], &expected)
             .unwrap_err()
             .contains("changed selected dataset scope"));
-        assert!(
-            validate_staged_dataset_scope(&[selected.clone()], &["1".into()], &expected)
-                .unwrap_err()
-                .contains("skipped selected SBIDs 1")
-        );
+        assert!(validate_staged_dataset_scope(
+            std::slice::from_ref(&selected),
+            &["1".into()],
+            &expected
+        )
+        .unwrap_err()
+        .contains("skipped selected SBIDs 1"));
 
         let extra = scoped_dataset("source-1", "1", "dataset-2");
         assert!(validate_manifest_dataset_scope(

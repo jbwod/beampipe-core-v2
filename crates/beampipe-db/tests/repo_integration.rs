@@ -1641,15 +1641,16 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
         Some("inconsistent_state")
     );
     assert!(abandoned.submission_abandoned_at.is_some());
+    type FencedJobLease = (
+        String,
+        Option<chrono::DateTime<Utc>>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<chrono::DateTime<Utc>>,
+        Option<chrono::DateTime<Utc>>,
+    );
     for job_id in [queued_job.uuid, expired_job.uuid] {
-        let fenced: (
-            String,
-            Option<chrono::DateTime<Utc>>,
-            Option<Uuid>,
-            Option<Uuid>,
-            Option<chrono::DateTime<Utc>>,
-            Option<chrono::DateTime<Utc>>,
-        ) = sqlx::query_as(
+        let fenced: FencedJobLease = sqlx::query_as(
             r#"
             SELECT status, locked_until, lease_owner, lease_token, lease_expires_at, heartbeat_at
             FROM jobs WHERE uuid = $1
