@@ -1,5 +1,6 @@
 use beampipe_db::{connect, migrate, repo};
 use beampipe_domain::discovery::{DiscoverySourceResult, SignatureOptions};
+use beampipe_project::SignatureConfig;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -129,6 +130,107 @@ async fn discovery_signature_unchanged_skips_pending() {
         .unwrap();
 
     let _ = signature;
+    teardown_test_module(&pool, &module).await;
+}
+
+#[tokio::test]
+async fn excluded_staging_urls_are_stored_and_refreshed_without_changing_signature() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("sig_urls_{}", Uuid::now_v7());
+    let source = "src-volatile-urls".to_string();
+    repo::upsert_source(&pool, &module, &source, true)
+        .await
+        .unwrap();
+    let signature = SignatureConfig {
+        exclude_fields: vec![
+            "access_url".into(),
+            "evaluation_file_access_url".into(),
+            "filesize".into(),
+        ],
+        include_discovery_flags: true,
+    };
+    let metadata = |suffix: &str| {
+        vec![json!({
+            "sbid": "72962",
+            "dataset_id": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
+            "visibility_filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
+            "access_url": format!("https://example.test/visibility-{suffix}"),
+            "evaluation_file": "calibration-metadata-processing-logs-SB72962.tar",
+            "evaluation_file_access_url": format!("https://example.test/evaluation-{suffix}"),
+            "filesize": if suffix == "old" { 1 } else { 2 }
+        })]
+    };
+    let flags = json!({"ra_dec_vsys_complete": true});
+
+    let first_claim = claim_source(&pool, &module, &source).await;
+    let first = repo::persist_discovery_results(
+        &pool,
+        &module,
+        &first_claim,
+        &[DiscoverySourceResult::HasMetadata {
+            source_identifier: source.clone(),
+            metadata: metadata("old"),
+            discovery_flags: flags.clone(),
+            duration_ms: None,
+        }],
+        Some(&signature),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.changed_count, 1);
+    let first_signature: String = sqlx::query_scalar(
+        "SELECT discovery_signature FROM source_registry WHERE project_module = $1 AND source_identifier = $2",
+    )
+    .bind(&module)
+    .bind(&source)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let second_claim = claim_source(&pool, &module, &source).await;
+    let second = repo::persist_discovery_results(
+        &pool,
+        &module,
+        &second_claim,
+        &[DiscoverySourceResult::HasMetadata {
+            source_identifier: source.clone(),
+            metadata: metadata("new"),
+            discovery_flags: flags,
+            duration_ms: None,
+        }],
+        Some(&signature),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.unchanged_count, 1);
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "SELECT metadata_json FROM archive_metadata WHERE project_module = $1 AND source_identifier = $2 AND sbid = '72962'",
+    )
+    .bind(&module)
+    .bind(&source)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored["datasets"][0]["access_url"],
+        "https://example.test/visibility-new"
+    );
+    assert_eq!(
+        stored["datasets"][0]["evaluation_file_access_url"],
+        "https://example.test/evaluation-new"
+    );
+    let second_signature: String = sqlx::query_scalar(
+        "SELECT discovery_signature FROM source_registry WHERE project_module = $1 AND source_identifier = $2",
+    )
+    .bind(&module)
+    .bind(&source)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first_signature, second_signature);
     teardown_test_module(&pool, &module).await;
 }
 

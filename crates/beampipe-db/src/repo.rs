@@ -7,9 +7,9 @@ use crate::models::{
 use beampipe_domain::{
     discovery::{
         discovery_signature, existing_signature_from_records, group_metadata_by_sbid,
-        metadata_payload_by_sbid, no_datasets_payload, no_datasets_signature,
-        validate_prepared_metadata_records, DiscoveryBatchStats, DiscoverySourceResult,
-        SignatureOptions,
+        metadata_payload_by_sbid, metadata_storage_payload_by_sbid, no_datasets_payload,
+        no_datasets_signature, validate_prepared_metadata_records, DiscoveryBatchStats,
+        DiscoverySourceResult, SignatureOptions,
     },
     plan_execution_retry,
     readiness::{
@@ -1230,8 +1230,10 @@ async fn persist_changed_or_unchanged(
     validate_prepared_metadata_records(metadata)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let grouped = group_metadata_by_sbid(metadata);
-    let payload = metadata_payload_by_sbid(&grouped, Some(discovery_flags), Some(signature));
-    let new_sig = discovery_signature(&payload);
+    let signature_payload =
+        metadata_payload_by_sbid(&grouped, Some(discovery_flags), Some(signature));
+    let storage_payload = metadata_storage_payload_by_sbid(&grouped, Some(discovery_flags));
+    let new_sig = discovery_signature(&signature_payload);
     let mut tx = pool.begin().await?;
     let source: Option<(Uuid, Option<String>)> = sqlx::query_as(
         r#"
@@ -1268,7 +1270,7 @@ async fn persist_changed_or_unchanged(
         .await?;
         existing_signature_from_records(&records, Some(signature))
     };
-    let sbids = payload.len();
+    let sbids = storage_payload.len();
     let datasets = metadata.len();
     if existing_sig == new_sig {
         debug!(
@@ -1277,6 +1279,8 @@ async fn persist_changed_or_unchanged(
             signature_prefix = &new_sig[..16.min(new_sig.len())],
             "event=discover_signature_unchanged"
         );
+        synchronize_archive_metadata(&mut tx, project_module, source_identifier, &storage_payload)
+            .await?;
         sqlx::query(
             r#"
             UPDATE source_registry
@@ -1309,37 +1313,8 @@ async fn persist_changed_or_unchanged(
         new_prefix = &new_sig[..16.min(new_sig.len())],
         "event=discover_signature_changed"
     );
-    let keep_sbids: Vec<String> = payload.keys().cloned().collect();
-    sqlx::query(
-        r#"
-        DELETE FROM archive_metadata
-        WHERE project_module = $1
-          AND source_identifier = $2
-          AND NOT (sbid = ANY($3))
-        "#,
-    )
-    .bind(project_module)
-    .bind(source_identifier)
-    .bind(&keep_sbids)
-    .execute(&mut *tx)
-    .await?;
-    for (sbid, metadata_json) in payload {
-        sqlx::query(
-            r#"
-            INSERT INTO archive_metadata (uuid, project_module, source_identifier, sbid, metadata_json)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (project_module, source_identifier, sbid)
-            DO UPDATE SET metadata_json = EXCLUDED.metadata_json, updated_at = now()
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(project_module)
-        .bind(source_identifier)
-        .bind(sbid)
-        .bind(metadata_json)
-        .execute(&mut *tx)
+    synchronize_archive_metadata(&mut tx, project_module, source_identifier, &storage_payload)
         .await?;
-    }
     sqlx::query(
         r#"
         UPDATE source_registry
@@ -1372,6 +1347,46 @@ async fn persist_changed_or_unchanged(
     )
     .await;
     Ok(PersistOutcome::Changed { sbids, datasets })
+}
+
+async fn synchronize_archive_metadata(
+    tx: &mut Transaction<'_, Postgres>,
+    project_module: &str,
+    source_identifier: &str,
+    payload: &BTreeMap<String, Value>,
+) -> Result<(), sqlx::Error> {
+    let keep_sbids: Vec<String> = payload.keys().cloned().collect();
+    sqlx::query(
+        r#"
+        DELETE FROM archive_metadata
+        WHERE project_module = $1
+          AND source_identifier = $2
+          AND NOT (sbid = ANY($3))
+        "#,
+    )
+    .bind(project_module)
+    .bind(source_identifier)
+    .bind(&keep_sbids)
+    .execute(&mut **tx)
+    .await?;
+    for (sbid, metadata_json) in payload {
+        sqlx::query(
+            r#"
+            INSERT INTO archive_metadata (uuid, project_module, source_identifier, sbid, metadata_json)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (project_module, source_identifier, sbid)
+            DO UPDATE SET metadata_json = EXCLUDED.metadata_json, updated_at = now()
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(project_module)
+        .bind(source_identifier)
+        .bind(sbid)
+        .bind(metadata_json)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn persist_no_datasets(

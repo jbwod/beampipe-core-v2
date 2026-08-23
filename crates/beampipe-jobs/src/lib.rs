@@ -1002,11 +1002,13 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
                                 include_discovery_flags: c.include_discovery_flags,
                             })
                             .unwrap_or_default();
-                        if should_skip_tap(
-                            source_row.discovery_signature.as_deref(),
-                            &records,
-                            &sig_opts,
-                        ) {
+                        if staging_metadata_cache_complete(config, &records)
+                            && should_skip_tap(
+                                source_row.discovery_signature.as_deref(),
+                                &records,
+                                &sig_opts,
+                            )
+                        {
                             metrics::record_discovery_tap_skipped(project_module);
                             if let Some(pool) = &self.pool {
                                 let payload = json!({
@@ -1069,6 +1071,37 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
             },
         }
     }
+}
+
+fn staging_metadata_cache_complete(config: &ProjectConfig, records: &[(String, Value)]) -> bool {
+    let requires_casda_evaluation = config
+        .discovery
+        .enrichments
+        .iter()
+        .any(|query| query.name == "sbid_to_eval_file" && query.adapter == "casda");
+    if !requires_casda_evaluation {
+        return true;
+    }
+    records.iter().all(|(_, payload)| {
+        payload
+            .get("datasets")
+            .and_then(Value::as_array)
+            .is_some_and(|datasets| {
+                !datasets.is_empty()
+                    && datasets.iter().all(|dataset| {
+                        nonempty_string_field(dataset, "access_url")
+                            && nonempty_string_field(dataset, "evaluation_file")
+                            && nonempty_string_field(dataset, "evaluation_file_access_url")
+                    })
+            })
+    })
+}
+
+fn nonempty_string_field(value: &Value, field: &str) -> bool {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -6807,6 +6840,33 @@ mod tests {
                 );
             }
             other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wallaby_cache_requires_visibility_and_evaluation_staging_urls() {
+        let config =
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
+                .unwrap();
+        let complete = vec![(
+            "72962".into(),
+            json!({
+                "datasets": [{
+                    "access_url": "https://example.test/visibility",
+                    "evaluation_file": "calibration-metadata-processing-logs-SB72962.tar",
+                    "evaluation_file_access_url": "https://example.test/evaluation"
+                }]
+            }),
+        )];
+        assert!(staging_metadata_cache_complete(&config, &complete));
+
+        for missing in ["access_url", "evaluation_file_access_url"] {
+            let mut damaged = complete.clone();
+            damaged[0].1["datasets"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(!staging_metadata_cache_complete(&config, &damaged));
         }
     }
 
