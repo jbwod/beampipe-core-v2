@@ -232,6 +232,19 @@ pub struct SlurmSshSession {
     handle: client::Handle<SshClientHandler>,
 }
 
+fn ssh_client_config() -> client::Config {
+    client::Config {
+        // Submission artifacts can be tens of MiB. A healthy remote `tee` is
+        // silent until EOF, so an inbound inactivity deadline can disconnect
+        // a progressing upload. Keepalives detect a dead peer while the
+        // persisted submission deadline bounds the complete operation.
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..Default::default()
+    }
+}
+
 impl SlurmSshSession {
     pub async fn connect(target: &SlurmTarget) -> Result<Self, OrchestrationError> {
         let creds = SlurmSshCredentials::resolve_for(target.credential_slot.as_deref())?;
@@ -244,10 +257,7 @@ impl SlurmSshSession {
     ) -> Result<Self, OrchestrationError> {
         let key_pair = creds.load_private_key()?;
         let handler = SshClientHandler::from_credentials(creds, target)?;
-        let config = Arc::new(client::Config {
-            inactivity_timeout: Some(Duration::from_secs(300)),
-            ..Default::default()
-        });
+        let config = Arc::new(ssh_client_config());
         let addr = (target.login_node.as_str(), target.ssh_port);
         let mut handle = client::connect(config, addr, handler).await.map_err(|e| {
             OrchestrationError::Backend(format!(
@@ -673,8 +683,8 @@ mod tests {
         command_stdout, is_missing_squeue_job_error, known_host_patterns_match,
         known_hosts_has_target, load_known_host_keys, remote_command_transport_error,
         sacct_query_command, scancel_command, squeue_query_command, squeue_stdout,
-        upload_text_command, validate_slurm_job_id, RemoteCommandKind, RemoteCommandOutput,
-        SlurmSshPool, SlurmTarget,
+        ssh_client_config, upload_text_command, validate_slurm_job_id, RemoteCommandKind,
+        RemoteCommandOutput, SlurmSshPool, SlurmTarget,
     };
     use crate::OrchestrationError;
     use std::sync::Arc;
@@ -702,6 +712,17 @@ mod tests {
         let command = upload_text_command("/scratch/session graph.pgt");
         assert!(command.starts_with("umask 077 && tee "));
         assert!(command.contains("'/scratch/session graph.pgt'"));
+    }
+
+    #[test]
+    fn large_silent_uploads_use_keepalives_not_an_inactivity_disconnect() {
+        let config = ssh_client_config();
+        assert_eq!(config.inactivity_timeout, None);
+        assert_eq!(
+            config.keepalive_interval,
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(config.keepalive_max, 3);
     }
 
     #[test]
