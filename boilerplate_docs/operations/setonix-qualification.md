@@ -115,9 +115,9 @@ The production qualification artifacts are:
 
 | Artifact | Expected evidence |
 |---|---|
-| WALLABY graph | SHA-256 `b53e6a52d847c9c2957c07ab3b5cbcb34ffaf9bc9f4da7211f87171c2036c7ff` |
-| Wallaby package | version `0.1.10` |
-| Python wheel | SHA-256 `1d360050535d5a8956f65cba774d29269e0effa18c4a0bf11f2c0291e0efb2a5` |
+| WALLABY graph | SHA-256 `279776976d0650321a8813aac1ff5f73e81696913480ef045692f7d295696b83` |
+| Wallaby package | version `0.1.11` |
+| Python wheel | SHA-256 `593bbd412744cdff68e32097b685b95e81b46505ac2de4ef7f51c5623d8a08de` |
 
 Installing the package into a local `/daliuge` runtime does not prove that the
 Setonix login environment and compute-node environment contain the same build.
@@ -144,7 +144,7 @@ command -v singularity
 test -f "$BEAMPIPE_ASKAPSOFT_SIF" && test -r "$BEAMPIPE_ASKAPSOFT_SIF"
 ```
 
-Stop if Wallaby is not `0.1.10`, imports resolve from an unexpected environment,
+Stop if Wallaby is not `0.1.11`, imports resolve from an unexpected environment,
 the SIF differs, or the dedicated DLG root is not writable. Transferring or
 installing the wheel is a separate remote-mutation approval. A compute-node
 import or container smoke test consumes an allocation and is not part of this
@@ -198,14 +198,19 @@ For the known three-dataset candidate, the qualified graph creates three child
 imager jobs. Each child requests:
 
 ```text
-partition=work  nodes=1  ntasks=2  ntasks-per-node=2
-cpus-per-task=1  memory=12G  time=00:20:00
+partition=work  nodes=1  ntasks=6  ntasks-per-node=6
+cpus-per-task=1  memory=6G  time=00:20:00
 ```
 
-The nested upper bound is therefore three concurrent nodes, six tasks, 36 GB
+The nested upper bound is therefore three concurrent nodes, 18 tasks, 18 GB
 requested memory, and 60 node-minutes. Add the separately rendered outer
 DALiuGE allocation. The approval packet must show both; approving the outer job
 does not conceal the nested request.
+
+The qualified `CimagerStaticNew` parset renders
+`Cimager.Channels=[250,0]` and `Cimager.nchanpercore=50`. Treat these values and
+the child resource request as one versioned graph contract; changing either
+requires a new graph digest and approval packet.
 
 Size the outer wall time for the entire cold-cache critical path: CASDA transfer,
 checksum verification, extraction, DALiuGE graph execution, the longest child
@@ -216,7 +221,7 @@ limit**. Use at least 120 minutes for the one-source qualification unless a
 measured site-specific bound justifies more. A warm cache is not evidence that
 the cold-cache limit is sufficient.
 
-Wallaby 0.1.10 publishes a newly validated extracted MeasurementSet by atomic
+Wallaby 0.1.11 publishes a newly validated extracted MeasurementSet by atomic
 same-filesystem rename. Older builds copied the full extracted tree a second
 time, doubled write I/O, exposed a partially populated beam directory, and can
 consume most of a 50-minute outer allocation before imaging starts.
@@ -290,7 +295,7 @@ state, source (`squeue` or `sacct`), reason, and timestamp. Each Wallaby child i
 submitted held, records its exact ID in a mode-0600 lifecycle directory, and is
 then released. Capture every `BEAMPIPE_CHILD_JOB_ID`. Core requests an advance
 TERM notification before the outer wall-time, and the normal supervisor trap
-cancels its recorded exact child. Wallaby 0.1.10 also embeds the validated outer
+cancels its recorded exact child. Wallaby 0.1.11 also embeds the validated outer
 job ID in every child script; a child terminates its own `srun` if that parent
 disappears. `SIGKILL`, node loss, or an older Wallaby build can still orphan a
 child; never cancel by username, wildcard, or job-name prefix.
