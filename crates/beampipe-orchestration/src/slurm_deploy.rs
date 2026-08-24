@@ -8,7 +8,24 @@ use std::path::{Component, Path, PathBuf};
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
 const WALLABY_STAGING_ROOT_ENV: &str = "WALLABY_HIRES_STAGING_ROOT";
 const WALLABY_CACHE_ROOT_ENV: &str = "WALLABY_HIRES_CACHE_ROOT";
+const PYTHON_PATH_ENV: &str = "PYTHONPATH";
 const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
+const DALIUGE_FAILED_SESSION_SITECUSTOMIZE: &str = r#"# Beampipe compatibility shim for DALiuGE deploy.common.
+from dlg.deploy import common as _beampipe_common
+from dlg.manager.session import SessionStates as _beampipe_session_states
+
+_beampipe_original_is_end_state = _beampipe_common._is_end_state
+
+
+def _beampipe_is_end_state(state):
+    return (
+        state == _beampipe_session_states.FAILED
+        or _beampipe_original_is_end_state(state)
+    )
+
+
+_beampipe_common._is_end_state = _beampipe_is_end_state
+"#;
 
 pub struct SlurmSubmitParams {
     pub execution_id: String,
@@ -199,6 +216,7 @@ fn sbatch_command_with<F>(
     jobsub_path: &str,
     staging_root: &str,
     cache_root: &str,
+    python_path: &str,
     read_environment: F,
 ) -> Result<String, OrchestrationError>
 where
@@ -212,6 +230,7 @@ where
         SLURM_ACCOUNT_ENV,
         WALLABY_STAGING_ROOT_ENV,
         WALLABY_CACHE_ROOT_ENV,
+        PYTHON_PATH_ENV,
     ];
     if deployment
         .environment_setup
@@ -258,12 +277,14 @@ where
     }
     argv.push(jobsub_path.to_string());
     let inner = format!(
-        "{}\numask 077\nmkdir -p -- {} {}\nexport {WALLABY_STAGING_ROOT_ENV}={}\nexport {WALLABY_CACHE_ROOT_ENV}={}\n{}",
+        "{}\numask 077\nmkdir -p -- {} {}\nexport {WALLABY_STAGING_ROOT_ENV}={}\nexport {WALLABY_CACHE_ROOT_ENV}={}\nif [ -n \"${{PYTHONPATH:-}}\" ]; then export {PYTHON_PATH_ENV}={}:\"$PYTHONPATH\"; else export {PYTHON_PATH_ENV}={}; fi\n{}",
         env_prelude_with(deployment, read_environment)?,
         shell_quote(&staging_root),
         shell_quote(&cache_root),
         shell_quote(&staging_root),
         shell_quote(&cache_root),
+        shell_quote(python_path),
+        shell_quote(python_path),
         argv.iter()
             .map(|argument| shell_quote(argument))
             .collect::<Vec<_>>()
@@ -278,6 +299,7 @@ fn sbatch_command(
     jobsub_path: &str,
     staging_root: &str,
     cache_root: &str,
+    python_path: &str,
 ) -> Result<String, OrchestrationError> {
     sbatch_command_with(
         deployment,
@@ -285,6 +307,7 @@ fn sbatch_command(
         jobsub_path,
         staging_root,
         cache_root,
+        python_path,
         |name| std::env::var(name).ok(),
     )
 }
@@ -530,12 +553,23 @@ pub async fn submit_slurm_session(
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
     let (session_dir, staging_root, cache_root) = derive_session_paths(&jobsub_path, &dlg_root)?;
+    let python_shim_dir = format!("{session_dir}/.beampipe-python");
+    session
+        .run_command(&format!("mkdir -p -- {}", shell_quote(&python_shim_dir)))
+        .await?;
+    session
+        .upload_text_atomic(
+            &format!("{python_shim_dir}/sitecustomize.py"),
+            DALIUGE_FAILED_SESSION_SITECUSTOMIZE,
+        )
+        .await?;
     let sbatch = sbatch_command(
         &deployment,
         &session_id,
         &jobsub_path,
         &staging_root,
         &cache_root,
+        &python_shim_dir,
     )?;
     let sbatch_out = session.run_submission_command(&sbatch).await?;
     let _ = session.close().await;
@@ -720,15 +754,18 @@ mod tests {
             "/dlg root/sessions/execution-a/job sub.sh",
             &output_a,
             &cache_a,
+            "/dlg root/sessions/execution-a/.beampipe-python",
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap.sif".into()),
         )
         .unwrap();
         for expected in [
-            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,WALLABY_HIRES_CACHE_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
+            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,WALLABY_HIRES_CACHE_ROOT,PYTHONPATH,BEAMPIPE_ASKAPSOFT_SIF",
             "export BEAMPIPE_SLURM_ACCOUNT=myacct",
             "export BEAMPIPE_ASKAPSOFT_SIF=/images/askap.sif",
             "export WALLABY_HIRES_STAGING_ROOT=",
             "export WALLABY_HIRES_CACHE_ROOT=",
+            "export PYTHONPATH=",
+            "/dlg root/sessions/execution-a/.beampipe-python",
             "/dlg root/sessions/execution-a/wallaby_outputs",
             "/dlg root/wallaby_staging_data",
             "mkdir -p --",
@@ -736,6 +773,21 @@ mod tests {
             assert!(
                 command.contains(expected),
                 "missing {expected:?} in {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn daliuge_failed_session_shim_marks_failed_terminal() {
+        for expected in [
+            "from dlg.deploy import common",
+            "SessionStates",
+            "state == _beampipe_session_states.FAILED",
+            "_beampipe_common._is_end_state = _beampipe_is_end_state",
+        ] {
+            assert!(
+                DALIUGE_FAILED_SESSION_SITECUSTOMIZE.contains(expected),
+                "missing {expected:?}"
             );
         }
     }
@@ -838,6 +890,7 @@ mod tests {
             "/dlg/job sub.sh",
             "/dlg/wallaby_staging_data",
             "/dlg/shared-cache",
+            "/dlg/.beampipe-python",
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into()),
         )
         .unwrap();
@@ -846,7 +899,7 @@ mod tests {
         assert!(command.contains("export BEAMPIPE_SLURM_ACCOUNT=myacct"));
         assert!(command.contains("export BEAMPIPE_ASKAPSOFT_SIF="));
         for expected in [
-            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,WALLABY_HIRES_CACHE_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
+            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,WALLABY_HIRES_CACHE_ROOT,PYTHONPATH,BEAMPIPE_ASKAPSOFT_SIF",
             "--parsable",
             "--job-name=session id",
             "--account=myacct",
@@ -882,6 +935,7 @@ mod tests {
             "/dlg/jobsub.sh",
             "/dlg/wallaby_staging_data",
             "/dlg/shared-cache",
+            "/dlg/.beampipe-python",
             |_| None,
         )
         .unwrap();
