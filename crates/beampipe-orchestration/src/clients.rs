@@ -594,7 +594,7 @@ impl SlurmClient for SshSlurmClient {
         execution_id: &str,
         session_id: &str,
         pgt_json: Value,
-    ) -> Result<String, OrchestrationError> {
+    ) -> Result<crate::SlurmSubmitReceipt, OrchestrationError> {
         let deployment = self.deployment.clone().ok_or_else(|| {
             OrchestrationError::Backend("slurm deployment config required".into())
         })?;
@@ -607,7 +607,13 @@ impl SlurmClient for SshSlurmClient {
             username,
         })
         .await?;
-        Ok(result.composite_scheduler_job_id)
+        Ok(crate::SlurmSubmitReceipt {
+            scheduler_job_id: result.composite_scheduler_job_id,
+            remote_session_dir: result.session_dir,
+            staging_root: result.staging_root.ok_or_else(|| {
+                OrchestrationError::Backend("Slurm submission did not return an output root".into())
+            })?,
+        })
     }
 
     async fn poll(&self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError> {

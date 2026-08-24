@@ -926,6 +926,7 @@ mod tests {
             manager_topology: DaliugeManagerTopologyConfig::default(),
             container_runtime: Some("singularity".into()),
             environment_setup: None,
+            runtime_contract: Default::default(),
         }
     }
 

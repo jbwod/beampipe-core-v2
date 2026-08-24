@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use beampipe_orchestration::{
     clients::{TranslateConfig, TranslatedGraph},
     prepare_graph_for_manifest, BackendPoll, ExecutionBackend, MockSlurmClient, OrchestrationError,
-    SlurmClient, SlurmExecutionBackend, TranslatorClient,
+    SlurmClient, SlurmExecutionBackend, SlurmSubmitReceipt, TranslatorClient,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -43,9 +43,14 @@ impl SlurmClient for CapturingSlurmClient {
         _execution_id: &str,
         session_id: &str,
         pgt_json: Value,
-    ) -> Result<String, OrchestrationError> {
+    ) -> Result<SlurmSubmitReceipt, OrchestrationError> {
         *self.physical_graph.lock().unwrap() = Some(pgt_json);
-        Ok(format!("{session_id}:12345|/dlg/sessions/{session_id}"))
+        let remote_session_dir = format!("/dlg/sessions/{session_id}");
+        Ok(SlurmSubmitReceipt {
+            scheduler_job_id: format!("{session_id}:12345|{remote_session_dir}"),
+            staging_root: format!("{remote_session_dir}/science-products"),
+            remote_session_dir,
+        })
     }
 
     async fn poll(&self, _scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError> {
@@ -182,6 +187,14 @@ async fn slurm_receipt_physical_graph_matches_the_dispatched_payload() {
     let dispatched = captured.lock().unwrap().clone().unwrap();
 
     assert_eq!(receipt.physical_graph.as_ref(), Some(&dispatched));
+    let expected_staging_root = format!(
+        "/dlg/sessions/{}/science-products",
+        receipt.session_id.as_deref().unwrap()
+    );
+    assert_eq!(
+        receipt.staging_root.as_deref(),
+        Some(expected_staging_root.as_str())
+    );
     assert_eq!(
         dispatched[0],
         format!("{}.pgt.graph", receipt.session_id.as_deref().unwrap())

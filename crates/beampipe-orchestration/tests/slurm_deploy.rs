@@ -30,6 +30,7 @@ fn sample_slurm_config() -> SlurmRemoteDeploymentConfig {
         manager_topology: Default::default(),
         container_runtime: None,
         environment_setup: None,
+        runtime_contract: Default::default(),
     }
 }
 

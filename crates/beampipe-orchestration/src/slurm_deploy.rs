@@ -1,13 +1,15 @@
 use crate::scheduler::SchedulerResourceRequest;
 use crate::slurm_ssh::{SlurmSshSession, SlurmTarget};
 use crate::OrchestrationError;
-use beampipe_profiles::{DaliugeAlgo, SlurmRemoteDeploymentConfig};
+use beampipe_profiles::{
+    DaliugeAlgo, SlurmRemoteDeploymentConfig, SlurmRuntimeContractConfig,
+    SlurmRuntimeEnvironmentKind,
+};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
-const WALLABY_STAGING_ROOT_ENV: &str = "WALLABY_HIRES_STAGING_ROOT";
-const WALLABY_CACHE_ROOT_ENV: &str = "WALLABY_HIRES_CACHE_ROOT";
 const PYTHON_PATH_ENV: &str = "PYTHONPATH";
 const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
 const DALIUGE_FAILED_SESSION_SITECUSTOMIZE: &str = r#"# Beampipe compatibility shim for DALiuGE deploy.common.
@@ -100,7 +102,6 @@ fn push_ini_value(lines: &mut Vec<String>, key: &str, value: Option<&str>) {
 }
 
 const SLURM_ACCOUNT_ENV: &str = "BEAMPIPE_SLURM_ACCOUNT";
-const OPTIONAL_FORWARDED_ENVIRONMENT: [&str; 1] = ["BEAMPIPE_ASKAPSOFT_SIF"];
 
 pub fn env_prelude(deployment: &SlurmRemoteDeploymentConfig) -> Result<String, OrchestrationError> {
     env_prelude_with(deployment, |name| std::env::var(name).ok())
@@ -113,6 +114,10 @@ fn env_prelude_with<F>(
 where
     F: FnMut(&str) -> Option<String>,
 {
+    deployment
+        .runtime_contract
+        .validate()
+        .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
     let mut parts = vec![
         "set -euo pipefail".to_string(),
         format!(
@@ -132,19 +137,22 @@ where
         parts.push(venv.trim().to_string());
         parts.push("set -u".into());
     }
+    for requirement in &deployment.runtime_contract.required_environment {
+        let value = read_environment(&requirement.name)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                OrchestrationError::Backend(format!(
+                    "deployment.runtime_contract requires non-empty {}",
+                    requirement.name
+                ))
+            })?;
+        parts.push(format!(
+            "export {}={}",
+            requirement.name,
+            shell_quote(&value)
+        ));
+    }
     if let Some(setup) = deployment.environment_setup.as_deref() {
-        for name in OPTIONAL_FORWARDED_ENVIRONMENT {
-            if setup.contains(name) {
-                let value = read_environment(name)
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| {
-                        OrchestrationError::Backend(format!(
-                            "deployment.environment_setup requires non-empty {name}"
-                        ))
-                    })?;
-                parts.push(format!("export {name}={}", shell_quote(&value)));
-            }
-        }
         for line in setup.lines().map(str::trim).filter(|line| !line.is_empty()) {
             parts.push(line.to_string());
         }
@@ -167,7 +175,7 @@ where
     F: FnMut(&str) -> Option<String>,
 {
     let mut lines = vec![env_prelude_with(deployment, read_environment)?];
-    for command in [
+    let mut commands = vec![
         "sbatch",
         "squeue",
         "sacct",
@@ -175,31 +183,45 @@ where
         "scontrol",
         "srun",
         "python3",
-        "wallaby_hires",
-    ] {
+    ];
+    for command in &deployment.runtime_contract.required_commands {
+        if !commands.contains(&command.as_str()) {
+            commands.push(command);
+        }
+    }
+    for command in commands {
         lines.push(format!(
-            "command -v {command} >/dev/null 2>&1 || {{ echo 'missing required command: {command}' >&2; exit 127; }}"
+            "command -v {} >/dev/null 2>&1 || {{ echo {} >&2; exit 127; }}",
+            shell_quote(command),
+            shell_quote(&format!("missing required command: {command}")),
         ));
     }
-    lines.push("wallaby_hires --version >/dev/null".into());
     lines.push(format!(
         "test -d {root} && test -w {root} || {{ echo 'DLG_ROOT is not a writable directory' >&2; exit 73; }}",
         root = shell_quote(&deployment.dlg_root)
     ));
-    lines.push("python3 -c 'import dlg.deploy.create_dlg_job; import wallaby_hires'".to_string());
-    if deployment
-        .environment_setup
-        .as_deref()
-        .is_some_and(|setup| setup.contains("BEAMPIPE_ASKAPSOFT_SIF"))
-    {
-        lines.push(
-            "command -v singularity >/dev/null 2>&1 || { echo 'missing required command: singularity' >&2; exit 127; }"
-                .into(),
-        );
-        lines.push(
-            "test -f \"$BEAMPIPE_ASKAPSOFT_SIF\" && test -r \"$BEAMPIPE_ASKAPSOFT_SIF\" || { echo 'BEAMPIPE_ASKAPSOFT_SIF is not a readable regular file' >&2; exit 66; }"
-                .into(),
-        );
+    let mut python_modules = vec!["dlg.deploy.create_dlg_job"];
+    for module in &deployment.runtime_contract.required_python_modules {
+        if !python_modules.contains(&module.as_str()) {
+            python_modules.push(module);
+        }
+    }
+    let module_list = serde_json::to_string(&python_modules)
+        .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
+    let import_script =
+        format!("import importlib; [importlib.import_module(name) for name in {module_list}]");
+    lines.push(format!("python3 -c {}", shell_quote(&import_script)));
+    for requirement in &deployment.runtime_contract.required_environment {
+        if matches!(requirement.kind, SlurmRuntimeEnvironmentKind::ReadableFile) {
+            lines.push(format!(
+                "test -f \"${{{name}}}\" && test -r \"${{{name}}}\" || {{ echo {message} >&2; exit 66; }}",
+                name = requirement.name,
+                message = shell_quote(&format!(
+                    "{} is not a readable regular file",
+                    requirement.name
+                )),
+            ));
+        }
     }
     Ok(lines.join("\n"))
 }
@@ -222,23 +244,31 @@ fn sbatch_command_with<F>(
 where
     F: FnMut(&str) -> Option<String>,
 {
-    let staging_root = normalized_remote_absolute_path(staging_root, "Wallaby staging root")?;
+    deployment
+        .runtime_contract
+        .validate()
+        .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
+    let staging_root = normalized_remote_absolute_path(staging_root, "run output root")?;
     let staging_root = staging_root.to_string_lossy();
-    let cache_root = normalized_remote_absolute_path(cache_root, "Wallaby cache root")?;
+    let cache_root = normalized_remote_absolute_path(cache_root, "shared staging root")?;
     let cache_root = cache_root.to_string_lossy();
-    let mut exported = vec![
-        SLURM_ACCOUNT_ENV,
-        WALLABY_STAGING_ROOT_ENV,
-        WALLABY_CACHE_ROOT_ENV,
-        PYTHON_PATH_ENV,
-    ];
-    if deployment
-        .environment_setup
-        .as_deref()
-        .is_some_and(|setup| setup.contains("BEAMPIPE_ASKAPSOFT_SIF"))
+    let contract = &deployment.runtime_contract;
+    let mut exported = vec![SLURM_ACCOUNT_ENV.to_string()];
+    for name in [
+        contract.output_environment_variable.as_ref(),
+        contract.shared_staging_environment_variable.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
     {
-        exported.push("BEAMPIPE_ASKAPSOFT_SIF");
+        exported.push(name.clone());
     }
+    exported.push(PYTHON_PATH_ENV.to_string());
+    for requirement in &contract.required_environment {
+        exported.push(requirement.name.clone());
+    }
+    let mut seen = HashSet::new();
+    exported.retain(|name| seen.insert(name.clone()));
     let resources = SchedulerResourceRequest::from_slurm_profile(deployment);
     let termination_notice_seconds = resources
         .wall_time_minutes
@@ -276,20 +306,33 @@ where
         argv.push(format!("--cpus-per-task={cpus}"));
     }
     argv.push(jobsub_path.to_string());
-    let inner = format!(
-        "{}\numask 077\nmkdir -p -- {} {}\nexport {WALLABY_STAGING_ROOT_ENV}={}\nexport {WALLABY_CACHE_ROOT_ENV}={}\nif [ -n \"${{PYTHONPATH:-}}\" ]; then export {PYTHON_PATH_ENV}={}:\"$PYTHONPATH\"; else export {PYTHON_PATH_ENV}={}; fi\n{}",
+    let mut inner = vec![
         env_prelude_with(deployment, read_environment)?,
-        shell_quote(&staging_root),
-        shell_quote(&cache_root),
-        shell_quote(&staging_root),
-        shell_quote(&cache_root),
+        "umask 077".into(),
+        format!(
+            "mkdir -p -- {} {}",
+            shell_quote(&staging_root),
+            shell_quote(&cache_root)
+        ),
+    ];
+    if let Some(name) = contract.output_environment_variable.as_deref() {
+        inner.push(format!("export {name}={}", shell_quote(&staging_root)));
+    }
+    if let Some(name) = contract.shared_staging_environment_variable.as_deref() {
+        inner.push(format!("export {name}={}", shell_quote(&cache_root)));
+    }
+    inner.push(format!(
+        "if [ -n \"${{PYTHONPATH:-}}\" ]; then export {PYTHON_PATH_ENV}={}:\"$PYTHONPATH\"; else export {PYTHON_PATH_ENV}={}; fi",
         shell_quote(python_path),
         shell_quote(python_path),
+    ));
+    inner.push(
         argv.iter()
             .map(|argument| shell_quote(argument))
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" "),
     );
+    let inner = inner.join("\n");
     Ok(format!("bash -lc {}", shell_quote(&inner)))
 }
 
@@ -440,7 +483,11 @@ fn normalized_remote_absolute_path(
 fn derive_session_paths(
     jobsub_path: &str,
     dlg_root: &str,
+    contract: &SlurmRuntimeContractConfig,
 ) -> Result<(String, String, String), OrchestrationError> {
+    contract
+        .validate()
+        .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
     let jobsub_path = normalized_remote_absolute_path(jobsub_path, "job submission script path")?;
     let dlg_root = normalized_remote_absolute_path(dlg_root, "DLG_ROOT")?;
     if dlg_root == Path::new("/") {
@@ -462,8 +509,8 @@ fn derive_session_paths(
                     .into(),
             )
         })?;
-    let staging_root = session_dir.join("wallaby_outputs");
-    let cache_root = dlg_root.join("wallaby_staging_data");
+    let staging_root = session_dir.join(&contract.output_subdirectory);
+    let cache_root = dlg_root.join(&contract.shared_staging_subdirectory);
     Ok((
         session_dir.to_string_lossy().into_owned(),
         staging_root.to_string_lossy().into_owned(),
@@ -552,7 +599,11 @@ pub async fn submit_slurm_session(
         .run_command(&format!("bash -lc {}", shell_quote(&inner)))
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
-    let (session_dir, staging_root, cache_root) = derive_session_paths(&jobsub_path, &dlg_root)?;
+    let (session_dir, staging_root, cache_root) = derive_session_paths(
+        &jobsub_path,
+        &dlg_root,
+        &deployment.runtime_contract,
+    )?;
     let python_shim_dir = format!("{session_dir}/.beampipe-python");
     session
         .run_command(&format!("mkdir -p -- {}", shell_quote(&python_shim_dir)))
@@ -593,7 +644,7 @@ pub async fn submit_slurm_session(
     })
 }
 
-/// Preflight SSH to the Slurm login node before CASDA staging / TM translate.
+/// Preflight SSH to the Slurm login node before translation and submission.
 pub async fn probe_slurm_login(
     deployment: &SlurmRemoteDeploymentConfig,
     username: &str,
@@ -611,7 +662,7 @@ pub async fn probe_slurm_login(
         .await
         .map_err(|e| {
         format!(
-            "Slurm runtime preflight failed on {} ({}@{}): {e}. Check the profile runtime, shared root, and ASKAPsoft image before submit.",
+            "Slurm runtime preflight failed on {} ({}@{}): {e}. Check the profile runtime contract and shared root before submit.",
             deployment.login_node, username, deployment.login_node
         )
     })?;
@@ -638,6 +689,7 @@ pub fn algo_str(algo: &DaliugeAlgo) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beampipe_profiles::SlurmRuntimeEnvironmentRequirement;
 
     #[test]
     fn parse_jobsub_extracts_path() {
@@ -700,6 +752,7 @@ mod tests {
         let (session_dir, staging_root, cache_root) = derive_session_paths(
             "/scratch/project root/dlg/sessions/execution one/job sub.sh",
             "/scratch/project root/dlg",
+            &SlurmRuntimeContractConfig::default(),
         )
         .unwrap();
 
@@ -709,9 +762,9 @@ mod tests {
         );
         assert_eq!(
             staging_root,
-            "/scratch/project root/dlg/sessions/execution one/wallaby_outputs"
+            "/scratch/project root/dlg/sessions/execution one/outputs"
         );
-        assert_eq!(cache_root, "/scratch/project root/dlg/wallaby_staging_data");
+        assert_eq!(cache_root, "/scratch/project root/dlg/shared_staging");
     }
 
     #[test]
@@ -726,25 +779,36 @@ mod tests {
             "/dlg/jobsub.sh",
         ] {
             assert!(
-                derive_session_paths(jobsub_path, "/dlg").is_err(),
+                derive_session_paths(jobsub_path, "/dlg", &SlurmRuntimeContractConfig::default())
+                    .is_err(),
                 "accepted {jobsub_path:?}"
             );
         }
-        assert!(derive_session_paths("/sessions/execution/jobsub.sh", "/").is_err());
+        assert!(derive_session_paths(
+            "/sessions/execution/jobsub.sh",
+            "/",
+            &SlurmRuntimeContractConfig::default()
+        )
+        .is_err());
     }
 
     #[test]
     fn outer_sbatch_separates_run_outputs_from_the_shared_cache() {
         let mut dep = deployment();
         dep.dlg_root = "/dlg root".into();
-        dep.environment_setup =
-            Some("export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
-        let (_, output_a, cache_a) =
-            derive_session_paths("/dlg root/sessions/execution-a/job sub.sh", &dep.dlg_root)
-                .unwrap();
-        let (_, output_b, cache_b) =
-            derive_session_paths("/dlg root/sessions/execution-b/job sub.sh", &dep.dlg_root)
-                .unwrap();
+        dep.runtime_contract = wallaby_runtime_contract();
+        let (_, output_a, cache_a) = derive_session_paths(
+            "/dlg root/sessions/execution-a/job sub.sh",
+            &dep.dlg_root,
+            &dep.runtime_contract,
+        )
+        .unwrap();
+        let (_, output_b, cache_b) = derive_session_paths(
+            "/dlg root/sessions/execution-b/job sub.sh",
+            &dep.dlg_root,
+            &dep.runtime_contract,
+        )
+        .unwrap();
         assert_ne!(output_a, output_b);
         assert_eq!(cache_a, cache_b);
 
@@ -811,13 +875,14 @@ mod tests {
     }
 
     #[test]
-    fn environment_setup_forwards_required_process_values_safely() {
+    fn runtime_contract_forwards_required_process_values_safely() {
         let mut dep = deployment();
-        dep.environment_setup = Some(
-            "export BEAMPIPE_SLURM_ACCOUNT=\"$BEAMPIPE_SLURM_ACCOUNT\"\n\
-             export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\""
-                .into(),
-        );
+        dep.runtime_contract.required_environment = vec![SlurmRuntimeEnvironmentRequirement {
+            name: "BEAMPIPE_ASKAPSOFT_SIF".into(),
+            kind: SlurmRuntimeEnvironmentKind::ReadableFile,
+        }];
+        dep.environment_setup =
+            Some("export BEAMPIPE_SLURM_ACCOUNT=\"$BEAMPIPE_SLURM_ACCOUNT\"".into());
         let prelude = env_prelude_with(&dep, |name| match name {
             "BEAMPIPE_ASKAPSOFT_SIF" => Some("/images/askap soft's.sif".into()),
             _ => None,
@@ -831,9 +896,12 @@ mod tests {
     }
 
     #[test]
-    fn environment_setup_rejects_missing_forwarded_values() {
+    fn runtime_contract_rejects_missing_required_values() {
         let mut dep = deployment();
-        dep.environment_setup = Some("echo $BEAMPIPE_ASKAPSOFT_SIF".into());
+        dep.runtime_contract.required_environment = vec![SlurmRuntimeEnvironmentRequirement {
+            name: "BEAMPIPE_ASKAPSOFT_SIF".into(),
+            kind: SlurmRuntimeEnvironmentKind::ReadableFile,
+        }];
         let error = env_prelude_with(&dep, |_| None).unwrap_err();
         assert!(error.to_string().contains("BEAMPIPE_ASKAPSOFT_SIF"));
     }
@@ -842,8 +910,7 @@ mod tests {
     fn preflight_checks_the_exact_runtime_before_submission() {
         let mut dep = deployment();
         dep.dlg_root = "/scratch/project/user/dlg root".into();
-        dep.environment_setup =
-            Some("export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
+        dep.runtime_contract = wallaby_runtime_contract();
         let script = slurm_preflight_script_with(&dep, |name| {
             (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askapsoft.sif".into())
         })
@@ -858,12 +925,11 @@ mod tests {
             "command -v srun",
             "command -v python3",
             "command -v wallaby_hires",
-            "wallaby_hires --version",
             "test -d '/scratch/project/user/dlg root'",
-            "import dlg.deploy.create_dlg_job",
-            "import wallaby_hires",
+            "dlg.deploy.create_dlg_job",
+            "wallaby_hires",
             "command -v singularity",
-            "test -f \"$BEAMPIPE_ASKAPSOFT_SIF\"",
+            "test -f \"${BEAMPIPE_ASKAPSOFT_SIF}\"",
         ] {
             assert!(
                 script.contains(expected),
@@ -875,7 +941,7 @@ mod tests {
     #[test]
     fn sbatch_runs_with_exports_in_the_same_remote_shell() {
         let mut dep = deployment();
-        dep.environment_setup = Some("test -n \"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
+        dep.runtime_contract = wallaby_runtime_contract();
         dep.resources.partition = Some("work".into());
         dep.resources.nodes = Some(2);
         dep.resources.tasks = Some(2);
@@ -944,6 +1010,52 @@ mod tests {
         assert!(command.contains("--signal=TERM@59"));
     }
 
+    #[test]
+    fn generic_runtime_has_no_wallaby_requirements_or_names() {
+        let dep = deployment();
+        let script = slurm_preflight_script_with(&dep, |_| None).unwrap();
+        assert!(!script.to_ascii_lowercase().contains("wallaby"));
+        assert!(!script.to_ascii_lowercase().contains("askap"));
+
+        let (_, output_root, shared_root) = derive_session_paths(
+            "/dlg/sessions/execution-a/jobsub.sh",
+            "/dlg",
+            &dep.runtime_contract,
+        )
+        .unwrap();
+        assert_eq!(output_root, "/dlg/sessions/execution-a/outputs");
+        assert_eq!(shared_root, "/dlg/shared_staging");
+
+        let command = sbatch_command_with(
+            &dep,
+            "execution-a",
+            "/dlg/sessions/execution-a/jobsub.sh",
+            &output_root,
+            &shared_root,
+            "/dlg/sessions/execution-a/.beampipe-python",
+            |_| None,
+        )
+        .unwrap();
+        assert!(!command.to_ascii_lowercase().contains("wallaby"));
+        assert!(!command.to_ascii_lowercase().contains("askap"));
+        assert!(command.contains("--export=BEAMPIPE_SLURM_ACCOUNT,PYTHONPATH"));
+    }
+
+    fn wallaby_runtime_contract() -> SlurmRuntimeContractConfig {
+        SlurmRuntimeContractConfig {
+            required_commands: vec!["wallaby_hires".into(), "singularity".into()],
+            required_python_modules: vec!["wallaby_hires".into()],
+            required_environment: vec![SlurmRuntimeEnvironmentRequirement {
+                name: "BEAMPIPE_ASKAPSOFT_SIF".into(),
+                kind: SlurmRuntimeEnvironmentKind::ReadableFile,
+            }],
+            output_subdirectory: "wallaby_outputs".into(),
+            shared_staging_subdirectory: "wallaby_staging_data".into(),
+            output_environment_variable: Some("WALLABY_HIRES_STAGING_ROOT".into()),
+            shared_staging_environment_variable: Some("WALLABY_HIRES_CACHE_ROOT".into()),
+        }
+    }
+
     fn deployment() -> SlurmRemoteDeploymentConfig {
         SlurmRemoteDeploymentConfig {
             login_node: "login".into(),
@@ -973,6 +1085,7 @@ mod tests {
             manager_topology: Default::default(),
             container_runtime: None,
             environment_setup: None,
+            runtime_contract: Default::default(),
         }
     }
 }

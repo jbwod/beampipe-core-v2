@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use beampipe_domain::{slurm, ExecutionStatus};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::path::Path;
 use thiserror::Error;
 
 pub mod cancel;
@@ -87,12 +86,12 @@ pub enum OrchestrationError {
 #[derive(Debug, Clone, Default)]
 pub struct StageOutcome {
     pub metadata: Vec<Value>,
-    pub skipped_sbids: Vec<String>,
+    pub skipped_groups: Vec<String>,
     pub staged_count: usize,
-    pub staged_urls_by_scan_id: std::collections::HashMap<String, String>,
-    pub checksum_urls_by_scan_id: std::collections::HashMap<String, String>,
-    pub eval_urls_by_sbid: std::collections::HashMap<String, String>,
-    pub eval_checksum_urls_by_sbid: std::collections::HashMap<String, String>,
+    pub staged_urls_by_record_id: std::collections::HashMap<String, String>,
+    pub checksum_urls_by_record_id: std::collections::HashMap<String, String>,
+    pub staged_urls_by_group: std::collections::HashMap<String, String>,
+    pub checksum_urls_by_group: std::collections::HashMap<String, String>,
 }
 
 #[async_trait]
@@ -108,7 +107,7 @@ impl StagingClient for PassThroughStagingClient {
     async fn stage(&self, metadata: &[Value]) -> Result<StageOutcome, OrchestrationError> {
         Ok(StageOutcome {
             metadata: metadata.to_vec(),
-            skipped_sbids: Vec::new(),
+            skipped_groups: Vec::new(),
             staged_count: metadata.len(),
             ..Default::default()
         })
@@ -120,11 +119,11 @@ pub trait ManifestBuilder: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct WallabyManifestBuilder;
+pub struct GenericManifestBuilder;
 
-impl ManifestBuilder for WallabyManifestBuilder {
+impl ManifestBuilder for GenericManifestBuilder {
     fn build_manifest(&self, metadata: &[Value]) -> Result<Value, OrchestrationError> {
-        build_wallaby_manifest(metadata)
+        build_generic_manifest(metadata)
     }
 }
 
@@ -161,6 +160,13 @@ pub struct BackendPoll {
     pub poll_summary: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct SlurmSubmitReceipt {
+    pub scheduler_job_id: String,
+    pub remote_session_dir: String,
+    pub staging_root: String,
+}
+
 #[async_trait]
 pub trait TranslatorClient: Send + Sync {
     async fn translate(
@@ -190,7 +196,7 @@ pub trait SlurmClient: Send + Sync {
         execution_id: &str,
         session_id: &str,
         pgt_json: Value,
-    ) -> Result<String, OrchestrationError>;
+    ) -> Result<SlurmSubmitReceipt, OrchestrationError>;
     async fn poll(&self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError>;
     async fn cancel(&self, scheduler_job_id: &str) -> Result<(), OrchestrationError>;
 }
@@ -267,8 +273,12 @@ impl SlurmClient for MockSlurmClient {
         _execution_id: &str,
         session_id: &str,
         _pgt_json: Value,
-    ) -> Result<String, OrchestrationError> {
-        Ok(format!("{session_id}:0001|/tmp/beampipe"))
+    ) -> Result<SlurmSubmitReceipt, OrchestrationError> {
+        Ok(SlurmSubmitReceipt {
+            scheduler_job_id: format!("{session_id}:0001|/tmp/beampipe"),
+            remote_session_dir: "/tmp/beampipe".into(),
+            staging_root: "/tmp/beampipe/outputs".into(),
+        })
     }
 
     async fn poll(&self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError> {
@@ -421,10 +431,11 @@ where
         })?;
         slurm_deploy::bind_physical_graph_to_session(&mut pgt_json, &session_id);
         let physical_graph = pgt_json.clone();
-        let scheduler_job_id = self
+        let submitted = self
             .slurm
             .submit(execution_id, &session_id, pgt_json)
             .await?;
+        let scheduler_job_id = submitted.scheduler_job_id;
         let slurm_job_id = {
             let parsed = slurm::parse_scheduler_job_id(&scheduler_job_id);
             if parsed.slurm_job_id.is_empty() {
@@ -441,10 +452,8 @@ where
             self.login_node.as_deref(),
             self.remote_user.as_deref(),
         );
-        let remote_session_dir = slurm::parse_scheduler_job_id(&scheduler_job_id).session_dir;
-        let staging_root = remote_session_dir
-            .as_deref()
-            .and_then(execution_wallaby_output_root);
+        let remote_session_dir = Some(submitted.remote_session_dir);
+        let staging_root = Some(submitted.staging_root);
         record_slurm_paths(
             &mut workflow_manifest,
             remote_session_dir.as_deref(),
@@ -461,22 +470,6 @@ where
             next_status: ExecutionStatus::AwaitingScheduler,
         })
     }
-}
-
-fn execution_wallaby_output_root(session_dir: &str) -> Option<String> {
-    let session_dir = Path::new(session_dir);
-    if !session_dir.is_absolute() {
-        return None;
-    }
-    if session_dir == Path::new("/") {
-        return None;
-    }
-    Some(
-        session_dir
-            .join("wallaby_outputs")
-            .to_string_lossy()
-            .into_owned(),
-    )
 }
 
 fn record_slurm_paths(manifest: &mut Value, session_dir: Option<&str>, staging_root: Option<&str>) {
@@ -513,7 +506,7 @@ pub fn beampipe_session_id(execution_id: &str, created_at: DateTime<Utc>) -> Str
     )
 }
 
-pub fn build_wallaby_manifest(metadata: &[Value]) -> Result<Value, OrchestrationError> {
+pub fn build_generic_manifest(metadata: &[Value]) -> Result<Value, OrchestrationError> {
     let mut by_source: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, Vec<Value>>,
@@ -522,59 +515,60 @@ pub fn build_wallaby_manifest(metadata: &[Value]) -> Result<Value, Orchestration
         let source = record
             .get("source_identifier")
             .and_then(Value::as_str)
-            .unwrap_or("unknown")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                OrchestrationError::Backend(
+                    "metadata record requires a non-empty source_identifier".into(),
+                )
+            })?
             .to_string();
-        let sbid = record
-            .get("sbid")
+        let group_key = record
+            .get("group_key")
             .map(value_key)
-            .filter(|v| v != "0")
-            .unwrap_or_default();
-        if sbid.is_empty() {
-            continue;
-        }
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                OrchestrationError::Backend(
+                    "metadata record requires a non-empty group_key".into(),
+                )
+            })?;
+        let record_id = record
+            .get("record_id")
+            .map(value_key)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                OrchestrationError::Backend(
+                    "metadata record requires a non-empty record_id".into(),
+                )
+            })?;
+        let mut record = record.clone();
+        record["record_id"] = Value::String(record_id);
         by_source
             .entry(source)
             .or_default()
-            .entry(sbid)
+            .entry(group_key)
             .or_default()
-            .push(record.clone());
+            .push(record);
     }
     let mut sources = Vec::new();
-    let mut total_datasets = 0_usize;
-    for (source_identifier, by_sbid) in by_source {
-        let first = by_sbid
-            .values()
-            .flatten()
-            .next()
-            .cloned()
-            .unwrap_or(Value::Null);
-        let mut sbids = Vec::new();
-        for (sbid, datasets) in by_sbid {
-            total_datasets += datasets.len();
-            sbids.push(serde_json::json!({
-                "sbid": sbid,
-                "datasets": datasets,
+    let mut total_records = 0_usize;
+    for (source_identifier, by_group) in by_source {
+        let mut groups = Vec::new();
+        for (group_key, records) in by_group {
+            total_records += records.len();
+            groups.push(serde_json::json!({
+                "group_key": group_key,
+                "records": records,
             }));
         }
         sources.push(serde_json::json!({
             "source_identifier": source_identifier,
-            "ra_string": first.get("ra_string").cloned().unwrap_or(Value::Null),
-            "dec_string": first.get("dec_string").cloned().unwrap_or(Value::Null),
-            "vsys": first.get("vsys").cloned().unwrap_or(Value::Null),
-            "sbids": sbids,
+            "groups": groups,
         }));
     }
-    if total_datasets == 0 {
+    if total_records == 0 {
         return Err(OrchestrationError::NoUsableDatasets);
     }
-    let mut manifest = serde_json::json!({"inputs": {}, "sources": sources});
-    manifest["graph_overrides"] = serde_json::json!({
-        "patches": [{
-            "match": {"equals": "Scatter/GenericScatterApp/Beam"},
-            "fields": [{"name": "num_of_copies", "value": total_datasets}]
-        }]
-    });
-    Ok(manifest)
+    Ok(serde_json::json!({"inputs": {}, "sources": sources}))
 }
 
 pub fn resolve_beampipe_ingest_uuids(graph: &Value) -> Option<(String, String)> {
@@ -838,26 +832,16 @@ mod tests {
         record_slurm_paths(
             &mut manifest,
             Some("/dlg/sessions/execution-a"),
-            Some("/dlg/sessions/execution-a/wallaby_outputs"),
+            Some("/dlg/sessions/execution-a/science-products"),
         );
 
         assert_eq!(
             manifest["beampipe_run_record"]["slurm"]["paths"],
             json!({
                 "session_dir": "/dlg/sessions/execution-a",
-                "staging_root": "/dlg/sessions/execution-a/wallaby_outputs",
+                "staging_root": "/dlg/sessions/execution-a/science-products",
             })
         );
-    }
-
-    #[test]
-    fn output_root_is_scoped_to_the_execution_session() {
-        assert_eq!(
-            execution_wallaby_output_root("/scratch/project/dlg/workspace/execution-a"),
-            Some("/scratch/project/dlg/workspace/execution-a/wallaby_outputs".into())
-        );
-        assert_eq!(execution_wallaby_output_root("relative/execution-a"), None);
-        assert_eq!(execution_wallaby_output_root("/"), None);
     }
 
     #[test]
@@ -892,17 +876,15 @@ mod tests {
     }
 
     #[test]
-    fn wallaby_manifest_groups_by_source_and_sbid() {
-        let manifest = build_wallaby_manifest(&[
-            serde_json::json!({"source_identifier": "s1", "sbid": "1", "dataset_id": "d1"}),
-            serde_json::json!({"source_identifier": "s1", "sbid": "2", "dataset_id": "d2"}),
+    fn generic_manifest_groups_records_by_source_and_group() {
+        let manifest = build_generic_manifest(&[
+            serde_json::json!({"source_identifier": "s1", "group_key": "g1", "record_id": "r1"}),
+            serde_json::json!({"source_identifier": "s1", "group_key": "g2", "record_id": "r2"}),
         ])
         .unwrap();
-        assert_eq!(manifest["sources"][0]["sbids"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            manifest["graph_overrides"]["patches"][0]["fields"][0]["value"],
-            2
-        );
+        assert_eq!(manifest["sources"][0]["groups"].as_array().unwrap().len(), 2);
+        assert_eq!(manifest["sources"][0]["groups"][0]["records"][0]["record_id"], "r1");
+        assert!(manifest.get("graph_overrides").is_none());
     }
 
     #[test]
