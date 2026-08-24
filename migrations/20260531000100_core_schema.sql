@@ -71,16 +71,16 @@ CREATE TABLE IF NOT EXISTS archive_metadata (
     uuid UUID PRIMARY KEY,
     project_module VARCHAR(50) NOT NULL,
     source_identifier VARCHAR(100) NOT NULL,
-    group_key VARCHAR(255) NOT NULL,
+    sbid VARCHAR(50) NOT NULL,
     metadata_json JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ,
-    CONSTRAINT uq_archive_metadata_composite UNIQUE(project_module, source_identifier, group_key)
+    CONSTRAINT uq_archive_metadata_composite UNIQUE(project_module, source_identifier, sbid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_archive_metadata_project_source
     ON archive_metadata(project_module, source_identifier);
-CREATE INDEX IF NOT EXISTS idx_archive_metadata_group_key ON archive_metadata(group_key);
+CREATE INDEX IF NOT EXISTS idx_archive_metadata_sbid ON archive_metadata(sbid);
 
 CREATE TABLE IF NOT EXISTS batch_execution_record (
     uuid UUID PRIMARY KEY,
@@ -168,3 +168,4 @@ CREATE INDEX IF NOT EXISTS idx_jobs_claim
     ON jobs(status, next_run_at, locked_until);
 CREATE INDEX IF NOT EXISTS idx_jobs_execution_id ON jobs(execution_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_kind ON jobs(kind);
+
