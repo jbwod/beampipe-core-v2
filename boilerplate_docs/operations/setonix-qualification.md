@@ -1,4 +1,4 @@
-# Qualify one source on Setonix
+# Qualify one WALLABY source on Setonix
 
 This runbook qualifies the production WALLABY graph against Pawsey Setonix
 without giving background services open-ended permission to use SSH. It is an
@@ -180,7 +180,7 @@ Prepare with an explicit selection:
   "sources": [
     {
       "source_identifier": "HIPASSJ1317-16",
-      "sbids": ["72962"]
+      "groups": ["72962"]
     }
   ],
   "archive_name": "casda",

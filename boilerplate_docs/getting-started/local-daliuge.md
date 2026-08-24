@@ -1,4 +1,4 @@
-# Local DALiuGE end-to-end qualification
+# WALLABY local DALiuGE end-to-end qualification
 
 This runbook proves the complete live path on one Docker host: public
 CASDA/VizieR discovery, immutable project and profile pinning, manifest and
@@ -391,7 +391,7 @@ curl -fsS -X POST "$BASE/api/v2/executions/prepare" \
   -H "$AUTH" -H 'Content-Type: application/json' \
   -d @/tmp/beampipe-execution.json \
   | tee /tmp/beampipe-preflight.json | jq .
-jq -e '.valid == true and .total_datasets > 0' \
+jq -e '.valid == true and .total_records > 0' \
   /tmp/beampipe-preflight.json >/dev/null
 ```
 

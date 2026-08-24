@@ -1,7 +1,7 @@
 # Dashboard deployment and security
 
 Dash needs Node.js and network access to Core. It does not need PostgreSQL,
-CASDA credentials, SSH keys, or access to worker filesystems.
+archive/provider credentials, SSH keys, or access to worker filesystems.
 
 ```text
 browser --HTTPS--> dashboard --private HTTP/HTTPS--> Core /api/v2
@@ -128,7 +128,7 @@ coalescing is process-local, so unconstrained multi-replica routing can race
 rotating refresh tokens.
 
 Deployment profiles contain targets and resource policy, not private keys or
-passphrases. Configure SSH slots, CASDA passwords, JWT secrets, notification
+passphrases. Configure SSH slots, provider passwords, JWT secrets, notification
 credentials, and routing keys in Core. Dash shows redacted readiness metadata
 and omits an unchanged redacted field when saving.
 

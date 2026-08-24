@@ -49,9 +49,12 @@ beampipe doctor --profile PROFILE_NAME
 Continue with:
 
 1. [Install and configure](installation.md) for Docker, native host, and source-build paths.
-2. [Deployment profiles and SSH](../architecture/deployment-profiles.md) for REST/DIM or Slurm.
-3. [First workflow](first-run.md) to register and discover a source.
-4. [Local DALiuGE end to end](local-daliuge.md) to qualify real discovery,
+2. [Project-neutral acceptance](neutral-project.md) to prove discovery,
+   persistence, admission, mock submission, and generic output verification
+   offline against PostgreSQL.
+3. [Deployment profiles and SSH](../architecture/deployment-profiles.md) for REST/DIM or Slurm.
+4. [WALLABY first workflow](first-run.md) to register and discover a source with the explicit sample.
+5. [WALLABY local DALiuGE](local-daliuge.md) to qualify real discovery,
    translation, REST deployment, reconciliation, and artifacts with the
    no-download graph.
-5. [Dashboard setup and tour](dashboard.md) for the optional web console.
+6. [Dashboard setup and tour](dashboard.md) for the optional web console.

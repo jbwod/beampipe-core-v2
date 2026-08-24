@@ -44,7 +44,7 @@ replica.
 | Users and password hashes | Core | Login and current-user lookup only |
 | Project configurations | Core immutable revisions | Visual/YAML authoring and upload |
 | Deployment profiles | Core revisioned rows | Typed REST/Slurm editing and connectivity checks |
-| Sources and archive metadata | Core | Registry, discovery trigger, and readiness inspection |
+| Sources, groups, and records | Core | Registry, discovery trigger, metadata, and readiness inspection |
 | Jobs and worker leases | Core | Bounded polling and privileged scheduler actions |
 | Executions and artifacts | Core ledger | Prepare, create, start, retry, cancel, and inspect |
 | SSH keys and external secrets | Core runtime | Readiness metadata only; never accepted or stored |
@@ -60,8 +60,11 @@ YAML is canonical. The visual editor and code surface operate on one parsed
 4. Unknown project-specific keys survive normalization and round trips.
 5. Saving uploads a new immutable revision and displays Core diagnostics.
 
-TAP queries remain project-defined. Dash does not hardcode CASDA or VizieR
-ADQL, duplicate source readiness rules, or infer backend transitions.
+TAP adapter names, endpoint URLs, transport modes, queries, iteration, and
+result policies remain project-defined. Dash must not hardcode provider ADQL,
+duplicate source readiness rules, or infer backend transitions. Core's stable
+selection vocabulary is `groups` and `records`; projects may reshape only
+their emitted manifest fields.
 
 ## Runtime behavior
 

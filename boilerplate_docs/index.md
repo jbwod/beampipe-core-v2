@@ -126,7 +126,7 @@ curl -fsS http://127.0.0.1:18080/api/v2/health</code></pre>
 ## How work moves
 
 <div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Archive discovery and project policy flow through the Beampipe ledger and workers to DALiuGE">
-  <div class="bp-flow-node" data-tone="cyan"><span>01 / FACTS</span><strong>CASDA + VizieR</strong><small>project-defined TAP</small></div>
+  <div class="bp-flow-node" data-tone="cyan"><span>01 / FACTS</span><strong>project adapters</strong><small>named TAP endpoints</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
   <div class="bp-flow-node" data-tone="amber"><span>02 / INTENT</span><strong>PostgreSQL</strong><small>config + ledger + jobs</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
@@ -148,9 +148,9 @@ Beampipe owns durable intent, preparation artifacts, admission, submission recor
 <a href="api/"><strong>[06] Integrate</strong><span>Use the authenticated API workflow and generated schema.</span></a>
 </div>
 
-## Current qualification
+## Current WALLABY qualification
 
-The implementation has been exercised through real CASDA/VizieR discovery,
+The explicit WALLABY sample has been exercised through real CASDA/VizieR discovery,
 manifest and graph preparation, idempotent creation and start, DALiuGE
 translation, REST deployment, reconciliation, and terminal success on the
 WALLABY no-download graph. The result retained the pinned project/profile,
@@ -160,3 +160,6 @@ The runbook is [Local DALiuGE end to end](getting-started/local-daliuge.md).
 This qualification intentionally skipped CASDA staging and opted out of output
 verification in the pinned no-download project. Setonix/Slurm has passed config
 and command tests but has not run live without its account, SSH, paths, and SIF.
+
+For the provider-neutral Core contract, use the
+[offline PostgreSQL acceptance path](getting-started/neutral-project.md).

@@ -2,8 +2,10 @@
 
 This procedure configures project policy, selects an execution backend,
 discovers sources, composes a run, and follows durable evidence through Dash.
-For the exact local REST qualification values and matching API commands, use
-[Local DALiuGE end to end](../getting-started/local-daliuge.md).
+For a provider-neutral contract check, use
+[Project-neutral acceptance](../getting-started/neutral-project.md). The
+[WALLABY local DALiuGE runbook](../getting-started/local-daliuge.md) gives
+provider-specific live values and matching API commands.
 
 <div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Dashboard workflow from source registration, discovery, signed metadata, and pinned intent through a REST or Slurm backend, reconciliation and output verification, to terminal ledger evidence">
   <div class="bp-flow-node" data-tone="cyan"><span>01 / SOURCE</span><strong>registered identity</strong><small>enabled project source</small></div>
@@ -23,9 +25,10 @@ For the exact local REST qualification values and matching API commands, use
 
 ## 1. Prove system readiness
 
-Open **System** and confirm PostgreSQL, queue, TAP, and worker status match the
-intended environment. DALiuGE and Slurm tiles show whether a backend is
-configured or profile-managed; they do not prove network connectivity. Use
+Open **System** and confirm PostgreSQL, queue, configured provider checks, and
+worker status match the intended environment. DALiuGE and Slurm tiles show
+whether a backend is configured or profile-managed; they do not prove network
+connectivity. Use
 **Deployment target > Test profile** for the selected profile and resolve
 critical diagnostics before creating external intent.
 
@@ -57,15 +60,15 @@ assumed. Existing executions keep their pinned revision.
 ## 3. Configure the deployment target
 
 Open **Deployment target**. For REST DIM, remember that TM and workers may need
-different DIM addresses. The local qualified profile uses:
+different DIM addresses. For example, a project-neutral local profile can use:
 
 ```text
-name                 dlg-desk
-project              wallaby_hires
+name                 local-rest
+project              minimal_survey
 default              yes
-translator URL       http://dlg-tm.desk
-deploy host/port     dlg-dim.desk / 80
-DIM host/port for TM dlg-dim / 8001
+translator URL       http://translator.example.test
+deploy host/port     manager.example.test / 8001
+DIM host/port for TM manager.internal / 8001
 ```
 
 When Core runs in Docker, enter names reachable from Core and TM containers,
@@ -88,7 +91,7 @@ Open **Source registry** and select **Register**:
 5. Select **Discover selected** and confirm.
 
 Discovery is asynchronous. Follow `scheduler_tick` and `discover_batch` in
-**Jobs**. Open a source to inspect readiness gates, metadata by SBID, current
+**Jobs**. Open a source to inspect readiness gates, metadata by group, current
 and last-executed discovery signatures, linked executions, provenance, enabled
 state, and stale-after policy.
 
@@ -101,10 +104,10 @@ recurring admission.
 Select same-project sources and choose **Compose run**, or open
 **Runs > Compose run**:
 
-1. Confirm project, archive, and deployment-profile revision.
-2. Select sources and optional SBIDs.
+1. Confirm project, archive label, and deployment-profile revision.
+2. Select sources and optional groups.
 3. Select **Validate selection**.
-4. Review source, SBID, and dataset counts.
+4. Review source, group, and record counts.
 5. Resolve every blocker.
 6. For a full live run, keep **Start immediately** and **Submit backend** on.
 7. Keep **Stage inputs** on for a production staging graph; turn it off only
@@ -112,7 +115,7 @@ Select same-project sources and choose **Compose run**, or open
 8. Select **Create + start**.
 
 Preparation calls Core's authoritative readiness endpoint. Changing a source,
-SBID, archive, or profile invalidates the preview. Creation pins the active
+group, archive label, or profile invalidates the preview. Creation pins the active
 project revision and profile snapshot.
 
 If creation returns an ambiguous network failure, Dash preserves the same

@@ -53,7 +53,8 @@ deployment.
 
 The overview brings several Core signals together for triage:
 
-- authenticated readiness for PostgreSQL, queues, CASDA, and VizieR;
+- authenticated readiness for PostgreSQL, queues, configured provider probes,
+  and workers;
 - registered sources and pending workflow admission;
 - running and failed executions;
 - active or stale workers and durable queue depth;
@@ -104,8 +105,9 @@ headless `curl` equivalents.
 
 For a single Docker engine, run Dash `scripts/install.sh` (or `beampipe setup --dashboard`). It attaches Dash to Core's private Compose network and sets `BEAMPIPE_API_URL=http://api:8080`. Publish Dash—not the Core API—to the operator LAN or reverse proxy. See [Install and configure](installation.md) for the setup flags.
 
-Open **System** after login and confirm service/PostgreSQL readiness, TAP
-health, a healthy worker pool, and no unresolved critical diagnostic. The
+Open **System** after login and confirm service/PostgreSQL readiness, the
+provider probes exposed by Core, a healthy worker pool, and no unresolved
+critical diagnostic. The
 DALiuGE and Slurm tiles report configuration/profile ownership; they do not
 prove backend connectivity. Use **Deployment target > Test profile** for that.
 The equivalent headless checks are:

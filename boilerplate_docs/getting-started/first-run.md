@@ -1,4 +1,4 @@
-# First workflow
+# WALLABY first workflow
 
 This walkthrough uses one known WALLABY source to prove live public CASDA/VizieR discovery and deterministic graph preparation. It does not request CASDA staging or submit work to DALiuGE.
 
