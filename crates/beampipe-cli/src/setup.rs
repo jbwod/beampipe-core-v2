@@ -391,6 +391,10 @@ fn resolve_setup_option_paths(opts: &mut SetupOptions, launch_dir: &Path) {
     }
 }
 
+fn core_roles_running(counts: runtime::RoleCounts) -> bool {
+    counts.api > 0 && counts.scheduler > 0 && counts.worker > 0
+}
+
 fn installation_services_running(context: &installation::InstallationContext) -> bool {
     if !context.exists()
         || !context
@@ -400,13 +404,7 @@ fn installation_services_running(context: &installation::InstallationContext) ->
     {
         return false;
     }
-    let Ok(mut command) = runtime::compose_command(context) else {
-        return false;
-    };
-    command.args(["ps", "--status", "running", "--quiet"]);
-    command
-        .output()
-        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+    core_roles_running(runtime::running_role_counts(context))
 }
 
 pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
@@ -414,6 +412,19 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     let launch_dir = std::env::current_dir().context("current directory")?;
     resolve_setup_option_paths(&mut opts, &launch_dir);
     let mut root = resolve_operator_root(&opts)?;
+
+    let root_was_missing = !root.exists();
+    if root_was_missing {
+        if opts.yes {
+            // Reject invalid unattended invocations before creating the target.
+            decide_runtime(&opts)?;
+        }
+        print_banner(opts.start, opts.yes);
+        print_hint(&format!("Installation home: {}", root.display()));
+        if interactive_setup(opts.yes) && !prompt_yes_no("Set up Beampipe here?", true)? {
+            bail!("setup aborted before creating the installation directory");
+        }
+    }
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     root = root
         .canonicalize()
@@ -439,9 +450,12 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         );
     }
 
-    print_banner(opts.start, opts.yes);
-    print_hint(&format!("Installation home: {}", root.display()));
-    if interactive_setup(opts.yes)
+    if !root_was_missing {
+        print_banner(opts.start, opts.yes);
+        print_hint(&format!("Installation home: {}", root.display()));
+    }
+    if !root_was_missing
+        && interactive_setup(opts.yes)
         && !prompt_yes_no(
             if existing_context.exists() {
                 "Update this Beampipe installation?"
@@ -1873,34 +1887,54 @@ fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
 }
 
 fn update_env_file(path: &Path, key: &str, value: &str) -> Result<()> {
-    if key.is_empty()
-        || !key.chars().all(|character| {
-            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
-        })
-    {
-        bail!("environment variable name must contain only A-Z, 0-9, and '_'");
+    update_env_values(path, &[(key, value)])
+}
+
+fn update_env_values(path: &Path, updates: &[(&str, &str)]) -> Result<()> {
+    let mut encoded = Vec::with_capacity(updates.len());
+    for &(key, value) in updates {
+        if key.is_empty()
+            || !key.chars().all(|character| {
+                character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+            })
+        {
+            bail!("environment variable name must contain only A-Z, 0-9, and '_'");
+        }
+        if encoded.iter().any(|(existing, _)| existing == key) {
+            bail!("environment variable {key} was supplied more than once");
+        }
+        encoded.push((key.to_string(), env_file_encode(value)?));
     }
-    if value.contains(['\n', '\r']) {
-        bail!("environment variable value must be a single line");
-    }
+
     let content = if path.exists() {
         std::fs::read_to_string(path)?
     } else {
         String::new()
     };
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-    let prefix = format!("{key}=");
-    let mut found = false;
-    for line in &mut lines {
-        if line.starts_with(&prefix) || line.starts_with(&format!("#{key}=")) {
-            *line = format!("{key}={value}");
-            found = true;
-            break;
+
+    for (key, value) in encoded {
+        let prefix = format!("{key}=");
+        let commented_prefix = format!("#{key}=");
+        let replacement = format!("{key}={value}");
+        let mut found = false;
+        let mut updated = Vec::with_capacity(lines.len() + 1);
+        for line in lines {
+            if line.starts_with(&prefix) || line.starts_with(&commented_prefix) {
+                if !found {
+                    updated.push(replacement.clone());
+                    found = true;
+                }
+            } else {
+                updated.push(line);
+            }
         }
+        if !found {
+            updated.push(replacement);
+        }
+        lines = updated;
     }
-    if !found {
-        lines.push(format!("{key}={value}"));
-    }
+
     write_private_file_atomic(path, &(lines.join("\n") + "\n"))
 }
 
@@ -1977,17 +2011,12 @@ fn seed_env_file(root: &Path, env_path: &Path) -> Result<()> {
 }
 
 fn env_file_value(path: &Path, key: &str) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let prefix = format!("{key}=");
-    for line in content.lines() {
-        if let Some(value) = line.trim().strip_prefix(&prefix) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
+    dotenvy::from_path_iter(path)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .find_map(|(candidate, value)| {
+            (candidate == key && !value.is_empty()).then_some(value)
+        })
 }
 
 fn ensure_beampipe_version(root: &Path, env_path: &Path) -> Result<()> {
@@ -2390,8 +2419,9 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
         println!("Cloning Beampipe Dash into {}.", dash_dir.display());
         if let Err(error) = git_clone_dash(repo_url, &dash_dir) {
             bail!(
-                "{error}. Clone it with: git clone {repo_url} {}",
-                dash_dir.display()
+                "{error}. Clone it with: git clone {} {}",
+                shell_quote(repo_url),
+                shell_quote_path(&dash_dir)
             );
         }
     }
@@ -2441,17 +2471,45 @@ async fn create_admin_user(
     }
 }
 
+fn select_admin_text(
+    explicit: Option<&str>,
+    unattended: bool,
+    label: &str,
+    default: &str,
+) -> Result<String> {
+    match explicit {
+        Some(value) => Ok(value.to_string()),
+        None if unattended => Ok(default.to_string()),
+        None => prompt_default(label, default),
+    }
+}
+
+fn explicit_admin_password(opts: &SetupOptions) -> Result<Option<String>> {
+    if let Some(password) = opts
+        .admin_password
+        .as_deref()
+        .filter(|password| !password.is_empty())
+    {
+        return Ok(Some(password.to_string()));
+    }
+    opts.admin_password_file
+        .as_deref()
+        .map(|path| read_secret_file(path, "admin password"))
+        .transpose()
+}
+
 async fn create_admin_user_once(
     pool: &PgPool,
     opts: &SetupOptions,
     api_port: u16,
     root: &Path,
 ) -> Result<()> {
-    let username = if opts.yes {
-        opts.admin_user.clone().unwrap_or_else(|| "admin".into())
-    } else {
-        prompt_default("Admin username", "admin")?
-    };
+    let username = select_admin_text(
+        opts.admin_user.as_deref(),
+        opts.yes,
+        "Admin username",
+        "admin",
+    )?;
     if username.trim().is_empty() {
         bail!("admin username cannot be empty");
     }
@@ -2462,34 +2520,28 @@ async fn create_admin_user_once(
         return Ok(());
     }
 
-    let password = if opts.yes {
-        match opts
-            .admin_password
-            .clone()
-            .filter(|password| !password.is_empty())
-        {
-            Some(password) => {
-                eprintln!(
-                    "warning: --admin-password can be exposed through shell history; prefer --admin-password-file"
-                );
-                password
-            }
-            None => {
-                if let Some(path) = opts.admin_password_file.as_deref() {
-                    read_secret_file(path, "admin password")?
-                } else {
-                    let password = generate_admin_password();
-                    let path = write_generated_admin_password(root, &password)?;
-                    println!(
-                        "Generated admin password and stored it at {} (0600).",
-                        path.display()
-                    );
-                    password
-                }
-            }
+    let explicit_password = explicit_admin_password(opts)?;
+    if opts
+        .admin_password
+        .as_deref()
+        .is_some_and(|password| !password.is_empty())
+    {
+        eprintln!(
+            "warning: --admin-password can be exposed through shell history; prefer --admin-password-file"
+        );
+    }
+    let password = match explicit_password {
+        Some(password) => password,
+        None if opts.yes => {
+            let password = generate_admin_password();
+            let path = write_generated_admin_password(root, &password)?;
+            println!(
+                "Generated admin password and stored it at {} (0600).",
+                path.display()
+            );
+            password
         }
-    } else {
-        loop {
+        None => loop {
             let password = rpassword::prompt_password("Admin password (12+ characters): ")?;
             if let Err(error) = validate_admin_password(&password) {
                 print_hint(&error.to_string());
@@ -2501,16 +2553,15 @@ async fn create_admin_user_once(
                 continue;
             }
             break password;
-        }
+        },
     };
     validate_admin_password(&password)?;
-    let email = if opts.yes {
-        opts.admin_email
-            .clone()
-            .unwrap_or_else(|| "admin@example.test".into())
-    } else {
-        prompt_default("Admin email", "admin@example.test")?
-    };
+    let email = select_admin_text(
+        opts.admin_email.as_deref(),
+        opts.yes,
+        "Admin email",
+        "admin@example.test",
+    )?;
     if email.trim().is_empty() {
         bail!("admin email cannot be empty");
     }
@@ -3290,16 +3341,18 @@ fn env_file_encode(value: &str) -> Result<String> {
     if value.contains(['\n', '\r']) {
         bail!("environment variable value must be a single line");
     }
-    let needs_quotes = value
-        .chars()
-        .any(|character| character.is_whitespace() || matches!(character, '#' | '"' | '\''));
-    if !needs_quotes {
-        return Ok(value.to_string());
+    let mut encoded = String::with_capacity(value.len() + 2);
+    encoded.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => encoded.push_str("\\\\"),
+            '"' => encoded.push_str("\\\""),
+            '$' => encoded.push_str("\\$"),
+            _ => encoded.push(character),
+        }
     }
-    if value.contains(['"', '\\']) {
-        bail!("value cannot be written to .env because it contains a quote or backslash");
-    }
-    Ok(format!("\"{value}\""))
+    encoded.push('"');
+    Ok(encoded)
 }
 
 fn apply_casda_process_env(runtime: RuntimeKind, username: &str, password: &str, file_path: &Path) {
@@ -3330,26 +3383,38 @@ fn write_casda_credentials(
     if password.is_empty() {
         bail!("CASDA password cannot be empty");
     }
+    // Validate every value before writing either the private credential or .env.
+    env_file_encode(username)?;
+    env_file_encode(password)?;
     let file_path = casda_password_file_path(root);
+    let file_path_value = file_path.display().to_string();
+    env_file_encode(&file_path_value)?;
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     write_private_file_atomic(&file_path, &format!("{password}\n"))?;
 
-    update_env_file(env_path, "CASDA_USERNAME", username)?;
     match runtime {
         RuntimeKind::Docker => {
             // Compose env_file cannot see a host CASDA_PASSWORD_FILE path.
-            update_env_file(env_path, "CASDA_PASSWORD", &env_file_encode(password)?)?;
-            update_env_file(env_path, "CASDA_PASSWORD_FILE", "")?;
+            update_env_values(
+                env_path,
+                &[
+                    ("CASDA_USERNAME", username),
+                    ("CASDA_PASSWORD", password),
+                    ("CASDA_PASSWORD_FILE", ""),
+                ],
+            )?;
         }
         RuntimeKind::Host => {
-            update_env_file(
+            update_env_values(
                 env_path,
-                "CASDA_PASSWORD_FILE",
-                &file_path.display().to_string(),
+                &[
+                    ("CASDA_USERNAME", username),
+                    ("CASDA_PASSWORD_FILE", &file_path_value),
+                    ("CASDA_PASSWORD", ""),
+                ],
             )?;
-            update_env_file(env_path, "CASDA_PASSWORD", "")?;
         }
     }
     Ok(file_path)
@@ -3767,6 +3832,40 @@ staging:
     }
 
     #[test]
+    fn core_running_requires_every_runtime_role() {
+        assert!(core_roles_running(runtime::RoleCounts {
+            api: 1,
+            scheduler: 1,
+            worker: 1,
+        }));
+        assert!(!core_roles_running(runtime::RoleCounts {
+            api: 0,
+            scheduler: 0,
+            worker: 0,
+        }));
+        assert!(!core_roles_running(runtime::RoleCounts {
+            api: 1,
+            scheduler: 1,
+            worker: 0,
+        }));
+    }
+
+    #[tokio::test]
+    async fn invalid_unattended_setup_does_not_create_its_home() {
+        let parent = tempfile::tempdir().unwrap();
+        let home = parent.path().join("not-created");
+        let error = run_setup(SetupOptions {
+            yes: true,
+            directory: Some(home.clone()),
+            ..SetupOptions::default()
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("--yes requires --runtime"));
+        assert!(!home.exists());
+    }
+
+    #[test]
     fn yes_no_parser_accepts_only_explicit_answers() {
         assert_eq!(parse_yes_no("", true), Some(true));
         assert_eq!(parse_yes_no("", false), Some(false));
@@ -4007,9 +4106,15 @@ staging:
         .unwrap();
 
         let env = std::fs::read_to_string(&env_path).unwrap();
-        assert!(env.contains("CASDA_USERNAME=casda.user@example.test\n"));
-        assert!(env.contains(&format!("CASDA_PASSWORD={password}\n")));
-        assert!(env.contains("CASDA_PASSWORD_FILE=\n"));
+        assert_eq!(
+            env_file_value(&env_path, "CASDA_USERNAME").as_deref(),
+            Some("casda.user@example.test")
+        );
+        assert_eq!(
+            env_file_value(&env_path, "CASDA_PASSWORD").as_deref(),
+            Some(password)
+        );
+        assert_eq!(env_file_value(&env_path, "CASDA_PASSWORD_FILE"), None);
         assert!(!env.contains("/old/host/path"));
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
@@ -4041,10 +4146,16 @@ staging:
         )
         .unwrap();
 
+        assert_eq!(
+            env_file_value(&env_path, "CASDA_USERNAME").as_deref(),
+            Some("casda.user@example.test")
+        );
+        assert_eq!(env_file_value(&env_path, "CASDA_PASSWORD"), None);
+        assert_eq!(
+            env_file_value(&env_path, "CASDA_PASSWORD_FILE").as_deref(),
+            Some(file_path.to_string_lossy().as_ref())
+        );
         let env = std::fs::read_to_string(&env_path).unwrap();
-        assert!(env.contains("CASDA_USERNAME=casda.user@example.test\n"));
-        assert!(env.contains("CASDA_PASSWORD=\n"));
-        assert!(env.contains(&format!("CASDA_PASSWORD_FILE={}\n", file_path.display())));
         assert!(!env.contains("old-inline-password"));
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
@@ -4053,10 +4164,22 @@ staging:
     }
 
     #[test]
-    fn env_file_encode_quotes_hash_and_rejects_quotes() {
-        assert_eq!(env_file_encode("plain").unwrap(), "plain");
-        assert_eq!(env_file_encode("hash#value").unwrap(), "\"hash#value\"");
-        assert!(env_file_encode("has\"quote").is_err());
+    fn env_file_encoding_round_trips_special_characters() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".env");
+        let values = [
+            "plain",
+            "space # value",
+            "dollar$HOME and ${USER}",
+            "single' and double\" quotes",
+            "backslash\\tail",
+        ];
+        for (index, value) in values.iter().enumerate() {
+            let key = format!("SECRET_{index}");
+            update_env_file(&path, &key, value).unwrap();
+            assert_eq!(env_file_value(&path, &key).as_deref(), Some(*value));
+        }
+        assert!(env_file_encode("line one\nline two").is_err());
     }
 
     #[test]
@@ -4239,7 +4362,10 @@ staging:
 
         update_env_file(&path, "DATABASE_URL", "postgres://localhost/beampipe").unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("DATABASE_URL=postgres://localhost/beampipe\n"));
+        assert_eq!(
+            env_file_value(&path, "DATABASE_URL").as_deref(),
+            Some("postgres://localhost/beampipe")
+        );
         assert!(content.contains("UNCHANGED=value\n"));
         assert!(update_env_file(&path, "INJECTED", "value\nSECOND=value").is_err());
 
@@ -4278,9 +4404,10 @@ staging:
         let created = empty.path().join(".env");
         std::fs::write(&created, "BEAMPIPE_ENV=development\n").unwrap();
         ensure_beampipe_version(empty.path(), &created).unwrap();
-        assert!(std::fs::read_to_string(&created)
-            .unwrap()
-            .contains(&format!("BEAMPIPE_VERSION={}\n", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(
+            env_file_value(&created, "BEAMPIPE_VERSION").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
@@ -4288,6 +4415,50 @@ staging:
         let password = generate_admin_password();
         assert!(password.len() >= 12);
         assert!(password.starts_with("bp-"));
+    }
+
+    #[test]
+    fn explicit_admin_identity_values_win_in_guided_and_unattended_modes() {
+        for unattended in [false, true] {
+            assert_eq!(
+                select_admin_text(
+                    Some("operator"),
+                    unattended,
+                    "Admin username",
+                    "admin"
+                )
+                .unwrap(),
+                "operator"
+            );
+            assert_eq!(
+                select_admin_text(
+                    Some("operator@example.test"),
+                    unattended,
+                    "Admin email",
+                    "admin@example.test"
+                )
+                .unwrap(),
+                "operator@example.test"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_admin_password_file_is_mode_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("admin-password");
+        std::fs::write(&path, "a-guided-secret-123\n").unwrap();
+        for yes in [false, true] {
+            let options = SetupOptions {
+                yes,
+                admin_password_file: Some(path.clone()),
+                ..SetupOptions::default()
+            };
+            assert_eq!(
+                explicit_admin_password(&options).unwrap().as_deref(),
+                Some("a-guided-secret-123")
+            );
+        }
     }
 
     #[test]
@@ -4441,12 +4612,11 @@ staging:
         assert_eq!(decide_dashboard(&opts, true), Some(false));
 
         prepare_docker_env(root.path(), &env).unwrap();
-        let content = std::fs::read_to_string(&env).unwrap();
-        assert!(content.contains(&format!(
-            "BEAMPIPE_SSH_CREDENTIALS_HOST={}",
-            root.path().join("credentials/ssh").display()
-        )));
-        assert!(!content.contains("BEAMPIPE_SSH_CREDENTIALS_DIR=/"));
+        assert_eq!(
+            env_file_value(&env, "BEAMPIPE_SSH_CREDENTIALS_HOST").as_deref(),
+            Some(root.path().join("credentials/ssh").to_string_lossy().as_ref())
+        );
+        assert_eq!(env_file_value(&env, "BEAMPIPE_SSH_CREDENTIALS_DIR"), None);
     }
 
     #[test]
@@ -4790,12 +4960,23 @@ staging:
             RuntimeKind::Host,
         )
         .unwrap();
-        let content = std::fs::read_to_string(&env).unwrap();
-        assert!(content.contains("BEAMPIPE_API_PORT=18181\n"));
-        assert!(content.contains("BEAMPIPE_POSTGRES_PORT=15432\n"));
-        assert!(content.contains("BEAMPIPE_METRICS_PORT=19090\n"));
-        assert!(content.contains("BEAMPIPE_BIND_ADDR=127.0.0.1:18181\n"));
-        assert!(content.contains("BEAMPIPE_METRICS_BIND_ADDR=127.0.0.1:19090\n"));
+        assert_eq!(env_file_value(&env, "BEAMPIPE_API_PORT").as_deref(), Some("18181"));
+        assert_eq!(
+            env_file_value(&env, "BEAMPIPE_POSTGRES_PORT").as_deref(),
+            Some("15432")
+        );
+        assert_eq!(
+            env_file_value(&env, "BEAMPIPE_METRICS_PORT").as_deref(),
+            Some("19090")
+        );
+        assert_eq!(
+            env_file_value(&env, "BEAMPIPE_BIND_ADDR").as_deref(),
+            Some("127.0.0.1:18181")
+        );
+        assert_eq!(
+            env_file_value(&env, "BEAMPIPE_METRICS_BIND_ADDR").as_deref(),
+            Some("127.0.0.1:19090")
+        );
     }
 
     #[test]
@@ -4804,9 +4985,7 @@ staging:
         let env = root.path().join(".env");
         std::fs::write(&env, "BEAMPIPE_CONFIG=beampipe.yaml\n").unwrap();
         clear_missing_config_path(root.path(), &env).unwrap();
-        assert!(std::fs::read_to_string(&env)
-            .unwrap()
-            .contains("BEAMPIPE_CONFIG=\n"));
+        assert_eq!(env_file_value(&env, "BEAMPIPE_CONFIG"), None);
     }
 
     #[test]
