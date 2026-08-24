@@ -20,7 +20,7 @@ use crate::{
 
 const DEFAULT_CASDA_TAP_URL: &str = "https://casda.csiro.au/casda_vo_tools/tap/sync";
 const DEFAULT_VIZIER_TAP_URL: &str = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync";
-const WALLABY_BACKEND_CAPABILITIES: &str = "deployment:slurm_remote,staging:casda";
+const WALLABY_BACKEND_CAPABILITIES: &str = "staging:casda";
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
 const DEFAULT_WORKER_POOL: &str = "default";
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/beampipe";
@@ -222,6 +222,19 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
                 .filter(|value| !value.trim().is_empty())
         })
         .unwrap_or_else(|| default.to_string())
+}
+
+fn add_backend_capability(configured: &str, capability: &str) -> String {
+    let mut capabilities = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !capabilities.iter().any(|value| value == capability) {
+        capabilities.push(capability.to_string());
+    }
+    capabilities.join(",")
 }
 
 fn parse_env_bool(raw: &str) -> Option<bool> {
@@ -456,7 +469,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             ""
         },
     );
-    let backend_capabilities = env_override(
+    let mut backend_capabilities = env_override(
         None,
         "BEAMPIPE_BACKEND_CAPABILITIES",
         if opts.wallaby_sample {
@@ -638,6 +651,19 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             Some((path, profile)) => (Some(path), Some(profile)),
             None => (None, None),
         };
+    if prepared_profile
+        .as_ref()
+        .is_some_and(|profile| matches!(&profile.deployment, DeploymentConfig::SlurmRemote(_)))
+    {
+        backend_capabilities =
+            add_backend_capability(&backend_capabilities, "deployment:slurm_remote");
+        update_env_file(
+            &env_path,
+            "BEAMPIPE_BACKEND_CAPABILITIES",
+            &backend_capabilities,
+        )?;
+        std::env::set_var("BEAMPIPE_BACKEND_CAPABILITIES", &backend_capabilities);
+    }
 
     let pool = match beampipe_db::connect(&database_url).await {
         Ok(pool) => Some(pool),
@@ -3153,6 +3179,21 @@ mod tests {
         assert_eq!(
             resolve_use_real_backends(false, Some("maybe"), Some("no")),
             "false"
+        );
+    }
+
+    #[test]
+    fn backend_capabilities_are_added_without_duplicates() {
+        assert_eq!(
+            add_backend_capability("staging:casda", "deployment:slurm_remote"),
+            "staging:casda,deployment:slurm_remote"
+        );
+        assert_eq!(
+            add_backend_capability(
+                "deployment:slurm_remote,staging:casda",
+                "deployment:slurm_remote"
+            ),
+            "deployment:slurm_remote,staging:casda"
         );
     }
 
