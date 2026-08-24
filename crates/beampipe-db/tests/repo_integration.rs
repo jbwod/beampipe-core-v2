@@ -212,6 +212,15 @@ async fn queue_gauges_only_include_runnable_jobs() {
     .await
     .unwrap();
 
+    // These gauges intentionally cover the whole queue. Hold a read lock while
+    // comparing their independently executed queries so parallel integration
+    // tests cannot insert or complete a job between snapshots.
+    let mut queue_snapshot = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE jobs IN SHARE MODE")
+        .execute(&mut *queue_snapshot)
+        .await
+        .unwrap();
+
     let by_kind = repo::queue_depth_by_kind(&pool).await.unwrap();
     assert!(!by_kind.iter().any(|(kind, _)| kind == &future_kind));
     assert_eq!(
@@ -242,6 +251,8 @@ async fn queue_gauges_only_include_runnable_jobs() {
         overdue_age >= 29,
         "age should be measured from next_run_at, got {overdue_age} seconds"
     );
+
+    queue_snapshot.commit().await.unwrap();
 
     repo::complete_job(&pool, future.uuid).await.unwrap();
     repo::complete_job(&pool, overdue.uuid).await.unwrap();
