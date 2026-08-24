@@ -1484,6 +1484,10 @@
             "description": "Explicit acknowledgement that negative scheduler evidence cannot prove non-existence.",
             "type": "boolean"
           },
+          "allow_early_after_execute_fenced": {
+            "description": "Superuser override: start the evidence window after the execute lease is\ndurably fenced instead of waiting the default 24-hour quiet grace.",
+            "type": "boolean"
+          },
           "expected_daliuge_session_id": {
             "description": "Compare-and-set guard for the exact DALiuGE/Slurm submission name.",
             "type": "string"

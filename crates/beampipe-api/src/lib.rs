@@ -3699,6 +3699,10 @@ pub struct ExecutionSubmissionAbandonRequest {
     pub expected_submission_deadline_at: chrono::DateTime<Utc>,
     /// Explicit acknowledgement that negative scheduler evidence cannot prove non-existence.
     pub acknowledge_external_job_may_exist: bool,
+    /// Superuser override: start the evidence window after the execute lease is
+    /// durably fenced instead of waiting the default 24-hour quiet grace.
+    #[serde(default)]
+    pub allow_early_after_execute_fenced: bool,
 }
 
 impl ExecutionSubmissionAbandonRequest {
@@ -3949,6 +3953,7 @@ async fn abandon_execution_submission(
             expected_daliuge_session_id: req.expected_daliuge_session_id,
             expected_submission_deadline_at: req.expected_submission_deadline_at,
             acknowledge_external_job_may_exist: req.acknowledge_external_job_may_exist,
+            allow_early_after_execute_fenced: req.allow_early_after_execute_fenced,
         },
     )
     .await
@@ -4744,6 +4749,7 @@ adapters:
             expected_daliuge_session_id: "beampipe-0198f2f7".into(),
             expected_submission_deadline_at: Utc::now(),
             acknowledge_external_job_may_exist: true,
+            allow_early_after_execute_fenced: false,
         }
     }
 
@@ -4822,6 +4828,29 @@ adapters:
             "grace_period_seconds": 0
         });
         assert!(serde_json::from_value::<ExecutionSubmissionAbandonRequest>(value).is_err());
+
+        let early_override = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "in_flight",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now(),
+            "acknowledge_external_job_may_exist": true,
+            "allow_early_after_execute_fenced": true
+        });
+        let parsed = serde_json::from_value::<ExecutionSubmissionAbandonRequest>(early_override)
+            .expect("the explicit early override is part of the strict request schema");
+        assert!(parsed.allow_early_after_execute_fenced);
+
+        let default_override = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "in_flight",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now(),
+            "acknowledge_external_job_may_exist": true
+        });
+        let parsed = serde_json::from_value::<ExecutionSubmissionAbandonRequest>(default_override)
+            .expect("the early override defaults off for existing clients");
+        assert!(!parsed.allow_early_after_execute_fenced);
     }
 
     #[test]

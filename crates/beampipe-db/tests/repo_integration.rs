@@ -1631,6 +1631,7 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
             expected_daliuge_session_id: session_id.clone(),
             expected_submission_deadline_at: deadline,
             acknowledge_external_job_may_exist: true,
+            allow_early_after_execute_fenced: false,
         },
     )
     .await
@@ -1780,6 +1781,107 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
 }
 
 #[tokio::test]
+async fn evidenced_early_abandonment_only_bypasses_the_default_quiet_grace() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let session_id = format!("BeampipeExecution-early-abandon-{}", Uuid::now_v7());
+    let (mut execution, _) = prepare_abandonable_slurm_submission(
+        &pool,
+        &format!("early_abandon_{}", Uuid::now_v7().simple()),
+        &session_id,
+    )
+    .await;
+    let future_deadline = Utc::now() + Duration::minutes(30);
+    sqlx::query("UPDATE batch_execution_record SET submission_deadline_at = $2 WHERE uuid = $1")
+        .bind(execution.uuid)
+        .bind(future_deadline)
+        .execute(&pool)
+        .await
+        .unwrap();
+    execution = repo::get_execution(&pool, execution.uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    let future_deadline = execution.submission_deadline_at.unwrap();
+
+    let execute_job = repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid, "fence": "early-override"}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(execution.uuid),
+            idempotency_key: Some(format!("early-abandon-fence:{}", execution.uuid)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let fenced_at = Utc::now() - Duration::minutes(12);
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET status = 'completed',
+            created_at = $2,
+            updated_at = $2,
+            next_run_at = $2
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(execute_job.uuid)
+    .bind(fenced_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let base_input = repo::AbandonSlurmSubmissionInput {
+        actor: "user:integration-superuser".into(),
+        correlation_id: Some("abandon:early-integration".into()),
+        reason: "execute lease fenced and exact-name searches remained negative".into(),
+        expected_submission_state: execution
+            .submission_state
+            .as_deref()
+            .and_then(SubmissionState::parse)
+            .unwrap(),
+        expected_daliuge_session_id: session_id,
+        expected_submission_deadline_at: future_deadline,
+        acknowledge_external_job_may_exist: true,
+        allow_early_after_execute_fenced: false,
+    };
+    let error = repo::abandon_slurm_submission(&pool, execution.uuid, base_input.clone())
+        .await
+        .expect_err("the default policy must retain its 24-hour quiet grace");
+    assert_eq!(error.code(), "submission_abandonment_quiet_grace");
+
+    let abandoned = repo::abandon_slurm_submission(
+        &pool,
+        execution.uuid,
+        repo::AbandonSlurmSubmissionInput {
+            allow_early_after_execute_fenced: true,
+            ..base_input
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(abandoned.status, "failed");
+    assert_eq!(abandoned.terminal_outcome.as_deref(), Some("inconsistent"));
+
+    let event = repo::list_provenance_events_for_execution(&pool, execution.uuid, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "execution.submission_abandoned")
+        .expect("durable early abandonment provenance");
+    assert_eq!(event.payload["early_after_execute_fenced"], true);
+    assert_eq!(event.payload["policy"]["quiet_grace_seconds"], 0);
+    assert_eq!(
+        event.payload["policy"]["default_quiet_grace_seconds"],
+        repo::SUBMISSION_ABANDONMENT_GRACE_SECONDS
+    );
+}
+
+#[tokio::test]
 async fn abandonment_rejects_an_active_execute_lease() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
@@ -1881,6 +1983,7 @@ async fn abandonment_rejects_an_active_execute_lease() {
             expected_daliuge_session_id: session_id,
             expected_submission_deadline_at: execution.submission_deadline_at.unwrap(),
             acknowledge_external_job_may_exist: true,
+            allow_early_after_execute_fenced: false,
         },
     )
     .await
@@ -1944,6 +2047,7 @@ async fn abandonment_rejects_a_scheduler_match_after_negative_evidence() {
             expected_daliuge_session_id: session_id,
             expected_submission_deadline_at: execution.submission_deadline_at.unwrap(),
             acknowledge_external_job_may_exist: true,
+            allow_early_after_execute_fenced: false,
         },
     )
     .await
@@ -2069,6 +2173,7 @@ async fn submission_receipt_winning_the_row_lock_prevents_abandonment() {
             expected_daliuge_session_id: session_id,
             expected_submission_deadline_at: execution.submission_deadline_at.unwrap(),
             acknowledge_external_job_may_exist: true,
+            allow_early_after_execute_fenced: false,
         },
     )
     .await

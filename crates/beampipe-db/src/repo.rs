@@ -3175,6 +3175,7 @@ pub struct AbandonSlurmSubmissionInput {
     pub expected_daliuge_session_id: String,
     pub expected_submission_deadline_at: DateTime<Utc>,
     pub acknowledge_external_job_may_exist: bool,
+    pub allow_early_after_execute_fenced: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3599,16 +3600,23 @@ pub async fn abandon_slurm_submission(
             "an execute worker still holds an active or incompletely fenced lease".into(),
         ));
     }
-    let quiet_anchor = execute_jobs
+    let latest_execute_anchor = execute_jobs
         .iter()
         .map(latest_execute_activity)
-        .chain(std::iter::once(input.expected_submission_deadline_at))
         .max()
         .unwrap_or(input.expected_submission_deadline_at);
+    let quiet_anchor = if input.allow_early_after_execute_fenced {
+        latest_execute_anchor
+    } else {
+        latest_execute_anchor.max(input.expected_submission_deadline_at)
+    };
+    let grace_seconds = if input.allow_early_after_execute_fenced {
+        0
+    } else {
+        SUBMISSION_ABANDONMENT_GRACE_SECONDS
+    };
     let quiet_eligible_at = quiet_anchor
-        .checked_add_signed(chrono::Duration::seconds(
-            SUBMISSION_ABANDONMENT_GRACE_SECONDS,
-        ))
+        .checked_add_signed(chrono::Duration::seconds(grace_seconds))
         .ok_or_else(|| {
             conflict(
                 "submission_abandonment_deadline_invalid",
@@ -3619,7 +3627,7 @@ pub async fn abandon_slurm_submission(
         tx.rollback().await?;
         return Err(conflict(
             "submission_abandonment_quiet_grace",
-            format!("the 24-hour quiet grace does not end until {quiet_eligible_at}"),
+            format!("the required quiet grace does not end until {quiet_eligible_at}"),
         ));
     }
     let lookup_rows = sqlx::query_as::<_, ExecutionObservationRow>(
@@ -3735,6 +3743,7 @@ pub async fn abandon_slurm_submission(
         "schema": "beampipe-slurm-submission-abandonment/v1",
         "reason": reason,
         "acknowledged_orphan_risk": true,
+        "early_after_execute_fenced": input.allow_early_after_execute_fenced,
         "prior_submission_state": input.expected_submission_state.as_str(),
         "daliuge_session_id": input.expected_daliuge_session_id,
         "submission_deadline_at": input.expected_submission_deadline_at,
@@ -3747,7 +3756,8 @@ pub async fn abandon_slurm_submission(
         "negative_lookup_observation_ids": evidence_ids,
         "invalidated_execute_job_ids": invalidated_job_ids,
         "policy": {
-            "quiet_grace_seconds": SUBMISSION_ABANDONMENT_GRACE_SECONDS,
+            "quiet_grace_seconds": grace_seconds,
+            "default_quiet_grace_seconds": SUBMISSION_ABANDONMENT_GRACE_SECONDS,
             "negative_lookup_count": SUBMISSION_ABANDONMENT_NEGATIVE_COUNT,
             "negative_lookup_span_seconds": SUBMISSION_ABANDONMENT_NEGATIVE_SPAN_SECONDS,
             "latest_evidence_max_age_seconds": SUBMISSION_ABANDONMENT_EVIDENCE_FRESHNESS_SECONDS,
