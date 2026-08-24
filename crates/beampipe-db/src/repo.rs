@@ -3820,6 +3820,23 @@ fn receipt_nonempty<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, 
         .ok_or_else(|| sqlx::Error::Protocol(format!("submission receipt requires {field}")))
 }
 
+fn shared_staging_root_from_session_dir(session_dir: &str) -> Option<String> {
+    let session_dir = std::path::Path::new(session_dir);
+    if !session_dir.is_absolute() {
+        return None;
+    }
+    session_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .filter(|path| path != &std::path::Path::new("/"))
+        .map(|dlg_root| {
+            dlg_root
+                .join("wallaby_staging_data")
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
 fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sqlx::Error> {
     if !input.workflow_manifest.is_object() {
         return Err(sqlx::Error::Protocol(
@@ -3838,11 +3855,16 @@ fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sql
             let session_dir =
                 receipt_nonempty(input.remote_session_dir.as_deref(), "remote_session_dir")?;
             let staging_root = receipt_nonempty(input.staging_root.as_deref(), "staging_root")?;
-            let expected_staging_root =
-                format!("{}/wallaby-staging", session_dir.trim_end_matches('/'));
+            let expected_staging_root = shared_staging_root_from_session_dir(session_dir)
+                .ok_or_else(|| {
+                    sqlx::Error::Protocol(
+                        "submission receipt session_dir must identify a workspace beneath DLG_ROOT"
+                            .into(),
+                    )
+                })?;
             if staging_root != expected_staging_root {
                 return Err(sqlx::Error::Protocol(format!(
-                    "submission receipt staging_root must be the execution session child '{expected_staging_root}'"
+                    "submission receipt staging_root must be the shared DLG cache '{expected_staging_root}'"
                 )));
             }
             if input.next_status != ExecutionStatus::AwaitingScheduler {
@@ -7536,12 +7558,26 @@ pub async fn list_alert_deliveries(
 #[cfg(test)]
 mod tests {
     use super::{
-        deployment_profile_spec_sha256, validate_slurm_abandonment_evidence,
-        SlurmAbandonmentEvidenceExpectation, SlurmLookupEvidenceAttempt,
+        deployment_profile_spec_sha256, shared_staging_root_from_session_dir,
+        validate_slurm_abandonment_evidence, SlurmAbandonmentEvidenceExpectation,
+        SlurmLookupEvidenceAttempt,
     };
     use chrono::{Duration, Utc};
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn shared_staging_receipt_path_is_beside_workspace() {
+        assert_eq!(
+            shared_staging_root_from_session_dir("/scratch/project/dlg/workspace/execution-a"),
+            Some("/scratch/project/dlg/wallaby_staging_data".into())
+        );
+        assert_eq!(
+            shared_staging_root_from_session_dir("relative/execution-a"),
+            None
+        );
+        assert_eq!(shared_staging_root_from_session_dir("/execution-a"), None);
+    }
 
     #[test]
     fn deployment_profile_hash_is_stable_and_content_addressed() {

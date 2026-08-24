@@ -416,7 +416,7 @@ fn derive_session_paths(
                     .into(),
             )
         })?;
-    let staging_root = session_dir.join("wallaby-staging");
+    let staging_root = dlg_root.join("wallaby_staging_data");
     Ok((
         session_dir.to_string_lossy().into_owned(),
         staging_root.to_string_lossy().into_owned(),
@@ -644,7 +644,7 @@ mod tests {
         );
         assert_eq!(
             staging_root,
-            "/scratch/project root/dlg/sessions/execution one/wallaby-staging"
+            "/scratch/project root/dlg/wallaby_staging_data"
         );
     }
 
@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn outer_sbatch_exports_a_distinct_wallaby_root_per_session() {
+    fn outer_sbatch_exports_a_shared_wallaby_cache_beside_session_workspace() {
         let mut dep = deployment();
         dep.dlg_root = "/dlg root".into();
         dep.environment_setup =
@@ -679,7 +679,7 @@ mod tests {
         let (_, root_b) =
             derive_session_paths("/dlg root/sessions/execution-b/job sub.sh", &dep.dlg_root)
                 .unwrap();
-        assert_ne!(root_a, root_b);
+        assert_eq!(root_a, root_b);
 
         let command = sbatch_command_with(
             &dep,
@@ -694,7 +694,7 @@ mod tests {
             "export BEAMPIPE_SLURM_ACCOUNT=myacct",
             "export BEAMPIPE_ASKAPSOFT_SIF=/images/askap.sif",
             "export WALLABY_HIRES_STAGING_ROOT=",
-            "/dlg root/sessions/execution-a/wallaby-staging",
+            "/dlg root/wallaby_staging_data",
             "mkdir -p --",
         ] {
             assert!(
@@ -800,7 +800,7 @@ mod tests {
             &dep,
             "session id",
             "/dlg/job sub.sh",
-            "/dlg/sessions/session id/wallaby-staging",
+            "/dlg/wallaby_staging_data",
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into()),
         )
         .unwrap();

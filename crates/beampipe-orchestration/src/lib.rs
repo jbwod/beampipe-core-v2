@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use beampipe_domain::{slurm, ExecutionStatus};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::path::Path;
 use thiserror::Error;
 
 pub mod cancel;
@@ -443,7 +444,7 @@ where
         let remote_session_dir = slurm::parse_scheduler_job_id(&scheduler_job_id).session_dir;
         let staging_root = remote_session_dir
             .as_deref()
-            .map(|session_dir| format!("{}/wallaby-staging", session_dir.trim_end_matches('/')));
+            .and_then(shared_wallaby_staging_root);
         record_slurm_paths(
             &mut workflow_manifest,
             remote_session_dir.as_deref(),
@@ -460,6 +461,24 @@ where
             next_status: ExecutionStatus::AwaitingScheduler,
         })
     }
+}
+
+fn shared_wallaby_staging_root(session_dir: &str) -> Option<String> {
+    let session_dir = Path::new(session_dir);
+    if !session_dir.is_absolute() {
+        return None;
+    }
+    let workspace_dir = session_dir.parent()?;
+    let dlg_root = workspace_dir.parent()?;
+    if dlg_root == Path::new("/") {
+        return None;
+    }
+    Some(
+        dlg_root
+            .join("wallaby_staging_data")
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn record_slurm_paths(manifest: &mut Value, session_dir: Option<&str>, staging_root: Option<&str>) {
@@ -809,7 +828,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn slurm_receipt_manifest_records_execution_specific_paths() {
+    fn slurm_receipt_manifest_records_session_and_shared_staging_paths() {
         let mut manifest = beampipe_domain::run_record::merge_slurm_submit_into_manifest(
             None,
             "execution-a",
@@ -821,16 +840,25 @@ mod tests {
         record_slurm_paths(
             &mut manifest,
             Some("/dlg/sessions/execution-a"),
-            Some("/dlg/sessions/execution-a/wallaby-staging"),
+            Some("/dlg/wallaby_staging_data"),
         );
 
         assert_eq!(
             manifest["beampipe_run_record"]["slurm"]["paths"],
             json!({
                 "session_dir": "/dlg/sessions/execution-a",
-                "staging_root": "/dlg/sessions/execution-a/wallaby-staging",
+                "staging_root": "/dlg/wallaby_staging_data",
             })
         );
+    }
+
+    #[test]
+    fn shared_staging_root_is_beside_the_workspace_directory() {
+        assert_eq!(
+            shared_wallaby_staging_root("/scratch/project/dlg/workspace/execution-a"),
+            Some("/scratch/project/dlg/wallaby_staging_data".into())
+        );
+        assert_eq!(shared_wallaby_staging_root("relative/execution-a"), None);
     }
 
     #[test]
