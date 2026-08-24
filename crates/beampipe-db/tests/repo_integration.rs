@@ -2581,6 +2581,30 @@ async fn list_slurm_executions_pending_poll_returns_active_slurm() {
         .await
         .unwrap();
     assert!(!after.iter().any(|row| row.uuid == exec.uuid));
+
+    sqlx::query(
+        r#"
+        UPDATE batch_execution_record
+        SET status = 'awaiting_scheduler',
+            output_verification_required = false,
+            output_state = 'pending',
+            scheduler_state = 'cancelled',
+            daliuge_state = 'unknown',
+            terminal_outcome = NULL
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(exec.uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let recovered_terminal = repo::list_slurm_executions_pending_poll(&pool)
+        .await
+        .unwrap();
+    assert!(
+        recovered_terminal.iter().any(|row| row.uuid == exec.uuid),
+        "recovered terminal scheduler evidence must reconcile the aggregate ledger once"
+    );
 }
 
 #[tokio::test]

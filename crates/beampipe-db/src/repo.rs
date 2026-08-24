@@ -6926,9 +6926,11 @@ pub async fn list_slurm_executions_pending_poll(
         WHERE execution.scheduler_name = 'slurm'
           AND execution.scheduler_job_id IS NOT NULL
           AND execution.status IN ('awaiting_scheduler', 'running')
-          AND COALESCE(execution.scheduler_state, 'unknown') NOT IN (
-              'succeeded', 'failed', 'cancelled', 'timed_out'
-          )
+          -- A recovered failed/cancelled/timed-out scheduler axis must pass
+          -- through the state machine once if the aggregate ledger is still
+          -- nonterminal. Successful compute waiting for output verification
+          -- remains excluded from backend re-polling.
+          AND COALESCE(execution.scheduler_state, 'unknown') <> 'succeeded'
           AND NOT EXISTS (
               SELECT 1
               FROM jobs AS active_execute
