@@ -386,8 +386,7 @@ async fn automated_execution_and_execute_job_commit_together() {
         return;
     };
     let module = format!("auto_atomic_{}", Uuid::now_v7().simple());
-    let (profile, config) =
-        install_routing_contract(&pool, &module, "rest_remote", "none").await;
+    let (profile, config) = install_routing_contract(&pool, &module, "rest_remote", "none").await;
     let (execution, job) = repo::create_automated_execution_and_enqueue(
         &pool,
         &module,
@@ -431,8 +430,7 @@ async fn automated_execution_rolls_back_when_enqueue_fails() {
         return;
     };
     let module = format!("auto_rollback_{}", Uuid::now_v7().simple());
-    let (profile, config) =
-        install_routing_contract(&pool, &module, "rest_remote", "none").await;
+    let (profile, config) = install_routing_contract(&pool, &module, "rest_remote", "none").await;
     let error = repo::create_automated_execution_and_enqueue(
         &pool,
         &module,
@@ -1955,11 +1953,7 @@ async fn abandonment_rejects_an_active_execute_lease() {
     let worker = Uuid::now_v7();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(
-            worker,
-            &queue,
-            &["manifest:generic", "translation:daliuge"],
-        ),
+        &worker_registration(worker, &queue, &["manifest:generic", "translation:daliuge"]),
     )
     .await
     .unwrap();
@@ -1990,9 +1984,9 @@ async fn abandonment_rejects_an_active_execute_lease() {
         &["manifest:generic".into(), "translation:daliuge".into()],
         60,
     )
-        .await
-        .unwrap()
-        .unwrap();
+    .await
+    .unwrap()
+    .unwrap();
     sqlx::query(
         r#"
         UPDATE batch_execution_record
@@ -3159,12 +3153,18 @@ async fn active_job_lease_cannot_be_stolen() {
     let queue = format!("lease_active_{}", Uuid::now_v7());
     let first = Uuid::now_v7();
     let second = Uuid::now_v7();
-    repo::register_worker_instance(&pool, &worker_registration(first, &queue, &["discovery:tap"]))
-        .await
-        .unwrap();
-    repo::register_worker_instance(&pool, &worker_registration(second, &queue, &["discovery:tap"]))
-        .await
-        .unwrap();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(first, &queue, &["discovery:tap"]),
+    )
+    .await
+    .unwrap();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(second, &queue, &["discovery:tap"]),
+    )
+    .await
+    .unwrap();
     let job = repo::enqueue_job_with_options(
         &pool,
         "lease_test",
@@ -3178,13 +3178,15 @@ async fn active_job_lease_cannot_be_stolen() {
     )
     .await
     .unwrap();
-    let claimed = repo::claim_next_job_for_worker(&pool, first, &queue, &["discovery:tap".into()], 60)
-        .await
-        .unwrap()
-        .expect("first worker claims job");
-    let stolen = repo::claim_next_job_for_worker(&pool, second, &queue, &["discovery:tap".into()], 60)
-        .await
-        .unwrap();
+    let claimed =
+        repo::claim_next_job_for_worker(&pool, first, &queue, &["discovery:tap".into()], 60)
+            .await
+            .unwrap()
+            .expect("first worker claims job");
+    let stolen =
+        repo::claim_next_job_for_worker(&pool, second, &queue, &["discovery:tap".into()], 60)
+            .await
+            .unwrap();
     assert!(stolen.is_none());
     assert!(
         repo::complete_job_with_lease(&pool, job.uuid, first, claimed.lease_token.unwrap(),)
@@ -3223,11 +3225,16 @@ async fn expired_job_lease_is_recovered_with_new_fence() {
     )
     .await
     .unwrap();
-    let original =
-        repo::claim_next_job_for_worker(&pool, first, &queue, &["deployment:daliuge_rest".into()], 60)
-            .await
-            .unwrap()
-            .unwrap();
+    let original = repo::claim_next_job_for_worker(
+        &pool,
+        first,
+        &queue,
+        &["deployment:daliuge_rest".into()],
+        60,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     sqlx::query(
         "UPDATE jobs SET lease_expires_at = now() - interval '1 second', locked_until = now() - interval '1 second' WHERE uuid = $1",
     )
@@ -3235,11 +3242,16 @@ async fn expired_job_lease_is_recovered_with_new_fence() {
     .execute(&pool)
     .await
     .unwrap();
-    let recovered =
-        repo::claim_next_job_for_worker(&pool, second, &queue, &["deployment:daliuge_rest".into()], 60)
-            .await
-            .unwrap()
-            .expect("expired lease should be recovered");
+    let recovered = repo::claim_next_job_for_worker(
+        &pool,
+        second,
+        &queue,
+        &["deployment:daliuge_rest".into()],
+        60,
+    )
+    .await
+    .unwrap()
+    .expect("expired lease should be recovered");
     assert_eq!(recovered.lease_owner, Some(second));
     assert_ne!(recovered.lease_token, original.lease_token);
     assert_eq!(recovered.attempts, original.attempts + 1);
@@ -3323,14 +3335,18 @@ async fn claim_requires_every_capability_and_separates_deployment_backends() {
     )
     .await
     .unwrap();
-    assert!(repo::claim_next_job_for_worker(&pool, rest_only_worker, &queue, &[], 60)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(repo::claim_next_job_for_worker(&pool, partial_slurm_worker, &queue, &[], 60)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        repo::claim_next_job_for_worker(&pool, rest_only_worker, &queue, &[], 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repo::claim_next_job_for_worker(&pool, partial_slurm_worker, &queue, &[], 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let eligible = repo::claim_next_job_for_worker(&pool, slurm_worker, &queue, &[], 60)
         .await
         .unwrap()
@@ -3407,10 +3423,12 @@ async fn execute_capabilities_follow_pinned_profile_and_staging_flags() {
     )
     .await
     .unwrap();
-    assert!(repo::claim_next_job_for_worker(&pool, rest_worker, &queue, &[], 60)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        repo::claim_next_job_for_worker(&pool, rest_worker, &queue, &[], 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let slurm_worker = Uuid::now_v7();
     repo::register_worker_instance(
@@ -3487,7 +3505,10 @@ async fn execute_capabilities_follow_pinned_profile_and_staging_flags() {
             "do_submit": false
         }),
         Some(prepare_only_execution.uuid),
-        Some(&format!("routing:prepare-only:{}", prepare_only_execution.uuid)),
+        Some(&format!(
+            "routing:prepare-only:{}",
+            prepare_only_execution.uuid
+        )),
     )
     .await
     .unwrap();
@@ -3511,9 +3532,7 @@ async fn unroutable_job_diagnostic_is_bounded_and_live_worker_aware() {
     )
     .await
     .unwrap();
-    let baseline = repo::count_unroutable_queued_jobs(&pool, 60)
-        .await
-        .unwrap();
+    let baseline = repo::count_unroutable_queued_jobs(&pool, 60).await.unwrap();
     let job = repo::enqueue_job_with_options(
         &pool,
         "diagnostic_test",
@@ -3527,12 +3546,7 @@ async fn unroutable_job_diagnostic_is_bounded_and_live_worker_aware() {
     )
     .await
     .unwrap();
-    assert!(
-        repo::count_unroutable_queued_jobs(&pool, 60)
-            .await
-            .unwrap()
-            >= baseline + 1
-    );
+    assert!(repo::count_unroutable_queued_jobs(&pool, 60).await.unwrap() >= baseline + 1);
     let bounded = repo::list_unroutable_queued_jobs(&pool, 60, 1)
         .await
         .unwrap();
@@ -3602,11 +3616,16 @@ async fn claim_requires_all_worker_labels() {
     .await
     .unwrap()
     .is_none());
-    let claimed =
-        repo::claim_next_job_for_worker(&pool, eligible, &queue, &["deployment:slurm_remote".into()], 60)
-            .await
-            .unwrap()
-            .expect("matching worker should claim job");
+    let claimed = repo::claim_next_job_for_worker(
+        &pool,
+        eligible,
+        &queue,
+        &["deployment:slurm_remote".into()],
+        60,
+    )
+    .await
+    .unwrap()
+    .expect("matching worker should claim job");
     assert_eq!(claimed.uuid, job.uuid);
 }
 

@@ -1156,12 +1156,14 @@ pub async fn execution_required_capabilities(
 ) -> Result<Vec<String>, sqlx::Error> {
     let project_config = match execution.project_config_id {
         Some(id) => {
-            let row = get_project_config_by_uuid(pool, id)
-                .await?
-                .ok_or_else(|| sqlx::Error::Protocol("pinned project config does not exist".into()))?;
-            Some(serde_json::from_value::<ProjectConfig>(row.spec).map_err(|error| {
-                sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
-            })?)
+            let row = get_project_config_by_uuid(pool, id).await?.ok_or_else(|| {
+                sqlx::Error::Protocol("pinned project config does not exist".into())
+            })?;
+            Some(
+                serde_json::from_value::<ProjectConfig>(row.spec).map_err(|error| {
+                    sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
+                })?,
+            )
         }
         None => None,
     };
@@ -2205,22 +2207,23 @@ pub async fn retry_execution(
     })?;
     let project_config = match execution.project_config_id {
         Some(config_id) => {
-            let spec: Option<Value> = sqlx::query_scalar(
-                "SELECT spec FROM project_configs WHERE uuid = $1",
-            )
-            .bind(config_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+            let spec: Option<Value> =
+                sqlx::query_scalar("SELECT spec FROM project_configs WHERE uuid = $1")
+                    .bind(config_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
             let spec = spec.ok_or_else(|| {
                 RetryExecutionError::Database(sqlx::Error::Protocol(
                     "pinned project config does not exist".into(),
                 ))
             })?;
-            Some(serde_json::from_value::<ProjectConfig>(spec).map_err(|error| {
-                RetryExecutionError::Database(sqlx::Error::Protocol(format!(
-                    "pinned project config is invalid: {error}"
-                )))
-            })?)
+            Some(
+                serde_json::from_value::<ProjectConfig>(spec).map_err(|error| {
+                    RetryExecutionError::Database(sqlx::Error::Protocol(format!(
+                        "pinned project config is invalid: {error}"
+                    )))
+                })?,
+            )
         }
         None => None,
     };
@@ -5586,9 +5589,11 @@ pub async fn enqueue_job_with_options(
                 let spec = spec.ok_or_else(|| {
                     sqlx::Error::Protocol("pinned project config does not exist".into())
                 })?;
-                Some(serde_json::from_value::<ProjectConfig>(spec).map_err(|error| {
-                    sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
-                })?)
+                Some(
+                    serde_json::from_value::<ProjectConfig>(spec).map_err(|error| {
+                        sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
+                    })?,
+                )
             }
             None => None,
         };
