@@ -1,6 +1,15 @@
 # Install and configure
 
-Beampipe has one installation directory and one management command. PostgreSQL is required; Docker is recommended but not mandatory.
+Beampipe has one installation directory and one management command. PostgreSQL is required; Docker is recommended but not mandatory. For a first installation, use the guided Docker wizard.
+
+| Path | Best for | What you provide |
+|---|---|---|
+| Guided Docker | First evaluation or a single-host service | Docker Compose v2 and free local ports |
+| Unattended Docker | Repeatable automation | Explicit `--yes`, runtime, and database mode |
+| Native host | Supervised services or a host-only environment | PostgreSQL and a process supervisor |
+| Source build | Development and commit qualification | Rust toolchain and this repository |
+
+The [interactive command builder](../index.md#install-builder) creates a copyable command without putting passwords into it.
 
 ```text
 $BEAMPIPE_HOME/                  default: ~/beampipe
@@ -12,17 +21,31 @@ $BEAMPIPE_HOME/                  default: ~/beampipe
 `-- credentials/ssh/<slot>/     managed SSH credential copies
 ```
 
-The active installation is selected by global `--home`, then `BEAMPIPE_HOME`, then `~/beampipe`. The current directory does not select an installation.
+The active installation is selected by global `--home`, then `BEAMPIPE_HOME`, then `~/beampipe`. The current directory does not select an installation. Setup never stores secrets in `installation.json`.
 
 ## 1. Docker: recommended
 
 Use this path for a workstation or a single-host service. It downloads the release binary and published container image; no repository clone or Rust toolchain is needed.
 
+### Guided setup
+
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, and creates the first administrator. No scientific project or provider integration is enabled implicitly.
+The wrapper checks local installer tools, selects the release for your platform, verifies its SHA-256 checksum, installs `beampipe`, and hands the terminal to the setup wizard. Choose Docker and managed PostgreSQL for the shortest path.
+
+The wizard walks through **Runtime → PostgreSQL → Network → optional Dash → Project and deployment → Review**. It confirms the install home at the beginning and the complete plan before configuration starts. Setup then creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, creates the first administrator, and starts the selected services. No scientific project, provider integration, or real execution backend is enabled implicitly.
+
+When setup finishes, open a new terminal or update this one, then verify it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+beampipe status
+beampipe doctor
+```
+
+If setup stops, the verified binary remains installed and the installer prints a safely quoted resume command. `beampipe setup` is idempotent; fix the reported issue and rerun that command.
 
 ### Fresh database and migration ownership
 
@@ -37,9 +60,11 @@ deployment step before starting API, scheduler, and workers unless the API role
 is explicitly designated as migration owner. Back up an existing database
 before upgrading across migrations.
 
-The installer writes `~/.local/bin/beampipe` and appends that directory to `~/.bashrc` and `~/.profile`. The current terminal still needs `export PATH="$HOME/.local/bin:$PATH"` (or a new terminal) before `beampipe` is found.
+The installer writes `~/.local/bin/beampipe` and appends that directory to the applicable login and interactive shell files. The current terminal still needs `export PATH="$HOME/.local/bin:$PATH"` (or a new terminal) before `beampipe` is found.
 
-Unattended equivalent:
+### Unattended setup
+
+Headless setup never guesses operator intent. A process without a terminal must pass both `--yes` and an explicit runtime; otherwise the installer exits before downloading anything and prints the exact Docker command. A complete managed-Docker invocation is:
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh \
@@ -47,9 +72,19 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
       --api-port 18080 --postgres-port 5432 --metrics-port 9090
 ```
 
-`--yes` skips the Next actions prompt and prints a neutral recipe: add a project config and deployment profile, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` in the install `.env` and restart. Pass `--use-real-backends` only after that profile doctor is known to pass.
+`--yes` answers setup questions from explicit flags or safe defaults. The CLI remains the single source of the resulting **SETUP COMPLETE → ACCESS → NEXT ACTIONS** handoff. Pass `--use-real-backends` only after `beampipe doctor --profile NAME` is known to pass.
 
-Supply any project during setup with `--project-config PATH`. The bundled WALLABY HiRes example is opt-in:
+For unattended administrator creation, omit a password to generate one or use a mode-`0600` file:
+
+```bash
+beampipe setup --yes --runtime docker --postgres compose \
+  --admin-user operator --admin-email operator@example.test \
+  --admin-password-file /run/secrets/beampipe-admin
+```
+
+Do not pass `--admin-password` in shell history, CI logs, or a copied installer command. When unattended setup generates the password, it writes it to `$BEAMPIPE_HOME/credentials/admin/password` with mode `0600` and does not print it to standard output.
+
+Supply any project during setup with `--project-config PATH`. Omitting it produces a project-neutral installation. The bundled WALLABY HiRes example is opt-in:
 
 ```bash
 beampipe setup --yes --runtime docker --postgres compose --sample wallaby-hires

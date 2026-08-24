@@ -30,7 +30,7 @@ hide:
 
 ## Fastest safe start
 
-Run the API, durable job system, and console locally. External execution stays mocked until you explicitly enable real backends. Discovery uses live TAP only after you register and trigger a source. Build the installer command, then follow the [quick start](getting-started/index.md).
+Run the API and durable job system locally. External execution stays mocked until you explicitly enable real backends. The guided path asks one question at a time; the unattended path emits the same neutral installation for automation. Choose a project only when you mean to install one.
 
 <section class="bp-install-builder" id="install-builder" data-bp-install-builder aria-labelledby="bp-install-title">
   <header class="bp-install-builder__chrome">
@@ -41,7 +41,21 @@ Run the API, durable job system, and console locally. External execution stays m
   <form class="bp-install-builder__form" action="#" method="get">
     <div class="bp-install-builder__body">
       <div class="bp-install-builder__section">
-        <p class="bp-install-builder__kicker">01 / runtime</p>
+        <p class="bp-install-builder__kicker">01 / experience</p>
+        <div class="bp-install-builder__chips" role="radiogroup" aria-label="Setup experience">
+          <label class="bp-install-builder__chip">
+            <input id="bp-install-guided" name="setup-mode" type="radio" value="guided" checked>
+            <span>Guided wizard</span>
+          </label>
+          <label class="bp-install-builder__chip">
+            <input id="bp-install-unattended" name="setup-mode" type="radio" value="unattended">
+            <span>Unattended</span>
+          </label>
+        </div>
+        <p class="bp-install-builder__note" id="bp-install-mode-note">Recommended for a first install. Prompts are read from your terminal even though the script arrives through a pipe.</p>
+      </div>
+      <div class="bp-install-builder__section">
+        <p class="bp-install-builder__kicker">02 / runtime</p>
         <div class="bp-install-builder__chips" role="radiogroup" aria-label="Runtime">
           <label class="bp-install-builder__chip">
             <input id="bp-install-runtime-docker" name="runtime" type="radio" value="docker" checked>
@@ -72,12 +86,30 @@ Run the API, durable job system, and console locally. External execution stays m
         </div>
       </div>
       <div class="bp-install-builder__section">
-        <p class="bp-install-builder__kicker">02 / flags</p>
-        <div class="bp-install-builder__checks">
+        <p class="bp-install-builder__kicker">03 / project</p>
+        <div class="bp-install-builder__checks" role="radiogroup" aria-label="Initial project">
           <label class="bp-install-builder__toggle">
-            <input id="bp-install-yes" name="yes" type="checkbox" checked>
-            <span>Non-interactive <code>--yes</code></span>
+            <input id="bp-install-project-none" name="project-mode" type="radio" value="none" checked>
+            <span>None <small>neutral Core</small></span>
           </label>
+          <label class="bp-install-builder__toggle">
+            <input id="bp-install-project-custom" name="project-mode" type="radio" value="custom">
+            <span>My project YAML</span>
+          </label>
+          <label class="bp-install-builder__toggle">
+            <input id="bp-install-project-wallaby" name="project-mode" type="radio" value="wallaby-hires">
+            <span>WALLABY HiRes sample</span>
+          </label>
+        </div>
+        <div class="bp-install-builder__field is-disabled" id="bp-install-project-config-field">
+          <label for="bp-install-project-config">Project config path</label>
+          <input id="bp-install-project-config" name="project-config" type="text" spellcheck="false" placeholder="/path/to/project.yaml" autocomplete="off" disabled>
+        </div>
+        <p class="bp-install-builder__note">Nothing project-specific is installed unless you select it here.</p>
+      </div>
+      <div class="bp-install-builder__section">
+        <p class="bp-install-builder__kicker">04 / options</p>
+        <div class="bp-install-builder__checks">
           <label class="bp-install-builder__toggle">
             <input id="bp-install-start" name="start" type="checkbox" checked>
             <span>Start Postgres and the stack</span>
@@ -87,9 +119,6 @@ Run the API, durable job system, and console locally. External execution stays m
             <span>Install Dash <small>Docker only</small></span>
           </label>
         </div>
-      </div>
-      <div class="bp-install-builder__section">
-        <p class="bp-install-builder__kicker">03 / admin</p>
         <div class="bp-install-builder__admin">
           <div class="bp-install-builder__field">
             <label for="bp-install-admin-user">Username</label>
@@ -100,21 +129,22 @@ Run the API, durable job system, and console locally. External execution stays m
             <input id="bp-install-admin-email" name="admin-email" type="email" spellcheck="false" placeholder="admin@example.test" autocomplete="email">
           </div>
           <div class="bp-install-builder__field">
-            <label for="bp-install-admin-password">Password</label>
-            <input id="bp-install-admin-password" name="admin-password" type="password" placeholder="generated if empty" autocomplete="new-password">
+            <label for="bp-install-admin-password-file">Password file</label>
+            <input id="bp-install-admin-password-file" name="admin-password-file" type="text" spellcheck="false" placeholder="generated if empty" autocomplete="off">
           </div>
         </div>
-        <p class="bp-install-builder__note">Empty password generates one at setup. A typed password is quoted into the command and will sit in shell history.</p>
+        <p class="bp-install-builder__note">Leave the password file empty to generate a password. Secrets are never placed in the generated command.</p>
       </div>
     </div>
   </form>
   <div class="bp-install-builder__output">
     <div class="bp-install-builder__prompt">
       <span class="bp-install-builder__ps" aria-hidden="true">$</span>
-      <pre><code id="bp-install-command" aria-live="polite">curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker</code></pre>
+      <pre><code id="bp-install-command" aria-live="polite">curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --runtime docker</code></pre>
       <button type="button" class="terminal-button bp-install-builder__copy" id="bp-install-copy">Copy</button>
     </div>
-    <p class="bp-install-builder__hint">API at <code id="bp-install-api-url">http://127.0.0.1:18080/api/v2</code>. Files in <code>~/beampipe</code> unless you set a directory. Dash stays opt-in.</p>
+    <p class="bp-install-builder__summary" id="bp-install-summary" aria-live="polite">Guided Docker setup · neutral Core · external execution mocked</p>
+    <p class="bp-install-builder__hint">After setup: <code>beampipe status</code>, then <code>beampipe doctor</code>. API at <code id="bp-install-api-url">http://127.0.0.1:18080/api/v2</code>. Files in <code id="bp-install-home">~/beampipe</code>.</p>
     <p class="bp-install-builder__status" id="bp-install-status" aria-live="polite"></p>
   </div>
   <noscript>
@@ -122,6 +152,18 @@ Run the API, durable job system, and console locally. External execution stays m
 curl -fsS http://127.0.0.1:18080/api/v2/health</code></pre>
   </noscript>
 </section>
+
+<div class="bp-setup-route" aria-label="Setup journey">
+  <div><span>01</span><strong>Install</strong><small>published SHA-256</small></div>
+  <i aria-hidden="true">--&gt;</i>
+  <div><span>02</span><strong>Verify</strong><small><code>status</code> + <code>doctor</code></small></div>
+  <i aria-hidden="true">--&gt;</i>
+  <div><span>03</span><strong>Configure</strong><small>project + profile</small></div>
+  <i aria-hidden="true">--&gt;</i>
+  <div><span>04</span><strong>Activate</strong><small>real backends explicitly</small></div>
+</div>
+
+The installer verifies the release checksum before writing the binary. It generates private local secrets, binds services to loopback by default, and leaves real DALiuGE or Slurm submission off. Continue with the [five-minute verification](getting-started/index.md).
 
 ## How work moves
 

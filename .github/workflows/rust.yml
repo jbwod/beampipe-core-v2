@@ -52,8 +52,10 @@ jobs:
       - name: Promtool alert rules
         run: bash scripts/promtool-test-alerts.sh
 
-      - name: Installer target mapping
-        run: sh deploy/install-target-test.sh
+      - name: Installer and command builder
+        run: |
+          sh deploy/install-target-test.sh
+          node deploy/install-builder-test.js
 
       - name: Checkout setup command
         run: sh deploy/setup-docker-test.sh

@@ -2221,6 +2221,7 @@ body:has(#redoc-frame) .md-main {
 .md-typeset .bp-install-builder__meta,
 .md-typeset .bp-install-builder__kicker,
 .md-typeset .bp-install-builder__note,
+.md-typeset .bp-install-builder__summary,
 .md-typeset .bp-install-builder__hint,
 .md-typeset .bp-install-builder__status {
   margin: 0;
@@ -2250,7 +2251,14 @@ body:has(#redoc-frame) .md-main {
   display: grid;
   gap: 1rem 1.25rem;
   padding: 1rem 0.95rem 1.05rem;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.bp-install-builder__section {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--bp-border-soft);
+  background: rgba(255, 255, 255, 0.012);
 }
 
 .md-typeset .bp-install-builder__kicker {
@@ -2336,7 +2344,6 @@ body:has(#redoc-frame) .md-main {
 .md-typeset .bp-install-builder__toggle:has(input:focus-visible),
 .md-typeset .bp-install-builder input[type="text"]:focus,
 .md-typeset .bp-install-builder input[type="email"]:focus,
-.md-typeset .bp-install-builder input[type="password"]:focus,
 .md-typeset .bp-install-builder input[type="number"]:focus {
   outline: 1px solid var(--bp-code-name);
   outline-offset: 2px;
@@ -2349,6 +2356,10 @@ body:has(#redoc-frame) .md-main {
 
 .bp-install-builder__field {
   margin-top: 0.7rem;
+}
+
+.bp-install-builder__field.is-disabled {
+  opacity: 0.48;
 }
 
 .bp-install-builder__admin {
@@ -2381,7 +2392,6 @@ body:has(#redoc-frame) .md-main {
 
 .md-typeset .bp-install-builder input[type="text"],
 .md-typeset .bp-install-builder input[type="email"],
-.md-typeset .bp-install-builder input[type="password"],
 .md-typeset .bp-install-builder input[type="number"] {
   width: 100%;
   margin: 0;
@@ -2398,6 +2408,7 @@ body:has(#redoc-frame) .md-main {
 }
 
 .md-typeset .bp-install-builder__note,
+.md-typeset .bp-install-builder__summary,
 .md-typeset .bp-install-builder__hint,
 .md-typeset .bp-install-builder__status {
   color: var(--bp-muted);
@@ -2407,6 +2418,12 @@ body:has(#redoc-frame) .md-main {
 
 .md-typeset .bp-install-builder__note {
   margin-top: 0.65rem;
+}
+
+.md-typeset .bp-install-builder__summary {
+  margin-top: 0.72rem;
+  color: var(--bp-code-string);
+  font-size: 0.72rem;
 }
 
 .md-typeset .bp-install-builder__status {
@@ -2454,6 +2471,11 @@ body:has(#redoc-frame) .md-main {
   line-height: 1.5;
 }
 
+.md-typeset .bp-install-builder .md-clipboard,
+.md-typeset .bp-install-builder .md-code__nav {
+  display: none;
+}
+
 .md-typeset .bp-install-builder .terminal-button,
 .md-typeset .bp-install-builder .terminal-button:nth-child(1),
 .md-typeset .bp-install-builder .terminal-button:nth-child(2) {
@@ -2469,8 +2491,57 @@ body:has(#redoc-frame) .md-main {
   background: var(--bp-code-name);
 }
 
+.md-typeset .bp-install-builder .terminal-button:disabled {
+  border-color: var(--bp-border-soft);
+  color: var(--bp-subtle);
+  background: #050505;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .md-typeset .bp-install-builder__hint {
-  margin-top: 0.7rem;
+  margin-top: 0.38rem;
+}
+
+.bp-setup-route {
+  display: grid;
+  align-items: stretch;
+  gap: 0.4rem;
+  margin: -0.45rem 0 1.4rem;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.bp-setup-route > div {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+  padding: 0.58rem 0.65rem;
+  border: 1px solid var(--bp-border-soft);
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.md-typeset .bp-setup-route span {
+  color: var(--bp-code-name);
+  font-size: 0.62rem;
+}
+
+.md-typeset .bp-setup-route strong {
+  color: var(--bp-text);
+  font-size: 0.74rem;
+  font-weight: 500;
+}
+
+.md-typeset .bp-setup-route small {
+  color: var(--bp-muted);
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
+.md-typeset .bp-setup-route i {
+  align-self: center;
+  color: var(--bp-code-key);
+  font-size: 0.68rem;
+  font-style: normal;
 }
 
 @media (max-width: 47em) {
@@ -2489,6 +2560,15 @@ body:has(#redoc-frame) .md-main {
 
   .bp-install-builder__prompt {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .bp-setup-route {
+    grid-template-columns: 1fr;
+  }
+
+  .md-typeset .bp-setup-route i {
+    justify-self: center;
+    transform: rotate(90deg);
   }
 
   .md-typeset .bp-install-builder .terminal-button {

@@ -127,17 +127,33 @@ beampipe project add -f config/examples/minimal_survey.v2.yaml
 
 ## `First-time setup`
 
+The recommended path is an interactive Docker wizard. It checks the host, verifies the downloaded release, and explains its choices before writing the operator bundle:
+
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-That installs `beampipe` to `~/.local/bin`, writes a project-neutral operator bundle to `~/beampipe`, and starts Postgres plus the stack. Interactive setup asks Docker (default) or host, then prompts for generic project and deployment-profile next steps. Non-interactive:
+```text
+[1/3] Check this machine
+[2/3] Download and install
+[3/3] Configure Beampipe
+```
+
+That installs `beampipe` to `~/.local/bin`, writes a project-neutral operator bundle to `~/beampipe`, and starts PostgreSQL plus the stack. It creates private random secrets and keeps external execution mocked. Verify the result from a new terminal:
+
+```bash
+beampipe status
+beampipe doctor
+curl -fsS http://127.0.0.1:18080/api/v2/health
+```
+
+Headless installation requires explicit unattended intent and runtime selection:
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker
 ```
 
-No project is installed implicitly. Supply your own config with `--project-config PATH`, or explicitly install the first-party WALLABY HiRes sample:
+No project is installed implicitly. Supply your own config with `--project-config PATH`, or explicitly install the first-party WALLABY HiRes sample. The [interactive installer builder](https://beampipe.jackblackwood.com/#install-builder) produces either command without placing a password in it:
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh \

@@ -22,7 +22,7 @@ Prefer the installer (no clone):
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-`beampipe setup` writes the selected installation (`--home`, then `BEAMPIPE_HOME`, then `~/beampipe`) and starts the configured runtime. Current working directory never selects an installation. `--yes` requires `--runtime docker` or `--runtime host`. `--no-start` writes files and prints a recipe only. Existing secrets and data are preserved on rerun. Host publish ports default to API `18080`, PostgreSQL `5432`, and metrics `9090`; override with `--api-port`, `--postgres-port`, and `--metrics-port`. Interactive setup then prompts generic Next actions for projects, deployment profiles, and `doctor --profile`. `--yes` prints that recipe. `--use-real-backends` writes `BEAMPIPE_USE_REAL_BACKENDS=true` during setup.
+`beampipe setup` writes the selected installation (`--home`, then `BEAMPIPE_HOME`, then `~/beampipe`) and starts the configured runtime. Current working directory never selects an installation. `--yes` requires `--runtime docker` or `--runtime host`; the release installer also refuses to infer unattended mode when no terminal exists. `--no-start` writes files and prints a recipe only. Existing secrets and data are preserved on rerun. Host publish ports default to API `18080`, PostgreSQL `5432`, and metrics `9090`; override with `--api-port`, `--postgres-port`, and `--metrics-port`. The CLI is the single source of the setup summary and generic next actions for projects, deployment profiles, and `doctor --profile`. `--use-real-backends` writes `BEAMPIPE_USE_REAL_BACKENDS=true` during setup.
 
 ```bash
 beampipe --home ~/beampipe setup --yes --runtime docker --postgres compose
@@ -35,6 +35,8 @@ beampipe --home ~/beampipe setup --no-start --yes --runtime host --postgres exis
 PostgreSQL is the managed Compose service or an existing URL. Both Docker and host runtimes support either selection. Fresh managed databases receive a random password.
 
 Setup can install a deployment profile with `--profile-config` and can assign/import a Slurm SSH slot. Dash remains Docker-only and opt-in (`--dashboard`); setup starts it after Core is up. `./deploy/setup-docker.sh` is the checkout developer path.
+
+Prefer the interactive password prompt, generated password, or `--admin-password-file`. An inline `--admin-password` can be visible in shell history and the process list and should not be used in copied commands or CI logs.
 
 `beampipe init --directory` writes the project-neutral pull-only Compose bundle and credential directories. `beampipe init --directory PATH --sample wallaby-hires` additionally writes the first-party WALLABY project, graphs, and profiles. `start` dispatches to the recorded Docker or host runtime; `serve` remains the low-level foreground API command.
 
