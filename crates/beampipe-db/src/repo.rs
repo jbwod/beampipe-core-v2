@@ -6,10 +6,11 @@ use crate::models::{
 };
 use beampipe_domain::{
     discovery::{
-        discovery_signature, existing_signature_from_records, group_metadata_by_group_key,
-        metadata_payload_by_group, metadata_storage_payload_by_group, no_records_payload,
-        no_records_signature, validate_prepared_metadata_records, DiscoveryBatchStats,
-        DiscoverySourceResult, SignatureOptions,
+        canonicalize_prepared_metadata_identities, discovery_signature,
+        existing_signature_from_records, group_metadata_by_group_key, metadata_payload_by_group,
+        metadata_storage_payload_by_group, no_records_payload, no_records_signature,
+        validate_prepared_metadata_records_for_source, DiscoveryBatchStats, DiscoverySourceResult,
+        SignatureOptions,
     },
     plan_execution_retry,
     readiness::{
@@ -1349,9 +1350,11 @@ async fn persist_changed_or_unchanged(
     discovery_flags: &Value,
     signature: &SignatureOptions,
 ) -> Result<PersistOutcome, sqlx::Error> {
-    validate_prepared_metadata_records(metadata)
+    let mut metadata = metadata.to_vec();
+    canonicalize_prepared_metadata_identities(&mut metadata)
+        .and_then(|()| validate_prepared_metadata_records_for_source(&metadata, source_identifier))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    let grouped = group_metadata_by_group_key(metadata);
+    let grouped = group_metadata_by_group_key(&metadata);
     let signature_payload =
         metadata_payload_by_group(&grouped, Some(discovery_flags), Some(signature));
     let storage_payload = metadata_storage_payload_by_group(&grouped, Some(discovery_flags));

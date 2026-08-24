@@ -40,6 +40,7 @@ async fn discovery_signature_unchanged_skips_pending() {
         .unwrap();
 
     let metadata = vec![json!({
+        "source_identifier": source.as_str(),
         "group_key": "group-123",
         "record_id": "record-1",
         "filename": "record-1.bin",
@@ -134,6 +135,45 @@ async fn discovery_signature_unchanged_skips_pending() {
 }
 
 #[tokio::test]
+async fn persistence_rejects_an_embedded_source_identifier_mismatch() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let module = format!("source_mismatch_{}", &suffix[..16]);
+    let source = "101".to_string();
+    repo::upsert_source(&pool, &module, &source, true)
+        .await
+        .unwrap();
+    let claim = claim_source(&pool, &module, &source).await;
+
+    let error = repo::persist_discovery_results(
+        &pool,
+        &module,
+        &claim,
+        &[DiscoverySourceResult::HasMetadata {
+            source_identifier: source.clone(),
+            metadata: vec![json!({
+                "source_identifier": 102,
+                "group_key": 3001,
+                "record_id": 2001,
+            })],
+            discovery_flags: json!({}),
+            duration_ms: None,
+        }],
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("record[0] source_identifier '102' does not match claimed source '101'"));
+    teardown_test_module(&pool, &module).await;
+}
+
+#[tokio::test]
 async fn excluded_staging_urls_are_stored_and_refreshed_without_changing_signature() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
@@ -154,6 +194,7 @@ async fn excluded_staging_urls_are_stored_and_refreshed_without_changing_signatu
     };
     let metadata = |suffix: &str| {
         vec![json!({
+            "source_identifier": source.as_str(),
             "group_key": "group-1",
             "record_id": "record-1",
             "filename": "record-1.bin",

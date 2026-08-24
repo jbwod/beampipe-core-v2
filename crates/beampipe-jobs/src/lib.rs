@@ -21,7 +21,10 @@ use beampipe_domain::run_record::{
 };
 use beampipe_domain::{
     can_admit_by_in_flight,
-    discovery::{should_skip_tap, DiscoverySourceResult, SignatureOptions},
+    discovery::{
+        canonicalize_prepared_metadata_identities, should_skip_tap,
+        validate_prepared_metadata_records_for_source, DiscoverySourceResult, SignatureOptions,
+    },
     discovery_admission_budget, execute_admission_budget, is_non_retryable_job_error, ControlPhase,
     DaliugeState, ExecutionPhase, ExecutionStatus, FailureClass, LedgerPatch, OutputState,
     SchedulerState, SchedulerTickResult, SkipReason, SubmissionState, TerminalOutcome,
@@ -1059,13 +1062,24 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
         }
         match self.discover_from_config(config, source_identifier).await {
             Ok(Some((metadata, discovery_flags))) => {
-                let metadata = if let Some(pool) = &self.pool {
+                let mut metadata = if let Some(pool) = &self.pool {
                     apply_wasm_prepare_metadata(pool, config, &json!({}), &metadata)
                         .await
                         .unwrap_or(metadata)
                 } else {
                     metadata
                 };
+                let identity_validation = canonicalize_prepared_metadata_identities(&mut metadata)
+                    .and_then(|()| {
+                        validate_prepared_metadata_records_for_source(&metadata, source_identifier)
+                    });
+                if let Err(error) = identity_validation {
+                    return DiscoverySourceResult::Error {
+                        source_identifier: source_identifier.to_string(),
+                        error: format!("invalid prepared metadata: {error}"),
+                        duration_ms: Some(started.elapsed().as_millis() as i64),
+                    };
+                }
                 DiscoverySourceResult::HasMetadata {
                     source_identifier: source_identifier.to_string(),
                     metadata,
@@ -6769,7 +6783,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutral_project_runs_offline_end_to_end() {
+    async fn discovery_rejects_metadata_for_a_different_claimed_source() {
+        let mut config = ProjectConfig::from_slice(include_bytes!(
+            "../../../config/examples/minimal_survey.v2.yaml"
+        ))
+        .unwrap();
+        config
+            .discovery
+            .prepare_metadata
+            .as_mut()
+            .expect("neutral metadata mapping")
+            .field_map
+            .get_mut("source_identifier")
+            .expect("neutral source identity mapping")
+            .from = "tap_source_id".into();
+        let clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::from([(
+            "catalog".into(),
+            Arc::new(MockTapClient::with_rows(
+                "project_records",
+                vec![json!({
+                    "tap_source_id": 102,
+                    "object_id": 2001,
+                    "collection_id": 3001,
+                    "access_url": "https://data.example.invalid/2001"
+                })],
+            )) as Arc<dyn TapClient>,
+        )]);
+
+        let result = ConfigDiscoveryRunner::with_clients(clients)
+            .discover_source(Some(&config), "minimal_survey", "101")
+            .await;
+
+        let DiscoverySourceResult::Error {
+            source_identifier,
+            error,
+            ..
+        } = result
+        else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(source_identifier, "101");
+        assert!(
+            error.contains("record[0] source_identifier '102' does not match claimed source '101'")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutral_project_numeric_tap_identities_run_offline_end_to_end() {
         let Some(pool) = test_pool().await else {
             assert!(
                 std::env::var_os("CI").is_none(),
@@ -6786,9 +6846,24 @@ mod tests {
 
         let suffix = Uuid::now_v7().simple().to_string();
         let module = format!("neutral_e2e_{}", &suffix[..16]);
-        let source_identifier = "source-1";
+        let source_identifier = "101";
         let mut project = ProjectConfig::from_slice(fixture.as_bytes()).unwrap();
         project.metadata.id.clone_from(&module);
+        project.discovery.queries[0].template = r#"
+            SELECT tap_source_id, object_id, collection_id, access_url
+            FROM project_records
+            WHERE source_id = '{source_identifier}'
+        "#
+        .into();
+        project
+            .discovery
+            .prepare_metadata
+            .as_mut()
+            .expect("neutral metadata mapping")
+            .field_map
+            .get_mut("source_identifier")
+            .expect("neutral source identity mapping")
+            .from = "tap_source_id".into();
         project.graph.as_mut().expect("neutral graph").path = Some(format!(
             "{}/../../config/examples/neutral_demo.graph",
             env!("CARGO_MANIFEST_DIR")
@@ -6818,9 +6893,10 @@ mod tests {
             Arc::new(MockTapClient::with_rows(
                 "project_records",
                 vec![json!({
-                    "object_id": "record-1",
-                    "collection_id": "group-1",
-                    "access_url": "https://data.example.invalid/record-1"
+                    "tap_source_id": 101,
+                    "object_id": 2001,
+                    "collection_id": 3001,
+                    "access_url": "https://data.example.invalid/2001"
                 })],
             )) as Arc<dyn TapClient>,
         )]);
@@ -6845,10 +6921,14 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(metadata.len(), 1);
-        assert_eq!(metadata[0].group_key, "group-1");
+        assert_eq!(metadata[0].group_key, "3001");
+        assert_eq!(
+            metadata[0].metadata_json.as_ref().unwrap()["records"][0]["source_identifier"],
+            "101"
+        );
         assert_eq!(
             metadata[0].metadata_json.as_ref().unwrap()["records"][0]["record_id"],
-            "record-1"
+            "2001"
         );
 
         let (ready, skipped) = repo::partition_sources_ready_for_execution(
@@ -6865,13 +6945,18 @@ mod tests {
             .unwrap();
         assert_eq!(
             preview.manifest["sources"][0]["groups"][0]["group_key"],
-            "group-1"
+            "3001"
+        );
+        assert_eq!(preview.manifest["sources"][0]["source_identifier"], "101");
+        assert_eq!(
+            preview.manifest["sources"][0]["groups"][0]["records"][0]["record_id"],
+            "2001"
         );
 
         let execution = repo::create_execution(
             &pool,
             &module,
-            json!([{"source_identifier": source_identifier, "groups": ["group-1"]}]),
+            json!([{"source_identifier": source_identifier, "groups": ["3001"]}]),
             "catalog",
             None,
             Some(config_row.uuid),
@@ -6903,7 +6988,7 @@ mod tests {
         assert_eq!(submitted.scheduler_name.as_deref(), Some("daliuge"));
         assert_eq!(
             submitted.workflow_manifest.as_ref().unwrap()["_beampipe"]["selection"][0]["group_key"],
-            "group-1"
+            "3001"
         );
         let artifacts = repo::list_execution_artifacts(&pool, execution.uuid)
             .await
@@ -6944,7 +7029,7 @@ mod tests {
             ExecutionArtifactInput {
                 kind: "output_inventory".into(),
                 storage_kind: "remote".into(),
-                uri: Some("file:///durable/neutral/source-1".into()),
+                uri: Some("file:///durable/neutral/101".into()),
                 inline_json: Some(json!({
                     "schema": "beampipe-output-inventory/v1",
                     "products": [{
@@ -6976,7 +7061,7 @@ mod tests {
         assert_eq!(
             completed.workflow_manifest.as_ref().unwrap()["sources"][0]["groups"][0]["records"][0]
                 ["record_id"],
-            "record-1"
+            "2001"
         );
         let source = repo::get_source_by_identifier(&pool, &module, source_identifier)
             .await

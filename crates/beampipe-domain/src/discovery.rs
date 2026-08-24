@@ -96,10 +96,57 @@ pub struct DiscoveryBatchStats {
 pub enum PreparedMetadataError {
     #[error("record[{index}] must be a JSON object")]
     NotObject { index: usize },
+    #[error("record[{index}] requires a non-empty 'source_identifier'")]
+    MissingSourceIdentifier { index: usize },
     #[error("record[{index}] requires a non-empty 'group_key'")]
     MissingGroupKey { index: usize },
     #[error("record[{index}] requires a non-empty 'record_id'")]
     MissingRecordIdentity { index: usize },
+    #[error("record[{index}] identity field '{field}' must be a JSON string, number, or boolean")]
+    UnsupportedIdentityType { index: usize, field: &'static str },
+    #[error("record[{index}] identity field '{field}' must be a canonical non-empty string")]
+    NonCanonicalIdentity { index: usize, field: &'static str },
+    #[error(
+        "record[{index}] source_identifier '{actual}' does not match claimed source '{expected}'"
+    )]
+    SourceIdentifierMismatch {
+        index: usize,
+        expected: String,
+        actual: String,
+    },
+}
+
+const PREPARED_IDENTITY_FIELDS: [&str; 3] = ["source_identifier", "group_key", "record_id"];
+
+/// Normalize prepared discovery identities before they cross the persistence boundary.
+///
+/// TAP services commonly encode numeric identifiers as JSON numbers. Beampipe's
+/// execution scope is string-based, so normalize every supported scalar once and
+/// reject values that cannot be stable identity keys.
+pub fn canonicalize_prepared_metadata_identities(
+    metadata: &mut [Value],
+) -> Result<(), PreparedMetadataError> {
+    for (index, record) in metadata.iter_mut().enumerate() {
+        let Some(object) = record.as_object_mut() else {
+            return Err(PreparedMetadataError::NotObject { index });
+        };
+        for field in PREPARED_IDENTITY_FIELDS {
+            let canonical = match object.get(field) {
+                Some(Value::String(value)) => value.trim().to_string(),
+                Some(Value::Number(value)) => value.to_string(),
+                Some(Value::Bool(value)) => value.to_string(),
+                Some(_) => {
+                    return Err(PreparedMetadataError::UnsupportedIdentityType { index, field });
+                }
+                None => return Err(missing_identity_error(index, field)),
+            };
+            if canonical.is_empty() {
+                return Err(missing_identity_error(index, field));
+            }
+            object.insert(field.to_string(), Value::String(canonical));
+        }
+    }
+    Ok(())
 }
 
 pub fn group_metadata_by_group_key(metadata: &[Value]) -> BTreeMap<String, Vec<Value>> {
@@ -110,13 +157,13 @@ pub fn group_metadata_by_group_key(metadata: &[Value]) -> BTreeMap<String, Vec<V
         };
         let Some(group_key) = obj
             .get("group_key")
-            .map(value_key)
-            .filter(|value| !value.trim().is_empty())
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && *value == value.trim())
         else {
             continue;
         };
         grouped
-            .entry(group_key)
+            .entry(group_key.to_string())
             .or_default()
             .push(Value::Object(obj.clone()));
     }
@@ -128,22 +175,52 @@ pub fn validate_prepared_metadata_records(metadata: &[Value]) -> Result<(), Prep
         let Some(obj) = rec.as_object() else {
             return Err(PreparedMetadataError::NotObject { index });
         };
-        if obj
-            .get("group_key")
-            .map(value_key)
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err(PreparedMetadataError::MissingGroupKey { index });
-        }
-        let has_identity = obj
-            .get("record_id")
-            .map(value_key)
-            .is_some_and(|value| !value.trim().is_empty());
-        if !has_identity {
-            return Err(PreparedMetadataError::MissingRecordIdentity { index });
+        for field in PREPARED_IDENTITY_FIELDS {
+            match obj.get(field) {
+                Some(Value::String(value)) if !value.is_empty() && value == value.trim() => {}
+                Some(Value::String(value)) if value.trim().is_empty() => {
+                    return Err(missing_identity_error(index, field));
+                }
+                None => return Err(missing_identity_error(index, field)),
+                Some(_) => {
+                    return Err(PreparedMetadataError::NonCanonicalIdentity { index, field });
+                }
+            }
         }
     }
     Ok(())
+}
+
+pub fn validate_prepared_metadata_records_for_source(
+    metadata: &[Value],
+    expected_source_identifier: &str,
+) -> Result<(), PreparedMetadataError> {
+    validate_prepared_metadata_records(metadata)?;
+    for (index, record) in metadata.iter().enumerate() {
+        let Some(actual) = record.get("source_identifier").and_then(Value::as_str) else {
+            return Err(PreparedMetadataError::NonCanonicalIdentity {
+                index,
+                field: "source_identifier",
+            });
+        };
+        if actual != expected_source_identifier {
+            return Err(PreparedMetadataError::SourceIdentifierMismatch {
+                index,
+                expected: expected_source_identifier.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn missing_identity_error(index: usize, field: &'static str) -> PreparedMetadataError {
+    match field {
+        "source_identifier" => PreparedMetadataError::MissingSourceIdentifier { index },
+        "group_key" => PreparedMetadataError::MissingGroupKey { index },
+        "record_id" => PreparedMetadataError::MissingRecordIdentity { index },
+        _ => unreachable!("unexpected prepared identity field"),
+    }
 }
 
 pub fn metadata_payload_by_group(
@@ -264,15 +341,11 @@ fn strip_excluded_fields(value: &mut Value, exclude: &HashSet<&str>) {
     }
 }
 
-fn value_key(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
 fn record_sort_key(value: &Value) -> String {
-    let record_id = value.get("record_id").map(value_key).unwrap_or_default();
+    let record_id = value
+        .get("record_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     format!("{record_id}\u{1f}{}", stable_json(value))
 }
 
@@ -337,13 +410,101 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn grouping_skips_missing_group_key() {
+    fn grouping_requires_canonical_string_group_key() {
         let grouped = group_metadata_by_group_key(&[
             json!({"group_key": 1, "record_id": "a"}),
+            json!({"group_key": "1", "record_id": "b"}),
             json!({"record_id": "b"}),
         ]);
         assert_eq!(grouped.len(), 1);
         assert!(grouped.contains_key("1"));
+        assert_eq!(grouped["1"].len(), 1);
+    }
+
+    #[test]
+    fn prepared_identity_scalars_are_canonicalized_to_strings() {
+        let mut metadata = vec![json!({
+            "source_identifier": " 101 ",
+            "group_key": 3001,
+            "record_id": true,
+        })];
+
+        canonicalize_prepared_metadata_identities(&mut metadata).unwrap();
+
+        assert_eq!(metadata[0]["source_identifier"], "101");
+        assert_eq!(metadata[0]["group_key"], "3001");
+        assert_eq!(metadata[0]["record_id"], "true");
+        validate_prepared_metadata_records(&metadata).unwrap();
+    }
+
+    #[test]
+    fn prepared_identity_rejects_non_scalar_values() {
+        for invalid in [Value::Null, json!(["nested"]), json!({"nested": true})] {
+            let mut metadata = vec![json!({
+                "source_identifier": "101",
+                "group_key": invalid,
+                "record_id": "record-1",
+            })];
+
+            let err = canonicalize_prepared_metadata_identities(&mut metadata).unwrap_err();
+            assert_eq!(
+                err,
+                PreparedMetadataError::UnsupportedIdentityType {
+                    index: 0,
+                    field: "group_key",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn validation_requires_canonical_identity_strings() {
+        let err = validate_prepared_metadata_records(&[json!({
+            "source_identifier": "101",
+            "group_key": 3001,
+            "record_id": "record-1",
+        })])
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PreparedMetadataError::NonCanonicalIdentity {
+                index: 0,
+                field: "group_key",
+            }
+        );
+
+        let err = validate_prepared_metadata_records(&[json!({
+            "source_identifier": "101",
+            "group_key": " 3001 ",
+            "record_id": "record-1",
+        })])
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PreparedMetadataError::NonCanonicalIdentity {
+                index: 0,
+                field: "group_key",
+            }
+        );
+    }
+
+    #[test]
+    fn validation_rejects_record_for_a_different_claimed_source() {
+        let metadata = [json!({
+            "source_identifier": "102",
+            "group_key": "3001",
+            "record_id": "2001",
+        })];
+
+        let err = validate_prepared_metadata_records_for_source(&metadata, "101").unwrap_err();
+        assert_eq!(
+            err,
+            PreparedMetadataError::SourceIdentifierMismatch {
+                index: 0,
+                expected: "101".into(),
+                actual: "102".into(),
+            }
+        );
     }
 
     #[test]
@@ -455,16 +616,37 @@ mod tests {
 
     #[test]
     fn validate_rejects_missing_group_key() {
-        let err = validate_prepared_metadata_records(&[json!({"record_id": "a"})]).unwrap_err();
+        let err = validate_prepared_metadata_records(&[json!({
+            "source_identifier": "source-1",
+            "record_id": "a"
+        })])
+        .unwrap_err();
         assert_eq!(err, PreparedMetadataError::MissingGroupKey { index: 0 });
     }
 
     #[test]
     fn validate_rejects_missing_identity() {
-        let err = validate_prepared_metadata_records(&[json!({"group_key": "1"})]).unwrap_err();
+        let err = validate_prepared_metadata_records(&[json!({
+            "source_identifier": "source-1",
+            "group_key": "1"
+        })])
+        .unwrap_err();
         assert_eq!(
             err,
             PreparedMetadataError::MissingRecordIdentity { index: 0 }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_missing_source_identifier() {
+        let err = validate_prepared_metadata_records(&[json!({
+            "group_key": "1",
+            "record_id": "a"
+        })])
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PreparedMetadataError::MissingSourceIdentifier { index: 0 }
         );
     }
 
