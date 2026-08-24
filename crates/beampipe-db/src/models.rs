@@ -76,6 +76,8 @@ pub struct ExecutionRow {
     pub execution_phase: Option<String>,
     pub control_phase: Option<String>,
     pub submission_state: Option<String>,
+    pub submission_deadline_at: Option<DateTime<Utc>>,
+    pub submission_abandoned_at: Option<DateTime<Utc>>,
     pub scheduler_name: Option<String>,
     pub scheduler_job_id: Option<String>,
     pub scheduler_state: Option<String>,
@@ -87,6 +89,8 @@ pub struct ExecutionRow {
     pub daliuge_raw_status: Option<Value>,
     pub output_state: Option<String>,
     pub output_verification_required: bool,
+    #[serde(default = "default_output_verification_policy")]
+    pub output_verification_policy: Value,
     pub remote_session_dir: Option<String>,
     pub terminal_outcome: Option<String>,
     pub failure_class: Option<String>,
@@ -94,12 +98,21 @@ pub struct ExecutionRow {
     pub last_reconciled_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     pub created_by_id: Option<i32>,
+    pub create_idempotency_key: Option<String>,
+    pub create_request_sha256: Option<String>,
     pub status: String,
     pub retry_count: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+fn default_output_verification_policy() -> Value {
+    serde_json::json!({
+        "required": false,
+        "inventory_schema": "wallaby-hires-output-inventory/v1",
+    })
 }
 
 impl ExecutionRow {
@@ -175,6 +188,8 @@ pub struct ExecutionStatePatch {
     pub terminal_outcome: Option<TerminalOutcome>,
     pub failure_class: Option<FailureClass>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub clear_failure_context: bool,
     pub last_reconciled_at: Option<DateTime<Utc>>,
 }
 

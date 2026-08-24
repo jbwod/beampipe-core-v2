@@ -3,7 +3,7 @@ docs_dir: boilerplate_docs
 site_name: beampipe operator docs
 site_description: Operate and extend Beampipe, the Rust control plane for archive-driven radio astronomy workflows.
 site_author: Jack Blackwood
-site_url: https://beampipe-core.readthedocs.io/
+site_url: https://beampipe.jackblackwood.com/
 
 theme:
   name: material
@@ -38,26 +38,25 @@ nav:
   - Start:
       - Quick start: getting-started/index.md
       - Install and configure: getting-started/installation.md
-      - Deployment topologies: getting-started/deployment.md
-      - Dashboard tour: getting-started/dashboard.md
+      - Dashboard setup and tour: getting-started/dashboard.md
       - First workflow: getting-started/first-run.md
-      - REST demonstration playbook: getting-started/rest-no-downloads-demo.md
+      - Local DALiuGE end to end: getting-started/local-daliuge.md
   - Operate:
       - Operator handbook: operations/index.md
+      - Dashboard workflow: operations/dashboard-workflow.md
+      - Setonix qualification: operations/setonix-qualification.md
       - Workers and scheduling: operations/workers-scheduling.md
       - Observability: operations/observability.md
       - Recovery and cancellation: operations/recovery.md
-      - Production runbook: operations/production-runbook.md
-      - Qualification run: operations/end-to-end-demo.md
   - Configure projects:
       - Project YAML: project-configs/index.md
       - Transforms: project-configs/transforms.md
       - Graph preparation: project-configs/graph-patches.md
+      - Output verification: project-configs/output-verification.md
       - Deployment profiles and SSH: architecture/deployment-profiles.md
-  - Understand:
-      - Architecture: architecture/index.md
-      - Installation setup audit: architecture/installation-setup-audit.md
-      - Execution state model: architecture/state-machine.md
+  - Architecture:
+      - Dashboard boundary: architecture/dashboard.md
+      - Dashboard deployment: architecture/dashboard-deployment.md
   - Reference:
       - CLI commands: reference/cli.md
       - API workflow: api/index.md

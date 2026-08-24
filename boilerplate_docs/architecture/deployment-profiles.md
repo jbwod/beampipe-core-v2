@@ -47,7 +47,7 @@ Place operator-owned copies in a private directory if you do not want to edit th
 
 ```json
 {
-  "name": "setonix",
+  "name": "slurm-hpc",
   "description": "WALLABY qualification profile",
   "project_module": "wallaby_hires",
   "is_default": true,
@@ -78,10 +78,20 @@ Place operator-owned copies in a private directory if you do not want to edit th
 }
 ```
 
+- `translation.tm_url` is the Translator Manager address visible from a
+  Beampipe worker.
 - `dim_host_for_tm` is the DIM address visible from Translator Manager.
-- `deploy_host` is the address visible from Beampipe workers.
+- `deploy_host` is the DIM address visible from Beampipe workers.
 - Keep TLS verification enabled. Use trusted CA configuration instead of disabling it.
 - Validate the graph application/runtime package versions, not only endpoint health.
+
+These are three network viewpoints, not aliases for one host. For example, the
+qualified local topology used `http://dlg-tm.desk` from Core to TM,
+`dlg-dim:8001` from TM to DIM, and `dlg-dim.desk:80` from Core to DIM through
+Traefik. Direct Docker service names are also valid when all callers share the
+network. Never substitute `127.0.0.1` without checking which process makes the
+connection; container loopback points back to that container. See the complete
+[local DALiuGE qualification](../getting-started/local-daliuge.md#proven-topology).
 
 ```bash
 beampipe doctor --profile local-daliuge
@@ -96,18 +106,19 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
 ```json
 {
   "kind": "slurm_remote",
-  "login_node": "login.hpc.example",
+  "login_node": "login.example.org",
   "ssh_port": 22,
   "remote_user": "operator",
-  "ssh_credential": "setonix",
+  "ssh_credential": "hpc",
   "account": "project_account",
   "home_dir": "/scratch/project_account",
   "log_dir": "/scratch/project_account/operator/dlg/log",
   "dlg_root": "/scratch/project_account/operator/dlg",
   "modules": "module load singularity",
   "venv": "source /software/project/venv/bin/activate",
+  "environment_setup": "export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"",
   "exec_prefix": "srun -l",
-  "facility": "setonix",
+  "facility": "hpc",
   "resources": {
     "partition": "work",
     "nodes": 1,
@@ -126,14 +137,25 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
 
 `beampipe profile render PROFILE_NAME` shows effective `#SBATCH` directives and DALiuGE settings before submission.
 
+`environment_setup` runs on the remote login node before DALiuGE creates the
+job script and again in the same remote shell that invokes `sbatch`. Named
+runtime inputs are explicitly propagated into the allocation. Beampipe always
+derives `BEAMPIPE_SLURM_ACCOUNT` from the profile's `deployment.account`, so
+outer and nested allocations cannot drift. Set `BEAMPIPE_ASKAPSOFT_SIF` in the
+installation `.env` when the setup references it; submission fails before
+`sbatch` when it is empty. The bundled WALLABY graph uses these values for its
+nested Slurm jobs and immutable ASKAPsoft image. The bundled Slurm profile is
+deliberately not a default: edit and qualify its account, paths, credentials,
+and SIF before selecting it.
+
 ## Preferred SSH key model
 
-Profiles store only a non-secret slot name. Every installation has one deterministic credential root:
+Profiles store only a non-secret slot name. The slot is a directory under the credential root, not a hostname. Every installation has one deterministic credential root:
 
 ```text
 $BEAMPIPE_HOME/credentials/ssh/
 |-- known_hosts
-`-- setonix/
+`-- hpc/
     |-- private_key
     |-- private_key.pub
     |-- passphrase
@@ -142,14 +164,37 @@ $BEAMPIPE_HOME/credentials/ssh/
 
 The host runtime reads this tree directly. The release Compose bundle mounts the same absolute host path read-only at `/run/beampipe/ssh` in API, scheduler, and worker services. Keys are never copied into images or containers.
 
-### Import and bind an existing key
+`GET /api/v2/slurm/credentials` (and Dash's profile picker) lists slot names and whether `private_key`, `private_key.pub`, `passphrase`, and `known_hosts` files are present. The responses never include key material. Init, import, and `copy-id` remain CLI.
 
-The source key is not modified. Prefer a facility-verified `known_hosts` file.
+Beampipe does not use `ssh-agent`. Workers unlock `private_key` plus an optional `passphrase` file. Choose **one** path: generate a Beampipe-owned key, or import a key you already have. Do not run `ssh-keygen` and `init` for the same slot.
+
+### Generate a Beampipe-owned key
+
+`init` creates the Ed25519 key. You still must install `private_key.pub` on the login node before SSH will work. `--copy-id` (or the later `copy-id` command) is that install step when password SSH still works; otherwise use the site's key-registration process.
+
+```bash
+beampipe slurm credentials init \
+  --slot hpc \
+  --host login.example.org \
+  --user alice \
+  --port 22 \
+  --acl
+beampipe slurm credentials copy-id \
+  --slot hpc \
+  --user alice \
+  --host login.example.org
+```
+
+Generation occurs inside Beampipe, so the passphrase is not exposed in an `ssh-keygen` process argument. Interactive `init` can prompt to run `ssh-copy-id`; `--yes` does not prompt.
+
+### Import an existing key
+
+Use this when the key already exists (including a key created with `ssh-keygen`). The source key is not modified. Skip uploading the public key if the cluster already has it in `~/.ssh/authorized_keys`. Prefer a facility-verified `known_hosts` file.
 
 ```bash
 beampipe profile add \
   -f "$HOME/beampipe/config/deployment_profile.slurm-remote.json" \
-  --ssh-slot setonix \
+  --ssh-slot hpc \
   --ssh-private-key "$HOME/.ssh/id_ed25519" \
   --ssh-known-hosts "$HOME/.ssh/known_hosts" \
   --ssh-acl
@@ -159,27 +204,30 @@ Or manage the slot separately:
 
 ```bash
 beampipe slurm credentials import \
-  --slot setonix \
+  --slot hpc \
   --private-key "$HOME/.ssh/id_ed25519" \
   --known-hosts "$HOME/.ssh/known_hosts" \
   --acl
-beampipe slurm credentials sync --slot setonix
-beampipe slurm credentials check --slot setonix --profile slurm-remote
+beampipe slurm credentials sync --slot hpc
+beampipe slurm credentials check --slot hpc --profile slurm-remote
 ```
 
 For an encrypted key, pass `--passphrase-file` pointing to a protected file. Secret text is never accepted as a CLI argument.
 
-### Generate a dedicated key
+### Installing the public key
+
+`ssh-copy-id` and a manual append both keep existing `authorized_keys` entries when you use `>>`. Some sites require a portal or helpdesk process instead.
 
 ```bash
-beampipe slurm credentials init \
-  --slot setonix \
-  --host login.hpc.example \
-  --port 22 \
-  --acl
+# password SSH still works
+beampipe slurm credentials copy-id --slot hpc --user alice --host login.example.org
+
+# or append manually (use >> so existing keys are kept)
+cat "$BEAMPIPE_HOME/credentials/ssh/hpc/private_key.pub" \
+  | ssh alice@login.example.org "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
 ```
 
-Generation occurs inside Beampipe, so the passphrase is not exposed in an `ssh-keygen` process argument. The wizard can optionally run `ssh-copy-id`; production sites may require their normal account/key registration process instead.
+Pawsey-style login nodes follow the same `authorized_keys` pattern. See [Use of SSH Keys for Authentication](https://pawsey.atlassian.net/wiki/spaces/US/pages/51925870/Use+of+SSH+Keys+for+Authentication). That guide also covers `ssh-agent` for interactive laptop SSH; Beampipe workers do not use the agent.
 
 ### Permissions by runtime
 
@@ -215,9 +263,9 @@ export BEAMPIPE_ALLOW_INLINE_SECRETS=false
 export BEAMPIPE_ALLOW_INSECURE_SSH_HOST_KEYS=false
 
 beampipe security check
-beampipe doctor --profile setonix
-beampipe slurm ping --profile setonix
-beampipe scheduler status --profile setonix
+beampipe doctor --profile PROFILE_NAME
+beampipe slurm ping --profile PROFILE_NAME
+beampipe scheduler status --profile PROFILE_NAME
 ```
 
 Inline PEM, home-directory fallback, and disabled host-key checks are development or break-glass features. Do not make them normal deployment configuration.
@@ -226,4 +274,10 @@ Inline PEM, home-directory fallback, and disabled host-key checks are developmen
 
 Before raising concurrency, qualify one run and then a paced batch. Watch login-node SSH/SFTP pressure, remote filesystem growth, TM availability, profile caps, and poll duration. Polling is batched by target through pooled SSH sessions, but submission still stages files per execution.
 
-The strongest unresolved risk from local testing is graph/runtime package compatibility. Pin DALiuGE and project application versions in the Slurm runtime and record them with each qualification result.
+The local REST path has qualified the pinned WALLABY graph and application
+package against the local DALiuGE runtime. That does not qualify Setonix or any
+other Slurm facility. The bundled Slurm profile has passed schema, rendering,
+and command tests only; a live qualification still requires the real account,
+SSH slot, paths, runtime modules, and `BEAMPIPE_ASKAPSOFT_SIF`. Pin DALiuGE and
+project application versions in that runtime and record them with every
+facility qualification.

@@ -7,6 +7,10 @@ hide:
 
 <p class="bp-hero-kicker">[ RUST V2 / DURABLE CONTROL PLANE ]</p>
 
+<p class="bp-hero-logo">
+<img alt="Beampipe" src="assets/brand/beampipe-terminal-logo.svg" width="920">
+</p>
+
 # beampipe
 
 <p class="bp-tagline">Discover archive data, prepare reproducible DALiuGE graphs, and operate REST or Slurm execution from one PostgreSQL-backed control plane.</p>
@@ -52,6 +56,20 @@ Run the API, durable job system, and console locally. External execution stays m
           <label for="bp-install-directory">Directory</label>
           <input id="bp-install-directory" name="directory" type="text" spellcheck="false" placeholder="~/beampipe" autocomplete="off">
         </div>
+        <div class="bp-install-builder__ports">
+          <div class="bp-install-builder__field">
+            <label for="bp-install-api-port">API port</label>
+            <input id="bp-install-api-port" name="api-port" type="number" min="1" max="65535" placeholder="18080" inputmode="numeric">
+          </div>
+          <div class="bp-install-builder__field">
+            <label for="bp-install-postgres-port">PostgreSQL</label>
+            <input id="bp-install-postgres-port" name="postgres-port" type="number" min="1" max="65535" placeholder="5432" inputmode="numeric">
+          </div>
+          <div class="bp-install-builder__field">
+            <label for="bp-install-metrics-port">Metrics</label>
+            <input id="bp-install-metrics-port" name="metrics-port" type="number" min="1" max="65535" placeholder="9090" inputmode="numeric">
+          </div>
+        </div>
       </div>
       <div class="bp-install-builder__section">
         <p class="bp-install-builder__kicker">02 / flags</p>
@@ -66,7 +84,7 @@ Run the API, durable job system, and console locally. External execution stays m
           </label>
           <label class="bp-install-builder__toggle" id="bp-install-dashboard-label">
             <input id="bp-install-dashboard" name="dashboard" type="checkbox">
-            <span>Prepare Dash <small>Docker only</small></span>
+            <span>Install Dash <small>Docker only</small></span>
           </label>
         </div>
       </div>
@@ -96,12 +114,12 @@ Run the API, durable job system, and console locally. External execution stays m
       <pre><code id="bp-install-command" aria-live="polite">curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker</code></pre>
       <button type="button" class="terminal-button bp-install-builder__copy" id="bp-install-copy">Copy</button>
     </div>
-    <p class="bp-install-builder__hint">API at <code>http://127.0.0.1:8080/api/v2</code>. Files in <code>~/beampipe</code> unless you set a directory. Dash stays opt-in.</p>
+    <p class="bp-install-builder__hint">API at <code id="bp-install-api-url">http://127.0.0.1:18080/api/v2</code>. Files in <code>~/beampipe</code> unless you set a directory. Dash stays opt-in.</p>
     <p class="bp-install-builder__status" id="bp-install-status" aria-live="polite"></p>
   </div>
   <noscript>
     <pre><code>curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
-curl -fsS http://127.0.0.1:8080/api/v2/health</code></pre>
+curl -fsS http://127.0.0.1:18080/api/v2/health</code></pre>
   </noscript>
 </section>
 
@@ -126,12 +144,19 @@ Beampipe owns durable intent, preparation artifacts, admission, submission recor
 <a href="operations/"><strong>[02] Operate</strong><span>Watch queues and workers, investigate failures, and recover safely.</span></a>
 <a href="project-configs/"><strong>[03] Configure</strong><span>Define TAP queries, metadata, manifests, graph patches, and automation.</span></a>
 <a href="architecture/deployment-profiles/"><strong>[04] Deploy</strong><span>Connect an existing DALiuGE DIM or a Slurm facility with strict SSH trust.</span></a>
-<a href="architecture/"><strong>[05] Understand</strong><span>Follow durable state through discovery, preparation, submission, and polling.</span></a>
+<a href="operations/"><strong>[05] Understand</strong><span>Follow durable state through discovery, preparation, submission, and polling.</span></a>
 <a href="api/"><strong>[06] Integrate</strong><span>Use the authenticated API workflow and generated schema.</span></a>
 </div>
 
 ## Current qualification
 
-The implementation has been exercised through real CASDA/VizieR discovery, automatic admission, manifest and graph preparation, DALiuGE translation, and REST deployment to a local cluster. That run exposed and fixed manifest flag resolution. A graph/runtime package mismatch then prevented terminal graph success, and CASDA staging plus Slurm have not yet been qualified end to end.
+The implementation has been exercised through real CASDA/VizieR discovery,
+manifest and graph preparation, idempotent creation and start, DALiuGE
+translation, REST deployment, reconciliation, and terminal success on the
+WALLABY no-download graph. The result retained the pinned project/profile,
+finished DIM observation, and manifest/source/patched/physical graph artifacts.
+The runbook is [Local DALiuGE end to end](getting-started/local-daliuge.md).
 
-Use the [qualification run](operations/end-to-end-demo.md) for the exact evidence required before calling a release production-ready.
+This qualification intentionally skipped CASDA staging and opted out of output
+verification in the pinned no-download project. Setonix/Slurm has passed config
+and command tests but has not run live without its account, SSH, paths, and SIF.

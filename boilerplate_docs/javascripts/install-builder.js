@@ -4,6 +4,9 @@
   var INSTALL_URL =
     "https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh";
   var CURL = "curl -fsSL " + INSTALL_URL + " | sh";
+  var DEFAULT_API_PORT = "18080";
+  var DEFAULT_POSTGRES_PORT = "5432";
+  var DEFAULT_METRICS_PORT = "9090";
 
   function shellQuote(value) {
     if (/^[A-Za-z0-9_./~:@+-]+$/.test(value)) {
@@ -36,10 +39,23 @@
     if (state.adminPassword) {
       flags.push("--admin-password", shellQuote(state.adminPassword));
     }
+    addPortFlag(flags, "--api-port", state.apiPort, DEFAULT_API_PORT, state.yes);
+    addPortFlag(flags, "--postgres-port", state.postgresPort, DEFAULT_POSTGRES_PORT, state.yes);
+    addPortFlag(flags, "--metrics-port", state.metricsPort, DEFAULT_METRICS_PORT, state.yes);
     if (!flags.length) {
       return CURL;
     }
     return CURL + " -s -- " + flags.join(" ");
+  }
+
+  function addPortFlag(flags, name, value, defaultValue, yes) {
+    if (!value) {
+      return;
+    }
+    if (yes && value === defaultValue) {
+      return;
+    }
+    flags.push(name, value);
   }
 
   function selectedRuntime(root) {
@@ -66,7 +82,15 @@
       adminUser: adminUser ? adminUser.value.trim() : "",
       adminEmail: adminEmail ? adminEmail.value.trim() : "",
       adminPassword: adminPassword ? adminPassword.value : "",
+      apiPort: fieldValue(root, "#bp-install-api-port"),
+      postgresPort: fieldValue(root, "#bp-install-postgres-port"),
+      metricsPort: fieldValue(root, "#bp-install-metrics-port"),
     };
+  }
+
+  function fieldValue(root, selector) {
+    var input = root.querySelector(selector);
+    return input ? input.value.trim() : "";
   }
 
   function syncDashboard(root, state) {
@@ -93,6 +117,11 @@
     var output = root.querySelector("#bp-install-command");
     if (output) {
       output.textContent = command;
+    }
+    var apiUrl = root.querySelector("#bp-install-api-url");
+    if (apiUrl) {
+      apiUrl.textContent =
+        "http://127.0.0.1:" + (state.apiPort || DEFAULT_API_PORT) + "/api/v2";
     }
     return command;
   }

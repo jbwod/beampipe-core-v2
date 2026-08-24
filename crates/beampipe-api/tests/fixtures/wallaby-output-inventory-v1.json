@@ -1,0 +1,24 @@
+{
+  "schema": "wallaby-hires-output-inventory/v1",
+  "patterns": [
+    "**/image.*.10arc.final_mosaic.fits",
+    "**/weights.*.10arc.final_mosaic.fits"
+  ],
+  "pattern_counts": {
+    "**/image.*.10arc.final_mosaic.fits": 1,
+    "**/weights.*.10arc.final_mosaic.fits": 1
+  },
+  "products": [
+    {
+      "path": "HIPASSJ1318-21/image.HIPASSJ1318-21.10arc.final_mosaic.fits",
+      "bytes": 13,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "path": "HIPASSJ1318-21/weights.HIPASSJ1318-21.10arc.final_mosaic.fits",
+      "bytes": 15,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "inventory_sha256": "02f492603204bd707322da390bf56517ab23139adf02c43a4732899a1e4a4059"
+}

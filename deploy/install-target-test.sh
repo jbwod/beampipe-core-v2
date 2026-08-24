@@ -69,3 +69,51 @@ if ! beampipe_has_runtime_flag --skip-docker; then
   exit 1
 fi
 echo "install target mapping ok"
+
+HOME_TMP=$(mktemp -d)
+trap 'rm -rf "$tmp" "$HOME_TMP"' EXIT
+HOME=$HOME_TMP
+SHELL=/bin/bash
+beampipe_persist_path "$HOME_TMP/.local/bin"
+if ! grep -Fq "$HOME_TMP/.local/bin" "$HOME_TMP/.profile"; then
+  echo "PATH was not added to .profile" >&2
+  exit 1
+fi
+if ! grep -Fq "$HOME_TMP/.local/bin" "$HOME_TMP/.bashrc"; then
+  echo "PATH was not added to .bashrc" >&2
+  exit 1
+fi
+beampipe_persist_path "$HOME_TMP/.local/bin"
+if [ "$(grep -c 'Added by Beampipe installer' "$HOME_TMP/.bashrc")" -ne 1 ]; then
+  echo "PATH line was duplicated in .bashrc" >&2
+  exit 1
+fi
+printf '%s\n' 'if [ -d "$HOME/.local/bin" ] ; then PATH="$HOME/.local/bin:$PATH"; fi' > "$HOME_TMP/.zshrc"
+SHELL=/bin/zsh
+beampipe_persist_path "$HOME_TMP/.local/bin"
+if grep -Fq 'Added by Beampipe installer' "$HOME_TMP/.zshrc"; then
+  echo "PATH line was added despite existing \$HOME/.local/bin" >&2
+  exit 1
+fi
+echo "install PATH persistence ok"
+
+HOME_NEXT=$(mktemp -d)
+beampipe_print_next_actions "$HOME_NEXT" > "$HOME_NEXT/out"
+if ! grep -Fq "BEAMPIPE_USE_REAL_BACKENDS=true" "$HOME_NEXT/out"; then
+  echo "next actions omitted live backends" >&2
+  exit 1
+fi
+if ! grep -Fq "beampipe slurm credentials init" "$HOME_NEXT/out"; then
+  echo "next actions omitted Slurm credentials" >&2
+  exit 1
+fi
+if ! grep -Fq "$HOME_NEXT/config/deployment_profile.dlg-dim.json" "$HOME_NEXT/out"; then
+  echo "next actions omitted DIM profile path" >&2
+  exit 1
+fi
+if ! grep -Fq "CASDA_USERNAME" "$HOME_NEXT/out"; then
+  echo "next actions omitted CASDA credentials" >&2
+  exit 1
+fi
+rm -rf "$HOME_NEXT"
+echo "install next-actions recipe ok"

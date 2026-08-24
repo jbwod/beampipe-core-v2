@@ -50,7 +50,57 @@ fn extract_visibility_scan_id(result_id: &str) -> Option<String> {
 }
 
 fn extract_filename_from_url(url: &str) -> Option<String> {
-    url.rsplit('/').next().map(str::to_string)
+    let path = url.split(['?', '#']).next()?;
+    let encoded = path.rsplit('/').next()?;
+    let decoded = percent_decode_path_segment(encoded)?;
+    (!decoded.is_empty()).then_some(decoded)
+}
+
+fn percent_decode_path_segment(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            decoded.push((hex_digit(high)? << 4) | hex_digit(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn result_attributes(
+    element: &quick_xml::events::BytesStart<'_>,
+    decoder: quick_xml::encoding::Decoder,
+) -> (String, Option<String>) {
+    let mut result_id = String::new();
+    let mut href = None;
+    for attribute in element.attributes().flatten() {
+        let key = attribute.key.local_name();
+        let Ok(value) = attribute.decode_and_unescape_value(decoder) else {
+            continue;
+        };
+        if key.as_ref() == b"id" {
+            result_id = value.into_owned();
+        } else if key.as_ref() == b"href" {
+            href = Some(value.into_owned());
+        }
+    }
+    (result_id, href)
 }
 
 pub fn iter_uws_results(xml_text: &str) -> Vec<(String, String)> {
@@ -63,16 +113,28 @@ pub fn iter_uws_results(xml_text: &str) -> Vec<(String, String)> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                if name == "uws:result" || name == "result" {
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"id" {
-                            current_id = String::from_utf8_lossy(&attr.value).to_string();
+                let name = e.name().local_name();
+                if name.as_ref() == b"result" {
+                    let (result_id, href) = result_attributes(&e, reader.decoder());
+                    current_id = result_id;
+                    if let Some(href) = href.filter(|value| !value.is_empty()) {
+                        if !current_id.is_empty() {
+                            out.push((current_id.clone(), href));
                         }
                     }
                 }
-                if name == "uws:reference" || name == "reference" {
+                if name.as_ref() == b"reference" {
                     in_reference = true;
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(e))
+                if e.name().local_name().as_ref() == b"result" =>
+            {
+                let (result_id, href) = result_attributes(&e, reader.decoder());
+                if let Some(href) = href.filter(|value| !value.is_empty()) {
+                    if !result_id.is_empty() {
+                        out.push((result_id, href));
+                    }
                 }
             }
             Ok(quick_xml::events::Event::Text(e)) if in_reference => {
@@ -80,6 +142,10 @@ pub fn iter_uws_results(xml_text: &str) -> Vec<(String, String)> {
                 if !current_id.is_empty() && !url.is_empty() {
                     out.push((current_id.clone(), url));
                 }
+                in_reference = false;
+            }
+            Ok(quick_xml::events::Event::End(e)) if e.name().local_name().as_ref() == b"result" => {
+                current_id.clear();
                 in_reference = false;
             }
             Ok(quick_xml::events::Event::Eof) => break,
@@ -105,5 +171,27 @@ mod tests {
         let (data, checksum) = parse_job_results(xml);
         assert_eq!(data.get("105174").unwrap(), "https://example/a");
         assert_eq!(checksum.get("105174").unwrap(), "https://example/cs");
+    }
+
+    #[test]
+    fn parses_real_uws_xlink_results_and_decodes_filenames() {
+        let xml = r#"<?xml version="1.0"?>
+        <uws:results xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"
+                     xmlns:xlink="http://www.w3.org/1999/xlink">
+          <uws:result id="evaluation-90293"
+            xlink:href="https://example.test/cache/calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar?token=redacted"/>
+          <uws:result id="evaluation-90293.checksum"
+            xlink:href="https://example.test/cache/calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar.checksum?token=redacted"/>
+          <uws:result id="visibility-644741"
+            xlink:href="https://example.test/cache/HIPASSJ1317-16%5FSB72962.ms.tar"/>
+        </uws:results>"#;
+        let results = iter_uws_results(xml);
+        assert_eq!(results.len(), 3);
+        let (eval, checksums) = parse_eval_job_results(xml);
+        let filename = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
+        assert!(eval[filename].contains(filename));
+        assert!(checksums[filename].contains(".checksum"));
+        let (visibilities, _) = parse_job_results(xml);
+        assert!(visibilities["644741"].contains("HIPASSJ1317-16"));
     }
 }

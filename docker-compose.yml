@@ -5,10 +5,12 @@ x-beampipe-shaping: &beampipe-shaping
   BEAMPIPE_SHAPING_EXECUTION_MAX_IN_FLIGHT_RUNS: "10"
   BEAMPIPE_SHAPING_QUEUE_MAX_DEPTH: "5000"
   BEAMPIPE_WORKER_LOCK_SECONDS: "600"
+  BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS: "1800"
 
 # TAP endpoints. Export BEAMPIPE_USE_REAL_BACKENDS=true only after `beampipe doctor` passes.
 x-beampipe-backend-env: &beampipe-backend-env
   BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-false}
+  BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED: ${BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED:-false}
   BEAMPIPE_CASDA_TAP_URL: ${BEAMPIPE_CASDA_TAP_URL:-https://casda.csiro.au/casda_vo_tools/tap/sync}
   BEAMPIPE_VIZIER_TAP_URL: ${BEAMPIPE_VIZIER_TAP_URL:-https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync}
   CASDA_LOGIN_URL: ${CASDA_LOGIN_URL:-https://data.csiro.au/casda_vo_proxy/vo/tap/availability}
@@ -39,7 +41,7 @@ x-beampipe-config-volume: &beampipe-config-volume
 # BEAMPIPE_IMAGE=beampipe-v2:local and `docker compose build api`,
 # or BEAMPIPE_BUILD=1 ./deploy/setup-docker.sh, to compile from this checkout.
 x-beampipe-image: &beampipe-image
-  image: ${BEAMPIPE_IMAGE:-ghcr.io/jbwod/beampipe-core-v2:${BEAMPIPE_VERSION:-0.1.1}}
+  image: ${BEAMPIPE_IMAGE:-ghcr.io/jbwod/beampipe-core-v2:${BEAMPIPE_VERSION:-0.1.6}}
   pull_policy: ${BEAMPIPE_PULL_POLICY:-missing}
   build:
     context: .
@@ -74,6 +76,7 @@ services:
       BEAMPIPE_METRICS_BIND_ADDR: 0.0.0.0:9090
       BEAMPIPE_METRICS_SERVER_ENABLED: "true"
       BEAMPIPE_DB_MAX_CONNECTIONS: "20"
+      BEAMPIPE_MIGRATE_ON_SERVE: "true"
       BEAMPIPE_WORKER_SCHEDULER_ENABLED: "false"
       BEAMPIPE_ENV: ${BEAMPIPE_ENV:-development}
       BEAMPIPE_SSH_CREDENTIALS_DIR: /run/beampipe/ssh
@@ -118,10 +121,11 @@ services:
       <<: [*beampipe-shaping, *beampipe-backend-env]
     volumes:
       - *beampipe-slurm-ssh-volume
+      - *beampipe-config-volume
     expose:
       - "9090"
     depends_on:
-      postgres:
+      api:
         condition: service_healthy
     init: true
     restart: unless-stopped
@@ -147,34 +151,66 @@ services:
       <<: [*beampipe-shaping, *beampipe-backend-env]
     volumes:
       - *beampipe-slurm-ssh-volume
+      - *beampipe-config-volume
     expose:
       - "9090"
     depends_on:
-      postgres:
+      api:
         condition: service_healthy
     init: true
     restart: unless-stopped
 
   prometheus:
     profiles: [observability]
-    image: prom/prometheus:v2.55.1
+    image: prom/prometheus:v3.5.5
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${BEAMPIPE_PROMETHEUS_RETENTION:-30d}
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - beampipe_prometheus_data:/prometheus
     ports:
-      - "9099:9090"
+      - "127.0.0.1:${BEAMPIPE_PROMETHEUS_PORT:-9099}:9090"
     depends_on:
       - api
+    restart: unless-stopped
 
   alertmanager:
-    profiles: [observability, alerting]
-    image: prom/alertmanager:v0.28.0
+    profiles: [observability]
+    image: prom/alertmanager:v0.33.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
     volumes:
       - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - beampipe_alertmanager_data:/alertmanager
     ports:
-      - "9094:9093"
+      - "127.0.0.1:${BEAMPIPE_ALERTMANAGER_PORT:-9094}:9093"
     depends_on:
       - prometheus
+    restart: unless-stopped
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:13.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${BEAMPIPE_GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${BEAMPIPE_GRAFANA_ADMIN_PASSWORD:-change-me-before-use}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - beampipe_grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${BEAMPIPE_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
 
 volumes:
   beampipe_pgdata:
+  beampipe_prometheus_data:
+  beampipe_alertmanager_data:
+  beampipe_grafana_data:

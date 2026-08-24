@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use beampipe_domain::{slurm, ExecutionStatus};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::path::Path;
 use thiserror::Error;
 
 pub mod cancel;
@@ -40,17 +41,18 @@ pub use manifest::{
 pub use scheduler::{
     SchedulerAdapter, SchedulerAdapterError, SchedulerCapacity, SchedulerConnectivity,
     SchedulerErrorKind, SchedulerJobObservation, SchedulerKind, SchedulerLogLocations,
-    SchedulerQueueInfo, SchedulerResourceRequest, SchedulerSubmission, SchedulerSubmissionRequest,
+    SchedulerNameLookup, SchedulerNameLookupSourceCompletion, SchedulerQueueInfo,
+    SchedulerResourceRequest, SchedulerSubmission, SchedulerSubmissionRequest,
 };
 pub use security::{collect_security_issues, validate_security};
 pub use slurm_batch::SlurmJobPollResult;
 pub use slurm_credentials::{
-    beampipe_env, is_production_env, list_credential_slots, ssh_credentials_dir,
-    SlurmSshCredentials,
+    beampipe_env, inspect_credential_slot, is_production_env, list_credential_slot_presence,
+    list_credential_slots, ssh_credentials_dir, SlotPresence, SlurmSshCredentials,
 };
 pub use slurm_deploy::probe_slurm_login;
 pub use slurm_ssh::{query_slurm_states_batch, SlurmSshPool, SlurmSshSession, SlurmTarget};
-pub use staging::CasdaStagingClient;
+pub use staging::{casda_password_from_env, CasdaStagingClient};
 pub use tm_health::{
     dim_unreachable_message, format_service_request_error, probe_dim_reachable, probe_tm_reachable,
     tm_unreachable_message, TmProbeResult,
@@ -76,6 +78,8 @@ pub enum OrchestrationError {
     GraphPatchFieldNotFound { node: String, field: String },
     #[error("backend error: {0}")]
     Backend(String),
+    #[error("submission outcome is uncertain: {0}")]
+    SubmissionUncertain(String),
     #[error(transparent)]
     Daliuge(#[from] DaliugeClientError),
 }
@@ -145,6 +149,7 @@ pub struct BackendSubmit {
     pub scheduler_job_id: Option<String>,
     pub session_id: Option<String>,
     pub remote_session_dir: Option<String>,
+    pub staging_root: Option<String>,
     pub physical_graph: Option<Value>,
     pub workflow_manifest: Value,
     pub next_status: ExecutionStatus,
@@ -354,6 +359,7 @@ where
             scheduler_job_id: Some(session_id.clone()),
             session_id: Some(session_id),
             remote_session_dir: None,
+            staging_root: None,
             physical_graph: Some(Value::Array(translated.pg_spec)),
             workflow_manifest,
             next_status: ExecutionStatus::Running,
@@ -410,9 +416,10 @@ where
             .translator
             .translate(graph, &self.translate_config)
             .await?;
-        let pgt_json = translated.pgt_json.ok_or_else(|| {
+        let mut pgt_json = translated.pgt_json.ok_or_else(|| {
             OrchestrationError::Backend("slurm translate missing pgt_json".into())
         })?;
+        slurm_deploy::bind_physical_graph_to_session(&mut pgt_json, &session_id);
         let physical_graph = pgt_json.clone();
         let scheduler_job_id = self
             .slurm
@@ -426,7 +433,7 @@ where
                 parsed.slurm_job_id
             }
         };
-        let workflow_manifest = beampipe_domain::run_record::merge_slurm_submit_into_manifest(
+        let mut workflow_manifest = beampipe_domain::run_record::merge_slurm_submit_into_manifest(
             Some(manifest),
             &session_id,
             &slurm_job_id,
@@ -435,15 +442,66 @@ where
             self.remote_user.as_deref(),
         );
         let remote_session_dir = slurm::parse_scheduler_job_id(&scheduler_job_id).session_dir;
+        let staging_root = remote_session_dir
+            .as_deref()
+            .and_then(execution_wallaby_output_root);
+        record_slurm_paths(
+            &mut workflow_manifest,
+            remote_session_dir.as_deref(),
+            staging_root.as_deref(),
+        );
         Ok(BackendSubmit {
             scheduler_name: "slurm".into(),
             scheduler_job_id: Some(scheduler_job_id),
             session_id: Some(session_id),
             remote_session_dir,
+            staging_root,
             physical_graph: Some(physical_graph),
             workflow_manifest,
             next_status: ExecutionStatus::AwaitingScheduler,
         })
+    }
+}
+
+fn execution_wallaby_output_root(session_dir: &str) -> Option<String> {
+    let session_dir = Path::new(session_dir);
+    if !session_dir.is_absolute() {
+        return None;
+    }
+    if session_dir == Path::new("/") {
+        return None;
+    }
+    Some(
+        session_dir
+            .join("wallaby_outputs")
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn record_slurm_paths(manifest: &mut Value, session_dir: Option<&str>, staging_root: Option<&str>) {
+    let Some(slurm) = manifest
+        .get_mut("beampipe_run_record")
+        .and_then(Value::as_object_mut)
+        .and_then(|run_record| run_record.get_mut("slurm"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let paths = slurm
+        .entry("paths")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !paths.is_object() {
+        *paths = Value::Object(serde_json::Map::new());
+    }
+    let paths = paths
+        .as_object_mut()
+        .expect("paths reset to an object above");
+    if let Some(session_dir) = session_dir.filter(|value| !value.trim().is_empty()) {
+        paths.insert("session_dir".into(), Value::String(session_dir.into()));
+    }
+    if let Some(staging_root) = staging_root.filter(|value| !value.trim().is_empty()) {
+        paths.insert("staging_root".into(), Value::String(staging_root.into()));
     }
 }
 
@@ -766,6 +824,41 @@ fn value_key(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn slurm_receipt_manifest_records_session_and_run_scoped_output_paths() {
+        let mut manifest = beampipe_domain::run_record::merge_slurm_submit_into_manifest(
+            None,
+            "execution-a",
+            "42",
+            "execution-a:42|/dlg/sessions/execution-a",
+            None,
+            None,
+        );
+        record_slurm_paths(
+            &mut manifest,
+            Some("/dlg/sessions/execution-a"),
+            Some("/dlg/sessions/execution-a/wallaby_outputs"),
+        );
+
+        assert_eq!(
+            manifest["beampipe_run_record"]["slurm"]["paths"],
+            json!({
+                "session_dir": "/dlg/sessions/execution-a",
+                "staging_root": "/dlg/sessions/execution-a/wallaby_outputs",
+            })
+        );
+    }
+
+    #[test]
+    fn output_root_is_scoped_to_the_execution_session() {
+        assert_eq!(
+            execution_wallaby_output_root("/scratch/project/dlg/workspace/execution-a"),
+            Some("/scratch/project/dlg/workspace/execution-a/wallaby_outputs".into())
+        );
+        assert_eq!(execution_wallaby_output_root("relative/execution-a"), None);
+        assert_eq!(execution_wallaby_output_root("/"), None);
+    }
 
     #[test]
     fn graph_override_sets_matching_field() {

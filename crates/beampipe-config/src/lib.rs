@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub const CONFIG_API_VERSION: &str = "beampipe.dev/config/v1";
 pub const DEFAULT_CONFIG_FILE: &str = "beampipe.yaml";
+const MAX_WORKER_SUBMISSION_TIMEOUT_SECONDS: u64 = 86_400;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -19,6 +20,7 @@ pub struct Settings {
     pub refresh_token_expire_days: i64,
     pub worker_poll_interval_ms: u64,
     pub worker_lock_seconds: i64,
+    pub worker_submission_timeout_seconds: u64,
     pub worker_heartbeat_interval_seconds: u64,
     pub worker_concurrency: u32,
     pub worker_scheduler_enabled: bool,
@@ -39,6 +41,8 @@ pub struct Settings {
     pub redis_url: Option<String>,
     pub rate_limit_requests: u64,
     pub rate_limit_period_seconds: u64,
+    /// Proxy networks whose immediate peers may supply X-Forwarded-For.
+    pub trusted_proxy_cidrs: Vec<String>,
     pub metrics_bind_addr: String,
     pub metrics_server_enabled: bool,
     pub metrics_public: bool,
@@ -207,6 +211,12 @@ impl Settings {
                 file.worker.lock_seconds,
                 120,
             )?,
+            worker_submission_timeout_seconds: resolver.parsed(
+                "worker_submission_timeout_seconds",
+                "BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS",
+                file.worker.submission_timeout_seconds,
+                1_800,
+            )?,
             worker_heartbeat_interval_seconds: resolver.parsed(
                 "worker_heartbeat_interval_seconds",
                 "BEAMPIPE_WORKER_HEARTBEAT_INTERVAL_SECONDS",
@@ -324,6 +334,12 @@ impl Settings {
                 file.api.rate_limit_period_seconds,
                 3600,
             )?,
+            trusted_proxy_cidrs: resolver.string_list(
+                "trusted_proxy_cidrs",
+                "BEAMPIPE_TRUSTED_PROXY_CIDRS",
+                file.api.trusted_proxy_cidrs.clone(),
+                Vec::new(),
+            ),
             metrics_bind_addr: resolver.string(
                 "metrics_bind_addr",
                 "BEAMPIPE_METRICS_BIND_ADDR",
@@ -509,6 +525,7 @@ config_section!(ApiFile {
     cors_allow_origins: String,
     rate_limit_requests: u64,
     rate_limit_period_seconds: u64,
+    trusted_proxy_cidrs: Vec<String>,
     require_rate_limiter: bool,
 });
 config_section!(AuthFile {
@@ -522,6 +539,7 @@ config_section!(AuthFile {
 struct WorkerFile {
     poll_interval_ms: Option<u64>,
     lock_seconds: Option<i64>,
+    submission_timeout_seconds: Option<u64>,
     heartbeat_interval_seconds: Option<u64>,
     concurrency: Option<u32>,
     scheduler_enabled: Option<bool>,
@@ -888,6 +906,14 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
             value: settings.worker_lock_seconds.to_string(),
         });
     }
+    if settings.worker_submission_timeout_seconds == 0
+        || settings.worker_submission_timeout_seconds > MAX_WORKER_SUBMISSION_TIMEOUT_SECONDS
+    {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS",
+            value: settings.worker_submission_timeout_seconds.to_string(),
+        });
+    }
     if settings.worker_heartbeat_interval_seconds == 0
         || settings.worker_heartbeat_interval_seconds as i64 >= settings.worker_lock_seconds
     {
@@ -912,6 +938,40 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
         return Err(SettingsError::Invalid {
             name: "BEAMPIPE_OTEL_SAMPLER_RATIO",
             value: settings.otel_sampler_ratio.to_string(),
+        });
+    }
+    validate_rate_limit_settings(
+        settings.rate_limit_requests,
+        settings.rate_limit_period_seconds,
+        &settings.trusted_proxy_cidrs,
+    )?;
+    Ok(())
+}
+
+fn validate_rate_limit_settings(
+    requests: u64,
+    period_seconds: u64,
+    trusted_proxy_cidrs: &[String],
+) -> Result<(), SettingsError> {
+    if requests == 0 {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_RATE_LIMIT_REQUESTS",
+            value: requests.to_string(),
+        });
+    }
+    if period_seconds == 0 {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_RATE_LIMIT_PERIOD_SECONDS",
+            value: period_seconds.to_string(),
+        });
+    }
+    if let Some(invalid) = trusted_proxy_cidrs
+        .iter()
+        .find(|cidr| cidr.parse::<ipnet::IpNet>().is_err())
+    {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_TRUSTED_PROXY_CIDRS",
+            value: invalid.clone(),
         });
     }
     Ok(())
@@ -974,9 +1034,34 @@ mod tests {
     }
 
     #[test]
+    fn submission_timeout_defaults_to_thirty_minutes_and_accepts_yaml_override() {
+        let mut resolver = Resolver::new(None);
+        let default = resolver
+            .parsed::<u64>(
+                "worker_submission_timeout_seconds",
+                "BEAMPIPE_CONFIG_TEST_SUBMISSION_TIMEOUT_UNSET",
+                None,
+                1_800,
+            )
+            .unwrap();
+        assert_eq!(default, 1_800);
+
+        let worker: WorkerFile = serde_yaml::from_str("submission_timeout_seconds: 900\n").unwrap();
+        assert_eq!(worker.submission_timeout_seconds, Some(900));
+    }
+
+    #[test]
     fn sensitive_values_are_identified() {
         assert!(is_sensitive("jwt_secret"));
         assert!(is_sensitive("database_url"));
         assert!(!is_sensitive("bind_addr"));
+    }
+
+    #[test]
+    fn rate_limit_window_and_proxy_networks_are_validated() {
+        assert!(validate_rate_limit_settings(10, 60, &["10.0.0.0/8".into()]).is_ok());
+        assert!(validate_rate_limit_settings(10, 0, &[]).is_err());
+        assert!(validate_rate_limit_settings(0, 60, &[]).is_err());
+        assert!(validate_rate_limit_settings(10, 60, &["not-a-network".into()]).is_err());
     }
 }

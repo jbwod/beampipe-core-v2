@@ -137,6 +137,9 @@ enum CliCommand {
         tm_url: Option<String>,
         #[arg(long)]
         worker_pool: Option<String>,
+        /// Write BEAMPIPE_USE_REAL_BACKENDS=true (live TM/DIM or Slurm). Interactive setup also offers this as a Next action.
+        #[arg(long)]
+        use_real_backends: bool,
         #[arg(long)]
         skip_admin: bool,
         #[arg(long)]
@@ -147,13 +150,22 @@ enum CliCommand {
         /// PostgreSQL source: compose (Compose postgres service) or existing DATABASE_URL.
         #[arg(long, value_parser = ["compose", "existing"])]
         postgres: Option<String>,
+        /// Host port published for the API (default 18080).
+        #[arg(long, value_name = "PORT")]
+        api_port: Option<u16>,
+        /// Host port published for Compose PostgreSQL (default 5432).
+        #[arg(long, value_name = "PORT")]
+        postgres_port: Option<u16>,
+        /// Host port published for API metrics (default 9090).
+        #[arg(long, value_name = "PORT")]
+        metrics_port: Option<u16>,
         /// Alias for --runtime docker.
         #[arg(long, conflicts_with = "skip_docker")]
         docker: bool,
         /// Alias for --runtime host.
         #[arg(long)]
         skip_docker: bool,
-        /// Prepare optional Beampipe Dash (clone if missing; does not start containers).
+        /// Prepare Beampipe Dash and start it after Core is up (Docker only).
         #[arg(long, conflicts_with = "skip_dashboard")]
         dashboard: bool,
         /// Skip Beampipe Dash preparation.
@@ -177,6 +189,18 @@ enum CliCommand {
         /// Write files and print a recipe without starting anything.
         #[arg(long = "no-start")]
         no_start: bool,
+    },
+    /// Remove a Beampipe installation (Compose stack, volumes, and files).
+    Uninstall {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Also delete ~/.local/bin/beampipe.
+        #[arg(long)]
+        purge_binary: bool,
+        /// Keep Compose volumes, including managed PostgreSQL data.
+        #[arg(long)]
+        keep_volumes: bool,
     },
     /// Health and configuration preflight checks.
     Doctor {
@@ -423,14 +447,21 @@ enum SlurmCommand {
 
 #[derive(Debug, Subcommand)]
 enum SlurmCredentialsCommand {
-    /// Create a credential slot directory, ed25519 key, optional passphrase, and known_hosts.
+    /// Generate a new Ed25519 key into a credential slot.
+    ///
+    /// Do not also run ssh-keygen. Beampipe creates the key; you must still
+    /// install private_key.pub on the login node (`copy-id` or the site's
+    /// key-registration process). The slot name is only a directory name, not
+    /// a hostname.
     Init {
-        #[arg(long, default_value = "setonix")]
+        /// Credential directory name under the SSH credentials root. Not a hostname.
+        #[arg(long)]
         slot: String,
         #[arg(long)]
         dir: Option<PathBuf>,
-        #[arg(long, default_value = "setonix.pawsey.org.au")]
-        host: String,
+        /// Login node for ssh-keyscan and optional ssh-copy-id. Required unless --skip-keyscan.
+        #[arg(long, required_unless_present = "skip_keyscan")]
+        host: Option<String>,
         #[arg(long, default_value_t = 22)]
         port: u16,
         #[arg(long)]
@@ -439,6 +470,7 @@ enum SlurmCredentialsCommand {
         passphrase_file: Option<PathBuf>,
         #[arg(long)]
         no_passphrase: bool,
+        /// Install the new public key with ssh-copy-id (requires --user and --host).
         #[arg(long)]
         copy_id: bool,
         #[arg(long)]
@@ -447,11 +479,19 @@ enum SlurmCredentialsCommand {
         force: bool,
         #[arg(long)]
         yes: bool,
+        /// Generate the slot without scanning host keys.
+        #[arg(long)]
+        skip_keyscan: bool,
         #[arg(long)]
         accept_host_key: bool,
     },
-    /// Import an existing host SSH key into a managed credential slot.
+    /// Import an existing private key into a credential slot.
+    ///
+    /// Use this when the key already exists (including a key created with
+    /// ssh-keygen). Skip uploading the public key if the cluster already has
+    /// it in authorized_keys. Do not run init for the same key.
     Import {
+        /// Credential directory name under the SSH credentials root. Not a hostname.
         #[arg(long)]
         slot: String,
         #[arg(long)]
@@ -482,14 +522,14 @@ enum SlurmCredentialsCommand {
     },
     /// Show redacted file status for a slot.
     Show {
-        #[arg(long, default_value = "setonix")]
+        #[arg(long)]
         slot: String,
         #[arg(long)]
         dir: Option<PathBuf>,
     },
     /// Resolve and load the slot key (optional live ping via --profile).
     Check {
-        #[arg(long, default_value = "setonix")]
+        #[arg(long)]
         slot: String,
         #[arg(long)]
         dir: Option<PathBuf>,
@@ -500,6 +540,24 @@ enum SlurmCredentialsCommand {
     Sync {
         #[arg(long)]
         slot: Option<String>,
+    },
+    /// Install the slot public key on the login node with ssh-copy-id.
+    ///
+    /// Requires password SSH (or equivalent) to still work. Sites that only
+    /// accept portal or helpdesk key registration should follow that process
+    /// instead. ssh-copy-id appends; existing authorized_keys entries are kept.
+    #[command(name = "copy-id")]
+    CopyId {
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value_t = 22)]
+        port: u16,
     },
     /// Remove a managed credential slot after profiles have been reassigned.
     Remove {
@@ -808,10 +866,14 @@ async fn main() -> anyhow::Result<()> {
             casda_tap_url,
             tm_url,
             worker_pool,
+            use_real_backends,
             skip_admin,
             skip_upload,
             runtime,
             postgres,
+            api_port,
+            postgres_port,
+            metrics_port,
             docker,
             skip_docker,
             dashboard,
@@ -852,6 +914,9 @@ async fn main() -> anyhow::Result<()> {
                     skip_docker,
                     runtime,
                     postgres,
+                    api_port,
+                    postgres_port,
+                    metrics_port,
                     dashboard,
                     skip_dashboard,
                     dash_dir,
@@ -859,9 +924,22 @@ async fn main() -> anyhow::Result<()> {
                     directory: directory.or(cli.home),
                     credentials_dir,
                     start: start && !no_start,
+                    use_real_backends,
                 })
                 .await?;
             }
+        }
+        CliCommand::Uninstall {
+            yes,
+            purge_binary,
+            keep_volumes,
+        } => {
+            setup::run_uninstall(setup::UninstallOptions {
+                yes,
+                purge_binary,
+                keep_volumes,
+                directory: cli.home,
+            })?;
         }
         CliCommand::Doctor { json, profile, fix } => {
             setup::run_setup_check(json, profile.as_deref(), fix).await?;
@@ -983,12 +1061,13 @@ async fn main() -> anyhow::Result<()> {
                 acl,
                 force,
                 yes,
+                skip_keyscan,
                 accept_host_key,
             } => {
                 let result = slurm_credentials::init(slurm_credentials::InitOptions {
                     slot,
                     dir,
-                    host,
+                    host: host.unwrap_or_default(),
                     port,
                     user,
                     passphrase_file,
@@ -997,7 +1076,7 @@ async fn main() -> anyhow::Result<()> {
                     acl,
                     force,
                     yes,
-                    skip_keyscan: false,
+                    skip_keyscan,
                     accept_host_key,
                 })?;
                 slurm_credentials::print_init_next_steps(&result);
@@ -1059,6 +1138,26 @@ async fn main() -> anyhow::Result<()> {
                     slot.as_deref(),
                 )?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            SlurmCredentialsCommand::CopyId {
+                slot,
+                dir,
+                user,
+                host,
+                port,
+            } => {
+                let public_key =
+                    slurm_credentials::copy_id_for_slot(slurm_credentials::CopyIdOptions {
+                        slot: slot.clone(),
+                        dir,
+                        user: user.clone(),
+                        host: host.clone(),
+                        port,
+                    })?;
+                println!(
+                    "Installed {} on {user}@{host} with ssh-copy-id.",
+                    public_key.display()
+                );
             }
             SlurmCredentialsCommand::Remove { slot, dir, yes } => {
                 slurm_credentials::remove(&slot, dir.as_deref(), yes)?;

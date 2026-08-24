@@ -12,6 +12,7 @@ use tracing::debug;
 
 const CASDA_ASYNC_SERVICE: &str = "async_service";
 const DEFAULT_CASDA_LOGIN_URL: &str = "https://data.csiro.au/casda_vo_proxy/vo/tap/availability";
+type StagingUrlMaps = (HashMap<String, String>, HashMap<String, String>);
 
 #[derive(Debug, Clone)]
 pub struct CasdaStagingClient {
@@ -22,20 +23,28 @@ pub struct CasdaStagingClient {
     pub stage_by_sbid: bool,
 }
 
+/// Password from `CASDA_PASSWORD_FILE` when that path is non-empty, else `CASDA_PASSWORD`.
+/// An empty `CASDA_PASSWORD_FILE=` in Compose `env_file` is treated as unset.
+pub fn casda_password_from_env() -> Option<String> {
+    match std::env::var("CASDA_PASSWORD_FILE") {
+        Ok(path) if !path.trim().is_empty() => resolve_secret(
+            &SecretRef::File { file: path },
+            SecretPolicy::from_runtime_env(),
+        )
+        .ok()
+        .map(|secret| secret.expose().to_string()),
+        _ => std::env::var("CASDA_PASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    }
+}
+
 impl CasdaStagingClient {
     pub fn from_env() -> Option<Self> {
-        let username = std::env::var("CASDA_USERNAME").ok()?;
-        let password = if let Ok(path) = std::env::var("CASDA_PASSWORD_FILE") {
-            resolve_secret(
-                &SecretRef::File { file: path },
-                SecretPolicy::from_process_env(),
-            )
-            .ok()?
-            .expose()
-            .to_string()
-        } else {
-            std::env::var("CASDA_PASSWORD").ok()?
-        };
+        let username = std::env::var("CASDA_USERNAME")
+            .ok()
+            .filter(|value| !value.is_empty())?;
+        let password = casda_password_from_env()?;
         let login_url = std::env::var("CASDA_LOGIN_URL")
             .unwrap_or_else(|_| DEFAULT_CASDA_LOGIN_URL.to_string());
         Some(Self {
@@ -93,6 +102,8 @@ impl StagingClient for CasdaStagingClient {
         if metadata.is_empty() {
             return Ok(StageOutcome::default());
         }
+        let eval_inputs =
+            evaluation_staging_inputs(metadata).map_err(OrchestrationError::Backend)?;
         self.authenticate()
             .await
             .map_err(OrchestrationError::Backend)?;
@@ -147,10 +158,12 @@ impl StagingClient for CasdaStagingClient {
             }
         }
 
-        if let Ok((eval_data, eval_checksum)) = self.stage_eval_batch(metadata).await {
-            eval_urls.extend(eval_data);
-            eval_checksum_urls.extend(eval_checksum);
-        }
+        let (eval_data, eval_checksum) = self
+            .stage_eval_batch(&eval_inputs)
+            .await
+            .map_err(OrchestrationError::Backend)?;
+        eval_urls.extend(eval_data);
+        eval_checksum_urls.extend(eval_checksum);
 
         apply_url_maps(
             &mut staged_metadata,
@@ -158,7 +171,8 @@ impl StagingClient for CasdaStagingClient {
             &checksum_urls,
             &eval_urls,
             &eval_checksum_urls,
-        );
+        )
+        .map_err(OrchestrationError::Backend)?;
 
         Ok(StageOutcome {
             staged_count: staged_metadata.len(),
@@ -173,10 +187,7 @@ impl StagingClient for CasdaStagingClient {
 }
 
 impl CasdaStagingClient {
-    async fn stage_visibility_batch(
-        &self,
-        records: &[Value],
-    ) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
+    async fn stage_visibility_batch(&self, records: &[Value]) -> Result<StagingUrlMaps, String> {
         let access_urls = collect_access_urls(records, &["access_url"]);
         if access_urls.is_empty() {
             return Err("no access_url in metadata for CASDA visibility staging".into());
@@ -187,45 +198,18 @@ impl CasdaStagingClient {
 
     async fn stage_eval_batch(
         &self,
-        records: &[Value],
-    ) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
-        let mut seen = HashSet::new();
+        inputs: &BTreeMap<String, (String, String)>,
+    ) -> Result<StagingUrlMaps, String> {
+        let mut seen_urls = HashSet::new();
         let mut access_urls = Vec::new();
-        for rec in records {
-            let eval_file = rec.get("evaluation_file").and_then(Value::as_str);
-            let sbid = rec.get("sbid").and_then(Value::as_str);
-            let access_url = rec
-                .get("evaluation_file_access_url")
-                .or_else(|| rec.get("access_url"))
-                .and_then(Value::as_str);
-            if let (Some(file), Some(sbid), Some(url)) = (eval_file, sbid, access_url) {
-                let key = (sbid.to_string(), file.to_string());
-                if seen.insert(key) {
-                    access_urls.push(url.to_string());
-                }
+        for (_, access_url) in inputs.values() {
+            if seen_urls.insert(access_url.clone()) {
+                access_urls.push(access_url.clone());
             }
-        }
-        if access_urls.is_empty() {
-            return Ok((HashMap::new(), HashMap::new()));
         }
         let xml = self.create_and_run_soda_job(&access_urls).await?;
         let (by_filename, by_filename_cs) = parse_eval_job_results(&xml);
-        let mut by_sbid = HashMap::new();
-        let mut by_sbid_cs = HashMap::new();
-        for rec in records {
-            let sbid = rec.get("sbid").and_then(Value::as_str).unwrap_or_default();
-            let eval_file = rec
-                .get("evaluation_file")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if let Some(url) = by_filename.get(eval_file) {
-                by_sbid.insert(sbid.to_string(), url.clone());
-            }
-            if let Some(url) = by_filename_cs.get(eval_file) {
-                by_sbid_cs.insert(sbid.to_string(), url.clone());
-            }
-        }
-        Ok((by_sbid, by_sbid_cs))
+        map_eval_staging_results(inputs, &by_filename, &by_filename_cs)
     }
 
     async fn create_and_run_soda_job(&self, access_urls: &[String]) -> Result<String, String> {
@@ -293,12 +277,14 @@ impl CasdaStagingClient {
     }
 
     async fn run_soda_job(&self, job_url: &str) -> Result<String, String> {
-        self.client
+        let run_response = self
+            .client
             .post(format!("{job_url}/phase"))
             .form(&[("phase", "RUN")])
             .send()
             .await
             .map_err(|e| e.to_string())?;
+        ensure_casda_http_status(run_response.status(), "run staging job")?;
 
         for _ in 0..60 {
             let poll = self
@@ -307,19 +293,19 @@ impl CasdaStagingClient {
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
+            ensure_casda_http_status(poll.status(), "poll staging job")?;
             let body = poll.text().await.map_err(|e| e.to_string())?;
             match read_job_phase(&body) {
                 Some(phase) if phase == "COMPLETED" => {
                     let results_url = format!("{job_url}/results");
-                    return self
+                    let results = self
                         .client
                         .get(&results_url)
                         .send()
                         .await
-                        .map_err(|e| e.to_string())?
-                        .text()
-                        .await
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.to_string())?;
+                    ensure_casda_http_status(results.status(), "fetch staging results")?;
+                    return results.text().await.map_err(|e| e.to_string());
                 }
                 Some(phase) if matches!(phase.as_str(), "ERROR" | "ABORTED") => {
                     return Err(format!("CASDA staging job ended with status {phase}"));
@@ -330,6 +316,79 @@ impl CasdaStagingClient {
         }
         Err("CASDA staging job timed out".into())
     }
+}
+
+fn ensure_casda_http_status(status: reqwest::StatusCode, operation: &str) -> Result<(), String> {
+    if status.is_success() || status.is_redirection() {
+        Ok(())
+    } else {
+        Err(format!("CASDA {operation} failed: HTTP {status}"))
+    }
+}
+
+fn evaluation_staging_inputs(
+    records: &[Value],
+) -> Result<BTreeMap<String, (String, String)>, String> {
+    let mut inputs = BTreeMap::new();
+    for record in records {
+        let sbid = record
+            .get("sbid")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "CASDA evaluation staging metadata is missing sbid".to_string())?;
+        let filename = record
+            .get("evaluation_file")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("SBID {sbid} is missing evaluation_file"))?;
+        let expected_prefix = format!("calibration-metadata-processing-logs-SB{sbid}_");
+        if !filename.starts_with(&expected_prefix) || !filename.ends_with(".tar") {
+            return Err(format!(
+                "SBID {sbid} evaluation_file is not a calibration metadata archive"
+            ));
+        }
+        let access_url = record
+            .get("evaluation_file_access_url")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("SBID {sbid} is missing evaluation_file_access_url"))?;
+        let input = (filename.to_string(), access_url.to_string());
+        if let Some(existing) = inputs.get(sbid) {
+            if existing != &input {
+                return Err(format!(
+                    "SBID {sbid} has inconsistent evaluation staging metadata"
+                ));
+            }
+        } else {
+            inputs.insert(sbid.to_string(), input);
+        }
+    }
+    if inputs.is_empty() {
+        return Err("no calibration evaluation archives in CASDA staging metadata".into());
+    }
+    Ok(inputs)
+}
+
+fn map_eval_staging_results(
+    inputs: &BTreeMap<String, (String, String)>,
+    by_filename: &HashMap<String, String>,
+    by_filename_checksum: &HashMap<String, String>,
+) -> Result<StagingUrlMaps, String> {
+    let mut by_sbid = HashMap::new();
+    let mut by_sbid_checksum = HashMap::new();
+    for (sbid, (filename, _)) in inputs {
+        let staged_url = by_filename.get(filename).ok_or_else(|| {
+            format!("CASDA evaluation staging result is missing {filename} for SBID {sbid}")
+        })?;
+        let checksum_url = by_filename_checksum.get(filename).ok_or_else(|| {
+            format!(
+                "CASDA evaluation staging result is missing the checksum for {filename} (SBID {sbid})"
+            )
+        })?;
+        by_sbid.insert(sbid.clone(), staged_url.clone());
+        by_sbid_checksum.insert(sbid.clone(), checksum_url.clone());
+    }
+    Ok((by_sbid, by_sbid_checksum))
 }
 
 fn collect_access_urls(records: &[Value], fields: &[&str]) -> Vec<String> {
@@ -380,50 +439,69 @@ fn apply_url_maps(
     checksum_urls: &HashMap<String, String>,
     eval_urls: &HashMap<String, String>,
     eval_checksum_urls: &HashMap<String, String>,
-) {
+) -> Result<(), String> {
     for rec in metadata.iter_mut() {
-        let Some(obj) = rec.as_object_mut() else {
-            continue;
-        };
+        let obj = rec
+            .as_object_mut()
+            .ok_or_else(|| "CASDA staged metadata record is not an object".to_string())?;
         let scan_id = obj
             .get("scan_id")
             .and_then(Value::as_str)
-            .map(str::to_string)
+            .map(|value| extract_scan_id(value).unwrap_or_else(|| value.to_string()))
             .or_else(|| {
                 obj.get("obs_publisher_did")
                     .and_then(Value::as_str)
                     .and_then(extract_scan_id)
-            });
-        if let Some(scan_id) = scan_id {
-            if let Some(url) = staged_urls.get(&scan_id) {
-                obj.insert("staged_url".into(), Value::String(url.clone()));
-            }
-            if let Some(url) = checksum_urls.get(&scan_id) {
-                let dataset_name = obj
-                    .get("dataset_id")
-                    .or_else(|| obj.get("name"))
-                    .or_else(|| obj.get("visibility_filename"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if url.contains(dataset_name) || dataset_name.is_empty() {
-                    obj.insert("checksum_url".into(), Value::String(url.clone()));
-                } else {
-                    obj.insert("checksum_url".into(), Value::String(String::new()));
-                }
-            }
+            })
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "CASDA staged metadata record is missing scan_id".to_string())?;
+        let sbid = obj
+            .get("sbid")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "CASDA staged metadata record is missing sbid".to_string())?;
+        let dataset_name = obj
+            .get("dataset_id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("visibility_filename"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!("CASDA staged metadata for scan {scan_id} has no dataset name")
+            })?;
+
+        let staged_url = required_http_map_value(staged_urls, &scan_id, "visibility data")?;
+        let checksum_url = required_http_map_value(checksum_urls, &scan_id, "visibility checksum")?;
+        if !checksum_url.contains(dataset_name) {
+            return Err(format!(
+                "CASDA visibility checksum for scan {scan_id} does not match dataset {dataset_name}"
+            ));
         }
-        if let Some(sbid) = obj.get("sbid").and_then(Value::as_str).map(str::to_string) {
-            if let Some(url) = eval_urls.get(&sbid) {
-                obj.insert("evaluation_file_url".into(), Value::String(url.clone()));
-            }
-            if let Some(url) = eval_checksum_urls.get(&sbid) {
-                obj.insert(
-                    "evaluation_file_checksum_url".into(),
-                    Value::String(url.clone()),
-                );
-            }
-        }
+        let eval_url = required_http_map_value(eval_urls, sbid, "evaluation archive")?;
+        let eval_checksum_url =
+            required_http_map_value(eval_checksum_urls, sbid, "evaluation checksum")?;
+
+        obj.insert("staged_url".into(), Value::String(staged_url));
+        obj.insert("checksum_url".into(), Value::String(checksum_url));
+        obj.insert("evaluation_file_url".into(), Value::String(eval_url));
+        obj.insert(
+            "evaluation_file_checksum_url".into(),
+            Value::String(eval_checksum_url),
+        );
     }
+    Ok(())
+}
+
+fn required_http_map_value(
+    values: &HashMap<String, String>,
+    key: &str,
+    label: &str,
+) -> Result<String, String> {
+    let value = values
+        .get(key)
+        .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+        .ok_or_else(|| format!("CASDA staging result is missing HTTP(S) {label} URL for {key}"))?;
+    Ok(value.clone())
 }
 
 #[cfg(test)]
@@ -434,5 +512,121 @@ mod tests {
     fn read_completed_job_phase() {
         let xml = r#"<?xml version="1.0"?><uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"><uws:phase>COMPLETED</uws:phase></uws:job>"#;
         assert_eq!(read_job_phase(xml).as_deref(), Some("COMPLETED"));
+    }
+
+    #[test]
+    fn staging_http_failures_are_not_parsed_as_uws_responses() {
+        assert!(ensure_casda_http_status(reqwest::StatusCode::OK, "poll").is_ok());
+        let error = ensure_casda_http_status(reqwest::StatusCode::BAD_GATEWAY, "poll").unwrap_err();
+        assert_eq!(error, "CASDA poll failed: HTTP 502 Bad Gateway");
+    }
+
+    #[test]
+    fn evaluation_staging_requires_explicit_eval_access_url() {
+        let error = evaluation_staging_inputs(&[serde_json::json!({
+            "sbid": "72962",
+            "evaluation_file": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+            "access_url": "https://example.test/visibility"
+        })])
+        .unwrap_err();
+
+        assert_eq!(error, "SBID 72962 is missing evaluation_file_access_url");
+    }
+
+    #[test]
+    fn staged_metadata_requires_complete_visibility_and_evaluation_evidence() {
+        let mut metadata = vec![serde_json::json!({
+            "sbid": "72962",
+            "scan_id": "scan-9",
+            "dataset_id": "HIPASSJ1317-16_SB72962.ms.tar"
+        })];
+        let data = HashMap::from([(
+            "9".into(),
+            "https://example.test/HIPASSJ1317-16_SB72962.ms.tar".into(),
+        )]);
+        let checksum = HashMap::from([(
+            "9".into(),
+            "https://example.test/HIPASSJ1317-16_SB72962.ms.tar.checksum".into(),
+        )]);
+        let eval = HashMap::from([(
+            "72962".into(),
+            "https://example.test/calibration-SB72962.tar".into(),
+        )]);
+        let eval_checksum = HashMap::from([(
+            "72962".into(),
+            "https://example.test/calibration-SB72962.tar.checksum".into(),
+        )]);
+
+        apply_url_maps(&mut metadata, &data, &checksum, &eval, &eval_checksum).unwrap();
+        assert!(metadata[0]["staged_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://"));
+
+        let error = apply_url_maps(&mut metadata, &data, &HashMap::new(), &eval, &eval_checksum)
+            .unwrap_err();
+        assert!(error.contains("visibility checksum"));
+    }
+
+    #[tokio::test]
+    async fn stage_propagates_eval_preflight_error_before_authentication() {
+        let client = CasdaStagingClient {
+            username: "unused".into(),
+            password: "unused".into(),
+            login_url: "http://127.0.0.1:1/must-not-be-called".into(),
+            client: Client::new(),
+            stage_by_sbid: true,
+        };
+        let error = client
+            .stage(&[serde_json::json!({
+                "sbid": "72962",
+                "evaluation_file": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                "access_url": "https://example.test/visibility"
+            })])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OrchestrationError::Backend(message)
+                if message == "SBID 72962 is missing evaluation_file_access_url"
+        ));
+    }
+
+    #[test]
+    fn evaluation_staging_rejects_non_calibration_archive() {
+        let error = evaluation_staging_inputs(&[serde_json::json!({
+            "sbid": "72962",
+            "evaluation_file": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+            "evaluation_file_access_url": "https://example.test/validation"
+        })])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "SBID 72962 evaluation_file is not a calibration metadata archive"
+        );
+    }
+
+    #[test]
+    fn evaluation_staging_results_must_cover_every_expected_archive() {
+        let filename = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
+        let inputs = evaluation_staging_inputs(&[serde_json::json!({
+            "sbid": "72962",
+            "evaluation_file": filename,
+            "evaluation_file_access_url": "https://example.test/calibration"
+        })])
+        .unwrap();
+
+        let error =
+            map_eval_staging_results(&inputs, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(error.contains("CASDA evaluation staging result is missing"));
+
+        let staged = HashMap::from([(
+            filename.to_string(),
+            "https://example.test/staged-calibration".to_string(),
+        )]);
+        let error = map_eval_staging_results(&inputs, &staged, &HashMap::new()).unwrap_err();
+        assert!(error.contains("missing the checksum"));
     }
 }

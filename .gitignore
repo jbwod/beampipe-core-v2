@@ -1,7 +1,9 @@
 target/
 .env
+.env.bak
 .DS_Store
 .docs-venv/
+.cursor/
 
 /site
 /playbook-runs/

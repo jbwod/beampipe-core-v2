@@ -10,6 +10,7 @@ beampipe-adapters = { path = "../beampipe-adapters" }
 beampipe-db = { path = "../beampipe-db" }
 beampipe-domain = { path = "../beampipe-domain" }
 beampipe-orchestration = { path = "../beampipe-orchestration" }
+beampipe-profiles = { path = "../beampipe-profiles" }
 redis.workspace = true
 axum.workspace = true
 chrono.workspace = true

@@ -1,4 +1,7 @@
-use crate::{installation::InstallationContext, runtime};
+use crate::{
+    installation::{advertised_api_port, InstallationContext},
+    runtime,
+};
 use beampipe_adapters::probe_tap_health;
 use beampipe_config::Settings;
 use beampipe_db::{models::DeploymentProfileRow, repo};
@@ -163,20 +166,21 @@ pub fn installation_checks(context: &InstallationContext) -> Vec<DoctorCheck> {
         }
     }
 
-    let api_address = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let api_port = advertised_api_port();
+    let api_address = SocketAddr::from(([127, 0, 0, 1], api_port));
     checks.push(
         if TcpStream::connect_timeout(&api_address, Duration::from_secs(1)).is_ok() {
             success(
                 "api.reachable",
                 "api",
-                "API accepts connections on 127.0.0.1:8080",
+                format!("API accepts connections on 127.0.0.1:{api_port}"),
             )
         } else {
             failure(
                 "api.unreachable",
                 "api",
                 true,
-                "API is not reachable on 127.0.0.1:8080",
+                format!("API is not reachable on 127.0.0.1:{api_port}"),
                 "run `beampipe start`, then inspect `beampipe logs --service api`",
             )
         },

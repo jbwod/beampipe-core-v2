@@ -445,51 +445,99 @@ pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<ValidationDiagnost
 }
 
 fn select_eval_file_by_size(value: &Value) -> Option<Value> {
+    let row = select_eval_file_row(value)?;
+    row_filename(&row).map(Value::String)
+}
+
+/// Pick the largest valid CASDA calibration metadata archive.
+///
+/// Evaluation-file TAP results also contain diagnostics and validation reports.
+/// Those products are not interchangeable with the calibration tar consumed by
+/// WALLABY, so the selector deliberately has no non-calibration fallback. Equal
+/// sizes are resolved by the lexically latest filename (the archive name embeds
+/// its production timestamp).
+pub fn select_eval_file_row(value: &Value) -> Option<Map<String, Value>> {
     if let Some(obj) = value.as_object() {
-        if obj.contains_key("filename") {
-            return Some(Value::String(
-                obj.get("filename")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            ));
+        if is_calibration_metadata_archive(obj) && row_byte_size(obj).is_some() {
+            return Some(obj.clone());
         }
+        return None;
     }
     let rows = value.as_array()?;
-    let mut best: Option<(i64, &Map<String, Value>)> = None;
-    let has_calibration = rows.iter().any(|r| {
-        r.get("format")
-            .and_then(Value::as_str)
-            .is_some_and(|f| f.eq_ignore_ascii_case("calibration"))
-    });
+    let mut best: Option<(i64, String, &Map<String, Value>)> = None;
     for row in rows {
         let Some(obj) = row.as_object() else {
             continue;
         };
-        let format = obj
-            .get("format")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if has_calibration && format != "calibration" {
+        if !is_calibration_metadata_archive(obj) {
             continue;
         }
-        let size = obj
-            .get("filesize")
-            .and_then(|v| {
-                v.as_i64()
-                    .or_else(|| value_string(Some(v)).and_then(|s| s.parse().ok()))
+        let Some(size) = row_byte_size(obj) else {
+            continue;
+        };
+        let filename = row_filename(obj)?;
+        let is_better = best
+            .as_ref()
+            .map(|(best_size, best_filename, _)| {
+                size > *best_size || (size == *best_size && filename > *best_filename)
             })
-            .unwrap_or(0);
-        if best.map(|(s, _)| size > s).unwrap_or(true) {
-            best = Some((size, obj));
+            .unwrap_or(true);
+        if is_better {
+            best = Some((size, filename, obj));
         }
     }
-    best.and_then(|(_, obj)| {
-        obj.get("filename")
-            .cloned()
-            .or_else(|| value_string(obj.get("filename")).map(Value::String))
-    })
+    best.map(|(_, _, obj)| obj.clone())
+}
+
+fn is_calibration_metadata_archive(obj: &Map<String, Value>) -> bool {
+    let format_is_calibration = row_field(obj, "format")
+        .and_then(|value| value_string(Some(value)))
+        .is_some_and(|format| format.eq_ignore_ascii_case("calibration"));
+    let filename_is_archive = row_filename(obj).is_some_and(|filename| {
+        filename.starts_with("calibration-metadata-processing-logs-SB")
+            && filename.ends_with(".tar")
+    });
+    let has_access_url = row_field(obj, "access_url")
+        .and_then(|value| value_string(Some(value)))
+        .is_some();
+    format_is_calibration && filename_is_archive && has_access_url
+}
+
+fn row_filename(obj: &Map<String, Value>) -> Option<String> {
+    row_field(obj, "filename")
+        .or_else(|| row_field(obj, "file_name"))
+        .and_then(|value| value_string(Some(value)))
+}
+
+fn row_field<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    obj.get(key)
+        .or_else(|| obj.get(&key.to_ascii_lowercase()))
+        .or_else(|| obj.get(&key.to_ascii_uppercase()))
+}
+
+fn row_byte_size(obj: &Map<String, Value>) -> Option<i64> {
+    const KEYS: [&str; 4] = ["filesize", "file_size", "access_estsize", "size"];
+    for key in KEYS {
+        if let Some(value) = obj.get(key).or_else(|| obj.get(&key.to_ascii_uppercase())) {
+            if let Some(size) = json_byte_size(value) {
+                return (size >= 0).then_some(size);
+            }
+        }
+    }
+    None
+}
+
+fn json_byte_size(value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    if let Some(n) = value.as_u64() {
+        return Some(i64::try_from(n).unwrap_or(i64::MAX));
+    }
+    if let Some(n) = value.as_f64() {
+        return Some(n as i64);
+    }
+    value_string(Some(value))?.parse().ok()
 }
 
 pub fn value_string(value: Option<&Value>) -> Option<String> {
@@ -711,9 +759,64 @@ mod tests {
         assert_eq!(
             apply_transform_spec(
                 &spec(TransformKind::SelectEvalFileBySize),
-                &json!([{"filename": "small", "filesize": 1}, {"filename": "large", "filesize": 2}])
+                &json!([
+                    {
+                        "filename": "calibration-metadata-processing-logs-SB1_2026-01-01-000000.tar",
+                        "format": "calibration",
+                        "filesize": 1,
+                        "access_url": "https://example.test/old"
+                    },
+                    {
+                        "filename": "calibration-metadata-processing-logs-SB1_2026-01-02-000000.tar",
+                        "format": "calibration",
+                        "filesize": 2,
+                        "access_url": "https://example.test/new"
+                    }
+                ])
             ),
-            Some(json!("large"))
+            Some(json!(
+                "calibration-metadata-processing-logs-SB1_2026-01-02-000000.tar"
+            ))
+        );
+        assert_eq!(
+            apply_transform_spec(
+                &spec(TransformKind::SelectEvalFileBySize),
+                &json!([
+                    {
+                        "filename": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                        "format": "calibration",
+                        "filesize": 10,
+                        "access_url": "https://example.test/calibration"
+                    },
+                    {
+                        "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                        "format": "validation-report",
+                        "filesize": 999,
+                        "access_url": "https://example.test/validation"
+                    },
+                    {
+                        "filename": "diagnostics-SB72962.tar",
+                        "format": "diagnostics",
+                        "filesize": 9999,
+                        "access_url": "https://example.test/diagnostics"
+                    }
+                ])
+            ),
+            Some(json!(
+                "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar"
+            ))
+        );
+        assert_eq!(
+            apply_transform_spec(
+                &spec(TransformKind::SelectEvalFileBySize),
+                &json!([{
+                    "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                    "format": "validation-report",
+                    "filesize": 999,
+                    "access_url": "https://example.test/validation"
+                }])
+            ),
+            None
         );
         let mut regex = spec(TransformKind::RegexExtract);
         regex.pattern = Some("SB([0-9]+)".into());
@@ -932,5 +1035,29 @@ discovery:
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         let errors = validate_transform_refs(&config);
         assert!(errors.iter().any(|e| e.message.contains("missing_step")));
+    }
+
+    #[test]
+    fn eval_selector_uses_filename_as_a_deterministic_size_tie_break() {
+        let selected = select_eval_file_row(&json!([
+            {
+                "filename": "calibration-metadata-processing-logs-SB34166_2021-12-30-000000.tar",
+                "format": "calibration",
+                "filesize": 11_100_000,
+                "access_url": "https://example.test/older"
+            },
+            {
+                "filename": "calibration-metadata-processing-logs-SB34166_2021-12-31-011733.tar",
+                "format": "calibration",
+                "filesize": 11_100_000,
+                "access_url": "https://example.test/newer"
+            }
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            selected["filename"],
+            "calibration-metadata-processing-logs-SB34166_2021-12-31-011733.tar"
+        );
     }
 }

@@ -44,7 +44,11 @@ pub fn parsed_source_readiness_error(
     registered: Option<&RegisteredSourceReadiness>,
     rows: &[ArchiveMetadataReadiness],
 ) -> Option<String> {
-    let registered = registered?;
+    let Some(registered) = registered else {
+        return Some(format!(
+            "Source {sid} is not registered. Register and discover the source before execution."
+        ));
+    };
     if !registered.enabled {
         return Some(format!("Source {sid} is disabled"));
     }
@@ -243,6 +247,13 @@ mod tests {
             metadata_json: Some(json!({"discovery_flags": {"ok": true}})),
         }];
         assert!(parsed_source_readiness_error("S", None, Some(&reg()), &rows).is_none());
+    }
+
+    #[test]
+    fn absent_source_is_not_ready() {
+        assert!(parsed_source_readiness_error("missing", None, None, &[])
+            .unwrap()
+            .contains("not registered"));
     }
 
     #[test]

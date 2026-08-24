@@ -88,6 +88,8 @@ pub struct DiscoveryBatchStats {
     pub timeout_count: usize,
     pub failed_sources: Vec<String>,
     pub missing_registry_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_source_identifiers: Vec<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -168,6 +170,32 @@ pub fn metadata_payload_by_sbid(
             payload.insert("datasets".into(), Value::Array(normalized));
             if let Some(flags) = &flags {
                 payload.insert("discovery_flags".into(), flags.clone());
+            }
+            (sbid.clone(), Value::Object(payload))
+        })
+        .collect()
+}
+
+/// Build the complete archive payload persisted for later staging.
+///
+/// Signature exclusions only control change detection. They must never remove
+/// access URLs, sizes, or other execution inputs from the stored metadata.
+pub fn metadata_storage_payload_by_sbid(
+    grouped: &BTreeMap<String, Vec<Value>>,
+    discovery_flags: Option<&Value>,
+) -> BTreeMap<String, Value> {
+    grouped
+        .iter()
+        .map(|(sbid, datasets)| {
+            let mut normalized: Vec<Value> = datasets.iter().map(to_jsonable).collect();
+            normalized.sort_by_key(dataset_sort_key);
+            let mut payload = Map::new();
+            payload.insert("datasets".into(), Value::Array(normalized));
+            if let Some(flags) = discovery_flags
+                .map(to_jsonable)
+                .filter(|value| !value.as_object().is_some_and(Map::is_empty) && !value.is_null())
+            {
+                payload.insert("discovery_flags".into(), flags);
             }
             (sbid.clone(), Value::Object(payload))
         })
@@ -368,6 +396,14 @@ mod tests {
         assert_eq!(
             discovery_signature(&metadata_payload_by_sbid(&grouped, None, Some(&opts))),
             discovery_signature(&metadata_payload_by_sbid(&changed, None, Some(&opts)))
+        );
+        assert_eq!(
+            metadata_storage_payload_by_sbid(&grouped, None)["123"]["datasets"][0]["access_url"],
+            "https://old.example"
+        );
+        assert_eq!(
+            metadata_storage_payload_by_sbid(&changed, None)["123"]["datasets"][0]["access_url"],
+            "https://new.example"
         );
     }
 

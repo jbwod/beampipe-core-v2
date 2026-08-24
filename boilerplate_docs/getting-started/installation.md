@@ -8,6 +8,7 @@ $BEAMPIPE_HOME/                  default: ~/beampipe
 |-- .env                        private runtime configuration, mode 0600
 |-- docker-compose.yml          version-managed operator bundle
 |-- config/                     project and profile examples
+|-- credentials/casda/password  CASDA staging password, mode 0600
 `-- credentials/ssh/<slot>/     managed SSH credential copies
 ```
 
@@ -21,14 +22,32 @@ Use this path for a workstation or a single-host service. It downloads the relea
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback, migrates the database, creates the first administrator, and uploads the reference project.
+Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, creates the first administrator, and uploads the reference project.
+
+### Fresh database and migration ownership
+
+In the managed Compose topology, the API is the migration gate. It starts with
+`BEAMPIPE_MIGRATE_ON_SERVE=true`, applies every pending SQLx migration, and
+becomes healthy only afterwards. Scheduler and worker services depend on that
+health check. Do not race fresh setup with a separate `beampipe migrate` or
+start workers against an unmigrated database.
+
+For native or externally supervised roles, run `beampipe migrate` once as a
+deployment step before starting API, scheduler, and workers unless the API role
+is explicitly designated as migration owner. Back up an existing database
+before upgrading across migrations.
+
+The installer writes `~/.local/bin/beampipe` and appends that directory to `~/.bashrc` and `~/.profile`. The current terminal still needs `export PATH="$HOME/.local/bin:$PATH"` (or a new terminal) before `beampipe` is found.
 
 Unattended equivalent:
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh \
-  | sh -s -- --yes --runtime docker --postgres compose
+  | sh -s -- --yes --runtime docker --postgres compose \
+      --api-port 18080 --postgres-port 5432 --metrics-port 9090
 ```
+
+`--yes` skips the Next actions prompt and prints the recipe instead: add a REST or Slurm profile, run `beampipe doctor --profile NAME`, set CASDA credentials for staging, then set `BEAMPIPE_USE_REAL_BACKENDS=true` in the install `.env` and `beampipe restart`. Pass `--use-real-backends` only after that profile doctor is known to pass. Interactive setup offers those steps after the stack is up (live backends, profile file, Slurm SSH credentials, CASDA credentials, profile doctor).
 
 Manage it from any directory:
 
@@ -39,7 +58,15 @@ beampipe logs --follow
 beampipe restart
 beampipe stop
 beampipe start
+beampipe uninstall
 ```
+
+Production API startup requires a reachable Redis service configured through
+`BEAMPIPE_REDIS_URL`. Setting `BEAMPIPE_REQUIRE_RATE_LIMITER=false` does not
+disable that production requirement. Development may omit Redis; see
+[API rate limiting and proxy trust](../operations/index.md#api-rate-limiting-and-proxy-trust).
+
+`beampipe uninstall` stops Compose services, deletes the installation directory, and by default removes managed PostgreSQL volumes. Confirmation is required unless `--yes` is passed. `--keep-volumes` retains Compose volumes. `--purge-binary` also removes `~/.local/bin/beampipe`. Sibling checkouts such as `~/beampipe-dash` are not deleted.
 
 Use an existing PostgreSQL server instead:
 
@@ -69,7 +96,7 @@ beampipe setup --yes --runtime host --postgres compose --no-start
 beampipe start
 ```
 
-`beampipe start` starts the managed PostgreSQL container when required, then runs the compact API/scheduler process in the foreground. Production native deployments should run separate API, singleton scheduler, and worker units under systemd or another process supervisor; see [Deployment topologies](deployment.md).
+`beampipe start` starts the managed PostgreSQL container when required, then runs the compact API/scheduler process in the foreground. Production native deployments should run separate API, singleton scheduler, and worker units under systemd or another process supervisor; see [Process roles](../operations/index.md).
 
 ## 3. Build from source
 
@@ -114,21 +141,21 @@ beampipe profile validate dlg-dim
 beampipe doctor --profile dlg-dim
 ```
 
-Import and associate a Slurm key in the same operation:
+Import and associate a Slurm key in the same operation (skip the public-key upload if the cluster already has this key):
 
 ```bash
 beampipe profile add \
   -f "$HOME/beampipe/config/deployment_profile.slurm-remote.json" \
-  --ssh-slot setonix \
+  --ssh-slot hpc \
   --ssh-private-key "$HOME/.ssh/id_ed25519" \
   --ssh-known-hosts "$HOME/.ssh/known_hosts" \
   --ssh-acl
 
-beampipe slurm credentials sync --slot setonix
+beampipe slurm credentials sync --slot hpc
 beampipe doctor --profile slurm-remote
 ```
 
-The source key is never modified. Beampipe stores a private managed copy under the selected installation and mounts the credential root read-only into Docker services. See [Deployment profiles and SSH](../architecture/deployment-profiles.md).
+To generate a new Beampipe-owned key instead, run `beampipe slurm credentials init --slot hpc --host LOGIN_NODE` and then install `private_key.pub` with `copy-id` or the site's key-registration process. The source key is never modified on import. Beampipe stores a private managed copy under the selected installation and mounts the credential root read-only into Docker services. See [Deployment profiles and SSH](../architecture/deployment-profiles.md).
 
 ## Upgrade and rerun setup
 
@@ -139,14 +166,4 @@ beampipe setup
 beampipe doctor
 ```
 
-There is no implicit reset. Back up PostgreSQL before removing an installation or its Compose volume.
-
-## Configuration and production checks
-
-```bash
-beampipe config explain
-BEAMPIPE_ENV=production beampipe security check
-beampipe doctor --json
-```
-
-Settings resolve from defaults, `beampipe.yaml`, the installation `.env`, then process environment. Secret values are redacted by diagnostics. Production credentials should use mounted files or external secret injection rather than project/profile documents.
+There is no implicit reset. Back up PostgreSQL before `beampipe uninstall` or before deleting a Compose volume.

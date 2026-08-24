@@ -152,10 +152,16 @@ pub fn merge_slurm_poll_into_manifest(
     let mut rr = rr_mut(&mut base);
     let mut slurm = object(rr.remove("slurm"));
     slurm.remove("observations");
+    let composite_scheduler_job_id = slurm
+        .get("composite_scheduler_job_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(composite_scheduler_job_id)
+        .to_string();
     slurm.insert("slurm_job_id".into(), json!(slurm_job_id));
     slurm.insert(
         "composite_scheduler_job_id".into(),
-        json!(composite_scheduler_job_id),
+        json!(&composite_scheduler_job_id),
     );
     if let Some(dir) = opts.remote_session_dir.filter(|d| !d.trim().is_empty()) {
         merge_slurm_paths(&mut slurm, dir);
@@ -172,32 +178,36 @@ pub fn merge_slurm_poll_into_manifest(
     }
     slurm.insert("last_observation".into(), Value::Object(obs.clone()));
     if record_terminal {
+        let existing_terminal = slurm.get("terminal").and_then(Value::as_object);
+        let frozen = existing_terminal.is_some_and(|terminal| {
+            terminal
+                .get("composite_scheduler_job_id")
+                .and_then(Value::as_str)
+                == Some(composite_scheduler_job_id.as_str())
+        });
+        let mut term = if frozen {
+            existing_terminal.cloned().unwrap_or_default()
+        } else {
+            let mut term = obs;
+            term.insert(
+                "composite_scheduler_job_id".into(),
+                json!(&composite_scheduler_job_id),
+            );
+            term.insert("slurm_job_id_ref".into(), json!(slurm_job_id));
+            if let Some(reason) = opts.reason.filter(|r| !r.is_empty()) {
+                term.insert("reason".into(), json!(reason));
+            }
+            if let Some(diag) = opts.diagnostics.filter(|d| d.is_object()) {
+                term.insert("diagnostics".into(), diag);
+            }
+            term
+        };
         if let Some(status) = terminal_ledger_status {
-            let comp = composite_scheduler_job_id;
-            let frozen = slurm
-                .get("terminal")
-                .and_then(Value::as_object)
-                .is_some_and(|t| {
-                    t.get("ledger_status").and_then(Value::as_str) == Some(status)
-                        && t.get("composite_scheduler_job_id").and_then(Value::as_str) == Some(comp)
-                });
-            if !frozen {
-                let mut term = obs.clone();
+            if !term.contains_key("ledger_status") {
                 term.insert("ledger_status".into(), json!(status));
-                term.insert(
-                    "composite_scheduler_job_id".into(),
-                    json!(composite_scheduler_job_id),
-                );
-                term.insert("slurm_job_id_ref".into(), json!(slurm_job_id));
-                if let Some(reason) = opts.reason.filter(|r| !r.is_empty()) {
-                    term.insert("reason".into(), json!(reason));
-                }
-                if let Some(diag) = opts.diagnostics.filter(|d| d.is_object()) {
-                    term.insert("diagnostics".into(), diag);
-                }
-                slurm.insert("terminal".into(), Value::Object(term));
             }
         }
+        slurm.insert("terminal".into(), Value::Object(term));
     }
     rr.insert("slurm".into(), Value::Object(slurm));
     base.insert(BEAMPIPE_RUN_RECORD_KEY.into(), Value::Object(rr));
@@ -258,9 +268,14 @@ pub fn merge_dim_poll_into_manifest(
     obs.insert("observed_at".into(), json!(now_iso_z()));
     dim.insert("last_observation".into(), Value::Object(obs.clone()));
     if record_terminal {
-        if let Some(status) = terminal_ledger_status {
+        let existing_terminal = dim.get("terminal").and_then(Value::as_object);
+        let frozen = existing_terminal.is_some_and(|terminal| {
+            terminal.get("session_id").and_then(Value::as_str) == Some(session_id)
+        });
+        let mut term = if frozen {
+            existing_terminal.cloned().unwrap_or_default()
+        } else {
             let mut term = obs;
-            term.insert("ledger_status".into(), json!(status));
             term.insert("session_id".into(), json!(session_id));
             if let Some(err) = error.and_then(|e| trim_raw(Some(e))) {
                 term.insert("error".into(), json!(err));
@@ -268,10 +283,48 @@ pub fn merge_dim_poll_into_manifest(
             if let Some(count) = error_drops_count {
                 term.insert("error_drops_count".into(), json!(count));
             }
-            dim.insert("terminal".into(), Value::Object(term));
+            term
+        };
+        if let Some(status) = terminal_ledger_status {
+            if !term.contains_key("ledger_status") {
+                term.insert("ledger_status".into(), json!(status));
+            }
         }
+        dim.insert("terminal".into(), Value::Object(term));
     }
     rr.insert("dim".into(), Value::Object(dim));
+    base.insert(BEAMPIPE_RUN_RECORD_KEY.into(), Value::Object(rr));
+    Value::Object(base)
+}
+
+pub fn merge_output_verification_into_manifest(
+    existing: Option<Value>,
+    artifact_id: &str,
+    inventory_sha256: &str,
+    report_sha256: &str,
+    destination_uri: Option<&str>,
+) -> Value {
+    let mut base = object(existing);
+    let mut rr = rr_mut(&mut base);
+    let frozen = rr
+        .get("output_verification")
+        .and_then(Value::as_object)
+        .is_some_and(|verification| {
+            verification.get("artifact_id").and_then(Value::as_str) == Some(artifact_id)
+        });
+    if !frozen {
+        rr.insert(
+            "output_verification".into(),
+            json!({
+                "state": "verified",
+                "verified_at": now_iso_z(),
+                "artifact_id": artifact_id,
+                "inventory_sha256": inventory_sha256,
+                "report_sha256": report_sha256,
+                "destination_uri": destination_uri,
+            }),
+        );
+    }
     base.insert(BEAMPIPE_RUN_RECORD_KEY.into(), Value::Object(rr));
     Value::Object(base)
 }
@@ -313,7 +366,9 @@ pub fn extract_beampipe_run_record(workflow_manifest: &Value) -> Option<Value> {
 }
 
 pub fn parse_observed_at(v: &Value) -> Option<DateTime<Utc>> {
-    v.as_str()
+    v.get("observed_at")
+        .unwrap_or(v)
+        .as_str()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
 }
@@ -425,10 +480,85 @@ mod tests {
     }
 
     #[test]
+    fn slurm_terminal_evidence_does_not_imply_aggregate_completion() {
+        let submitted = merge_slurm_submit_into_manifest(
+            None,
+            "session-1",
+            "42",
+            "session-1:42|/sessions/session-1",
+            None,
+            None,
+        );
+        let polled = merge_slurm_poll_into_manifest(
+            Some(submitted),
+            "42",
+            "42",
+            "COMPLETED",
+            "sacct",
+            Some("42|COMPLETED|0:0"),
+            true,
+            None,
+            SlurmPollManifestOpts {
+                exit_code: Some(0),
+                remote_session_dir: Some("/sessions/session-1"),
+                ..Default::default()
+            },
+        );
+        let terminal = &polled["beampipe_run_record"]["slurm"]["terminal"];
+
+        assert_eq!(terminal["state"], "COMPLETED");
+        assert!(terminal.get("ledger_status").is_none());
+        assert_eq!(
+            terminal["composite_scheduler_job_id"],
+            "session-1:42|/sessions/session-1"
+        );
+        assert_eq!(
+            polled["beampipe_run_record"]["slurm"]["composite_scheduler_job_id"],
+            "session-1:42|/sessions/session-1"
+        );
+    }
+
+    #[test]
+    fn dim_terminal_evidence_does_not_imply_aggregate_completion() {
+        let polled =
+            merge_dim_poll_into_manifest(None, "session-1", "finished", true, None, None, Some(0));
+        let terminal = &polled["beampipe_run_record"]["dim"]["terminal"];
+
+        assert_eq!(terminal["session_state"], "finished");
+        assert_eq!(terminal["session_id"], "session-1");
+        assert!(terminal.get("ledger_status").is_none());
+    }
+
+    #[test]
+    fn output_verification_records_the_completion_gate_evidence() {
+        let manifest = merge_output_verification_into_manifest(
+            None,
+            "artifact-1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Some("file:///durable/run-1"),
+        );
+        let verification = &manifest["beampipe_run_record"]["output_verification"];
+
+        assert_eq!(verification["state"], "verified");
+        assert_eq!(verification["artifact_id"], "artifact-1");
+        assert!(verification["verified_at"].is_string());
+        assert!(verification.get("ledger_status").is_none());
+    }
+
+    #[test]
     fn slurm_poll_tick_round_is_stored() {
         let out = merge_slurm_poll_tick_round(None, 3);
         assert_eq!(out["beampipe_run_record"]["slurm_poll"]["round"], 3);
         assert!(out["beampipe_run_record"]["slurm_poll"]["started_at"].is_string());
+    }
+
+    #[test]
+    fn observed_at_parser_accepts_run_record_observation() {
+        let observed_at = "2026-08-22T03:23:43.555Z";
+
+        assert!(parse_observed_at(&json!(observed_at)).is_some());
+        assert!(parse_observed_at(&json!({"observed_at": observed_at})).is_some());
     }
 
     #[test]

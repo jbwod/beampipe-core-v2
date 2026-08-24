@@ -12,10 +12,12 @@ pub mod expressions;
 pub mod transforms;
 pub mod wasm;
 
+pub const WALLABY_OUTPUT_INVENTORY_SCHEMA: &str = "wallaby-hires-output-inventory/v1";
+
 pub use expressions::evaluate_expression;
 pub use transforms::{
-    apply_field_transform, apply_transform_spec, build_template_context, validate_transform_refs,
-    TransformRegistry,
+    apply_field_transform, apply_transform_spec, build_template_context, select_eval_file_row,
+    validate_transform_refs, TransformRegistry,
 };
 pub use wasm::{shared_host, HookKind, WasmHost, WasmHostError};
 
@@ -192,6 +194,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub graph_patches: Vec<GraphPatch>,
     #[serde(default)]
+    pub output_verification: OutputVerificationConfig,
+    #[serde(default)]
     pub automation: AutomationConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<ExtensionConfig>,
@@ -215,12 +219,36 @@ impl Default for ProjectConfig {
             discovery: DiscoveryConfig::default(),
             manifest: None,
             graph_patches: Vec::new(),
+            output_verification: OutputVerificationConfig::default(),
             automation: AutomationConfig::default(),
             extension: None,
             definitions: None,
             source_identity: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputVerificationConfig {
+    /// Hold terminal success until a trusted publisher acknowledges this inventory.
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default = "default_output_inventory_schema")]
+    pub inventory_schema: String,
+}
+
+impl Default for OutputVerificationConfig {
+    fn default() -> Self {
+        Self {
+            required: false,
+            inventory_schema: default_output_inventory_schema(),
+        }
+    }
+}
+
+fn default_output_inventory_schema() -> String {
+    WALLABY_OUTPUT_INVENTORY_SCHEMA.into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -272,6 +300,8 @@ pub struct GraphConfig {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -780,12 +810,22 @@ impl ProjectConfig {
                 }
             }
         }
+        if self.output_verification.inventory_schema != WALLABY_OUTPUT_INVENTORY_SCHEMA {
+            errors.push(ValidationDiagnostic::error(
+                "output_verification.inventory_schema",
+                "unsupported_output_inventory_schema",
+                format!(
+                    "output_verification.inventory_schema must be {WALLABY_OUTPUT_INVENTORY_SCHEMA}"
+                ),
+            ));
+        }
         if let Some(graph) = &self.graph {
-            if graph.url.is_some() && graph.path.is_some() {
+            let source_count = usize::from(graph.url.is_some()) + usize::from(graph.path.is_some());
+            if source_count != 1 {
                 errors.push(ValidationDiagnostic::error(
                     "graph",
                     "mutually_exclusive",
-                    "graph must use only one of url or path",
+                    "graph must use exactly one of url or path",
                 ));
             }
             if graph
@@ -809,6 +849,23 @@ impl ProjectConfig {
                     "required",
                     "graph.path must be non-empty when set",
                 ));
+            }
+            match graph.sha256.as_deref() {
+                None => errors.push(ValidationDiagnostic::error(
+                    "graph.sha256",
+                    "required",
+                    "graph.sha256 is required to pin graph content",
+                )),
+                Some(value)
+                    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+                {
+                    errors.push(ValidationDiagnostic::error(
+                        "graph.sha256",
+                        "invalid_sha256",
+                        "graph.sha256 must contain exactly 64 hexadecimal characters",
+                    ));
+                }
+                Some(_) => {}
             }
         }
         for (collection, queries) in [
@@ -1214,6 +1271,25 @@ automation:
     }
 
     #[test]
+    fn output_verification_policy_is_explicit_and_schema_pinned() {
+        let mut config = ProjectConfig::default();
+        config.metadata.id = "test".into();
+        assert!(!config.output_verification.required);
+        assert_eq!(
+            config.output_verification.inventory_schema,
+            WALLABY_OUTPUT_INVENTORY_SCHEMA
+        );
+
+        config.output_verification.required = true;
+        config.output_verification.inventory_schema = "unknown/v1".into();
+        let report = config.validate_report();
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "output_verification.inventory_schema"
+                && diagnostic.code == "unsupported_output_inventory_schema"
+        }));
+    }
+
+    #[test]
     fn enrichment_validation_uses_the_enrichment_path() {
         let yaml = r#"
 apiVersion: beampipe.dev/v2
@@ -1234,5 +1310,41 @@ discovery:
             .errors
             .iter()
             .any(|diagnostic| diagnostic.path == "discovery.enrichments[0].name"));
+    }
+
+    #[test]
+    fn graph_requires_one_source_and_a_sha256_pin() {
+        let yaml = r#"
+apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata:
+  id: graph-pin-test
+graph:
+  url: https://example.test/graph.json
+"#;
+        let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
+        let report = config.validate_report();
+        assert!(report
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.path == "graph.sha256"));
+
+        let invalid = ProjectConfig::from_slice(
+            yaml.replace(
+                "  url: https://example.test/graph.json",
+                "  url: https://example.test/graph.json\n  path: /tmp/graph.json\n  sha256: not-a-digest",
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+        .validate_report();
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.path == "graph"));
+        assert!(invalid
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.code == "invalid_sha256"));
     }
 }

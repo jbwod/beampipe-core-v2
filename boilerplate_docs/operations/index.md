@@ -5,35 +5,6 @@ hide:
 
 # Operator handbook
 
-Operate from durable state outward: PostgreSQL first, then worker ownership, then the scheduler or DALiuGE observation. Never infer external success from a control-plane status alone.
-
-## Start a shift
-
-```bash
-beampipe doctor
-beampipe status
-beampipe worker list
-beampipe console
-```
-
-For a live profile, add:
-
-```bash
-beampipe doctor --profile PROFILE
-beampipe scheduler status --profile PROFILE
-beampipe daliuge inspect --profile PROFILE
-```
-
-<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Operator inspection order from readiness through durable state to external systems">
-  <div class="bp-flow-node" data-tone="cyan"><span>01</span><strong>readiness</strong><small>process + dependencies</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>02</span><strong>ledger</strong><small>intent + exact axes</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>03</span><strong>worker</strong><small>claim + heartbeat</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>04</span><strong>external</strong><small>Slurm + DALiuGE</small></div>
-</div>
-
 ## Process roles
 
 | Role | Command | Scale rule |
@@ -44,6 +15,27 @@ beampipe daliuge inspect --profile PROFILE
 | PostgreSQL | external service | One logical primary; back it up |
 
 All roles coordinate through PostgreSQL. The console is a projection of that state plus explicit live probes, not a second control plane.
+
+## API rate limiting and proxy trust
+
+Sensitive API routes use Redis-backed fixed-window rate limiting. Production
+always requires `BEAMPIPE_REDIS_URL` and fails startup when Redis is absent or
+unreachable; `BEAMPIPE_REQUIRE_RATE_LIMITER=false` cannot weaken that policy.
+In development the limiter remains optional unless
+`BEAMPIPE_REQUIRE_RATE_LIMITER=true`. Runtime Redis errors fail requests closed
+whenever the limiter is required; optional development mode logs the dependency
+failure before allowing the request.
+
+The API always keys direct clients from the TCP peer address. It only consumes
+`X-Forwarded-For` when that peer belongs to a network explicitly listed in
+`BEAMPIPE_TRUSTED_PROXY_CIDRS` (a comma-separated list such as
+`10.20.0.0/16,2001:db8:1::/64`). The chain is walked from right to left and
+stops at the first untrusted address, so a caller cannot select a bucket by
+prepending a spoofed address. Leave the setting empty when no trusted reverse
+proxy is present.
+
+Both `BEAMPIPE_RATE_LIMIT_REQUESTS` and
+`BEAMPIPE_RATE_LIMIT_PERIOD_SECONDS` must be greater than zero.
 
 ## Console
 
@@ -75,7 +67,7 @@ beampipe worker leases --include-expired
 beampipe scheduler jobs --limit 100
 ```
 
-Use [Recovery and cancellation](recovery.md) before retrying failed work and [Production runbook](production-runbook.md) before changing binaries, project revisions, profiles, or secrets.
+Use [Recovery and cancellation](recovery.md) before retrying failed work. Back up PostgreSQL before changing binaries, project revisions, profiles, or secrets, and before `beampipe uninstall`.
 
 <div class="terminal-note" data-tone="amber">
 <strong>When external state is uncertain, reconcile.</strong><br>

@@ -24,4 +24,4 @@ Use these terms consistently across project configuration, API responses, the co
 | Source | Stable project identity for an astronomical target or other unit of discovery. |
 | Submission uncertainty | State where Beampipe attempted external submission but cannot yet prove whether it succeeded. |
 
-The [architecture map](../architecture/index.md) shows how these concepts relate. The [execution state model](../architecture/state-machine.md) defines exact state values.
+The [operator handbook](../operations/index.md) shows how these concepts show up in triage. [Recovery and cancellation](../operations/recovery.md) covers uncertain and terminal work.

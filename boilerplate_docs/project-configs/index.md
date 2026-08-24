@@ -2,20 +2,6 @@
 
 Project config is immutable, dynamically loaded survey policy. It defines source identity, TAP queries, metadata preparation, manifests, graph preparation, and scheduler automation. No project query is hardcoded in the Rust worker.
 
-## Data flow
-
-<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Project YAML drives query rendering metadata normalization manifest generation graph patches and automation">
-  <div class="bp-flow-node" data-tone="cyan"><span>YAML</span><strong>identity + queries</strong><small>survey policy</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="cyan"><span>TAP</span><strong>rows</strong><small>CASDA + VizieR</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>PREPARE</span><strong>metadata</strong><small>map + flag + sign</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>BUILD</span><strong>manifest + graph</strong><small>immutable artifacts</small></div>
-  <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="amber"><span>POLICY</span><strong>automation</strong><small>admit + execute</small></div>
-</div>
-
 ## Start from an example
 
 - `config/wallaby_hires.v2.yaml`: production-shaped WALLABY discovery and Slurm automation.
@@ -43,6 +29,7 @@ graph: {}
 discovery: {}
 manifest: {}
 graph_patches: []
+output_verification: {}
 automation: {}
 extension: {}
 ```
@@ -55,6 +42,7 @@ extension: {}
 | `discovery` | project-specific ADQL, enrichments, mappings, flags, signature |
 | `manifest` | source/SBID/dataset grouping and output templates |
 | `graph`, `graph_patches` | logical graph source and deterministic mutations |
+| `output_verification` | pinned durable-product inventory policy |
 | `automation` | discovery cadence and execution admission limits |
 | `extension` | optional pinned WASM hooks |
 
@@ -94,8 +82,17 @@ discovery:
     - name: sbid_to_eval_file
       adapter: casda
       template: |
-        SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'
+        SELECT * FROM casda.observation_evaluation_file
+        WHERE sbid = '{sbid}'
+        AND format = 'calibration'
+        AND filename LIKE 'calibration-metadata-processing-logs-SB{sbid}_%.tar'
 ```
+
+For each SBID, discovery considers only calibration metadata archives with the
+expected tar naming contract. When CASDA returns multiple valid archives, the
+largest is selected and equal sizes are resolved by the lexically latest filename.
+Missing calibration archives and duplicate winning rows fail closed; unrelated
+diagnostic and validation-report products are never used as fallbacks.
 
 Project-level `casda_tap_url` and `vizier_tap_url` can override runtime defaults. Keep credentials outside YAML.
 
@@ -137,7 +134,8 @@ manifest:
     vsys: "{flags.vsys}"
 
 graph:
-  url: https://example.org/pinned/wallaby.graph
+  url: https://example.org/releases/wallaby-v1.graph
+  sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 graph_patches:
   - match:
@@ -147,7 +145,17 @@ graph_patches:
       num_of_copies: "$count(sbids[].datasets[])"
 ```
 
-Manifest templates resolve both logical `flags.*` values and the flat persisted fields produced by discovery. Graph bytes are checksummed and stored on the execution, but remote branch URLs remain mutable before preparation; use immutable URLs or externally verified hashes for qualification.
+Manifest templates resolve both logical `flags.*` values and the flat persisted fields produced by discovery. Every graph source requires its expected SHA-256. Fetches time out after 30 seconds, reject content over 16 MiB, and verify the digest before parsing JSON. Use an immutable URL as well as the digest so configuration provenance remains human-auditable.
+
+The bundled WALLABY examples use graph files vendored from
+`wallaby-hires-beampipe` commit
+`6cc5c4cdc49c39a843b81ab14543d1c9c71b015f`. Setup materializes both the
+qualified Setonix graph and the no-download E2E graph under `config/graphs`;
+Compose mounts that directory read-only into API, scheduler, and worker roles.
+Relative graph paths resolve from `BEAMPIPE_HOME` for native installations and
+from the process working directory when no installation is selected. The
+configured SHA-256 remains authoritative and prevents a modified local file
+from executing.
 
 ## Automation
 

@@ -1,7 +1,7 @@
 //! OpenAPI metadata and post-processing to match the legacy Beampipe Core spec.
 
 use serde_json::{json, Value};
-use utoipa::openapi::security::{Flow, OAuth2, Password, Scopes, SecurityScheme};
+use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use crate::ApiDoc;
@@ -12,11 +12,8 @@ impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
-                "OAuth2PasswordBearer",
-                SecurityScheme::OAuth2(OAuth2::new([Flow::Password(Password::new(
-                    "/api/v2/login",
-                    Scopes::new(),
-                ))])),
+                "BearerAuth",
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
             );
         }
     }
@@ -26,7 +23,7 @@ const DESCRIPTION: &str = r#"Beampipe Core (Rust v2)
 
 ## Getting started
 
-1. **Authenticate**: `POST /api/v2/login` with the admin **username or email** and password from setup. Copy `access_token` and click **Authorize** (Bearer token).
+1. **Authenticate**: `POST /api/v2/login` with the admin **username** and password from setup. Copy `access_token` and click **Authorize** (Bearer token).
 2. **List projects**: `GET /api/v2/projects` shows registered project modules.
 3. **Register sources**: `POST /api/v2/sources` (returns 201 or 200 if already registered).
 4. **Run discovery**: `POST /api/v2/sources/discover` marks sources for async archive polling.
@@ -104,7 +101,7 @@ fn tag_groups() -> Value {
         },
         {
             "name": "Operations",
-            "tags": ["operators", "scheduler", "daliuge", "health", "provenance", "alerts"]
+            "tags": ["operators", "scheduler", "daliuge", "slurm-credentials", "health", "provenance", "alerts"]
         }
     ])
 }
@@ -151,7 +148,13 @@ fn error_ref() -> Value {
 }
 
 fn apply_security(spec: &mut Value) {
-    const PUBLIC: &[&str] = &["/api/v2/health", "/api/v2/health/tap", "/api/v2/login"];
+    const PUBLIC: &[&str] = &[
+        "/api/v2/health",
+        "/api/v2/health/tap",
+        "/api/v2/login",
+        "/api/v2/refresh",
+        "/api/v2/logout",
+    ];
     let Some(paths) = spec.get_mut("paths").and_then(Value::as_object_mut) else {
         return;
     };
@@ -165,7 +168,7 @@ fn apply_security(spec: &mut Value) {
         for op in ops.values_mut().filter(|v| v.is_object()) {
             op.as_object_mut()
                 .expect("operation object")
-                .insert("security".into(), json!([{"OAuth2PasswordBearer": []}]));
+                .insert("security".into(), json!([{"BearerAuth": []}]));
         }
     }
 }
@@ -212,7 +215,13 @@ fn alias_observability_schemas(spec: &mut Value) {
 }
 
 fn enrich_error_responses(spec: &mut Value) {
-    const PUBLIC: &[&str] = &["/api/v2/health", "/api/v2/health/tap", "/api/v2/login"];
+    const PUBLIC: &[&str] = &[
+        "/api/v2/health",
+        "/api/v2/health/tap",
+        "/api/v2/login",
+        "/api/v2/refresh",
+        "/api/v2/logout",
+    ];
     let Some(paths) = spec.get_mut("paths").and_then(Value::as_object_mut) else {
         return;
     };
@@ -325,6 +334,8 @@ fn apply_operation_docs(spec: &mut Value) {
         ("get", "/api/v2/deployment-profiles/{id}", "Get deployment profile", "Fetch one deployment profile."),
         ("patch", "/api/v2/deployment-profiles/{id}", "Update deployment profile", "Patch profile translation or deployment settings."),
         ("delete", "/api/v2/deployment-profiles/{id}", "Delete deployment profile", "Remove a deployment profile."),
+        ("get", "/api/v2/slurm/credentials", "List Slurm SSH credential slots", "Names and file presence for slots under BEAMPIPE_SSH_CREDENTIALS_DIR. Never returns key material."),
+        ("get", "/api/v2/slurm/credentials/{slot}", "Get Slurm SSH credential slot", "File presence for one installed credential slot. 404 if the slot directory is not listed."),
         ("post", "/api/v2/project-configs", "Upload project config", "Upload and validate a versioned survey YAML/JSON config."),
         ("get", "/api/v2/project-configs/{id}", "Get project config", "Fetch active or historical project configuration."),
         ("get", "/api/v2/project-configs/{id}/versions", "List config versions", "Version history for a project module."),
@@ -338,7 +349,7 @@ fn apply_operation_docs(spec: &mut Value) {
         ("post", "/api/v2/notification-channels/{id}/test", "Test notification channel", "Send a test alert delivery."),
         ("get", "/api/v2/alert-rules", "List alert rules", "Configured alert rules."),
         ("post", "/api/v2/alert-rules", "Create alert rule", "Create a new alert rule."),
-        ("patch", "/api/v2/alert-rules/{id}", "Update alert rule", "Patch alert rule trigger or channels."),
+        ("patch", "/api/v2/alert-rules/{id}", "Update alert rule", "Patch alert rule name, trigger, severity, or channels."),
         ("delete", "/api/v2/alert-rules/{id}", "Delete alert rule", "Remove an alert rule."),
         ("get", "/api/v2/alert-deliveries", "List alert deliveries", "Audit log of alert deliveries."),
         ("get", "/api/v2/executions/{id}/events", "List execution events", "Provenance timeline for one execution."),
@@ -410,7 +421,7 @@ mod tests {
         let spec = export_openapi_json();
         assert_eq!(spec["info"]["title"], "Beampipe");
         assert_eq!(spec["openapi"], "3.1.0");
-        assert!(spec["components"]["securitySchemes"]["OAuth2PasswordBearer"].is_object());
+        assert!(spec["components"]["securitySchemes"]["BearerAuth"].is_object());
         assert!(spec["paths"]["/api/v2/sources"]["get"]["security"].is_array());
         assert!(
             spec["paths"]["/api/v2/health"]["get"]["security"].is_null()
@@ -426,5 +437,9 @@ mod tests {
         let missing = collect_unresolved_schema_refs(&spec);
         assert!(missing.is_empty(), "unresolved $ref targets: {missing:?}");
         assert!(spec["components"]["schemas"]["ReadyResponse"].is_object());
+        assert!(spec["paths"]["/api/v2/slurm/credentials"]["get"].is_object());
+        assert!(spec["paths"]["/api/v2/slurm/credentials/{slot}"]["get"].is_object());
+        assert!(spec["components"]["schemas"]["SlurmCredentialSlot"].is_object());
+        assert!(spec["components"]["schemas"]["SlurmCredentialListResponse"].is_object());
     }
 }

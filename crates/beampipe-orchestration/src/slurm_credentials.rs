@@ -1,14 +1,26 @@
 //! Resolve Slurm SSH private keys and known-hosts policy from environment.
 
 use crate::OrchestrationError;
+use beampipe_profiles::ProfileValidationError;
 use beampipe_security::{
-    allow_inline_secrets_override, bool_env, is_process_production, process_env_name,
+    allow_inline_secrets_override, bool_env, is_runtime_production, runtime_env_name,
 };
 use russh::keys::{decode_secret_key, load_secret_key, PrivateKey};
+use serde::Serialize;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
+
+/// Presence of files in a named SSH credential slot. Never includes key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SlotPresence {
+    pub name: String,
+    pub private_key: bool,
+    pub public_key: bool,
+    pub passphrase: bool,
+    pub known_hosts: bool,
+}
 
 /// Resolved SSH material for Slurm login nodes (process-wide from env).
 #[derive(Clone)]
@@ -90,11 +102,11 @@ impl SlurmKeySource {
 }
 
 pub fn beampipe_env() -> String {
-    process_env_name()
+    runtime_env_name()
 }
 
 pub fn is_production_env() -> bool {
-    is_process_production()
+    is_runtime_production()
 }
 
 fn parse_bool_env(name: &str) -> Option<bool> {
@@ -207,6 +219,40 @@ pub fn list_credential_slots() -> Vec<String> {
         .collect::<Vec<_>>();
     names.sort();
     names
+}
+
+/// File presence for every listed credential slot. Empty or missing root yields `[]`.
+pub fn list_credential_slot_presence() -> Vec<SlotPresence> {
+    list_credential_slots()
+        .into_iter()
+        .filter_map(|name| inspect_credential_slot(&name).ok())
+        .collect()
+}
+
+/// Presence of files for `name`. Invalid names fail; a missing directory is all-false.
+pub fn inspect_credential_slot(name: &str) -> Result<SlotPresence, ProfileValidationError> {
+    beampipe_profiles::validate_ssh_credential_name(name)?;
+    let Some(root) = ssh_credentials_dir() else {
+        return Ok(empty_slot_presence(name));
+    };
+    let slot_dir = root.join(name);
+    Ok(SlotPresence {
+        name: name.to_string(),
+        private_key: slot_dir.join("private_key").is_file(),
+        public_key: slot_dir.join("private_key.pub").is_file(),
+        passphrase: slot_dir.join("passphrase").is_file(),
+        known_hosts: slot_dir.join("known_hosts").is_file() || root.join("known_hosts").is_file(),
+    })
+}
+
+fn empty_slot_presence(name: &str) -> SlotPresence {
+    SlotPresence {
+        name: name.to_string(),
+        private_key: false,
+        public_key: false,
+        passphrase: false,
+        known_hosts: false,
+    }
 }
 
 pub fn has_global_ssh_key_config() -> bool {
@@ -323,7 +369,7 @@ fn check_private_key_permissions(path: &Path) -> Result<(), OrchestrationError> 
         ));
     }
     let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
+    if private_key_mode_too_open(path, mode) {
         return Err(OrchestrationError::Backend(format!(
             "SSH private key {} permissions {mode:o} are too open (expected 0600 or stricter)",
             path.display()
@@ -342,9 +388,73 @@ fn check_private_key_permissions(path: &Path) -> Result<(), OrchestrationError> 
     Ok(())
 }
 
+#[cfg(unix)]
+fn private_key_mode_too_open(path: &Path, mode: u32) -> bool {
+    if mode & 0o007 != 0 {
+        return true;
+    }
+    if mode & 0o070 == 0 {
+        return false;
+    }
+    linux_posix_acl_access(path).is_none_or(|acl| posix_acl_grants_group_or_other(&acl))
+}
+
 #[cfg(not(unix))]
 fn check_private_key_permissions(_path: &Path) -> Result<(), OrchestrationError> {
     Ok(())
+}
+
+const POSIX_ACL_XATTR_VERSION: u32 = 2;
+const ACL_GROUP_OBJ: u16 = 0x04;
+const ACL_GROUP: u16 = 0x08;
+const ACL_OTHER: u16 = 0x20;
+const ACL_READ: u16 = 0x4;
+const ACL_WRITE: u16 = 0x2;
+
+fn posix_acl_grants_group_or_other(acl: &[u8]) -> bool {
+    if acl.len() < 4 || acl.len() % 8 != 4 {
+        return true;
+    }
+    let version = u32::from_le_bytes(acl[0..4].try_into().unwrap_or([0; 4]));
+    if version != POSIX_ACL_XATTR_VERSION {
+        return true;
+    }
+    acl[4..].as_chunks::<8>().0.iter().any(|chunk| {
+        let tag = u16::from_le_bytes(chunk[0..2].try_into().unwrap_or([0; 2]));
+        let perm = u16::from_le_bytes(chunk[2..4].try_into().unwrap_or([0; 2]));
+        matches!(tag, ACL_GROUP_OBJ | ACL_GROUP | ACL_OTHER) && perm & (ACL_READ | ACL_WRITE) != 0
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_posix_acl_access(path: &Path) -> Option<Vec<u8>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let name = CString::new("system.posix_acl_access").ok()?;
+    let size = unsafe { libc::lgetxattr(c_path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return None;
+    }
+    let mut buf = vec![0_u8; size as usize];
+    let read = unsafe {
+        libc::lgetxattr(
+            c_path.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if read <= 0 {
+        return None;
+    }
+    buf.truncate(read as usize);
+    Some(buf)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn linux_posix_acl_access(_path: &Path) -> Option<Vec<u8>> {
+    None
 }
 
 fn map_key_load_error(
@@ -639,6 +749,101 @@ mod tests {
         std::env::remove_var("BEAMPIPE_ENV");
     }
 
+    fn acl_entry(tag: u16, perm: u16, id: u32) -> [u8; 8] {
+        let mut entry = [0_u8; 8];
+        entry[0..2].copy_from_slice(&tag.to_le_bytes());
+        entry[2..4].copy_from_slice(&perm.to_le_bytes());
+        entry[4..8].copy_from_slice(&id.to_le_bytes());
+        entry
+    }
+
+    fn acl_blob(entries: &[[u8; 8]]) -> Vec<u8> {
+        let mut blob = Vec::from(2_u32.to_le_bytes());
+        for entry in entries {
+            blob.extend_from_slice(entry);
+        }
+        blob
+    }
+
+    #[test]
+    fn container_named_user_acl_is_not_group_or_other_access() {
+        let undefined = u32::MAX;
+        let acl = acl_blob(&[
+            acl_entry(0x01, 0x6, undefined),
+            acl_entry(0x02, 0x4, 10001),
+            acl_entry(0x04, 0x0, undefined),
+            acl_entry(0x10, 0x4, undefined),
+            acl_entry(0x20, 0x0, undefined),
+        ]);
+        assert!(!posix_acl_grants_group_or_other(&acl));
+    }
+
+    #[test]
+    fn owning_group_read_acl_is_too_open() {
+        let undefined = u32::MAX;
+        let acl = acl_blob(&[
+            acl_entry(0x01, 0x6, undefined),
+            acl_entry(0x04, 0x4, undefined),
+            acl_entry(0x10, 0x4, undefined),
+            acl_entry(0x20, 0x0, undefined),
+        ]);
+        assert!(posix_acl_grants_group_or_other(&acl));
+    }
+
+    #[test]
+    fn rejects_group_readable_key_without_acl() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("id_test");
+        std::fs::write(&key, "not-a-real-key").unwrap();
+        let mut perms = std::fs::metadata(&key).unwrap().permissions();
+        perms.set_mode(0o640);
+        std::fs::set_permissions(&key, perms).unwrap();
+        std::env::set_var("BEAMPIPE_ENV", "development");
+        std::env::set_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS", "false");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY");
+        std::env::set_var("SLURM_SSH_PRIVATE_KEY_FILE", &key);
+        let err = SlurmSshCredentials::resolve().unwrap_err().to_string();
+        assert!(err.contains("too open"), "{err}");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_FILE");
+        std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
+        std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn accepts_setfacl_named_user_when_stat_shows_group_bits() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("id_test");
+        std::fs::write(&key, "not-a-real-key").unwrap();
+        let mut perms = std::fs::metadata(&key).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&key, perms).unwrap();
+        let applied = std::process::Command::new("setfacl")
+            .args(["-m", "u:10001:r"])
+            .arg(&key)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !applied {
+            return;
+        }
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+        assert!(
+            !private_key_mode_too_open(&key, mode),
+            "mode {mode:o} should be accepted as an ACL mask"
+        );
+        std::env::set_var("BEAMPIPE_ENV", "development");
+        std::env::set_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS", "false");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY");
+        std::env::set_var("SLURM_SSH_PRIVATE_KEY_FILE", &key);
+        SlurmSshCredentials::resolve().expect("named-user ACL key should resolve");
+        std::env::remove_var("SLURM_SSH_PRIVATE_KEY_FILE");
+        std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
+        std::env::remove_var("BEAMPIPE_ENV");
+    }
+
     #[test]
     fn production_rejects_inline_private_key_without_escape_hatch() {
         let _guard = env_lock().lock().unwrap();
@@ -904,5 +1109,91 @@ mod tests {
         std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
         std::env::remove_var("BEAMPIPE_SLURM_SSH_STRICT_KNOWN_HOSTS");
         std::env::remove_var("BEAMPIPE_ENV");
+    }
+
+    #[test]
+    fn inspect_reports_presence_without_serializing_key_material() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("hpc");
+        std::fs::create_dir(&slot).unwrap();
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----\n";
+        write_mode600(&slot.join("private_key"), pem);
+        std::fs::write(slot.join("private_key.pub"), "ssh-ed25519 AAAA demo").unwrap();
+        write_mode600(&slot.join("passphrase"), "super-secret-passphrase");
+        std::fs::write(
+            slot.join("known_hosts"),
+            "login.example.org ssh-ed25519 AAAA",
+        )
+        .unwrap();
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+
+        let listed = list_credential_slot_presence();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "hpc");
+        assert!(listed[0].private_key);
+        assert!(listed[0].public_key);
+        assert!(listed[0].passphrase);
+        assert!(listed[0].known_hosts);
+
+        let json = serde_json::to_string(&listed[0]).unwrap();
+        assert!(!json.contains("BEGIN"));
+        assert!(!json.contains("super-secret-passphrase"));
+        assert!(!json.contains("not-a-real-key"));
+        assert!(json.contains("\"private_key\":true"));
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
+    }
+
+    #[test]
+    fn inspect_missing_slot_is_all_false_and_empty_root_lists_nothing() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+
+        assert!(list_credential_slots().is_empty());
+        assert!(list_credential_slot_presence().is_empty());
+        let missing = inspect_credential_slot("hpc").unwrap();
+        assert_eq!(
+            missing,
+            SlotPresence {
+                name: "hpc".into(),
+                private_key: false,
+                public_key: false,
+                passphrase: false,
+                known_hosts: false,
+            }
+        );
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
+    }
+
+    #[test]
+    fn inspect_rejects_unsafe_slot_names() {
+        assert!(inspect_credential_slot("../etc").is_err());
+        assert!(inspect_credential_slot("hpc/../root").is_err());
+        assert!(inspect_credential_slot("").is_err());
+    }
+
+    #[test]
+    fn inspect_known_hosts_falls_back_to_root_file() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slot = dir.path().join("hpc");
+        std::fs::create_dir(&slot).unwrap();
+        write_mode600(&slot.join("private_key"), "slot-key");
+        std::fs::write(
+            dir.path().join("known_hosts"),
+            "login.example.org ssh-ed25519 AAAA",
+        )
+        .unwrap();
+        std::env::set_var("BEAMPIPE_SSH_CREDENTIALS_DIR", dir.path());
+
+        let presence = inspect_credential_slot("hpc").unwrap();
+        assert!(presence.private_key);
+        assert!(!presence.public_key);
+        assert!(presence.known_hosts);
+
+        std::env::remove_var("BEAMPIPE_SSH_CREDENTIALS_DIR");
     }
 }

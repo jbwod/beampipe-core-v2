@@ -4,8 +4,9 @@ use beampipe_adapters::{casda_tap, vizier_tap, AdapterError, TapRow};
 use beampipe_config::Settings;
 use beampipe_db::{
     models::{
-        DeploymentProfileRow, ExecutionArtifactInput, ExecutionObservationInput,
-        ExecutionProvenancePatch, ExecutionStatePatch, JobRow, WorkerRegistration,
+        ArchiveMetadataRow, DeploymentProfileRow, ExecutionArtifactInput,
+        ExecutionObservationInput, ExecutionProvenancePatch, ExecutionStatePatch, JobRow,
+        WorkerRegistration,
     },
     repo,
 };
@@ -19,8 +20,8 @@ use beampipe_domain::{
     can_admit_by_in_flight,
     discovery::{should_skip_tap, DiscoverySourceResult, SignatureOptions},
     discovery_admission_budget, execute_admission_budget, is_non_retryable_job_error, ControlPhase,
-    DaliugeState, ExecutionPhase, ExecutionStatus, FailureClass, LedgerPatch, SchedulerState,
-    SchedulerTickResult, SkipReason, SubmissionState, TerminalOutcome,
+    DaliugeState, ExecutionPhase, ExecutionStatus, FailureClass, LedgerPatch, OutputState,
+    SchedulerState, SchedulerTickResult, SkipReason, SubmissionState, TerminalOutcome,
 };
 use beampipe_metrics as metrics;
 use beampipe_orchestration::slurm_deploy::resolve_remote_user;
@@ -37,16 +38,20 @@ use beampipe_profiles::{
     DeploymentConfig, RestRemoteDeploymentConfig, SlurmRemoteDeploymentConfig,
 };
 use beampipe_project::{
-    apply_field_transform, build_template_context, ExecutionAutomationConfig, HookKind,
-    ProjectConfig, TransformRegistry, WasmHost,
+    apply_field_transform, build_template_context, select_eval_file_row, ExecutionAutomationConfig,
+    HookKind, ProjectConfig, TransformRegistry, WasmHost,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn, Instrument};
@@ -54,6 +59,34 @@ use uuid::Uuid;
 
 static SLURM_SSH_POOL: LazyLock<SlurmSshPool> = LazyLock::new(SlurmSshPool::new_from_env);
 static SINGLE_TICK_WORKER_ID: LazyLock<Uuid> = LazyLock::new(Uuid::now_v7);
+const SLURM_TARGET_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn within_slurm_target_timeout<F>(
+    duration: Duration,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(duration, future).await
+}
+
+async fn within_submission_timeout<F>(
+    duration: Duration,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(duration, future).await
+}
+
+fn submission_timeout_remaining(deadline_at: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
+    deadline_at
+        .signed_duration_since(now)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+}
 
 fn trace_context_for_job(job: &JobRow) -> metrics::TraceContext {
     let fallback = job
@@ -75,6 +108,7 @@ fn job_phase_label(kind: &str) -> &'static str {
 pub struct WorkerConfig {
     pub poll_interval: Duration,
     pub lock_seconds: i64,
+    pub submission_timeout: Duration,
     pub discovery_batch_size: i64,
     pub discovery_stale_hours: i32,
     pub discovery_claim_ttl_minutes: i64,
@@ -109,9 +143,11 @@ pub struct WorkerConfig {
 
 impl WorkerConfig {
     pub fn from_settings(settings: &Settings) -> Self {
+        beampipe_security::configure_runtime_env(&settings.beampipe_env);
         Self {
             poll_interval: Duration::from_millis(settings.worker_poll_interval_ms),
             lock_seconds: settings.worker_lock_seconds,
+            submission_timeout: Duration::from_secs(settings.worker_submission_timeout_seconds),
             discovery_batch_size: 50,
             discovery_stale_hours: 24,
             discovery_claim_ttl_minutes: 180,
@@ -155,6 +191,7 @@ impl WorkerConfig {
             .unwrap_or(Self {
                 poll_interval,
                 lock_seconds,
+                submission_timeout: Duration::from_secs(1_800),
                 discovery_batch_size: 50,
                 discovery_stale_hours: 24,
                 discovery_claim_ttl_minutes: 180,
@@ -965,11 +1002,13 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
                                 include_discovery_flags: c.include_discovery_flags,
                             })
                             .unwrap_or_default();
-                        if should_skip_tap(
-                            source_row.discovery_signature.as_deref(),
-                            &records,
-                            &sig_opts,
-                        ) {
+                        if staging_metadata_cache_complete(config, &records)
+                            && should_skip_tap(
+                                source_row.discovery_signature.as_deref(),
+                                &records,
+                                &sig_opts,
+                            )
+                        {
                             metrics::record_discovery_tap_skipped(project_module);
                             if let Some(pool) = &self.pool {
                                 let payload = json!({
@@ -1034,6 +1073,37 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
     }
 }
 
+fn staging_metadata_cache_complete(config: &ProjectConfig, records: &[(String, Value)]) -> bool {
+    let requires_casda_evaluation = config
+        .discovery
+        .enrichments
+        .iter()
+        .any(|query| query.name == "sbid_to_eval_file" && query.adapter == "casda");
+    if !requires_casda_evaluation {
+        return true;
+    }
+    records.iter().all(|(_, payload)| {
+        payload
+            .get("datasets")
+            .and_then(Value::as_array)
+            .is_some_and(|datasets| {
+                !datasets.is_empty()
+                    && datasets.iter().all(|dataset| {
+                        nonempty_string_field(dataset, "access_url")
+                            && nonempty_string_field(dataset, "evaluation_file")
+                            && nonempty_string_field(dataset, "evaluation_file_access_url")
+                    })
+            })
+    })
+}
+
+fn nonempty_string_field(value: &Value, field: &str) -> bool {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ConfigDiscoveryError {
     #[error("project config has no discovery queries")]
@@ -1042,6 +1112,10 @@ enum ConfigDiscoveryError {
     MissingAdapter(String),
     #[error("adapter error: {0}")]
     Adapter(#[from] AdapterError),
+    #[error("SBID {sbid} has no valid calibration metadata archive")]
+    MissingCalibrationArchive { sbid: String },
+    #[error("SBID {sbid} has duplicate calibration metadata archive rows for {filename}")]
+    AmbiguousCalibrationArchive { sbid: String, filename: String },
 }
 
 impl ConfigDiscoveryRunner {
@@ -1117,10 +1191,11 @@ impl ConfigDiscoveryRunner {
                     .await
                 {
                     Ok(rows) => {
-                        if let Some(first) = rows.first() {
-                            by_sbid.insert(sbid.clone(), Value::Object(first.clone()));
+                        if let Some(row) = sbid_enrichment_row(&query.name, sbid, &rows)? {
+                            by_sbid.insert(sbid.clone(), Value::Object(row));
                         }
                     }
+                    Err(err) if query.name == "sbid_to_eval_file" => return Err(err),
                     Err(err) => {
                         warn!(
                             adapter = query.adapter,
@@ -1596,11 +1671,19 @@ async fn run_discover_batch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
         }
     }
     refresh_pool_gauges(pool).await?;
+    if !stats.changed_source_identifiers.is_empty() {
+        let _ = beampipe_alerts::fire_batched_discovery_changed(
+            pool,
+            project_module,
+            &stats.changed_source_identifiers,
+        )
+        .await;
+    }
     Ok(())
 }
 
 async fn refresh_pool_gauges(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let depth = repo::queue_depth(pool).await?;
+    let depth = repo::runnable_queue_depth(pool).await?;
     let running = repo::jobs_running_count(pool).await?;
     metrics::set_jobs_queue_depth(depth);
     metrics::set_jobs_running(running);
@@ -1655,9 +1738,9 @@ async fn finalize_execution_source_pending(
             repo::mark_sources_pending_workflow_run(pool, project_module, sources).await?;
         }
         ExecutionStatus::Completed | ExecutionStatus::NotSubmitted => {
-            repo::clear_workflow_pending_for_sources(pool, project_module, sources).await?;
-            repo::set_last_executed_discovery_signature_for_sources(pool, project_module, sources)
-                .await?;
+            if let Some(execution_id) = execution_id {
+                repo::finalize_successful_execution_sources(pool, execution_id).await?;
+            }
         }
         ExecutionStatus::Cancelled => {
             repo::clear_workflow_pending_for_sources(pool, project_module, sources).await?;
@@ -1830,6 +1913,49 @@ fn flatten_eval_enrichment(out: &mut Map<String, Value>) {
     {
         out.entry("evaluation_file".to_string()).or_insert(filename);
     }
+}
+
+fn sbid_enrichment_row(
+    query_name: &str,
+    sbid: &str,
+    rows: &[TapRow],
+) -> Result<Option<TapRow>, ConfigDiscoveryError> {
+    if query_name != "sbid_to_eval_file" {
+        return Ok(rows.first().cloned());
+    }
+
+    let expected_prefix = format!("calibration-metadata-processing-logs-SB{sbid}_");
+    let candidates: Vec<Value> = rows
+        .iter()
+        .filter(|row| {
+            value_string(row_value(row, "filename")).is_some_and(|filename| {
+                filename.starts_with(&expected_prefix) && filename.ends_with(".tar")
+            })
+        })
+        .cloned()
+        .map(Value::Object)
+        .collect();
+    let selected = select_eval_file_row(&Value::Array(candidates)).ok_or_else(|| {
+        ConfigDiscoveryError::MissingCalibrationArchive {
+            sbid: sbid.to_string(),
+        }
+    })?;
+    let selected_filename = value_string(row_value(&selected, "filename")).unwrap_or_default();
+    let duplicate_count = rows
+        .iter()
+        .filter(|row| {
+            value_string(row_value(row, "filename")).as_deref() == Some(selected_filename.as_str())
+                && value_string(row_value(row, "format"))
+                    .is_some_and(|format| format.eq_ignore_ascii_case("calibration"))
+        })
+        .count();
+    if duplicate_count > 1 {
+        return Err(ConfigDiscoveryError::AmbiguousCalibrationArchive {
+            sbid: sbid.to_string(),
+            filename: selected_filename,
+        });
+    }
+    Ok(Some(selected))
 }
 
 fn insert_flag_from_row(
@@ -2281,18 +2407,37 @@ async fn schedule_project_executions(
         let project_config_id = repo::get_active_project_config(pool, project_module)
             .await?
             .map(|c| c.uuid);
-        let execution = match repo::create_execution(
+        let scheduler_manifest = json!({
+            "beampipe_run_record": {
+                "scheduler": {
+                    "policy_decision": "admitted",
+                    "claim_token": claim_token,
+                    "admitted_source_count": valid.len(),
+                    "queue_depth": repo::queue_depth(pool).await.unwrap_or_default(),
+                }
+            }
+        });
+        let job_payload = metrics::payload_with_trace(
+            json!({}),
+            &metrics::correlation_only(tick_correlation.clone()),
+        );
+        let (_execution, _job) = match repo::create_automated_execution_and_enqueue(
             pool,
             project_module,
             sources,
             &policy.archive_name,
             deployment_profile_id,
             project_config_id,
-            None,
+            Some(&tick_correlation),
+            repo::AutomatedExecutionEnqueue {
+                scheduler_manifest,
+                job_payload,
+                worker_pool: config.pool.clone(),
+            },
         )
         .await
         {
-            Ok(execution) => execution,
+            Ok(result) => result,
             Err(sqlx::Error::Protocol(message))
                 if message.contains("concurrency limit reached") =>
             {
@@ -2301,42 +2446,6 @@ async fn schedule_project_executions(
             }
             Err(error) => return Err(error),
         };
-        repo::apply_execution_patch_with_correlation(
-            pool,
-            execution.uuid,
-            LedgerPatch {
-                scheduler_name: Some("workflow_auto".into()),
-                workflow_manifest: Some(json!({
-                    "beampipe_run_record": {
-                        "scheduler": {
-                            "policy_decision": "admitted",
-                            "claim_token": claim_token,
-                            "admitted_source_count": valid.len(),
-                            "queue_depth": repo::queue_depth(pool).await.unwrap_or_default(),
-                        }
-                    }
-                })),
-                ..beampipe_domain::LedgerPatch::default()
-            },
-            None,
-        )
-        .await?;
-        let job_payload = metrics::payload_with_trace(
-            json!({"execution_id": execution.uuid}),
-            &metrics::correlation_only(tick_correlation.clone()),
-        );
-        repo::enqueue_job_with_options(
-            pool,
-            "execute",
-            job_payload,
-            repo::JobEnqueueOptions {
-                execution_id: Some(execution.uuid),
-                idempotency_key: Some(format!("execute:{}", execution.uuid)),
-                pool: Some(config.pool.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
         pacing_sleep(config).await;
         admitted_sources.extend(valid);
         created_runs += 1;
@@ -2360,6 +2469,20 @@ async fn schedule_project_executions(
 fn json_sha256(value: &Value) -> Result<(String, i64), String> {
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     Ok((format!("{:x}", Sha256::digest(&bytes)), bytes.len() as i64))
+}
+
+fn resolved_slurm_target_fingerprint(
+    deployment: &SlurmRemoteDeploymentConfig,
+) -> Result<String, String> {
+    let remote_user = resolve_remote_user(deployment);
+    let target = SlurmTarget::from_deployment(deployment, &remote_user);
+    json_sha256(&json!({
+        "login_node": target.login_node,
+        "ssh_port": target.ssh_port,
+        "remote_user": target.remote_user,
+        "credential_slot": target.credential_slot,
+    }))
+    .map(|(sha256, _)| sha256)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2803,6 +2926,41 @@ async fn preflight_execute(
     Ok(())
 }
 
+async fn ensure_execution_active(
+    pool: &PgPool,
+    execution_id: uuid::Uuid,
+    recheck_sources: bool,
+) -> Result<beampipe_db::models::ExecutionRow, String> {
+    let execution = repo::get_execution(pool, execution_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("execution {execution_id} no longer exists"))?;
+    let status = execution.status_enum().ok_or_else(|| {
+        format!(
+            "execution {execution_id} has unknown status '{}'",
+            execution.status
+        )
+    })?;
+    if status.is_terminal() {
+        return Err(format!(
+            "execution {execution_id} became terminal ({}) before dispatch",
+            status.as_str()
+        ));
+    }
+    if recheck_sources {
+        let errors = repo::execution_source_readiness_errors(pool, &execution)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !errors.is_empty() {
+            return Err(format!(
+                "execution source readiness check failed: {}",
+                errors.join("; ")
+            ));
+        }
+    }
+    Ok(execution)
+}
+
 async fn run_execute(
     pool: &PgPool,
     config: &WorkerConfig,
@@ -2818,6 +2976,17 @@ async fn run_execute(
     let Some(execution) = repo::get_execution(pool, execution_id).await? else {
         return Ok(());
     };
+    if execution
+        .status_enum()
+        .is_some_and(ExecutionStatus::is_terminal)
+    {
+        info!(
+            event = "execute_terminal_guard",
+            execution_id = %execution_id,
+            status = %execution.status,
+        );
+        return Ok(());
+    }
     let project_module = execution.project_module.clone();
     let source_identifiers = source_identifiers_from_json(&execution.sources);
     let result = run_execute_body(
@@ -2831,17 +3000,45 @@ async fn run_execute(
     .await;
     metrics::record_execute_duration("total", started.elapsed().as_secs_f64());
     if let Err(msg) = result {
-        let submission_is_uncertain = repo::get_execution(pool, execution_id)
-            .await?
-            .and_then(|row| row.submission_state)
-            .as_deref()
+        let current = repo::get_execution(pool, execution_id).await?;
+        if current
+            .as_ref()
+            .and_then(|row| row.status_enum())
+            .is_some_and(ExecutionStatus::is_terminal)
+        {
+            info!(
+                event = "execute_terminal_guard",
+                execution_id = %execution_id,
+                error = %msg,
+                "discarding worker result because the execution is terminal"
+            );
+            return Ok(());
+        }
+        let submission_state = current
+            .as_ref()
+            .and_then(|row| row.submission_state.as_deref())
             .and_then(SubmissionState::parse)
-            == Some(SubmissionState::Uncertain);
-        if submission_is_uncertain {
+            .unwrap_or(SubmissionState::NotStarted);
+        if submission_state_holds_automatic_work(Some(submission_state)) {
+            if submission_state == SubmissionState::InFlight {
+                let _ = repo::apply_execution_state_patch(
+                    pool,
+                    execution_id,
+                    ExecutionStatePatch {
+                        submission_state: Some(SubmissionState::Uncertain),
+                        failure_class: Some(FailureClass::InconsistentState),
+                        last_error: Some(msg.clone()),
+                        last_reconciled_at: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
             warn!(
                 execution_id = %execution_id,
                 project_module,
                 error = %msg,
+                submission_state = submission_state.as_str(),
                 event = "execute_submission_uncertain"
             );
             beampipe_db::provenance::record_provenance_event(
@@ -2854,6 +3051,7 @@ async fn run_execute(
                 Some(&execution_id.to_string()),
                 &json!({
                     "error": msg,
+                    "submission_state": submission_state.as_str(),
                     "system_action": "submission is held for reconciliation and will not be repeated automatically",
                 }),
             )
@@ -2868,6 +3066,276 @@ async fn run_execute(
             msg,
         )
         .await?;
+    }
+    Ok(())
+}
+
+fn submission_state_holds_automatic_work(state: Option<SubmissionState>) -> bool {
+    matches!(
+        state,
+        Some(SubmissionState::InFlight | SubmissionState::Uncertain | SubmissionState::Submitted)
+    )
+}
+
+type ExecutionDatasetScope = BTreeMap<(String, String), BTreeSet<String>>;
+
+fn required_dataset_string(dataset: &Value, field: &str, context: &str) -> Result<String, String> {
+    dataset
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{context} requires a non-empty string '{field}'"))
+}
+
+fn dataset_identity(dataset: &Value, context: &str) -> Result<String, String> {
+    let object = dataset
+        .as_object()
+        .ok_or_else(|| format!("{context} must be a JSON object"))?;
+    for field in ["dataset_id", "visibility_filename"] {
+        if let Some(identity) = object
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(format!("{field}:{identity}"));
+        }
+    }
+    Err(format!(
+        "{context} requires a non-empty string 'dataset_id' or 'visibility_filename'"
+    ))
+}
+
+fn add_dataset_scope_entry(
+    scope: &mut ExecutionDatasetScope,
+    dataset: &Value,
+    expected_parent: Option<(&str, &str)>,
+    context: &str,
+) -> Result<(), String> {
+    let source = required_dataset_string(dataset, "source_identifier", context)?;
+    let sbid = required_dataset_string(dataset, "sbid", context)?;
+    if let Some((parent_source, parent_sbid)) = expected_parent {
+        if source != parent_source {
+            return Err(format!(
+                "{context} source_identifier '{source}' does not match archive/manifest parent '{parent_source}'"
+            ));
+        }
+        if sbid != parent_sbid {
+            return Err(format!(
+                "{context} SBID '{sbid}' does not match archive/manifest parent '{parent_sbid}'"
+            ));
+        }
+    }
+    let identity = dataset_identity(dataset, context)?;
+    if !scope
+        .entry((source.clone(), sbid.clone()))
+        .or_default()
+        .insert(identity.clone())
+    {
+        return Err(format!(
+            "{context} duplicates dataset '{identity}' for source '{source}' SBID '{sbid}'"
+        ));
+    }
+    Ok(())
+}
+
+fn select_execution_archive_metadata(
+    selection: &repo::ExecutionSourceScope,
+    rows: &[ArchiveMetadataRow],
+) -> Result<(Vec<Value>, ExecutionDatasetScope), String> {
+    let mut metadata = Vec::new();
+    let mut expected_scope = ExecutionDatasetScope::new();
+
+    for (source, selected_sbids) in &selection.sources {
+        let selected_rows = rows
+            .iter()
+            .filter(|row| {
+                row.source_identifier == *source
+                    && selected_sbids
+                        .as_ref()
+                        .is_none_or(|sbids| sbids.contains(&row.sbid))
+            })
+            .collect::<Vec<_>>();
+        if selected_rows.is_empty() {
+            return Err(match selected_sbids {
+                Some(sbids) => format!(
+                    "source '{source}' has no archive metadata for selected SBIDs {}",
+                    sbids.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+                None => format!("source '{source}' has no archive metadata"),
+            });
+        }
+
+        if let Some(sbids) = selected_sbids {
+            let covered = selected_rows
+                .iter()
+                .map(|row| row.sbid.as_str())
+                .collect::<BTreeSet<_>>();
+            let missing = sbids
+                .iter()
+                .filter(|sbid| !covered.contains(sbid.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "source '{source}' is missing archive metadata for selected SBIDs {}",
+                    missing.join(", ")
+                ));
+            }
+        }
+
+        for row in selected_rows {
+            let row_context = format!(
+                "archive metadata for source '{}' SBID '{}'",
+                row.source_identifier, row.sbid
+            );
+            let payload = row
+                .metadata_json
+                .as_ref()
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{row_context} must be a JSON object"))?;
+            let datasets = payload
+                .get("datasets")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{row_context} requires a datasets array"))?;
+            if datasets.is_empty() {
+                return Err(format!("{row_context} contains no datasets"));
+            }
+            for (index, dataset) in datasets.iter().enumerate() {
+                let context = format!("{row_context} dataset[{index}]");
+                add_dataset_scope_entry(
+                    &mut expected_scope,
+                    dataset,
+                    Some((&row.source_identifier, &row.sbid)),
+                    &context,
+                )?;
+                metadata.push(dataset.clone());
+            }
+        }
+    }
+
+    Ok((metadata, expected_scope))
+}
+
+fn dataset_scope_from_records(
+    records: &[Value],
+    context: &str,
+) -> Result<ExecutionDatasetScope, String> {
+    let mut scope = ExecutionDatasetScope::new();
+    for (index, dataset) in records.iter().enumerate() {
+        add_dataset_scope_entry(
+            &mut scope,
+            dataset,
+            None,
+            &format!("{context} dataset[{index}]"),
+        )?;
+    }
+    Ok(scope)
+}
+
+fn validate_staged_dataset_scope(
+    records: &[Value],
+    skipped_sbids: &[String],
+    expected: &ExecutionDatasetScope,
+) -> Result<(), String> {
+    if !skipped_sbids.is_empty() {
+        return Err(format!(
+            "staging skipped selected SBIDs {}; execution requires exact selected coverage",
+            skipped_sbids.join(", ")
+        ));
+    }
+    let actual = dataset_scope_from_records(records, "staged metadata")?;
+    if &actual != expected {
+        return Err(format!(
+            "staging changed selected dataset scope (expected {} datasets across {} source/SBID groups, received {} across {})",
+            expected.values().map(BTreeSet::len).sum::<usize>(),
+            expected.len(),
+            actual.values().map(BTreeSet::len).sum::<usize>(),
+            actual.len(),
+        ));
+    }
+    Ok(())
+}
+
+fn dataset_scope_from_manifest(manifest: &Value) -> Result<ExecutionDatasetScope, String> {
+    let sources = manifest
+        .get("sources")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "workflow manifest requires a sources array".to_string())?;
+    let mut scope = ExecutionDatasetScope::new();
+    let mut seen_sources = BTreeSet::new();
+    for (source_index, source_value) in sources.iter().enumerate() {
+        let source = required_dataset_string(
+            source_value,
+            "source_identifier",
+            &format!("workflow manifest sources[{source_index}]"),
+        )?;
+        if !seen_sources.insert(source.clone()) {
+            return Err(format!(
+                "workflow manifest selects source '{source}' more than once"
+            ));
+        }
+        let sbids = source_value
+            .get("sbids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!("workflow manifest source '{source}' requires an sbids array")
+            })?;
+        let mut seen_sbids = BTreeSet::new();
+        for (sbid_index, sbid_value) in sbids.iter().enumerate() {
+            let sbid = required_dataset_string(
+                sbid_value,
+                "sbid",
+                &format!("workflow manifest source '{source}' sbids[{sbid_index}]"),
+            )?;
+            if !seen_sbids.insert(sbid.clone()) {
+                return Err(format!(
+                    "workflow manifest source '{source}' selects SBID '{sbid}' more than once"
+                ));
+            }
+            let datasets = sbid_value
+                .get("datasets")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!(
+                        "workflow manifest source '{source}' SBID '{sbid}' requires a datasets array"
+                    )
+                })?;
+            if datasets.is_empty() {
+                return Err(format!(
+                    "workflow manifest source '{source}' SBID '{sbid}' contains no datasets"
+                ));
+            }
+            for (dataset_index, dataset) in datasets.iter().enumerate() {
+                add_dataset_scope_entry(
+                    &mut scope,
+                    dataset,
+                    Some((&source, &sbid)),
+                    &format!(
+                        "workflow manifest source '{source}' SBID '{sbid}' dataset[{dataset_index}]"
+                    ),
+                )?;
+            }
+        }
+    }
+    Ok(scope)
+}
+
+fn validate_manifest_dataset_scope(
+    manifest: &Value,
+    expected: &ExecutionDatasetScope,
+) -> Result<(), String> {
+    let actual = dataset_scope_from_manifest(manifest)?;
+    if &actual != expected {
+        return Err(format!(
+            "workflow manifest changed selected dataset scope (expected {} datasets across {} source/SBID groups, received {} across {})",
+            expected.values().map(BTreeSet::len).sum::<usize>(),
+            expected.len(),
+            actual.values().map(BTreeSet::len).sum::<usize>(),
+            actual.len(),
+        ));
     }
     Ok(())
 }
@@ -2892,6 +3360,21 @@ async fn run_execute_body(
         .get("use_real_backends")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(config.use_real_backends);
+    let persisted_submission_state = execution
+        .submission_state
+        .as_deref()
+        .and_then(SubmissionState::parse);
+    if submission_state_holds_automatic_work(persisted_submission_state) {
+        info!(
+            event = "execute_submission_reconciliation_guard",
+            execution_id = %execution_id,
+            submission_state = persisted_submission_state
+                .map(SubmissionState::as_str)
+                .unwrap_or("unknown"),
+            "submission may already exist; automatic execution is held"
+        );
+        return Ok(());
+    }
     let phase_is_submit = execution.phase_enum() == Some(ExecutionPhase::Submit);
     let replay_manifest = phase_is_submit && execution.workflow_manifest.is_some();
     let project_config_row = repo::get_project_config_for_execution(pool, execution)
@@ -2907,23 +3390,20 @@ async fn run_execute_body(
         .as_ref()
         .and_then(|row| deployment_kind(&row.deployment))
         .unwrap_or("rest_remote");
-    if execution
-        .submission_state
-        .as_deref()
-        .and_then(SubmissionState::parse)
-        == Some(SubmissionState::Submitted)
-        && (execution.scheduler_job_id.is_some() || execution.daliuge_session_id.is_some())
-    {
-        info!(
-            event = "execute_submit_already_recorded",
-            execution_id = %execution_id,
-            scheduler_job_id = execution.scheduler_job_id.as_deref().unwrap_or_default(),
-            daliuge_session_id = execution.daliuge_session_id.as_deref().unwrap_or_default(),
-        );
-        return Ok(());
-    }
     let requires_casda = execution_requires_casda(execution, project_config.as_ref());
     let casda_client = CasdaStagingClient::from_env();
+    ensure_execution_active(pool, execution_id, true).await?;
+    let source_scope = repo::parse_execution_source_scope(&execution.sources)?;
+    let source_identifiers = source_scope.source_identifiers();
+    let metadata_rows = repo::list_archive_metadata_for_sources(
+        pool,
+        &execution.project_module,
+        &source_identifiers,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let (selected_metadata, expected_dataset_scope) =
+        select_execution_archive_metadata(&source_scope, &metadata_rows)?;
     preflight_execute(
         do_stage,
         do_submit,
@@ -2972,37 +3452,22 @@ async fn run_execute_body(
         .await
         .map_err(|e| e.to_string())?;
     }
-    let source_identifiers = source_identifiers_from_json(&execution.sources);
     let manifest = if replay_manifest {
-        execution.workflow_manifest.clone().unwrap_or(json!({}))
+        let replayed = execution.workflow_manifest.clone().unwrap_or(json!({}));
+        validate_manifest_dataset_scope(&replayed, &expected_dataset_scope)?;
+        replayed
     } else {
-        let metadata_rows = repo::list_archive_metadata_for_sources(
-            pool,
-            &execution.project_module,
-            &source_identifiers,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        let metadata: Vec<_> = metadata_rows
-            .into_iter()
-            .filter_map(|row| row.metadata_json)
-            .flat_map(|value| {
-                value
-                    .get("datasets")
-                    .and_then(serde_json::Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            })
-            .collect();
+        ensure_execution_active(pool, execution_id, false).await?;
         let (metadata, skipped_sbids) = run_stage_phase(
             execution_id,
             do_stage,
             requires_casda,
             casda_client,
-            metadata,
+            selected_metadata,
             correlation_id,
         )
         .await?;
+        validate_staged_dataset_scope(&metadata, &skipped_sbids, &expected_dataset_scope)?;
         let staging_context = staging_context_from_metadata(&metadata);
         let mut built = if let Some(ref cfg) = project_config {
             build_manifest_from_config_with_staging(
@@ -3015,6 +3480,7 @@ async fn run_execute_body(
         } else {
             beampipe_orchestration::build_wallaby_manifest(&metadata).map_err(|e| e.to_string())?
         };
+        validate_manifest_dataset_scope(&built, &expected_dataset_scope)?;
         if let Some(ref cfg) = project_config {
             built = apply_wasm_manifest(pool, cfg, &metadata, built)
                 .await
@@ -3024,6 +3490,7 @@ async fn run_execute_body(
                 .await
                 .map_err(|e| e.to_string())?;
         }
+        validate_manifest_dataset_scope(&built, &expected_dataset_scope)?;
         built
     };
     let manifest_path = project_config
@@ -3109,20 +3576,9 @@ async fn run_execute_body(
         )
         .await
         .map_err(|e| e.to_string())?;
-        repo::clear_workflow_pending_for_sources(
-            pool,
-            &execution.project_module,
-            &source_identifiers,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        repo::set_last_executed_discovery_signature_for_sources(
-            pool,
-            &execution.project_module,
-            &source_identifiers,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        repo::finalize_successful_execution_sources(pool, execution_id)
+            .await
+            .map_err(|e| e.to_string())?;
         info!(event = "execute_complete", execution_id = %execution_id, status = "not_submitted");
         metrics::record_execute_terminal(&execution.project_module, "not_submitted");
         return Ok(());
@@ -3139,17 +3595,7 @@ async fn run_execute_body(
     )
     .await
     .map_err(|e| e.to_string())?;
-    repo::apply_execution_state_patch(
-        pool,
-        execution_id,
-        ExecutionStatePatch {
-            control_phase: Some(ControlPhase::SubmissionPending),
-            submission_state: Some(SubmissionState::Preparing),
-            ..Default::default()
-        },
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    ensure_execution_active(pool, execution_id, false).await?;
     run_submit_phase(
         pool,
         execution_id,
@@ -3161,6 +3607,7 @@ async fn run_execute_body(
         graph,
         correlation_id,
         &config.pool,
+        config.submission_timeout,
     )
     .await
 }
@@ -3240,7 +3687,17 @@ fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
             error.component != DaliugeComponent::Translator
                 || !matches!(error.operation.as_str(), "unroll_and_partition" | "map")
         }
-        OrchestrationError::Backend(_) => true,
+        OrchestrationError::SubmissionUncertain(_) => true,
+        OrchestrationError::Backend(_) => false,
+    }
+}
+
+fn submission_timeout_patch(error: String) -> ExecutionStatePatch {
+    ExecutionStatePatch {
+        submission_state: Some(SubmissionState::Uncertain),
+        failure_class: Some(FailureClass::Timeout),
+        last_error: Some(error),
+        ..Default::default()
     }
 }
 
@@ -3256,6 +3713,7 @@ async fn run_submit_phase(
     graph: Value,
     correlation_id: Option<&str>,
     worker_pool: &str,
+    submission_timeout: Duration,
 ) -> Result<(), String> {
     let tm_url = profile_tm_url(profile).unwrap_or_default();
     info!(
@@ -3276,50 +3734,63 @@ async fn run_submit_phase(
                 DeploymentConfig::SlurmRemote(_) => None,
             })
     });
-    repo::apply_execution_state_patch(
+    let submission_timeout_seconds = i64::try_from(submission_timeout.as_secs())
+        .map_err(|_| "submission timeout exceeds the supported range".to_string())?;
+    let target_fingerprint = if backend_kind == "slurm_remote" {
+        let deployment = profile
+            .and_then(|profile| {
+                serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()).ok()
+            })
+            .and_then(|deployment| match deployment {
+                DeploymentConfig::SlurmRemote(slurm) => Some(slurm),
+                DeploymentConfig::RestRemote(_) => None,
+            });
+        match deployment {
+            Some(deployment) => Some(resolved_slurm_target_fingerprint(&deployment)?),
+            None if !use_real => {
+                Some(json_sha256(&json!({"backend": "mock-slurm"})).map(|(sha256, _)| sha256)?)
+            }
+            None => {
+                return Err(
+                    "real Slurm submission requires a valid pinned deployment profile".into(),
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let submission_deadline_at = repo::begin_execution_submission(
         pool,
         execution_id,
-        ExecutionStatePatch {
-            control_phase: Some(ControlPhase::SubmissionPending),
-            submission_state: Some(SubmissionState::InFlight),
-            scheduler_name: Some(if backend_kind == "slurm_remote" {
-                "slurm".into()
-            } else {
-                "daliuge".into()
-            }),
-            daliuge_session_id: Some(expected_session_id.clone()),
-            daliuge_manager_url,
-            daliuge_state: Some(DaliugeState::NotCreated),
-            ..Default::default()
+        if backend_kind == "slurm_remote" {
+            "slurm"
+        } else {
+            "daliuge"
         },
+        &expected_session_id,
+        daliuge_manager_url.as_deref(),
+        submission_timeout_seconds,
+        target_fingerprint.as_deref(),
     )
     .await
     .map_err(|error| error.to_string())?;
-    repo::record_execution_observation(
-        pool,
-        execution_id,
-        ExecutionObservationInput {
-            kind: "daliuge_session".into(),
-            normalized_state: SubmissionState::InFlight.as_str().into(),
-            raw_state: Some("intent_persisted".into()),
-            reason: None,
-            payload: json!({
-                "daliuge_session_id": expected_session_id,
-                "backend": backend_kind,
-            }),
-            source_version: None,
-            observed_at: Some(Utc::now()),
-        },
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let Some(submission_deadline_at) = submission_deadline_at else {
+        warn!(
+            event = "execute_submit_duplicate_guard",
+            execution_id = %execution_id,
+            "another worker already began or recorded this submission"
+        );
+        return Ok(());
+    };
     async {
-        let submitted = match backend
-            .submit(&execution_id.to_string(), manifest, graph)
-            .await
+        let submitted = match within_submission_timeout(
+            submission_timeout_remaining(submission_deadline_at, Utc::now()),
+            backend.submit(&execution_id.to_string(), manifest, graph),
+        )
+        .await
         {
-            Ok(submitted) => submitted,
-            Err(error) => {
+            Ok(Ok(submitted)) => submitted,
+            Ok(Err(error)) => {
                 let uncertain = submission_error_is_uncertain(&error);
                 repo::apply_execution_state_patch(
                     pool,
@@ -3343,14 +3814,28 @@ async fn run_submit_phase(
                 .map_err(|db_error| db_error.to_string())?;
                 return Err(error.to_string());
             }
+            Err(_) => {
+                let error = format!(
+                    "backend submission exceeded its persisted wall-clock deadline at {}",
+                    submission_deadline_at.to_rfc3339()
+                );
+                repo::apply_execution_state_patch(
+                    pool,
+                    execution_id,
+                    submission_timeout_patch(error.clone()),
+                )
+                .await
+                .map_err(|db_error| db_error.to_string())?;
+                return Err(error);
+            }
         };
         apply_submit_result(
             pool,
             execution_id,
-            execution,
             submitted,
             use_real,
             worker_pool,
+            correlation_id,
         )
         .await
         .map_err(|e| e.to_string())
@@ -3370,10 +3855,10 @@ async fn run_submit_phase(
 async fn apply_submit_result(
     pool: &PgPool,
     execution_id: uuid::Uuid,
-    execution: &beampipe_db::models::ExecutionRow,
     submitted: beampipe_orchestration::BackendSubmit,
     use_real: bool,
     worker_pool: &str,
+    correlation_id: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let scheduler_name = submitted.scheduler_name.clone();
     let legacy_scheduler_job_id = submitted.scheduler_job_id.clone();
@@ -3395,127 +3880,51 @@ async fn apply_submit_result(
             .and_then(|parsed| parsed.session_dir.clone())
     });
     let daliuge_session_id = submitted.session_id.clone();
-    let workflow_manifest = submitted.workflow_manifest;
-    repo::apply_execution_patch_with_correlation(
-        pool,
-        execution_id,
-        LedgerPatch {
-            status: Some(submitted.next_status),
-            scheduler_name: Some(submitted.scheduler_name),
-            scheduler_job_id: scheduler_job_id.clone(),
-            workflow_manifest: Some(workflow_manifest),
-            execution_phase: Some(Some(ExecutionPhase::Submit)),
-            ..LedgerPatch::default()
-        },
-        None,
-    )
-    .await?;
-    let physical_graph_sha256 = if let Some(physical_graph) = submitted.physical_graph.as_ref() {
-        Some(
-            persist_inline_json_artifact(
-                pool,
-                execution_id,
-                "physical_graph",
-                "translated",
-                physical_graph,
-                json!({"backend": scheduler_name}),
-            )
-            .await
-            .map_err(sqlx::Error::Protocol)?,
-        )
+    let physical_graph = submitted.physical_graph.ok_or_else(|| {
+        sqlx::Error::Protocol("backend submission receipt omitted the physical graph".into())
+    })?;
+    let poll_job = if scheduler_name != "slurm" && !use_real {
+        Some(repo::SubmissionReceiptPollJob {
+            payload: metrics::payload_with_trace(
+                json!({
+                    "execution_id": execution_id,
+                    "poll_round": 0,
+                    "use_real_backends": use_real,
+                }),
+                &metrics::correlation_only(execution_id.to_string()),
+            ),
+            worker_pool: worker_pool.to_string(),
+        })
     } else {
         None
     };
-    repo::apply_execution_provenance_patch(
+    let receipt = repo::record_submission_receipt(
         pool,
         execution_id,
-        ExecutionProvenancePatch {
-            physical_graph_sha256,
-            ..Default::default()
-        },
-    )
-    .await?;
-    repo::apply_execution_state_patch(
-        pool,
-        execution_id,
-        ExecutionStatePatch {
-            control_phase: Some(ControlPhase::Submitted),
-            submission_state: Some(SubmissionState::Submitted),
-            scheduler_name: Some(scheduler_name.clone()),
-            scheduler_job_id: scheduler_job_id.clone(),
-            scheduler_state: Some(if scheduler_name == "slurm" {
-                SchedulerState::Pending
-            } else {
-                SchedulerState::NotSubmitted
-            }),
-            daliuge_session_id: daliuge_session_id.clone(),
-            daliuge_state: Some(if scheduler_name == "slurm" {
-                DaliugeState::NotCreated
-            } else {
-                DaliugeState::Running
-            }),
+        repo::SubmissionReceiptInput {
+            scheduler_name,
+            scheduler_job_id,
+            daliuge_session_id,
             remote_session_dir,
-            ..Default::default()
+            staging_root: submitted.staging_root,
+            workflow_manifest: submitted.workflow_manifest,
+            physical_graph,
+            next_status: submitted.next_status,
+            actor: "system:execute".into(),
+            correlation_id: correlation_id.map(str::to_string),
+            poll_job,
         },
     )
     .await?;
-    if let Some(job_id) = scheduler_job_id {
-        repo::record_execution_observation(
-            pool,
-            execution_id,
-            ExecutionObservationInput {
-                kind: "scheduler".into(),
-                normalized_state: SchedulerState::Pending.as_str().into(),
-                raw_state: Some("SUBMITTED".into()),
-                reason: None,
-                payload: json!({"scheduler_job_id": job_id}),
-                source_version: None,
-                observed_at: Some(Utc::now()),
-            },
-        )
-        .await?;
-    }
-    if scheduler_name != "slurm" {
-        if let Some(session_id) = daliuge_session_id {
-            repo::record_execution_observation(
-                pool,
-                execution_id,
-                ExecutionObservationInput {
-                    kind: "daliuge_session".into(),
-                    normalized_state: DaliugeState::Running.as_str().into(),
-                    raw_state: Some("deployed".into()),
-                    reason: None,
-                    payload: json!({"daliuge_session_id": session_id}),
-                    source_version: None,
-                    observed_at: Some(Utc::now()),
-                },
-            )
-            .await?;
-        }
-    }
-    if scheduler_name != "slurm" && !use_real {
-        let job_payload = metrics::payload_with_trace(
-            json!({
-                "execution_id": execution_id,
-                "poll_round": 0,
-                "use_real_backends": use_real,
-            }),
-            &metrics::correlation_only(execution_id.to_string()),
+    if receipt.late_after_abandonment {
+        error!(
+            event = "submission_receipt_after_operator_abandonment",
+            execution_id = %execution_id,
+            scheduler_job_id = receipt.execution.scheduler_job_id.as_deref().unwrap_or_default(),
+            "external submission was detected after its unresolved intent was operator-abandoned"
         );
-        repo::enqueue_job_with_options(
-            pool,
-            "dim_poll",
-            job_payload,
-            repo::JobEnqueueOptions {
-                execution_id: Some(execution_id),
-                idempotency_key: Some(format!("dim_poll:{execution_id}:0")),
-                pool: Some(worker_pool.to_string()),
-                ..Default::default()
-            },
-        )
-        .await?;
+        metrics::record_reconciliation_result("slurm_submission", "receipt_after_abandonment");
     }
-    let _ = execution;
     Ok(())
 }
 
@@ -3532,7 +3941,7 @@ async fn run_dim_poll(
     let Some(execution) = repo::get_execution(pool, execution_id).await? else {
         return Ok(());
     };
-    let policy = poll_policy_for_module(pool, &execution.project_module).await?;
+    let policy = poll_policy_for_execution(pool, &execution).await?;
     let session_id = execution
         .daliuge_session_id
         .clone()
@@ -3628,7 +4037,7 @@ async fn run_dim_poll_tick(
             let execution_id = item.execution.uuid;
             let poll_round =
                 dim_poll_round_from_manifest(item.execution.workflow_manifest.as_ref());
-            let policy = poll_policy_for_module(pool, &item.execution.project_module).await?;
+            let policy = poll_policy_for_execution(pool, &item.execution).await?;
             let poll_result = if use_real {
                 dim.poll(&item.session_id).await
             } else {
@@ -3685,16 +4094,18 @@ async fn apply_dim_poll_update(
         .clone()
         .unwrap_or_else(|| execution_id.to_string());
     let poll_summary = poll.poll_summary;
-    let daliuge_state = poll_summary
-        .get("normalized_session_state")
-        .and_then(Value::as_str)
-        .and_then(DaliugeState::parse)
-        .unwrap_or(match poll.status {
-            ExecutionStatus::Completed => DaliugeState::Finished,
-            ExecutionStatus::Failed => DaliugeState::Failed,
-            ExecutionStatus::Cancelled => DaliugeState::Cancelled,
-            _ => DaliugeState::Running,
-        });
+    let daliuge_state = match poll.status {
+        ExecutionStatus::Failed => DaliugeState::Failed,
+        ExecutionStatus::Cancelled => DaliugeState::Cancelled,
+        _ => poll_summary
+            .get("normalized_session_state")
+            .and_then(Value::as_str)
+            .and_then(DaliugeState::parse)
+            .unwrap_or(match poll.status {
+                ExecutionStatus::Completed => DaliugeState::Finished,
+                _ => DaliugeState::Running,
+            }),
+    };
     repo::record_execution_observation(
         pool,
         execution_id,
@@ -3712,52 +4123,55 @@ async fn apply_dim_poll_update(
         },
     )
     .await?;
-    repo::apply_execution_state_patch(
+    let transition = repo::apply_execution_state_patch_with_transition(
         pool,
         execution_id,
         ExecutionStatePatch {
-            control_phase: Some(ControlPhase::Monitoring),
-            submission_state: matches!(
-                execution
-                    .submission_state
-                    .as_deref()
-                    .and_then(SubmissionState::parse),
-                Some(SubmissionState::InFlight | SubmissionState::Uncertain)
-            )
-            .then_some(SubmissionState::Submitted),
+            control_phase: Some(poll_control_phase(
+                execution.output_verification_required,
+                execution.output_state.as_deref(),
+                daliuge_state == DaliugeState::Finished
+                    && matches!(
+                        execution
+                            .scheduler_state
+                            .as_deref()
+                            .and_then(SchedulerState::parse),
+                        Some(SchedulerState::Succeeded | SchedulerState::NotSubmitted)
+                    ),
+            )),
             daliuge_state: Some(daliuge_state),
             daliuge_raw_status: poll_summary.get("status").cloned(),
             last_reconciled_at: Some(Utc::now()),
             ..Default::default()
         },
     )
-    .await?;
+    .await?
+    .ok_or_else(|| sqlx::Error::Protocol("execution disappeared during DIM poll".into()))?;
+    if transition.previous_status.is_terminal() {
+        debug!(
+            execution_id = %execution_id,
+            status = transition.previous_status.as_str(),
+            "event=dim_poll_late_observation_ignored"
+        );
+        return Ok(());
+    }
+    let entered_terminal = transition.entered_terminal;
+    let reconciled = transition.row;
     metrics::record_reconciliation_result("daliuge", "observed");
+    let aggregate_status = reconciled
+        .status_enum()
+        .ok_or_else(|| sqlx::Error::Protocol("reconciled execution has unknown status".into()))?;
     let mut manifest = if poll.status.is_terminal() {
-        merge_dim_poll_into_manifest(
-            execution.workflow_manifest.clone(),
+        merge_terminal_dim_poll_into_manifest(
+            reconciled.workflow_manifest.clone(),
             &session_id,
-            poll_summary
-                .get("status")
-                .and_then(|v| v.get("status").or(Some(v)))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown"),
-            true,
-            Some(match poll.status {
-                ExecutionStatus::Completed => "completed",
-                ExecutionStatus::Failed => "failed",
-                ExecutionStatus::Cancelled => "cancelled",
-                _ => "unknown",
-            }),
-            None,
-            poll_summary
-                .get("error_drop_uids")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len() as i64),
+            daliuge_state,
+            terminal_ledger_status(aggregate_status),
+            &poll_summary,
         )
     } else {
         merge_poll_summary(
-            execution.workflow_manifest.clone(),
+            reconciled.workflow_manifest.clone(),
             "dim_poll",
             poll_summary,
         )
@@ -3780,28 +4194,39 @@ async fn apply_dim_poll_update(
             pool,
             execution_id,
             LedgerPatch {
-                status: Some(poll.status),
                 workflow_manifest: Some(manifest),
                 ..LedgerPatch::default()
             },
             correlation_id,
         )
         .await?;
-        let sources = source_identifiers_from_json(&execution.sources);
-        finalize_execution_source_pending(
-            pool,
-            &execution.project_module,
-            &sources,
-            poll.status,
-            Some(execution_id),
-        )
-        .await?;
-        metrics::record_execute_terminal(&execution.project_module, poll.status.as_str());
+        if entered_terminal {
+            let sources = source_identifiers_from_json(&execution.sources);
+            finalize_execution_source_pending(
+                pool,
+                &execution.project_module,
+                &sources,
+                aggregate_status,
+                Some(execution_id),
+            )
+            .await?;
+            metrics::record_execute_terminal(&execution.project_module, aggregate_status.as_str());
+        }
         return Ok(());
     }
     if poll_round + 1 >= max_rounds {
         let timed_out =
             merge_scheduler_timeout_into_manifest(Some(manifest), "DIM poll exceeded max rounds");
+        repo::apply_execution_state_patch(
+            pool,
+            execution_id,
+            ExecutionStatePatch {
+                failure_class: Some(FailureClass::Timeout),
+                last_error: Some("DIM poll timeout".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
         repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
@@ -3812,18 +4237,6 @@ async fn apply_dim_poll_update(
                 ..LedgerPatch::default()
             },
             correlation_id,
-        )
-        .await?;
-        repo::apply_execution_state_patch(
-            pool,
-            execution_id,
-            ExecutionStatePatch {
-                control_phase: Some(ControlPhase::Terminal),
-                terminal_outcome: Some(TerminalOutcome::Failed),
-                failure_class: Some(FailureClass::Timeout),
-                last_error: Some("DIM poll timeout".into()),
-                ..Default::default()
-            },
         )
         .await?;
         let sources = source_identifiers_from_json(&execution.sources);
@@ -3838,7 +4251,6 @@ async fn apply_dim_poll_update(
         pool,
         execution_id,
         LedgerPatch {
-            status: Some(poll.status),
             workflow_manifest: Some(manifest),
             ..LedgerPatch::default()
         },
@@ -3869,6 +4281,46 @@ async fn apply_dim_poll_update(
         .await?;
     }
     Ok(())
+}
+
+fn merge_terminal_dim_poll_into_manifest(
+    existing: Option<Value>,
+    session_id: &str,
+    daliuge_state: DaliugeState,
+    terminal_ledger_status: Option<&str>,
+    poll_summary: &Value,
+) -> Value {
+    merge_dim_poll_into_manifest(
+        existing,
+        session_id,
+        daliuge_state.as_str(),
+        true,
+        terminal_ledger_status,
+        None,
+        poll_summary
+            .get("error_drop_uids")
+            .and_then(Value::as_array)
+            .map(|items| items.len() as i64),
+    )
+}
+
+fn poll_control_phase(
+    output_verification_required: bool,
+    output_state: Option<&str>,
+    external_succeeded: bool,
+) -> ControlPhase {
+    if external_succeeded
+        && output_verification_required
+        && output_state.and_then(OutputState::parse) != Some(OutputState::Verified)
+    {
+        ControlPhase::OutputVerification
+    } else {
+        ControlPhase::Monitoring
+    }
+}
+
+fn terminal_ledger_status(status: ExecutionStatus) -> Option<&'static str> {
+    status.is_terminal().then(|| status.as_str())
 }
 
 async fn record_dim_reconciliation_error(
@@ -3936,7 +4388,7 @@ async fn dim_poll_tick_interval_secs(
     if let Some(secs) = config.dim_poll_interval_seconds {
         return Ok((secs as i64).max(1));
     }
-    let mut min_interval = 3_i64;
+    let mut min_interval = None;
     let configs = repo::list_active_project_configs(pool).await?;
     for row in configs {
         if let Ok(cfg) = serde_json::from_value::<ProjectConfig>(row.spec) {
@@ -3944,13 +4396,13 @@ async fn dim_poll_tick_interval_secs(
                 if let Some(secs) = exec.execution_rest_remote_poll_interval_seconds {
                     let s = secs.round() as i64;
                     if s >= 1 {
-                        min_interval = min_interval.min(s);
+                        min_interval = minimum_poll_interval(min_interval, s);
                     }
                 }
             }
         }
     }
-    Ok(min_interval.max(1))
+    Ok(min_interval.unwrap_or(3).max(1))
 }
 
 async fn slurm_poll_tick_interval_secs(
@@ -3960,18 +4412,80 @@ async fn slurm_poll_tick_interval_secs(
     if let Some(secs) = config.slurm_poll_interval_seconds {
         return Ok((secs as i64).max(5));
     }
-    let mut min_interval = 30_i64;
+    let mut min_interval = None;
     let configs = repo::list_active_project_configs(pool).await?;
     for row in configs {
         if let Ok(cfg) = serde_json::from_value::<ProjectConfig>(row.spec) {
             if let Some(exec) = cfg.automation.execution {
                 if let Some(secs) = exec.execution_slurm_remote_poll_interval_seconds {
-                    min_interval = min_interval.min(secs as i64);
+                    let seconds = secs.round() as i64;
+                    if seconds >= 1 {
+                        min_interval = minimum_poll_interval(min_interval, seconds);
+                    }
                 }
             }
         }
     }
-    Ok(min_interval.max(5))
+    Ok(min_interval.unwrap_or(30).max(5))
+}
+
+fn minimum_poll_interval(current: Option<i64>, candidate: i64) -> Option<i64> {
+    Some(current.map_or(candidate, |value| value.min(candidate)))
+}
+
+fn slurm_active_poll_budget_reached(next_round: i64, max_rounds: i64) -> bool {
+    max_rounds > 0 && next_round >= max_rounds
+}
+
+struct SlurmPollProgress {
+    manifest: Value,
+    next_round: i64,
+    operator_escalated: bool,
+}
+
+fn slurm_poll_operator_escalated(existing: Option<&Value>) -> bool {
+    existing
+        .and_then(|manifest| manifest.get("beampipe_run_record"))
+        .and_then(|run_record| run_record.get("slurm_poll"))
+        .and_then(|poll| poll.get("operator_escalation"))
+        .is_some()
+}
+
+fn advance_slurm_poll_progress(
+    existing: Option<Value>,
+    poll_round: i64,
+    max_rounds: i64,
+    escalation_reason: &str,
+) -> SlurmPollProgress {
+    let already_escalated = slurm_poll_operator_escalated(existing.as_ref());
+    let next_round = poll_round.saturating_add(1);
+    let operator_escalated =
+        slurm_active_poll_budget_reached(next_round, max_rounds) && !already_escalated;
+    let mut manifest = merge_slurm_poll_tick_round(existing, next_round);
+    if operator_escalated {
+        if let Some(poll) = manifest
+            .get_mut("beampipe_run_record")
+            .and_then(Value::as_object_mut)
+            .and_then(|run_record| run_record.get_mut("slurm_poll"))
+            .and_then(Value::as_object_mut)
+        {
+            poll.insert(
+                "operator_escalation".into(),
+                json!({
+                    "reason": escalation_reason,
+                    "round": next_round,
+                    "max_rounds": max_rounds,
+                    "recorded_at": Utc::now().to_rfc3339(),
+                    "terminalized": false,
+                }),
+            );
+        }
+    }
+    SlurmPollProgress {
+        manifest,
+        next_round,
+        operator_escalated,
+    }
 }
 
 fn slurm_job_id_from_scheduler(scheduler_job_id: &str) -> String {
@@ -3988,27 +4502,20 @@ fn slurm_job_id_from_scheduler(scheduler_job_id: &str) -> String {
 }
 
 fn slurm_poll_is_unknown(result: &SlurmJobPollResult) -> bool {
-    result.normalized_state == "UNKNOWN" && result.source == "none"
+    result.normalized_state == "UNKNOWN"
 }
 
-fn execution_status_for_slurm_state(state: &str) -> ExecutionStatus {
-    match state {
-        "COMPLETED" => ExecutionStatus::Completed,
-        "FAILED" | "TIMEOUT" => ExecutionStatus::Failed,
-        "CANCELLED" => ExecutionStatus::Cancelled,
-        "RUNNING" => ExecutionStatus::Running,
-        "PENDING" => ExecutionStatus::AwaitingScheduler,
-        _ => ExecutionStatus::AwaitingScheduler,
-    }
+fn slurm_poll_has_scheduler_observation(result: &SlurmJobPollResult) -> bool {
+    matches!(result.source, "squeue" | "sacct" | "mock")
 }
 
-fn terminal_ledger_and_reason(state: &str) -> (&'static str, Option<&'static str>) {
+fn terminal_reason(state: &str) -> Option<&'static str> {
     match state {
-        "COMPLETED" => ("completed", None),
-        "CANCELLED" => ("cancelled", Some("scheduler_cancelled")),
-        "TIMEOUT" => ("failed", Some("timeout")),
-        "FAILED" => ("failed", Some("failed")),
-        _ => ("failed", Some("unknown")),
+        "COMPLETED" => None,
+        "CANCELLED" => Some("scheduler_cancelled"),
+        "TIMEOUT" => Some("timeout"),
+        "FAILED" => Some("failed"),
+        _ => Some("unknown"),
     }
 }
 
@@ -4055,6 +4562,42 @@ fn manifest_for_slurm_poll(
     )
 }
 
+async fn record_slurm_poll_escalation(
+    pool: &PgPool,
+    execution_id: uuid::Uuid,
+    scheduler_state: SchedulerState,
+    next_round: i64,
+    max_rounds: i64,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    let detail = format!(
+        "Slurm polling reached its configured budget at round {next_round} while the scheduler state remained {}; manual reconciliation is required",
+        scheduler_state.as_str()
+    );
+    repo::record_execution_observation(
+        pool,
+        execution_id,
+        ExecutionObservationInput {
+            kind: "scheduler".into(),
+            normalized_state: scheduler_state.as_str().into(),
+            raw_state: Some("poll_budget_escalation".into()),
+            reason: Some(detail),
+            payload: json!({
+                "operator_action_required": true,
+                "escalation_reason": reason,
+                "poll_round": next_round,
+                "max_rounds": max_rounds,
+                "terminalized": false,
+            }),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    metrics::record_reconciliation_result("slurm", "operator_escalation");
+    Ok(())
+}
+
 async fn apply_slurm_poll_update(
     pool: &PgPool,
     execution_id: uuid::Uuid,
@@ -4096,20 +4639,36 @@ async fn apply_slurm_poll_update(
         },
     )
     .await?;
-    repo::apply_execution_state_patch(
+    let transition = repo::apply_execution_state_patch_with_transition(
         pool,
         execution_id,
         ExecutionStatePatch {
-            control_phase: Some(ControlPhase::Monitoring),
+            control_phase: Some(poll_control_phase(
+                execution.output_verification_required,
+                execution.output_state.as_deref(),
+                scheduler_state == SchedulerState::Succeeded,
+            )),
             scheduler_state: Some(scheduler_state),
             scheduler_raw_state: Some(result.raw_state.clone()),
             scheduler_reason,
             daliuge_state: inferred_daliuge_state,
+            clear_failure_context: slurm_poll_has_scheduler_observation(result),
             last_reconciled_at: Some(Utc::now()),
             ..Default::default()
         },
     )
-    .await?;
+    .await?
+    .ok_or_else(|| sqlx::Error::Protocol("execution disappeared during Slurm poll".into()))?;
+    if transition.previous_status.is_terminal() {
+        debug!(
+            execution_id = %execution_id,
+            status = transition.previous_status.as_str(),
+            "event=slurm_poll_late_observation_ignored"
+        );
+        return Ok(());
+    }
+    let entered_terminal = transition.entered_terminal;
+    let reconciled = transition.row;
     metrics::record_reconciliation_result("slurm", scheduler_state.as_str());
 
     if slurm_poll_is_unknown(result) {
@@ -4119,17 +4678,40 @@ async fn apply_slurm_poll_update(
             "event=slurm_poll_state_unknown"
         );
         let manifest =
-            manifest_for_slurm_poll(execution, result, &scheduler_job_id, false, None, None);
+            manifest_for_slurm_poll(&reconciled, result, &scheduler_job_id, false, None, None);
+        let progress = advance_slurm_poll_progress(
+            Some(manifest),
+            poll_round,
+            max_rounds,
+            "scheduler_state_unknown",
+        );
         repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
-                workflow_manifest: Some(manifest),
+                workflow_manifest: Some(progress.manifest),
                 ..LedgerPatch::default()
             },
             correlation_id,
         )
         .await?;
+        if progress.operator_escalated {
+            warn!(
+                execution_id = %execution_id,
+                slurm_job_id = %parsed.slurm_job_id,
+                max_rounds,
+                "event=slurm_poll_budget_exhausted_state_unknown"
+            );
+            record_slurm_poll_escalation(
+                pool,
+                execution_id,
+                scheduler_state,
+                progress.next_round,
+                max_rounds,
+                "scheduler_state_unknown",
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -4142,69 +4724,69 @@ async fn apply_slurm_poll_update(
             source = result.source,
             "event=slurm_poll_active"
         );
-        let mut next_status = None;
         if state == "RUNNING" && execution.status_enum() == Some(ExecutionStatus::AwaitingScheduler)
         {
-            next_status = Some(ExecutionStatus::Running);
             info!(
                 execution_id = %execution_id,
                 slurm_job_id = %parsed.slurm_job_id,
                 "event=slurm_job_running"
             );
         }
-        let mut manifest =
-            manifest_for_slurm_poll(execution, result, &scheduler_job_id, false, None, None);
-        let next_round = poll_round + 1;
-        if next_round >= max_rounds {
-            let timed_out = merge_scheduler_timeout_into_manifest(
-                Some(manifest),
-                "Slurm poll exceeded max rounds",
+        let manifest =
+            manifest_for_slurm_poll(&reconciled, result, &scheduler_job_id, false, None, None);
+        let progress = advance_slurm_poll_progress(
+            Some(manifest),
+            poll_round,
+            max_rounds,
+            "scheduler_job_still_active",
+        );
+        if progress.operator_escalated {
+            warn!(
+                execution_id = %execution_id,
+                slurm_job_id = %parsed.slurm_job_id,
+                state,
+                max_rounds,
+                "event=slurm_poll_budget_exhausted_but_job_active"
             );
-            repo::apply_execution_patch_with_correlation(
-                pool,
-                execution_id,
-                LedgerPatch {
-                    status: Some(ExecutionStatus::Failed),
-                    workflow_manifest: Some(timed_out),
-                    error: Some("Slurm poll timeout".into()),
-                    ..LedgerPatch::default()
-                },
-                None,
-            )
-            .await?;
-            let sources = source_identifiers_from_json(&execution.sources);
-            repo::mark_sources_pending_workflow_run(pool, &execution.project_module, &sources)
-                .await?;
-            metrics::record_execute_terminal(&execution.project_module, "failed");
-            return Ok(());
         }
-        manifest = merge_slurm_poll_tick_round(Some(manifest), next_round);
         repo::apply_execution_patch_with_correlation(
             pool,
             execution_id,
             LedgerPatch {
-                status: next_status,
-                workflow_manifest: Some(manifest),
+                workflow_manifest: Some(progress.manifest),
                 ..LedgerPatch::default()
             },
             correlation_id,
         )
         .await?;
+        if progress.operator_escalated {
+            record_slurm_poll_escalation(
+                pool,
+                execution_id,
+                scheduler_state,
+                progress.next_round,
+                max_rounds,
+                "scheduler_job_still_active",
+            )
+            .await?;
+        }
         return Ok(());
     }
 
-    let status = execution_status_for_slurm_state(state);
-    let (ledger_status, reason) = terminal_ledger_and_reason(state);
+    let aggregate_status = reconciled
+        .status_enum()
+        .ok_or_else(|| sqlx::Error::Protocol("reconciled execution has unknown status".into()))?;
+    let reason = terminal_reason(state);
     let manifest = manifest_for_slurm_poll(
-        execution,
+        &reconciled,
         result,
         &scheduler_job_id,
         true,
-        Some(ledger_status),
+        terminal_ledger_status(aggregate_status),
         reason,
     );
     let mut error = None;
-    if status == ExecutionStatus::Failed {
+    if aggregate_status == ExecutionStatus::Failed {
         let reason_str = reason.unwrap_or(state);
         let mut msg = format!(
             "SLURM job {} finished in state={state} reason={reason_str}",
@@ -4230,24 +4812,126 @@ async fn apply_slurm_poll_update(
         pool,
         execution_id,
         LedgerPatch {
-            status: Some(status),
             workflow_manifest: Some(manifest),
             error,
             ..LedgerPatch::default()
         },
-        None,
+        correlation_id,
     )
     .await?;
-    let sources = source_identifiers_from_json(&execution.sources);
-    finalize_execution_source_pending(
+    if entered_terminal {
+        let sources = source_identifiers_from_json(&execution.sources);
+        finalize_execution_source_pending(
+            pool,
+            &execution.project_module,
+            &sources,
+            aggregate_status,
+            Some(execution_id),
+        )
+        .await?;
+        metrics::record_execute_terminal(&execution.project_module, aggregate_status.as_str());
+    }
+    Ok(())
+}
+
+fn classify_slurm_poll_failure(error: &str) -> FailureClass {
+    let error = error.to_ascii_lowercase();
+    if error.contains("host key") || error.contains("known_hosts") {
+        FailureClass::Authorization
+    } else if error.contains("auth") || error.contains("credential") {
+        FailureClass::Authentication
+    } else if error.contains("timed out") || error.contains("timeout") {
+        FailureClass::Timeout
+    } else if error.contains("connect") || error.contains("unreachable") {
+        FailureClass::Connectivity
+    } else {
+        FailureClass::DependencyUnavailable
+    }
+}
+
+async fn record_slurm_poll_failure(
+    pool: &PgPool,
+    execution: &beampipe_db::models::ExecutionRow,
+    operation: &str,
+    error_kind: &str,
+    error: &str,
+    failure_class: FailureClass,
+    retryable: bool,
+) -> Result<(), sqlx::Error> {
+    let detail = beampipe_security::redact_string(error);
+    let policy = poll_policy_for_execution(pool, execution).await?;
+    let max_rounds = policy.slurm_max_rounds.unwrap_or(480);
+    let poll_round = slurm_poll_round_from_manifest(execution.workflow_manifest.as_ref());
+    let scheduler_state = execution
+        .scheduler_state
+        .as_deref()
+        .and_then(SchedulerState::parse)
+        .unwrap_or_default();
+    let progress = advance_slurm_poll_progress(
+        execution.workflow_manifest.clone(),
+        poll_round,
+        max_rounds,
+        "scheduler_poll_error",
+    );
+
+    repo::record_execution_observation(
         pool,
-        &execution.project_module,
-        &sources,
-        status,
-        Some(execution_id),
+        execution.uuid,
+        ExecutionObservationInput {
+            kind: "scheduler".into(),
+            normalized_state: scheduler_state.as_str().into(),
+            raw_state: Some(error_kind.into()),
+            reason: Some(detail.clone()),
+            payload: json!({
+                "operation": operation,
+                "error_kind": error_kind,
+                "retryable": retryable,
+                "failure_class": failure_class.as_str(),
+                "poll_round": progress.next_round,
+                "operator_escalated": progress.operator_escalated,
+                "scheduler_state_preserved": true,
+                "preserved_scheduler_raw_state": execution.scheduler_raw_state.as_deref(),
+                "preserved_scheduler_reason": execution.scheduler_reason.as_deref(),
+            }),
+            source_version: None,
+            observed_at: Some(Utc::now()),
+        },
     )
     .await?;
-    metrics::record_execute_terminal(&execution.project_module, status.as_str());
+    repo::apply_execution_state_patch(
+        pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            failure_class: Some(failure_class),
+            last_error: Some(detail),
+            last_reconciled_at: Some(Utc::now()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let correlation_id = execution.uuid.to_string();
+    repo::apply_execution_patch_with_correlation(
+        pool,
+        execution.uuid,
+        LedgerPatch {
+            workflow_manifest: Some(progress.manifest),
+            ..LedgerPatch::default()
+        },
+        Some(&correlation_id),
+    )
+    .await?;
+    if progress.operator_escalated {
+        record_slurm_poll_escalation(
+            pool,
+            execution.uuid,
+            scheduler_state,
+            progress.next_round,
+            max_rounds,
+            "scheduler_poll_error",
+        )
+        .await?;
+    }
+    metrics::record_reconciliation_result("slurm", error_kind);
     Ok(())
 }
 
@@ -4272,20 +4956,100 @@ async fn run_slurm_poll_tick(
 
     let mut by_target: HashMap<SlurmTarget, Vec<SlurmPollExec>> = HashMap::new();
     for execution in executions {
-        let scheduler_job_id = match execution.scheduler_job_id.as_deref() {
-            Some(id) if !id.is_empty() => id,
-            _ => continue,
+        if execution.deployment_profile_snapshot.is_some()
+            && profile_from_execution_snapshot(&execution).is_none()
+        {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "status_batch",
+                "invalid_deployment_profile_snapshot",
+                "the persisted deployment profile snapshot is incomplete or invalid",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
+            continue;
+        }
+        let scheduler_job_id = match execution
+            .scheduler_job_id
+            .as_deref()
+            .filter(|job_id| !job_id.trim().is_empty())
+        {
+            Some(id) => id,
+            None => {
+                record_slurm_poll_failure(
+                    pool,
+                    &execution,
+                    "status_batch",
+                    "missing_scheduler_job_id",
+                    "the Slurm execution has no scheduler job ID to poll",
+                    FailureClass::Configuration,
+                    false,
+                )
+                .await?;
+                continue;
+            }
         };
         let slurm_job_id = slurm_job_id_from_scheduler(scheduler_job_id);
+        if let Err(error) = beampipe_orchestration::slurm_ssh::validate_slurm_job_id(&slurm_job_id)
+        {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "status_batch",
+                "invalid_scheduler_job_id",
+                &error.to_string(),
+                FailureClass::Validation,
+                false,
+            )
+            .await?;
+            continue;
+        }
         let profile = deployment_profile_for_execution(pool, &execution).await?;
         let Some(profile) = profile else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "status_batch",
+                "missing_deployment_profile",
+                "no deployment profile is available for this Slurm execution",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
             continue;
         };
-        let Ok(DeploymentConfig::SlurmRemote(deployment)) =
-            serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
-        else {
-            continue;
-        };
+        let deployment =
+            match serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()) {
+                Ok(DeploymentConfig::SlurmRemote(deployment)) => deployment,
+                Ok(_) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "status_batch",
+                        "invalid_deployment_profile_kind",
+                        "the execution deployment profile is not a Slurm remote profile",
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(error) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "status_batch",
+                        "invalid_deployment_profile",
+                        &format!("the Slurm deployment profile is invalid: {error}"),
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
         let username = resolve_remote_user(&deployment);
         let target = SlurmTarget::from_deployment(&deployment, &username);
         by_target.entry(target).or_default().push(SlurmPollExec {
@@ -4301,30 +5065,53 @@ async fn run_slurm_poll_tick(
         );
         let job_ids: Vec<String> = group.iter().map(|e| e.slurm_job_id.clone()).collect();
         let poll_map: HashMap<String, SlurmJobPollResult> = if use_real {
-            let lock_key = target.advisory_lock_key();
-            let mut lock_tx = pool.begin().await?;
-            let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .fetch_one(&mut *lock_tx)
-                .await?;
-            if !locked {
-                lock_tx.rollback().await?;
-                debug!(
-                    login_node = %target.login_node,
-                    "event=slurm_poll_tick_lock_busy"
-                );
-                metrics::record_slurm_poll_error("advisory_lock_busy");
-                continue;
+            match within_slurm_target_timeout(
+                SLURM_TARGET_WALL_CLOCK_TIMEOUT,
+                SLURM_SSH_POOL.query_slurm_states(&target, &job_ids),
+            )
+            .await
+            {
+                Ok(Ok(poll_map)) => poll_map,
+                outcome => {
+                    let (error_kind, detail, failure_class) = match outcome {
+                        Ok(Err(error)) => {
+                            let detail = error.to_string();
+                            let failure_class = classify_slurm_poll_failure(&detail);
+                            ("target_query_failed", detail, failure_class)
+                        }
+                        Err(_) => (
+                            "target_query_timeout",
+                            format!(
+                                "Slurm target status query exceeded the {} second wall-clock limit",
+                                SLURM_TARGET_WALL_CLOCK_TIMEOUT.as_secs()
+                            ),
+                            FailureClass::Timeout,
+                        ),
+                        Ok(Ok(_)) => unreachable!("successful poll handled above"),
+                    };
+                    metrics::record_slurm_poll_error(error_kind);
+                    let redacted = beampipe_security::redact_string(&detail);
+                    warn!(
+                        login_node = %target.login_node,
+                        error = %redacted,
+                        affected_executions = group.len(),
+                        "event=slurm_poll_target_failed"
+                    );
+                    for item in &group {
+                        record_slurm_poll_failure(
+                            pool,
+                            &item.execution,
+                            "status_batch",
+                            error_kind,
+                            &detail,
+                            failure_class,
+                            true,
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
             }
-            let batch_result = SLURM_SSH_POOL
-                .query_slurm_states(&target, &job_ids)
-                .await
-                .map_err(|e| {
-                    metrics::record_slurm_poll_error("ssh_batch_failed");
-                    sqlx::Error::Protocol(e.to_string())
-                });
-            lock_tx.commit().await?;
-            batch_result?
         } else {
             job_ids
                 .iter()
@@ -4347,7 +5134,7 @@ async fn run_slurm_poll_tick(
             let execution_id = item.execution.uuid;
             let poll_round =
                 slurm_poll_round_from_manifest(item.execution.workflow_manifest.as_ref());
-            let policy = poll_policy_for_module(pool, &item.execution.project_module).await?;
+            let policy = poll_policy_for_execution(pool, &item.execution).await?;
             let result = poll_map
                 .get(&item.slurm_job_id)
                 .cloned()
@@ -4384,159 +5171,312 @@ async fn reconcile_uncertain_slurm_submissions(
             .daliuge_session_id
             .as_deref()
             .filter(|session_id| !session_id.is_empty())
+            .map(str::to_string)
         else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_daliuge_session_id",
+                "the uncertain Slurm submission has no stable DALiuGE session name",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
             continue;
         };
+        if execution.deployment_profile_snapshot.is_some()
+            && profile_from_execution_snapshot(&execution).is_none()
+        {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "invalid_deployment_profile_snapshot",
+                "the persisted deployment profile snapshot is incomplete or invalid",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
+            continue;
+        }
         let Some(profile) = deployment_profile_for_execution(pool, &execution).await? else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_deployment_profile",
+                "no deployment profile is available for uncertain Slurm submission reconciliation",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
             continue;
         };
+        let deployment =
+            match serde_json::from_value::<DeploymentConfig>(profile.deployment.clone()) {
+                Ok(DeploymentConfig::SlurmRemote(deployment)) => deployment,
+                Ok(_) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "find_by_name",
+                        "invalid_deployment_profile_kind",
+                        "the execution deployment profile is not a Slurm remote profile",
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(error) => {
+                    record_slurm_poll_failure(
+                        pool,
+                        &execution,
+                        "find_by_name",
+                        "invalid_deployment_profile",
+                        &format!("the Slurm deployment profile is invalid: {error}"),
+                        FailureClass::Configuration,
+                        false,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+        let Some(intent) = repo::latest_submission_intent_observation(pool, execution.uuid).await?
+        else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_submission_intent_evidence",
+                "the unresolved Slurm submission has no persisted intent timestamp",
+                FailureClass::InconsistentState,
+                false,
+            )
+            .await?;
+            continue;
+        };
+        let Some(intent_target_fingerprint) = intent
+            .payload
+            .get("target_fingerprint")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "missing_submission_target_fingerprint",
+                "the unresolved Slurm submission has no pinned resolved target identity",
+                FailureClass::InconsistentState,
+                false,
+            )
+            .await?;
+            continue;
+        };
+        let current_target_fingerprint =
+            resolved_slurm_target_fingerprint(&deployment).map_err(sqlx::Error::Protocol)?;
+        if current_target_fingerprint != intent_target_fingerprint {
+            record_slurm_poll_failure(
+                pool,
+                &execution,
+                "find_by_name",
+                "submission_target_identity_changed",
+                "the resolved Slurm login target or remote user changed after submission intent; refusing name lookup",
+                FailureClass::InconsistentState,
+                false,
+            )
+            .await?;
+            continue;
+        }
+        let profile_sha256 = profile.spec_sha256.clone().unwrap_or_else(|| {
+            repo::deployment_profile_spec_sha256(
+                &profile.name,
+                profile.description.as_deref(),
+                profile.project_module.as_deref(),
+                profile.is_default,
+                profile.max_concurrent_executions,
+                &profile.translation,
+                &profile.deployment,
+            )
+        });
+        let target_fingerprint = intent_target_fingerprint;
+        let lookup_id = Uuid::now_v7();
+        let lookup_started_at = Utc::now();
         let client = slurm_backend_from_profile(Some(&profile), true, execution.created_at).slurm;
-        let matches = match client.find_by_name(session_id).await {
-            Ok(matches) => matches,
-            Err(error) => {
-                let detail = beampipe_security::redact_string(&error.to_string());
-                repo::record_execution_observation(
+        let lookup = match within_slurm_target_timeout(
+            SLURM_TARGET_WALL_CLOCK_TIMEOUT,
+            client.find_by_name(&session_id, intent.observed_at),
+        )
+        .await
+        {
+            Ok(Ok(lookup)) => lookup,
+            Ok(Err(error)) => {
+                let completed_at = Utc::now();
+                repo::record_slurm_name_lookup(
                     pool,
                     execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: SchedulerState::Unknown.as_str().into(),
-                        raw_state: Some(format!("{:?}", error.kind).to_ascii_lowercase()),
-                        reason: Some(detail.clone()),
-                        payload: json!({
-                            "daliuge_session_id": session_id,
-                            "operation": "find_by_name",
-                            "retryable": error.retryable,
-                        }),
-                        source_version: None,
-                        observed_at: Some(Utc::now()),
-                    },
-                )
-                .await?;
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        scheduler_state: Some(SchedulerState::Unknown),
-                        failure_class: Some(error.failure_class()),
-                        last_error: Some(detail),
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
+                    repo::SlurmNameLookupRecordInput {
+                        lookup_id,
+                        intent_observation_id: intent.uuid,
+                        daliuge_session_id: session_id.clone(),
+                        profile_sha256: profile_sha256.clone(),
+                        target_fingerprint: target_fingerprint.clone(),
+                        accounting_not_before: intent.observed_at,
+                        query_started_at: lookup_started_at,
+                        query_completed_at: completed_at,
+                        squeue_complete: false,
+                        sacct_complete: false,
+                        outcome: repo::SlurmNameLookupOutcome::Error {
+                            code: format!("scheduler_{:?}", error.kind).to_ascii_lowercase(),
+                            message: beampipe_security::redact_string(&error.to_string()),
+                            retryable: error.retryable,
+                        },
                     },
                 )
                 .await?;
                 metrics::record_reconciliation_result("slurm_submission", "lookup_error");
                 continue;
             }
+            Err(_) => {
+                let completed_at = Utc::now();
+                repo::record_slurm_name_lookup(
+                    pool,
+                    execution.uuid,
+                    repo::SlurmNameLookupRecordInput {
+                        lookup_id,
+                        intent_observation_id: intent.uuid,
+                        daliuge_session_id: session_id.clone(),
+                        profile_sha256: profile_sha256.clone(),
+                        target_fingerprint: target_fingerprint.clone(),
+                        accounting_not_before: intent.observed_at,
+                        query_started_at: lookup_started_at,
+                        query_completed_at: completed_at,
+                        squeue_complete: false,
+                        sacct_complete: false,
+                        outcome: repo::SlurmNameLookupOutcome::Error {
+                            code: "find_by_name_timeout".into(),
+                            message: format!(
+                                "Slurm submission reconciliation exceeded the {} second wall-clock limit",
+                                SLURM_TARGET_WALL_CLOCK_TIMEOUT.as_secs()
+                            ),
+                            retryable: true,
+                        },
+                    },
+                )
+                .await?;
+                metrics::record_reconciliation_result("slurm_submission", "lookup_timeout");
+                continue;
+            }
         };
-        match matches.as_slice() {
-            [] => {
-                repo::record_execution_observation(
-                    pool,
-                    execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: SchedulerState::Unknown.as_str().into(),
-                        raw_state: Some("not_found_by_name".into()),
-                        reason: Some(
-                            "no scheduler job currently matches the stable session name".into(),
-                        ),
-                        payload: json!({"daliuge_session_id": session_id}),
-                        source_version: None,
-                        observed_at: Some(Utc::now()),
-                    },
-                )
-                .await?;
-                metrics::record_reconciliation_result("slurm_submission", "not_found");
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        scheduler_state: Some(SchedulerState::Unknown),
-                        failure_class: Some(FailureClass::NotFound),
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            }
-            [observation] => {
-                repo::record_execution_observation(
-                    pool,
-                    execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: observation.state.as_str().into(),
-                        raw_state: Some(observation.raw_state.clone()),
-                        reason: observation.reason.clone(),
-                        payload: json!({
-                            "scheduler_job_id": observation.external_job_id,
-                            "daliuge_session_id": session_id,
-                            "recovered_after_lost_response": true,
-                            "source": observation.source,
-                        }),
-                        source_version: None,
-                        observed_at: Some(observation.observed_at),
-                    },
-                )
-                .await?;
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        control_phase: Some(ControlPhase::Submitted),
-                        submission_state: Some(SubmissionState::Submitted),
-                        scheduler_job_id: Some(observation.external_job_id.clone()),
-                        scheduler_state: Some(observation.state),
-                        scheduler_raw_state: Some(observation.raw_state.clone()),
-                        scheduler_reason: observation.reason.clone(),
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-                metrics::record_reconciliation_result("slurm_submission", "recovered");
-            }
-            observations => {
-                let job_ids: Vec<_> = observations
+        let outcome = match lookup.matches.as_slice() {
+            [] => repo::SlurmNameLookupOutcome::NotFound,
+            [observation] => repo::SlurmNameLookupOutcome::Exact {
+                scheduler_job_id: observation.external_job_id.clone(),
+                state: observation.state,
+                raw_state: observation.raw_state.clone(),
+                reason: observation.reason.clone(),
+                source: observation.source.clone(),
+                observed_at: observation.observed_at,
+            },
+            observations => repo::SlurmNameLookupOutcome::Ambiguous {
+                scheduler_job_ids: observations
                     .iter()
                     .map(|observation| observation.external_job_id.clone())
-                    .collect();
-                let detail = format!(
-                    "multiple scheduler jobs match stable session name {session_id}: {}",
-                    job_ids.join(", ")
-                );
-                repo::record_execution_observation(
-                    pool,
-                    execution.uuid,
-                    ExecutionObservationInput {
-                        kind: "scheduler".into(),
-                        normalized_state: SchedulerState::Unknown.as_str().into(),
-                        raw_state: Some("ambiguous_name_match".into()),
-                        reason: Some(detail.clone()),
-                        payload: json!({"scheduler_job_ids": job_ids}),
-                        source_version: None,
-                        observed_at: Some(Utc::now()),
-                    },
-                )
-                .await?;
-                repo::apply_execution_state_patch(
-                    pool,
-                    execution.uuid,
-                    ExecutionStatePatch {
-                        scheduler_state: Some(SchedulerState::Unknown),
-                        failure_class: Some(FailureClass::InconsistentState),
-                        last_error: Some(detail),
-                        last_reconciled_at: Some(Utc::now()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-                metrics::record_reconciliation_result("slurm_submission", "ambiguous");
-            }
+                    .collect(),
+            },
+        };
+        let result_label = match &outcome {
+            repo::SlurmNameLookupOutcome::NotFound => "not_found",
+            repo::SlurmNameLookupOutcome::Exact { .. } => "recovered_unreceipted",
+            repo::SlurmNameLookupOutcome::Ambiguous { .. } => "ambiguous",
+            repo::SlurmNameLookupOutcome::Error { .. } => unreachable!(),
+        };
+        let recovered_poll = slurm_poll_result_from_name_lookup(&outcome);
+        let recorded = repo::record_slurm_name_lookup(
+            pool,
+            execution.uuid,
+            repo::SlurmNameLookupRecordInput {
+                lookup_id,
+                intent_observation_id: intent.uuid,
+                daliuge_session_id: session_id,
+                profile_sha256,
+                target_fingerprint,
+                accounting_not_before: lookup.accounting_not_before,
+                query_started_at: lookup.query_started_at,
+                query_completed_at: lookup.query_completed_at,
+                squeue_complete: lookup.source_completion.squeue_completed,
+                sacct_complete: lookup.source_completion.sacct_completed,
+                outcome,
+            },
+        )
+        .await?;
+        metrics::record_reconciliation_result(
+            "slurm_submission",
+            if recorded.late_after_abandonment {
+                "detected_after_abandonment"
+            } else {
+                result_label
+            },
+        );
+        if let Some(result) = recovered_poll.filter(|_| !recorded.late_after_abandonment) {
+            let poll_round =
+                slurm_poll_round_from_manifest(recorded.execution.workflow_manifest.as_ref());
+            let policy = poll_policy_for_execution(pool, &recorded.execution).await?;
+            apply_slurm_poll_update(
+                pool,
+                recorded.execution.uuid,
+                &recorded.execution,
+                &result,
+                poll_round,
+                &policy,
+            )
+            .await?;
         }
     }
     Ok(())
+}
+
+fn slurm_poll_result_from_name_lookup(
+    outcome: &repo::SlurmNameLookupOutcome,
+) -> Option<SlurmJobPollResult> {
+    let repo::SlurmNameLookupOutcome::Exact {
+        state,
+        raw_state,
+        reason,
+        source,
+        ..
+    } = outcome
+    else {
+        return None;
+    };
+    let normalized_state = match state {
+        SchedulerState::NotSubmitted => "NOT_SUBMITTED",
+        SchedulerState::Pending => "PENDING",
+        SchedulerState::Running => "RUNNING",
+        SchedulerState::Succeeded => "COMPLETED",
+        SchedulerState::Failed => "FAILED",
+        SchedulerState::Cancelled => "CANCELLED",
+        SchedulerState::TimedOut => "TIMEOUT",
+        SchedulerState::Unknown => "UNKNOWN",
+    };
+    let raw_line = Some(match reason.as_deref() {
+        Some(reason) if !reason.is_empty() => format!("{raw_state}|{reason}"),
+        _ => raw_state.clone(),
+    });
+    Some(SlurmJobPollResult {
+        raw_state: raw_state.clone(),
+        normalized_state: normalized_state.into(),
+        source: match source.as_str() {
+            "squeue" => "squeue",
+            "sacct" => "sacct",
+            _ => "name_lookup",
+        },
+        exit_code: None,
+        raw_line,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4547,12 +5487,16 @@ struct PollPolicy {
     slurm_interval_secs: Option<f64>,
 }
 
-async fn poll_policy_for_module(
+async fn poll_policy_for_execution(
     pool: &PgPool,
-    project_module: &str,
+    execution: &beampipe_db::models::ExecutionRow,
 ) -> Result<PollPolicy, sqlx::Error> {
     let mut policy = PollPolicy::default();
-    if let Some(row) = repo::get_active_project_config(pool, project_module).await? {
+    let config = match execution.project_config_id {
+        Some(id) => repo::get_project_config_by_uuid(pool, id).await?,
+        None => repo::get_active_project_config(pool, &execution.project_module).await?,
+    };
+    if let Some(row) = config {
         if let Ok(cfg) = serde_json::from_value::<ProjectConfig>(row.spec) {
             if let Some(exec) = cfg.automation.execution {
                 policy.rest_max_rounds = exec.execution_rest_remote_poll_max_rounds;
@@ -4620,16 +5564,9 @@ fn execution_id_from_payload(
 }
 
 fn source_identifiers_from_json(value: &serde_json::Value) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            item.get("source_identifier")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect()
+    repo::parse_execution_source_scope(value)
+        .map(|scope| scope.source_identifiers())
+        .unwrap_or_default()
 }
 
 fn deployment_kind(value: &serde_json::Value) -> Option<&'static str> {
@@ -4741,7 +5678,7 @@ fn slurm_backend_from_profile(
                 chrono::Utc::now().format("%Y%m%d")
             );
             login = slurm.login_node.clone();
-            remote_user = slurm.remote_user.clone();
+            remote_user = Some(resolve_remote_user(&slurm));
             account = Some(slurm.account.clone());
             slurm_dep = Some(slurm);
         }
@@ -4824,6 +5761,85 @@ mod tests {
     use beampipe_adapters::MockTapClient;
     use serde_json::json;
 
+    fn archive_row(source: &str, sbid: &str, datasets: Vec<Value>) -> ArchiveMetadataRow {
+        ArchiveMetadataRow {
+            uuid: Uuid::now_v7(),
+            project_module: "scope-test".into(),
+            source_identifier: source.into(),
+            sbid: sbid.into(),
+            metadata_json: Some(json!({"datasets": datasets})),
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    fn scoped_dataset(source: &str, sbid: &str, dataset_id: &str) -> Value {
+        json!({
+            "source_identifier": source,
+            "sbid": sbid,
+            "dataset_id": dataset_id,
+        })
+    }
+
+    fn scoped_manifest(datasets: Vec<Value>) -> Value {
+        let source = datasets[0]["source_identifier"].as_str().unwrap();
+        let sbid = datasets[0]["sbid"].as_str().unwrap();
+        json!({
+            "sources": [{
+                "source_identifier": source,
+                "sbids": [{"sbid": sbid, "datasets": datasets}],
+            }]
+        })
+    }
+
+    async fn test_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = beampipe_db::connect(&url).await.ok()?;
+        beampipe_db::migrate(&pool).await.ok()?;
+        Some(pool)
+    }
+
+    async fn slurm_poll_execution(
+        pool: &sqlx::PgPool,
+        suffix: &str,
+    ) -> beampipe_db::models::ExecutionRow {
+        let unique = Uuid::now_v7().simple().to_string();
+        let module = format!("jobs_slurm_poll_{suffix}_{}", &unique[..16]);
+        let execution = repo::create_execution(
+            pool,
+            &module,
+            json!([{"source_identifier": "source-1"}]),
+            "local",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'awaiting_scheduler',
+                scheduler_name = 'slurm',
+                scheduler_job_id = '4242',
+                submission_state = 'submitted',
+                scheduler_state = 'pending',
+                daliuge_state = 'not_created',
+                output_verification_required = false,
+                output_state = 'not_started'
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(execution.uuid)
+        .execute(pool)
+        .await
+        .unwrap();
+        repo::get_execution(pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
     #[test]
     fn slurm_unknown_does_not_map_to_terminal() {
         let result = SlurmJobPollResult {
@@ -4834,19 +5850,925 @@ mod tests {
             raw_line: None,
         };
         assert!(slurm_poll_is_unknown(&result));
-        assert!(!execution_status_for_slurm_state(&result.normalized_state).is_terminal());
+        assert_eq!(
+            SchedulerState::from_normalized(&result.normalized_state),
+            SchedulerState::Unknown
+        );
+    }
+
+    #[test]
+    fn persisted_submission_states_hold_automatic_work() {
+        for state in [
+            SubmissionState::InFlight,
+            SubmissionState::Uncertain,
+            SubmissionState::Submitted,
+        ] {
+            assert!(submission_state_holds_automatic_work(Some(state)));
+        }
+        for state in [
+            SubmissionState::NotStarted,
+            SubmissionState::Preparing,
+            SubmissionState::Failed,
+        ] {
+            assert!(!submission_state_holds_automatic_work(Some(state)));
+        }
+        assert!(!submission_state_holds_automatic_work(None));
+    }
+
+    #[test]
+    fn only_explicit_or_post_side_effect_submission_errors_are_uncertain() {
+        assert!(submission_error_is_uncertain(
+            &OrchestrationError::SubmissionUncertain("lost sbatch response".into())
+        ));
+        assert!(!submission_error_is_uncertain(
+            &OrchestrationError::Backend("definite local failure".into())
+        ));
+        assert!(!submission_error_is_uncertain(
+            &OrchestrationError::GraphNotObject
+        ));
+    }
+
+    #[test]
+    fn selected_sbid_scope_filters_archive_rows_exactly() {
+        let scope = repo::parse_execution_source_scope(&json!([{
+            "source_identifier": "source-1",
+            "sbids": ["1"]
+        }]))
+        .unwrap();
+        let selected = scoped_dataset("source-1", "1", "dataset-1");
+        let unselected = scoped_dataset("source-1", "2", "dataset-2");
+        let rows = vec![
+            archive_row("source-1", "1", vec![selected.clone()]),
+            archive_row("source-1", "2", vec![unselected]),
+        ];
+
+        let (metadata, expected) = select_execution_archive_metadata(&scope, &rows).unwrap();
+
+        assert_eq!(metadata, vec![selected]);
+        assert_eq!(expected.len(), 1);
+        assert!(expected.contains_key(&("source-1".into(), "1".into())));
+        assert!(!expected.contains_key(&("source-1".into(), "2".into())));
+    }
+
+    #[test]
+    fn selected_sbid_scope_rejects_missing_or_misparented_datasets() {
+        let scope = repo::parse_execution_source_scope(&json!([{
+            "source_identifier": "source-1",
+            "sbids": ["1"]
+        }]))
+        .unwrap();
+        let missing = select_execution_archive_metadata(
+            &scope,
+            &[archive_row(
+                "source-1",
+                "2",
+                vec![scoped_dataset("source-1", "2", "dataset-2")],
+            )],
+        )
+        .unwrap_err();
+        assert!(missing.contains("selected SBIDs 1"));
+
+        let misparented = select_execution_archive_metadata(
+            &scope,
+            &[archive_row(
+                "source-1",
+                "1",
+                vec![scoped_dataset("source-2", "1", "dataset-1")],
+            )],
+        )
+        .unwrap_err();
+        assert!(misparented.contains("does not match archive/manifest parent 'source-1'"));
+
+        let wrong_sbid = select_execution_archive_metadata(
+            &scope,
+            &[archive_row(
+                "source-1",
+                "1",
+                vec![scoped_dataset("source-1", "2", "dataset-1")],
+            )],
+        )
+        .unwrap_err();
+        assert!(wrong_sbid.contains("does not match archive/manifest parent '1'"));
+    }
+
+    #[test]
+    fn staging_and_manifest_must_preserve_exact_selected_scope() {
+        let selected = scoped_dataset("source-1", "1", "dataset-1");
+        let expected =
+            dataset_scope_from_records(std::slice::from_ref(&selected), "expected").unwrap();
+        validate_staged_dataset_scope(std::slice::from_ref(&selected), &[], &expected).unwrap();
+        validate_manifest_dataset_scope(&scoped_manifest(vec![selected.clone()]), &expected)
+            .unwrap();
+
+        assert!(validate_staged_dataset_scope(&[], &[], &expected)
+            .unwrap_err()
+            .contains("changed selected dataset scope"));
+        assert!(validate_staged_dataset_scope(
+            std::slice::from_ref(&selected),
+            &["1".into()],
+            &expected
+        )
+        .unwrap_err()
+        .contains("skipped selected SBIDs 1"));
+
+        let extra = scoped_dataset("source-1", "1", "dataset-2");
+        assert!(validate_manifest_dataset_scope(
+            &scoped_manifest(vec![selected.clone(), extra]),
+            &expected,
+        )
+        .unwrap_err()
+        .contains("changed selected dataset scope"));
+
+        let mut misparented = scoped_manifest(vec![selected]);
+        misparented["sources"][0]["sbids"][0]["datasets"][0]["sbid"] = json!("2");
+        assert!(validate_manifest_dataset_scope(&misparented, &expected)
+            .unwrap_err()
+            .contains("does not match archive/manifest parent '1'"));
     }
 
     #[test]
     fn slurm_timeout_maps_to_failed_status() {
         assert_eq!(
-            execution_status_for_slurm_state("TIMEOUT"),
-            ExecutionStatus::Failed
+            SchedulerState::from_normalized("TIMEOUT"),
+            SchedulerState::TimedOut
+        );
+        assert_eq!(terminal_reason("TIMEOUT"), Some("timeout"));
+        assert_eq!(
+            terminal_ledger_status(ExecutionStatus::Failed),
+            Some("failed")
+        );
+    }
+
+    #[test]
+    fn configured_poll_interval_is_not_capped_by_the_default() {
+        let interval = minimum_poll_interval(None, 60).unwrap_or(30).max(5);
+        assert_eq!(interval, 60);
+        let interval = minimum_poll_interval(Some(interval), 90)
+            .unwrap_or(30)
+            .max(5);
+        assert_eq!(interval, 60);
+        let interval = minimum_poll_interval(Some(interval), 15)
+            .unwrap_or(30)
+            .max(5);
+        assert_eq!(interval, 15);
+    }
+
+    #[test]
+    fn active_slurm_job_remains_nonterminal_at_poll_budget() {
+        assert!(slurm_active_poll_budget_reached(480, 480));
+        assert!(slurm_active_poll_budget_reached(481, 480));
+        assert!(!slurm_active_poll_budget_reached(479, 480));
+        assert!(SchedulerState::from_normalized("RUNNING").is_active());
+    }
+
+    #[test]
+    fn slurm_poll_progress_advances_unknown_and_escalates_only_once() {
+        let first = advance_slurm_poll_progress(None, 479, 480, "scheduler_state_unknown");
+        assert_eq!(first.next_round, 480);
+        assert!(first.operator_escalated);
+        assert_eq!(slurm_poll_round_from_manifest(Some(&first.manifest)), 480);
+        assert_eq!(
+            first.manifest["beampipe_run_record"]["slurm_poll"]["operator_escalation"]
+                ["terminalized"],
+            false
+        );
+
+        let second =
+            advance_slurm_poll_progress(Some(first.manifest), 480, 480, "scheduler_state_unknown");
+        assert_eq!(second.next_round, 481);
+        assert!(!second.operator_escalated);
+        assert_eq!(
+            second.manifest["beampipe_run_record"]["slurm_poll"]["operator_escalation"]["round"],
+            480
+        );
+    }
+
+    #[test]
+    fn slurm_poll_failure_classification_is_specific() {
+        assert_eq!(
+            classify_slurm_poll_failure("known_hosts rejected host key"),
+            FailureClass::Authorization
         );
         assert_eq!(
-            terminal_ledger_and_reason("TIMEOUT"),
-            ("failed", Some("timeout"))
+            classify_slurm_poll_failure("SSH authentication failed"),
+            FailureClass::Authentication
         );
+        assert_eq!(
+            classify_slurm_poll_failure("connection timed out"),
+            FailureClass::Timeout
+        );
+        assert_eq!(
+            classify_slurm_poll_failure("connection refused"),
+            FailureClass::Connectivity
+        );
+        assert_eq!(
+            classify_slurm_poll_failure("scheduler command failed"),
+            FailureClass::DependencyUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn slurm_target_wall_clock_timeout_bounds_a_stalled_query() {
+        let result =
+            within_slurm_target_timeout(Duration::from_millis(1), std::future::pending::<()>())
+                .await;
+
+        assert!(result.is_err());
+        assert_eq!(SLURM_TARGET_WALL_CLOCK_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn persisted_submission_deadline_bounds_the_whole_backend_future() {
+        let now = Utc::now();
+        assert_eq!(
+            submission_timeout_remaining(now + chrono::Duration::seconds(30), now),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            submission_timeout_remaining(now - chrono::Duration::milliseconds(1), now),
+            Duration::ZERO
+        );
+
+        let timed_out =
+            within_submission_timeout(Duration::from_millis(5), std::future::pending::<()>()).await;
+        assert!(timed_out.is_err());
+
+        let completed =
+            within_submission_timeout(Duration::from_secs(1), async { "receipt" }).await;
+        assert_eq!(completed.unwrap(), "receipt");
+
+        let patch = submission_timeout_patch("deadline exceeded".into());
+        assert_eq!(patch.submission_state, Some(SubmissionState::Uncertain));
+        assert_eq!(patch.failure_class, Some(FailureClass::Timeout));
+        assert!(submission_state_holds_automatic_work(
+            patch.submission_state
+        ));
+    }
+
+    #[test]
+    fn unknown_scheduler_state_does_not_false_terminalize() {
+        let decision = beampipe_domain::ExecutionAxes {
+            control_phase: ControlPhase::Monitoring,
+            submission: SubmissionState::Submitted,
+            scheduler: SchedulerState::Unknown,
+            daliuge: DaliugeState::Running,
+            outputs: OutputState::NotStarted,
+            output_verification_required: false,
+        }
+        .reconcile();
+
+        assert!(!decision.status.is_terminal());
+        assert!(decision.terminal_outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_slurm_round_and_operator_escalation_are_durable() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let execution = slurm_poll_execution(&pool, "unknown").await;
+        let unknown = SlurmJobPollResult {
+            raw_state: String::new(),
+            normalized_state: "UNKNOWN".into(),
+            source: "none",
+            exit_code: None,
+            raw_line: None,
+        };
+        let policy = PollPolicy {
+            slurm_max_rounds: Some(1),
+            ..Default::default()
+        };
+
+        apply_slurm_poll_update(&pool, execution.uuid, &execution, &unknown, 0, &policy)
+            .await
+            .unwrap();
+        let first = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!first.status_enum().unwrap().is_terminal());
+        assert_eq!(
+            slurm_poll_round_from_manifest(first.workflow_manifest.as_ref()),
+            1
+        );
+        assert!(slurm_poll_operator_escalated(
+            first.workflow_manifest.as_ref()
+        ));
+
+        apply_slurm_poll_update(&pool, first.uuid, &first, &unknown, 1, &policy)
+            .await
+            .unwrap();
+        let second = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!second.status_enum().unwrap().is_terminal());
+        assert_eq!(
+            slurm_poll_round_from_manifest(second.workflow_manifest.as_ref()),
+            2
+        );
+        let observations = repo::list_execution_observations(&pool, execution.uuid, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| {
+                    observation.raw_state.as_deref() == Some("poll_budget_escalation")
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn slurm_transport_failure_preserves_running_then_success_clears_context() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let execution = slurm_poll_execution(&pool, "failure").await;
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'running',
+                control_phase = 'monitoring',
+                scheduler_state = 'running',
+                scheduler_raw_state = 'RUNNING',
+                scheduler_reason = 'None',
+                daliuge_state = 'running'
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(execution.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let execution = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        record_slurm_poll_failure(
+            &pool,
+            &execution,
+            "status_batch",
+            "target_query_failed",
+            "SSH connection failed token=supersecret",
+            FailureClass::Connectivity,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let updated = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status_enum(), Some(ExecutionStatus::Running));
+        assert_eq!(updated.scheduler_state.as_deref(), Some("running"));
+        assert_eq!(updated.scheduler_raw_state.as_deref(), Some("RUNNING"));
+        assert_eq!(updated.scheduler_reason.as_deref(), Some("None"));
+        assert_eq!(updated.failure_class.as_deref(), Some("connectivity"));
+        assert!(!updated
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("supersecret"));
+        assert_eq!(
+            slurm_poll_round_from_manifest(updated.workflow_manifest.as_ref()),
+            1
+        );
+        let poll_round = slurm_poll_round_from_manifest(updated.workflow_manifest.as_ref());
+        apply_slurm_poll_update(
+            &pool,
+            updated.uuid,
+            &updated,
+            &SlurmJobPollResult {
+                raw_state: "RUNNING".into(),
+                normalized_state: "RUNNING".into(),
+                source: "squeue",
+                exit_code: None,
+                raw_line: Some("RUNNING|None".into()),
+            },
+            poll_round,
+            &PollPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let recovered = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status_enum(), Some(ExecutionStatus::Running));
+        assert_eq!(recovered.scheduler_state.as_deref(), Some("running"));
+        assert!(recovered.failure_class.is_none());
+        assert!(recovered.last_error.is_none());
+
+        let observations = repo::list_execution_observations(&pool, execution.uuid, 100, 0)
+            .await
+            .unwrap();
+        let failure = observations
+            .iter()
+            .find(|observation| observation.raw_state.as_deref() == Some("target_query_failed"))
+            .unwrap();
+        assert_eq!(failure.normalized_state, "running");
+        assert!(!failure
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("supersecret"));
+    }
+
+    #[tokio::test]
+    async fn dim_observations_do_not_forge_a_submission_receipt() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+
+        for submission in [SubmissionState::InFlight, SubmissionState::Uncertain] {
+            let suffix = submission.as_str();
+            let module = format!("jobs_dim_unreceipt_{suffix}");
+            let execution = repo::create_execution(
+                &pool,
+                &module,
+                json!([{"source_identifier": format!("source-{suffix}")}]),
+                "local",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let session_id = format!("BeampipeExecution-{}", execution.uuid);
+            assert!(repo::begin_execution_submission(
+                &pool,
+                execution.uuid,
+                "daliuge",
+                &session_id,
+                Some("http://dim.invalid"),
+                1_800,
+                None,
+            )
+            .await
+            .unwrap()
+            .is_some());
+            if submission == SubmissionState::Uncertain {
+                repo::apply_execution_state_patch(
+                    &pool,
+                    execution.uuid,
+                    ExecutionStatePatch {
+                        submission_state: Some(SubmissionState::Uncertain),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let before = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            apply_dim_poll_update(
+                &pool,
+                execution.uuid,
+                &before,
+                BackendPoll {
+                    status: ExecutionStatus::Running,
+                    poll_summary: json!({
+                        "status": 2,
+                        "normalized_session_state": "running",
+                    }),
+                },
+                0,
+                &PollPolicy::default(),
+                None,
+                None,
+                true,
+                false,
+                false,
+                "test",
+            )
+            .await
+            .unwrap();
+            let observed = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                observed.submission_state.as_deref(),
+                Some(submission.as_str())
+            );
+            assert!(observed.physical_graph_sha256.is_none());
+            assert!(repo::list_execution_artifacts(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .iter()
+                .all(|artifact| artifact.kind != "physical_graph"));
+        }
+    }
+
+    #[tokio::test]
+    async fn late_polls_after_confirmed_cancellation_only_append_observations() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+
+        let slurm = slurm_poll_execution(&pool, "late").await;
+        sqlx::query(
+            "UPDATE batch_execution_record SET workflow_manifest = '{\"sentinel\":\"slurm-before-cancel\"}'::jsonb WHERE uuid = $1",
+        )
+        .bind(slurm.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stale_slurm = repo::get_execution(&pool, slurm.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled_slurm = repo::cancel_execution_with_confirmed_external_cancellation(
+            &pool,
+            slurm.uuid,
+            "system:test",
+            Some("cancel:slurm-race"),
+            repo::ConfirmedExternalCancellation::Slurm {
+                scheduler_job_id: "4242".into(),
+                exact_job_id: "4242".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        apply_slurm_poll_update(
+            &pool,
+            slurm.uuid,
+            &stale_slurm,
+            &SlurmJobPollResult {
+                raw_state: "COMPLETED".into(),
+                normalized_state: "COMPLETED".into(),
+                source: "sacct",
+                exit_code: Some(0),
+                raw_line: Some("4242|COMPLETED|0:0".into()),
+            },
+            0,
+            &PollPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let after_slurm = repo::get_execution(&pool, slurm.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_slurm.status, "cancelled");
+        assert_eq!(after_slurm.control_phase, cancelled_slurm.control_phase);
+        assert_eq!(after_slurm.scheduler_state, cancelled_slurm.scheduler_state);
+        assert_eq!(after_slurm.daliuge_state, cancelled_slurm.daliuge_state);
+        assert_eq!(after_slurm.output_state, cancelled_slurm.output_state);
+        assert_eq!(
+            after_slurm.workflow_manifest,
+            cancelled_slurm.workflow_manifest
+        );
+        assert_eq!(
+            after_slurm.workflow_manifest,
+            Some(json!({"sentinel": "slurm-before-cancel"}))
+        );
+
+        let dim = repo::create_execution(
+            &pool,
+            &format!("jobs_dim_late_{}", Uuid::now_v7().simple()),
+            json!([{"source_identifier": "source-dim"}]),
+            "local",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'running',
+                control_phase = 'monitoring',
+                submission_state = 'submitted',
+                scheduler_name = 'daliuge',
+                scheduler_state = 'not_submitted',
+                daliuge_session_id = 'BeampipeExecution-dim-late',
+                daliuge_state = 'running',
+                workflow_manifest = '{"sentinel":"dim-before-cancel"}'::jsonb
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(dim.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stale_dim = repo::get_execution(&pool, dim.uuid).await.unwrap().unwrap();
+        let cancelled_dim = repo::cancel_execution_with_confirmed_external_cancellation(
+            &pool,
+            dim.uuid,
+            "system:test",
+            Some("cancel:dim-race"),
+            repo::ConfirmedExternalCancellation::Daliuge {
+                session_id: "BeampipeExecution-dim-late".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        apply_dim_poll_update(
+            &pool,
+            dim.uuid,
+            &stale_dim,
+            BackendPoll {
+                status: ExecutionStatus::Completed,
+                poll_summary: json!({
+                    "status": 3,
+                    "normalized_session_state": "finished",
+                    "error_drop_uids": [],
+                }),
+            },
+            0,
+            &PollPolicy::default(),
+            None,
+            None,
+            true,
+            false,
+            false,
+            "test",
+        )
+        .await
+        .unwrap();
+        let after_dim = repo::get_execution(&pool, dim.uuid).await.unwrap().unwrap();
+        assert_eq!(after_dim.status, "cancelled");
+        assert_eq!(after_dim.control_phase, cancelled_dim.control_phase);
+        assert_eq!(after_dim.scheduler_state, cancelled_dim.scheduler_state);
+        assert_eq!(after_dim.daliuge_state, cancelled_dim.daliuge_state);
+        assert_eq!(after_dim.output_state, cancelled_dim.output_state);
+        assert_eq!(after_dim.workflow_manifest, cancelled_dim.workflow_manifest);
+        assert_eq!(
+            after_dim.workflow_manifest,
+            Some(json!({"sentinel": "dim-before-cancel"}))
+        );
+
+        let slurm_observations = repo::list_execution_observations(&pool, slurm.uuid, 100, 0)
+            .await
+            .unwrap();
+        assert!(slurm_observations
+            .iter()
+            .any(|observation| { observation.raw_state.as_deref() == Some("COMPLETED") }));
+        let dim_observations = repo::list_execution_observations(&pool, dim.uuid, 100, 0)
+            .await
+            .unwrap();
+        assert!(dim_observations
+            .iter()
+            .any(|observation| { observation.normalized_state == "finished" }));
+    }
+
+    #[test]
+    fn required_outputs_keep_success_out_of_the_terminal_ledger() {
+        let decision = beampipe_domain::ExecutionAxes {
+            control_phase: ControlPhase::OutputVerification,
+            submission: SubmissionState::Submitted,
+            scheduler: SchedulerState::Succeeded,
+            daliuge: DaliugeState::Finished,
+            outputs: OutputState::Pending,
+            output_verification_required: true,
+        }
+        .reconcile();
+
+        assert_eq!(decision.status, ExecutionStatus::Running);
+        assert!(decision.terminal_outcome.is_none());
+        assert_eq!(terminal_ledger_status(decision.status), None);
+        assert_eq!(
+            poll_control_phase(true, Some("pending"), true),
+            ControlPhase::OutputVerification
+        );
+    }
+
+    #[tokio::test]
+    async fn slurm_success_waits_for_required_output_verification() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let module = format!("jobs_slurm_gate_{}", uuid::Uuid::now_v7().simple());
+        let execution = repo::create_execution(
+            &pool,
+            &module,
+            json!([{"source_identifier": "source-1"}]),
+            "local",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'running',
+                scheduler_name = 'slurm',
+                scheduler_job_id = '4242',
+                submission_state = 'submitted',
+                scheduler_state = 'running',
+                daliuge_state = 'running',
+                output_verification_required = true,
+                output_verification_policy = '{"required":true,"inventory_schema":"wallaby-hires-output-inventory/v1"}'::jsonb,
+                output_state = 'pending'
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(execution.uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let execution = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        apply_slurm_poll_update(
+            &pool,
+            execution.uuid,
+            &execution,
+            &SlurmJobPollResult {
+                raw_state: "COMPLETED".into(),
+                normalized_state: "COMPLETED".into(),
+                source: "sacct",
+                exit_code: Some(0),
+                raw_line: Some("4242|COMPLETED|0:0".into()),
+            },
+            0,
+            &PollPolicy::default(),
+        )
+        .await
+        .unwrap();
+
+        let held = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.status_enum(), Some(ExecutionStatus::Running));
+        assert_eq!(held.control_phase.as_deref(), Some("output_verification"));
+        assert_eq!(held.scheduler_state.as_deref(), Some("succeeded"));
+        assert_eq!(held.daliuge_state.as_deref(), Some("finished"));
+        assert!(held.terminal_outcome.is_none());
+        assert!(held.completed_at.is_none());
+        let terminal =
+            &held.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["slurm"]["terminal"];
+        assert_eq!(terminal["state"], "COMPLETED");
+        assert!(terminal.get("ledger_status").is_none());
+        assert!(!repo::list_slurm_executions_pending_poll(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.uuid == execution.uuid));
+    }
+
+    #[tokio::test]
+    async fn dim_success_waits_for_outputs_but_finished_graph_errors_fail() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let module = format!("jobs_dim_gate_{}", uuid::Uuid::now_v7().simple());
+
+        for (suffix, poll) in [
+            (
+                "success",
+                BackendPoll {
+                    status: ExecutionStatus::Completed,
+                    poll_summary: json!({
+                        "status": 3,
+                        "normalized_session_state": "finished",
+                        "error_drop_uids": [],
+                    }),
+                },
+            ),
+            (
+                "graph-error",
+                BackendPoll {
+                    status: ExecutionStatus::Failed,
+                    poll_summary: json!({
+                        "status": 3,
+                        "normalized_session_state": "finished",
+                        "error_drop_uids": ["drop-7"],
+                    }),
+                },
+            ),
+        ] {
+            let execution = repo::create_execution(
+                &pool,
+                &module,
+                json!([{"source_identifier": suffix}]),
+                "local",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                r#"
+                UPDATE batch_execution_record
+                SET status = 'running',
+                    scheduler_name = 'daliuge',
+                    daliuge_session_id = $2,
+                    submission_state = 'submitted',
+                    scheduler_state = 'not_submitted',
+                    daliuge_state = 'running',
+                    output_verification_required = true,
+                    output_verification_policy = '{"required":true,"inventory_schema":"wallaby-hires-output-inventory/v1"}'::jsonb,
+                    output_state = 'pending'
+                WHERE uuid = $1
+                "#,
+            )
+            .bind(execution.uuid)
+            .bind(format!("session-{suffix}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let execution = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            apply_dim_poll_update(
+                &pool,
+                execution.uuid,
+                &execution,
+                poll,
+                0,
+                &PollPolicy::default(),
+                None,
+                None,
+                true,
+                false,
+                false,
+                "test",
+            )
+            .await
+            .unwrap();
+            let updated = repo::get_execution(&pool, execution.uuid)
+                .await
+                .unwrap()
+                .unwrap();
+            if suffix == "success" {
+                assert_eq!(updated.status_enum(), Some(ExecutionStatus::Running));
+                assert_eq!(
+                    updated.control_phase.as_deref(),
+                    Some("output_verification")
+                );
+                assert_eq!(updated.daliuge_state.as_deref(), Some("finished"));
+                assert!(updated.terminal_outcome.is_none());
+                assert!(
+                    updated.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["dim"]
+                        ["terminal"]
+                        .get("ledger_status")
+                        .is_none()
+                );
+                assert!(!repo::list_rest_executions_pending_poll(&pool)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|row| row.uuid == execution.uuid));
+            } else {
+                assert_eq!(updated.status_enum(), Some(ExecutionStatus::Failed));
+                assert_eq!(updated.control_phase.as_deref(), Some("terminal"));
+                assert_ne!(
+                    updated.control_phase.as_deref(),
+                    Some("output_verification")
+                );
+                assert_eq!(updated.daliuge_state.as_deref(), Some("failed"));
+                assert_eq!(
+                    updated.workflow_manifest.as_ref().unwrap()["beampipe_run_record"]["dim"]
+                        ["terminal"]["ledger_status"],
+                    "failed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_dim_manifest_uses_canonical_state_for_non_string_backend_status() {
+        let manifest = merge_terminal_dim_poll_into_manifest(
+            None,
+            "BeampipeExecution-run-1",
+            DaliugeState::Finished,
+            Some("completed"),
+            &json!({
+                "status": {"status": 3},
+                "normalized_session_state": "finished",
+                "error_drop_uids": []
+            }),
+        );
+        let dim = &manifest["beampipe_run_record"]["dim"];
+
+        assert_eq!(dim["last_observation"]["session_state"], "finished");
+        assert_eq!(dim["terminal"]["session_state"], "finished");
+        assert_eq!(dim["terminal"]["ledger_status"], "completed");
+        assert!(beampipe_domain::run_record::parse_observed_at(&dim["last_observation"]).is_some());
+        assert!(beampipe_domain::run_record::parse_observed_at(&dim["terminal"]).is_some());
     }
 
     #[test]
@@ -4886,16 +6808,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_discovery_uses_project_query_templates() {
+    async fn config_discovery_selects_calibration_archive_and_preserves_it_in_manifest() {
         let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
         let mut casda = MockTapClient::default();
         casda.insert_rows(
             "ivoa.obscore",
-            vec![json!({"filename": "HIPASSJ1.ms", "obs_id": "ASKAP-123", "obs_publisher_did": "scan-9"})],
+            vec![json!({
+                "filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
+                "obs_id": "ASKAP-72962",
+                "obs_publisher_did": "scan-9"
+            })],
         );
         casda.insert_rows(
             "observation_evaluation_file",
-            vec![json!({"sbid": "123", "access_url": "https://x"})],
+            vec![
+                json!({
+                    "sbid": "72962",
+                    "filename": "calibration-metadata-processing-logs-SB72962_2025-04-20-063210.tar",
+                    "format": "calibration",
+                    "filesize": 12_800_000,
+                    "access_url": "https://example.test/calibration-old"
+                }),
+                json!({
+                    "sbid": "72962",
+                    "filename": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                    "format": "calibration",
+                    "filesize": 16_700_000,
+                    "access_url": "https://example.test/calibration-expected"
+                }),
+                json!({
+                    "sbid": "72962",
+                    "filename": "diagnostics-SB72962.tar",
+                    "format": "diagnostics",
+                    "filesize": 115_000_000,
+                    "access_url": "https://example.test/diagnostics"
+                }),
+                json!({
+                    "sbid": "72962",
+                    "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                    "format": "validation-report",
+                    "filesize": 898_000_000,
+                    "access_url": "https://example.test/validation"
+                }),
+            ],
         );
         let vizier = MockTapClient::with_rows(
             "VIII/73/hicat",
@@ -4908,7 +6863,7 @@ mod tests {
             ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
                 .unwrap();
         let result = runner
-            .discover_source(Some(&config), "wallaby_hires", "HIPASSJ1")
+            .discover_source(Some(&config), "wallaby_hires", "HIPASSJ1317-16")
             .await;
         match result {
             DiscoverySourceResult::HasMetadata {
@@ -4916,12 +6871,138 @@ mod tests {
                 discovery_flags,
                 ..
             } => {
-                assert_eq!(metadata[0]["sbid"], "123");
-                assert_eq!(metadata[0]["dataset_id"], "HIPASSJ1.ms");
+                let expected = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
+                assert_eq!(metadata[0]["sbid"], "72962");
+                assert_eq!(
+                    metadata[0]["dataset_id"],
+                    "HIPASSJ1317-16_SB72962_F00_B00.ms.tar"
+                );
+                assert_eq!(metadata[0]["evaluation_file"], expected);
+                assert_eq!(
+                    metadata[0]["evaluation_file_access_url"],
+                    "https://example.test/calibration-expected"
+                );
                 assert_eq!(discovery_flags["ra_dec_vsys_complete"], true);
+
+                let manifest =
+                    build_manifest_from_config_with_staging(&config, &metadata, &[], &json!({}))
+                        .unwrap();
+                let dataset = &manifest["sources"][0]["sbids"][0]["datasets"][0];
+                assert_eq!(dataset["evaluation_file"], expected);
+                assert_eq!(
+                    dataset["evaluation_file_access_url"],
+                    "https://example.test/calibration-expected"
+                );
             }
             other => panic!("unexpected result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn wallaby_cache_requires_visibility_and_evaluation_staging_urls() {
+        let config =
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
+                .unwrap();
+        let complete = vec![(
+            "72962".into(),
+            json!({
+                "datasets": [{
+                    "access_url": "https://example.test/visibility",
+                    "evaluation_file": "calibration-metadata-processing-logs-SB72962.tar",
+                    "evaluation_file_access_url": "https://example.test/evaluation"
+                }]
+            }),
+        )];
+        assert!(staging_metadata_cache_complete(&config, &complete));
+
+        for missing in ["access_url", "evaluation_file_access_url"] {
+            let mut damaged = complete.clone();
+            damaged[0].1["datasets"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(!staging_metadata_cache_complete(&config, &damaged));
+        }
+    }
+
+    #[tokio::test]
+    async fn config_discovery_fails_without_calibration_archive() {
+        let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
+        let mut casda = MockTapClient::default();
+        casda.insert_rows(
+            "ivoa.obscore",
+            vec![json!({
+                "filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
+                "obs_id": "ASKAP-72962",
+                "obs_publisher_did": "scan-9"
+            })],
+        );
+        casda.insert_rows(
+            "observation_evaluation_file",
+            vec![json!({
+                "sbid": "72962",
+                "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
+                "format": "validation-report",
+                "filesize": 8980,
+                "access_url": "https://example.test/validation"
+            })],
+        );
+        clients.insert("casda".into(), Arc::new(casda));
+        clients.insert(
+            "vizier".into(),
+            Arc::new(MockTapClient::with_rows(
+                "VIII/73/hicat",
+                vec![json!({"RAJ2000": "1:2:3", "DEJ2000": "-1:2:3", "RVmom": 42})],
+            )),
+        );
+        let runner = ConfigDiscoveryRunner::with_clients(clients);
+        let config =
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
+                .unwrap();
+
+        let result = runner
+            .discover_source(Some(&config), "wallaby_hires", "HIPASSJ1317-16")
+            .await;
+
+        match result {
+            DiscoverySourceResult::Error { error, .. } => {
+                assert!(error.contains("SBID 72962 has no valid calibration metadata archive"));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_winning_calibration_archive_fails_closed() {
+        let filename = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
+        let rows = vec![
+            json!({
+                "sbid": "72962",
+                "filename": filename,
+                "format": "calibration",
+                "filesize": 16_700_000,
+                "access_url": "https://example.test/calibration-a"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            json!({
+                "sbid": "72962",
+                "filename": filename,
+                "format": "calibration",
+                "filesize": 16_700_000,
+                "access_url": "https://example.test/calibration-b"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        ];
+
+        let error = sbid_enrichment_row("sbid_to_eval_file", "72962", &rows).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigDiscoveryError::AmbiguousCalibrationArchive { .. }
+        ));
     }
 
     #[test]
@@ -4931,6 +7012,50 @@ mod tests {
                 &json!({"kind": "slurm_remote", "login_node": "setonix", "account": "a", "home_dir": "/h", "log_dir": "/l", "dlg_root": "/d"})
             ),
             Some("slurm_remote")
+        );
+    }
+
+    #[test]
+    fn submission_target_fingerprint_includes_the_resolved_remote_user() {
+        let DeploymentConfig::SlurmRemote(mut deployment) = serde_json::from_value(json!({
+            "kind": "slurm_remote",
+            "login_node": "setonix.example",
+            "ssh_port": 22,
+            "remote_user": "operator-a",
+            "ssh_credential": "hpc",
+            "account": "project",
+            "home_dir": "/home/operator-a",
+            "log_dir": "/scratch/project/logs",
+            "dlg_root": "/scratch/project/dlg"
+        }))
+        .unwrap() else {
+            panic!("expected Slurm profile");
+        };
+        let first = resolved_slurm_target_fingerprint(&deployment).unwrap();
+        deployment.remote_user = Some("operator-b".into());
+        let second = resolved_slurm_target_fingerprint(&deployment).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn exact_name_recovery_reuses_the_canonical_poll_state_machine() {
+        let outcome = repo::SlurmNameLookupOutcome::Exact {
+            scheduler_job_id: "47503556".into(),
+            state: SchedulerState::Cancelled,
+            raw_state: "CANCELLED".into(),
+            reason: Some("Cancelled by operator".into()),
+            source: "sacct".into(),
+            observed_at: Utc::now(),
+        };
+        let poll = slurm_poll_result_from_name_lookup(&outcome).unwrap();
+        assert_eq!(poll.normalized_state, "CANCELLED");
+        assert_eq!(poll.source, "sacct");
+        assert_eq!(
+            poll.raw_line.as_deref(),
+            Some("CANCELLED|Cancelled by operator")
+        );
+        assert!(
+            slurm_poll_result_from_name_lookup(&repo::SlurmNameLookupOutcome::NotFound).is_none()
         );
     }
 

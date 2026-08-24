@@ -245,6 +245,9 @@ impl LedgerState {
             if recovering && patch.error.is_none() {
                 self.last_error = None;
             }
+            if next == ExecutionStatus::Completed && patch.error.is_none() {
+                self.last_error = None;
+            }
             if next.is_terminal() && patch.execution_phase.is_none() {
                 self.execution_phase = None;
             }
@@ -289,6 +292,23 @@ mod tests {
             completed_at: None,
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn successful_completion_clears_transient_error() {
+        let mut ledger = state(ExecutionStatus::Running);
+        ledger.last_error = Some("transient DIM status failure".into());
+        ledger
+            .apply_patch(
+                LedgerPatch {
+                    status: Some(ExecutionStatus::Completed),
+                    ..LedgerPatch::default()
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(ledger.status, ExecutionStatus::Completed);
+        assert!(ledger.last_error.is_none());
     }
 
     #[test]

@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-adapters"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "quick-xml",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-alerts"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "beampipe-db",
  "beampipe-domain",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-api"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -449,6 +449,7 @@ dependencies = [
  "beampipe-project",
  "beampipe-security",
  "chrono",
+ "ipnet",
  "redis",
  "serde",
  "serde_json",
@@ -459,6 +460,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-opentelemetry",
+ "url",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
@@ -466,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-auth"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "bcrypt",
  "chrono",
@@ -479,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-cli"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "beampipe-adapters",
@@ -516,9 +518,10 @@ dependencies = [
 
 [[package]]
 name = "beampipe-config"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "dotenvy",
+ "ipnet",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -527,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-db"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "beampipe-domain",
  "beampipe-project",
@@ -546,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-domain"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "schemars",
@@ -559,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-jobs"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "beampipe-adapters",
@@ -585,13 +588,14 @@ dependencies = [
 
 [[package]]
 name = "beampipe-metrics"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "axum",
  "beampipe-adapters",
  "beampipe-db",
  "beampipe-domain",
  "beampipe-orchestration",
+ "beampipe-profiles",
  "chrono",
  "metrics",
  "metrics-exporter-prometheus",
@@ -610,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-orchestration"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "beampipe-adapters",
@@ -626,6 +630,7 @@ dependencies = [
  "russh",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "ssh-key",
  "tempfile",
  "thiserror 1.0.69",
@@ -638,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-profiles"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "schemars",
  "serde",
@@ -649,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-project"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "beampipe-domain",
  "jsonschema",
@@ -667,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "beampipe-security"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",

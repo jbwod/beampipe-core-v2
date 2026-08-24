@@ -6,8 +6,8 @@ mod route_metrics;
 
 use axum::{
     body::Body,
-    extract::{FromRef, FromRequestParts, Path, Query, State},
-    http::{request::Parts, HeaderValue, Request, StatusCode},
+    extract::{ConnectInfo, FromRef, FromRequestParts, Path, Query, State},
+    http::{request::Parts, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -21,8 +21,8 @@ use beampipe_domain::{
         parsed_source_readiness_error, source_execution_status, ArchiveMetadataReadiness,
         RegisteredSourceReadiness, SourceExecutionStatus,
     },
-    DaliugeState, ExecutionStatus, Failure, FailureClass, LedgerPatch, RetryDisposition,
-    SchedulerState,
+    DaliugeState, ExecutionStatus, Failure, FailureClass, RetryDisposition, SchedulerState,
+    SubmissionState,
 };
 use beampipe_jobs::{spawn_workers, WorkerConfig};
 use beampipe_metrics as metrics;
@@ -37,12 +37,13 @@ use beampipe_project::{
 };
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
-use rate_limit::{check_rate_limit, client_ip, RateLimitError, RateLimiter};
+use rate_limit::{check_rate_limit, RateLimitError, RateLimiter};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -73,7 +74,8 @@ pub struct AppState {
         list_sources, get_source, get_source_status, update_source, delete_source, get_source_metadata,
         list_source_executions, prepare_execution, create_execution, list_executions, get_execution,
         execution_status, execution_summary, execution_ledger_snapshot, execution_observations,
-        execution_artifacts, patch_execution, execute_execution, retry_execution, prepare_graph,
+        execution_artifacts, verify_execution_outputs, patch_execution, execute_execution,
+        retry_execution, abandon_execution_submission, prepare_graph,
         scheduler_status, scheduler_jobs, daliuge_inspect, daliuge_sessions,
         upload_project_config, get_project_config, list_project_config_versions,
         upload_project_config_wasm, get_project_config_wasm,
@@ -81,6 +83,7 @@ pub struct AppState {
         enqueue_job_handler,
         create_deployment_profile, list_deployment_profiles, get_deployment_profile,
         update_deployment_profile, delete_deployment_profile,
+        list_slurm_credentials, get_slurm_credential,
         observability::list_notification_channels, observability::create_notification_channel,
         observability::update_notification_channel, observability::delete_notification_channel,
         observability::test_notification_channel, observability::list_alert_rules,
@@ -94,8 +97,12 @@ pub struct AppState {
         RefreshRequest, LogoutRequest,
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
         DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
-        ExecutionCreate, ExecutionPatchRequest, ExecuteRequest, ExecutionRetryRequest,
-        ExecutionRetryResponse, GraphPrepareRequest, GraphPrepareResponse, ExecutionStatus,
+        ExecutionCreate, ExecutionSourceSelection, ExecutionPatchRequest, ExecuteRequest,
+        ExecutionRetryRequest, ExecutionRetryResponse, ExecutionSubmissionAbandonRequest,
+        OutputInventoryProduct,
+        OutputPublicationAcknowledgement, ExecutionOutputVerificationRequest,
+        ExecutionOutputVerificationResponse, GraphPrepareRequest, GraphPrepareResponse,
+        ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
         ProjectConfig, ValidationReport, ValidationDiagnostic, DiagnosticSeverity,
         ApiErrorResponse, beampipe_domain::Failure,
@@ -118,6 +125,7 @@ pub struct AppState {
         beampipe_project::GraphPatchMatch,
         beampipe_project::GraphPatchMatchKind,
         beampipe_project::AutomationConfig,
+        beampipe_project::OutputVerificationConfig,
         beampipe_project::DiscoveryAutomationConfig,
         beampipe_project::ExecutionAutomationConfig,
         beampipe_project::ExtensionConfig,
@@ -130,6 +138,7 @@ pub struct AppState {
         beampipe_project::TransformRef,
         beampipe_project::MappingSpec,
         DeploymentProfile, DeploymentProfileResponse,
+        SlurmCredentialListResponse, SlurmCredentialSlot,
         beampipe_profiles::DaliugeTranslationConfig,
         beampipe_profiles::DaliugeAlgo,
         beampipe_profiles::DeploymentConfig,
@@ -159,6 +168,7 @@ pub struct AppState {
         (name = "project-configs", description = "Registered project modules and versioned survey configuration."),
         (name = "jobs", description = "Postgres-backed async jobs."),
         (name = "deployment-profiles", description = "DALiuGE deployment profiles (translation + REST/Slurm remote deployment configuration)."),
+        (name = "slurm-credentials", description = "Read-only inventory of installed Slurm SSH credential slots (names and file presence, no key material)."),
         (name = "alerts", description = "Notification channels and alert rules."),
         (name = "provenance", description = "Audit event stream."),
         (name = "operators", description = "System overview and Beampipe control-plane workers."),
@@ -176,6 +186,8 @@ pub fn router(state: AppState) -> Router {
     let cors = cors_layer(&state.settings);
     let sensitive = Router::new()
         .route("/api/v2/login", post(login))
+        .route("/api/v2/refresh", post(refresh))
+        .route("/api/v2/logout", post(logout))
         .route("/api/v2/executions", post(create_execution))
         .route("/api/v2/project-configs", post(upload_project_config))
         .route(
@@ -185,6 +197,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/jobs", post(enqueue_job_handler))
         .route("/api/v2/executions/:id/execute", post(execute_execution))
         .route("/api/v2/executions/:id/retry", post(retry_execution))
+        .route(
+            "/api/v2/executions/:id/submission/abandon",
+            post(abandon_execution_submission),
+        )
+        .route(
+            "/api/v2/executions/:id/outputs/verify",
+            post(verify_execution_outputs),
+        )
         .route("/api/v2/graphs/prepare", post(prepare_graph))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -198,8 +218,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/ready", get(ready))
         .route("/api/v2/diagnostics", get(diagnostics))
         .route("/api/v2/overview", get(operator_overview))
-        .route("/api/v2/refresh", post(refresh))
-        .route("/api/v2/logout", post(logout))
         .route("/api/v2/user/me", get(current_user))
         .route("/api/v2/sources", post(create_source).get(list_sources))
         .route("/api/v2/sources/bulk", post(bulk_create_sources))
@@ -264,6 +282,8 @@ pub fn router(state: AppState) -> Router {
                 .patch(update_deployment_profile)
                 .delete(delete_deployment_profile),
         )
+        .route("/api/v2/slurm/credentials", get(list_slurm_credentials))
+        .route("/api/v2/slurm/credentials/:slot", get(get_slurm_credential))
         .route(
             "/api/v2/notification-channels",
             get(observability::list_notification_channels)
@@ -374,10 +394,10 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
     if with_worker {
         worker_pool = Some(spawn_workers(
             pool.clone(),
-            WorkerConfig::from_settings(&settings),
+            embedded_worker_config(WorkerConfig::from_settings(&settings)),
         ));
     }
-    let rate_limiter = RateLimiter::from_settings(&settings).await;
+    let rate_limiter = RateLimiter::from_settings(&settings).await?;
     let bind_addr: SocketAddr = settings.bind_addr.parse()?;
     let app = router(AppState {
         pool,
@@ -387,14 +407,24 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
     });
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!(addr = %bind_addr, "event=api_listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     if let Some(workers) = worker_pool {
         workers.shutdown().await;
     }
     tracing::info!("event=api_shutdown_complete");
     Ok(())
+}
+
+fn embedded_worker_config(mut config: WorkerConfig) -> WorkerConfig {
+    // The API already owns the process-wide metrics listener. Starting the
+    // worker listener on the same address would race it and log EADDRINUSE.
+    config.metrics_server_enabled = false;
+    config
 }
 
 async fn shutdown_signal() {
@@ -433,6 +463,8 @@ pub enum ApiError {
     Unauthorized(String),
     #[error("forbidden: {0}")]
     Forbidden(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error("auth error: {0}")]
@@ -449,6 +481,10 @@ pub enum ApiError {
     Scheduler(#[from] SchedulerAdapterError),
     #[error("execution retry rejected ({code}): {message}")]
     RetryRejected { code: String, message: String },
+    #[error("submission abandonment request rejected ({code}): {message}")]
+    SubmissionAbandonmentInvalid { code: String, message: String },
+    #[error("submission abandonment conflict ({code}): {message}")]
+    SubmissionAbandonmentConflict { code: String, message: String },
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -506,6 +542,15 @@ fn api_failure(error: &ApiError) -> Failure {
             "the requested operation was not applied",
         )
         .with_operator_action("use an account with the required role"),
+        ApiError::Conflict(message) => Failure::new(
+            "conflict",
+            "api",
+            FailureClass::InconsistentState,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the request was not applied",
+        )
+        .with_operator_action("refresh the resource state before trying another operation"),
         ApiError::Db(_) => Failure::new(
             "database_error",
             "postgres",
@@ -564,6 +609,24 @@ fn api_failure(error: &ApiError) -> Failure {
             "no retry job was created and no external work was repeated",
         )
         .with_operator_action("reconcile external state or create a new execution as indicated"),
+        ApiError::SubmissionAbandonmentInvalid { code, message } => Failure::new(
+            code.clone(),
+            "submission_abandonment",
+            FailureClass::Validation,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the unresolved submission was not abandoned",
+        )
+        .with_operator_action("correct the request and retry only after reviewing orphan risk"),
+        ApiError::SubmissionAbandonmentConflict { code, message } => Failure::new(
+            code.clone(),
+            "submission_abandonment",
+            FailureClass::InconsistentState,
+            message,
+            RetryDisposition::AfterRemediation,
+            "the unresolved submission was not abandoned",
+        )
+        .with_operator_action("refresh the execution and review its reconciliation evidence"),
     }
 }
 
@@ -574,6 +637,7 @@ impl IntoResponse for ApiError {
             ApiError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) | ApiError::Project(_) | ApiError::Validation(_) => {
                 StatusCode::BAD_REQUEST
@@ -583,6 +647,8 @@ impl IntoResponse for ApiError {
             ApiError::Wasm(_) => StatusCode::BAD_REQUEST,
             ApiError::Daliuge(_) | ApiError::Scheduler(_) => StatusCode::BAD_GATEWAY,
             ApiError::RetryRejected { .. } => StatusCode::CONFLICT,
+            ApiError::SubmissionAbandonmentInvalid { .. } => StatusCode::BAD_REQUEST,
+            ApiError::SubmissionAbandonmentConflict { .. } => StatusCode::CONFLICT,
         };
         if matches!(&self, ApiError::Db(_)) {
             tracing::error!(error = %self, "event=api_request_failed");
@@ -651,11 +717,29 @@ async fn rate_limit_middleware(
     next: Next,
 ) -> Result<Response, ApiError> {
     let path = req.uri().path().to_string();
-    let ip = client_ip(req.headers(), "127.0.0.1");
-    if let Err(RateLimitError::Limited) =
-        check_rate_limit(&state.rate_limiter, None, &ip, &path).await
-    {
-        return Err(ApiError::TooManyRequests);
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect| connect.0.ip())
+        .ok_or(ApiError::ServiceUnavailable)?;
+    let ip = state
+        .rate_limiter
+        .client_ip(req.headers(), peer)
+        .to_string();
+    match check_rate_limit(&state.rate_limiter, None, &ip, &path).await {
+        Ok(()) => {}
+        Err(RateLimitError::Limited) => return Err(ApiError::TooManyRequests),
+        Err(RateLimitError::Redis(error)) if state.rate_limiter.fail_closed() => {
+            tracing::warn!(error = %error, "event=rate_limit_redis_unavailable_fail_closed");
+            return Err(ApiError::ServiceUnavailable);
+        }
+        Err(RateLimitError::Redis(error)) => {
+            tracing::warn!(error = %error, "event=rate_limit_redis_unavailable_bypassed_development");
+        }
+        Err(RateLimitError::Configuration(error)) => {
+            tracing::error!(error = %error, "event=rate_limit_configuration_error");
+            return Err(ApiError::ServiceUnavailable);
+        }
     }
     Ok(next.run(req).await)
 }
@@ -729,6 +813,9 @@ async fn ready(
             }
             Err(_) => {
                 metrics::set_dependency_up("redis", false);
+                if state.rate_limiter.fail_closed() {
+                    return Err(ApiError::ServiceUnavailable);
+                }
                 "error".into()
             }
         }
@@ -752,7 +839,7 @@ async fn ready(
         "vizier",
         tap_report.vizier.reachable || !tap_report.vizier.configured,
     );
-    let queue_depth = repo::queue_depth(&state.pool).await?;
+    let queue_depth = repo::runnable_queue_depth(&state.pool).await?;
     let jobs_running = repo::jobs_running_count(&state.pool).await?;
     metrics::set_jobs_queue_depth(queue_depth);
     metrics::set_jobs_running(jobs_running);
@@ -1662,14 +1749,42 @@ async fn logout(
     Json(req): Json<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
     let _ = repo::cleanup_expired_blacklisted_tokens(&state.pool).await;
-    let exp = chrono::Utc::now() + chrono::Duration::days(state.settings.refresh_token_expire_days);
-    if let Some(token) = req.access_token {
-        repo::blacklist_token(&state.pool, &beampipe_auth::token_hash(&token), exp).await?;
-    }
-    if let Some(token) = req.refresh_token {
+    let validated = validate_logout_tokens(req, &state.settings.jwt_secret)?;
+    for (token, claims) in validated {
+        let exp = chrono::DateTime::<Utc>::from_timestamp(claims.exp as i64, 0)
+            .ok_or_else(|| ApiError::BadRequest("token expiration is invalid".into()))?;
         repo::blacklist_token(&state.pool, &beampipe_auth::token_hash(&token), exp).await?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_logout_tokens(
+    req: LogoutRequest,
+    jwt_secret: &str,
+) -> Result<Vec<(String, beampipe_auth::Claims)>, ApiError> {
+    if req.access_token.is_none() && req.refresh_token.is_none() {
+        return Err(ApiError::BadRequest(
+            "access_token or refresh_token required".into(),
+        ));
+    }
+    let mut validated = Vec::new();
+    if let Some(token) = req.access_token {
+        let claims = beampipe_auth::decode_access_token(&token, jwt_secret)?;
+        validated.push((token, claims));
+    }
+    if let Some(token) = req.refresh_token {
+        let claims = beampipe_auth::decode_refresh_token(&token, jwt_secret)?;
+        validated.push((token, claims));
+    }
+    if validated
+        .windows(2)
+        .any(|pair| pair[0].1.sub != pair[1].1.sub)
+    {
+        return Err(ApiError::Unauthorized(
+            "logout tokens belong to different users".into(),
+        ));
+    }
+    Ok(validated)
 }
 
 #[utoipa::path(get, path = "/api/v2/executions", tag = "executions")]
@@ -1736,6 +1851,7 @@ pub struct LedgerSnapshotResponse {
 )]
 async fn execution_ledger_snapshot(
     State(state): State<Arc<AppState>>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
     Query(query): Query<LedgerSnapshotQuery>,
 ) -> Result<Json<LedgerSnapshotResponse>, ApiError> {
@@ -1748,23 +1864,13 @@ async fn execution_ledger_snapshot(
         .and_then(beampipe_domain::run_record::extract_beampipe_run_record);
     let run_record_phases =
         beampipe_domain::run_record::summarize_run_record_phases(run_record.as_ref());
-    let config_version = repo::get_active_project_config(&state.pool, &row.project_module)
-        .await?
-        .map(|c| c.version);
-    let source_id = row
-        .sources
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_str());
-    let discovery_signature = if let Some(sid) = source_id {
-        repo::get_source_by_identifier(&state.pool, &row.project_module, sid)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.discovery_signature)
-    } else {
-        None
+    let config_version = match row.project_config_id {
+        Some(config_id) => repo::get_project_config_by_uuid(&state.pool, config_id)
+            .await?
+            .map(|config| config.version),
+        None => None,
     };
+    let discovery_signature = row.discovery_signature.clone();
     let trace = repo::execution_trace_summary(&state.pool, id, 5).await?;
     let recent_events: Vec<observability::ProvenanceEventResponse> = trace
         .events
@@ -1867,10 +1973,14 @@ async fn login(
 ) -> Result<Json<TokenResponse>, ApiError> {
     let user = repo::get_user_by_username(&state.pool, &req.username).await?;
     let Some(user) = user else {
-        return Err(ApiError::BadRequest("invalid username or password".into()));
+        return Err(ApiError::Unauthorized(
+            "invalid username or password".into(),
+        ));
     };
     if !beampipe_auth::verify_password(&req.password, &user.hashed_password) {
-        return Err(ApiError::BadRequest("invalid username or password".into()));
+        return Err(ApiError::Unauthorized(
+            "invalid username or password".into(),
+        ));
     }
     let pair = beampipe_auth::issue_token_pair(
         &user.username,
@@ -1939,7 +2049,16 @@ pub struct SourceBulkCreateResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SourceUpdate {
     pub enabled: Option<bool>,
-    pub stale_after_hours: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub stale_after_hours: Option<Option<i32>>,
+}
+
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -2202,10 +2321,19 @@ async fn list_source_executions(
     ))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSourceSelection {
+    pub source_identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sbids: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionCreate {
     pub project_module: String,
-    pub sources: Vec<Value>,
+    pub sources: Vec<ExecutionSourceSelection>,
     pub archive_name: String,
     pub deployment_profile_id: Option<Uuid>,
     pub deployment_profile_name: Option<String>,
@@ -2225,11 +2353,15 @@ pub struct ExecutionRead {
     pub remote_session_dir: Option<String>,
     pub control_phase: Option<String>,
     pub submission_state: Option<String>,
+    pub submission_deadline_at: Option<chrono::DateTime<Utc>>,
+    pub submission_abandoned_at: Option<chrono::DateTime<Utc>>,
     pub scheduler_state: Option<String>,
     pub scheduler_raw_state: Option<String>,
     pub scheduler_reason: Option<String>,
     pub daliuge_state: Option<String>,
     pub output_state: Option<String>,
+    pub output_verification_required: bool,
+    pub output_verification_policy: Value,
     pub terminal_outcome: Option<String>,
     pub failure_class: Option<String>,
     pub discovery_signature: Option<String>,
@@ -2292,6 +2424,8 @@ pub struct ExecutionStatusResponse {
     pub daliuge_session_id: Option<String>,
     pub control_phase: Option<String>,
     pub submission_state: Option<String>,
+    pub submission_deadline_at: Option<chrono::DateTime<Utc>>,
+    pub submission_abandoned_at: Option<chrono::DateTime<Utc>>,
     pub scheduler_state: Option<String>,
     pub scheduler_raw_state: Option<String>,
     pub scheduler_reason: Option<String>,
@@ -2333,20 +2467,233 @@ async fn prepare_execution(
     AuthUser(_user): AuthUser,
     Json(req): Json<ExecutionCreate>,
 ) -> Result<Json<ExecutionPrepareResponse>, ApiError> {
-    let sids = source_identifiers_from_values(&req.sources);
-    let rows =
-        repo::list_archive_metadata_for_sources(&state.pool, &req.project_module, &sids).await?;
+    Ok(Json(
+        validate_execution_admission(&state.pool, &req)
+            .await?
+            .response,
+    ))
+}
+
+struct ExecutionAdmission {
+    response: ExecutionPrepareResponse,
+    deployment_profile_id: Option<Uuid>,
+    project_config_id: Option<Uuid>,
+    sources: Vec<ExecutionSourceSelection>,
+}
+
+async fn validate_execution_admission(
+    pool: &PgPool,
+    req: &ExecutionCreate,
+) -> Result<ExecutionAdmission, ApiError> {
+    let project_module = req.project_module.trim();
+    let archive_name = req.archive_name.trim();
     let mut errors = Vec::new();
+    if project_module.is_empty() {
+        errors.push("project_module must be non-empty".into());
+    }
+    if archive_name.is_empty() {
+        errors.push("archive_name must be non-empty".into());
+    }
+    if req.sources.is_empty() {
+        errors.push("at least one source is required".into());
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut sids = Vec::with_capacity(req.sources.len());
+    let mut normalized_sources = Vec::with_capacity(req.sources.len());
+    for (index, selection) in req.sources.iter().enumerate() {
+        let sid = selection.source_identifier.trim();
+        if sid.is_empty() {
+            errors.push(format!(
+                "sources[{index}].source_identifier must be non-empty"
+            ));
+            continue;
+        }
+        if !seen.insert(sid.to_string()) {
+            errors.push(format!("source '{sid}' is selected more than once"));
+            continue;
+        }
+        let normalized_sbids = selection.sbids.as_ref().map(|sbids| {
+            sbids
+                .iter()
+                .map(|sbid| sbid.trim().to_string())
+                .collect::<Vec<_>>()
+        });
+        if let Some(sbids) = normalized_sbids.as_ref() {
+            if sbids.is_empty() || sbids.iter().any(|sbid| sbid.trim().is_empty()) {
+                errors.push(format!(
+                    "sources[{index}].sbids must contain at least one non-empty SBID when set"
+                ));
+            }
+            let unique = sbids.iter().collect::<std::collections::BTreeSet<_>>();
+            if unique.len() != sbids.len() {
+                errors.push(format!("sources[{index}].sbids contains duplicates"));
+            }
+        }
+        sids.push(sid.to_string());
+        normalized_sources.push(ExecutionSourceSelection {
+            source_identifier: sid.to_string(),
+            sbids: normalized_sbids,
+        });
+    }
+
+    let project_config = if project_module.is_empty() {
+        None
+    } else {
+        repo::get_active_project_config(pool, project_module).await?
+    };
+    let parsed_config = match project_config.as_ref() {
+        Some(row) => match serde_json::from_value::<ProjectConfig>(row.spec.clone()) {
+            Ok(config) => {
+                let report = config.validate_report();
+                if !report.valid {
+                    let summary = report
+                        .errors
+                        .iter()
+                        .take(3)
+                        .map(|error| format!("{}: {}", error.path, error.message))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    errors.push(format!(
+                        "active project configuration is invalid: {summary}"
+                    ));
+                }
+                if config.metadata.id != project_module {
+                    errors.push(format!(
+                        "active project configuration identifies '{}' instead of '{project_module}'",
+                        config.metadata.id
+                    ));
+                }
+                Some(config)
+            }
+            Err(error) => {
+                errors.push(format!("active project configuration is invalid: {error}"));
+                None
+            }
+        },
+        None => {
+            if !project_module.is_empty() {
+                errors.push(format!(
+                    "project '{project_module}' has no active configuration"
+                ));
+            }
+            None
+        }
+    };
+    if let Some(config) = parsed_config.as_ref() {
+        if !archive_name.is_empty()
+            && !config
+                .adapters
+                .required
+                .iter()
+                .any(|adapter| adapter == archive_name)
+        {
+            errors.push(format!(
+                "archive '{archive_name}' is not enabled by project '{project_module}'"
+            ));
+        }
+        if let Some(max_sources) = execution_source_limit(config) {
+            if normalized_sources.len() > max_sources {
+                errors.push(format!(
+                    "project '{project_module}' permits at most {max_sources} source(s) per execution; received {}",
+                    normalized_sources.len()
+                ));
+            }
+        }
+    }
+
+    let profile = if req.deployment_profile_id.is_some()
+        && req.deployment_profile_name.as_deref().is_some()
+    {
+        errors.push("provide only one of deployment_profile_id or deployment_profile_name".into());
+        None
+    } else if let Some(id) = req.deployment_profile_id {
+        match repo::get_deployment_profile(pool, id).await? {
+            Some(profile) => Some(profile),
+            None => {
+                errors.push(format!("deployment profile '{id}' does not exist"));
+                None
+            }
+        }
+    } else if let Some(raw_name) = req.deployment_profile_name.as_deref() {
+        let name = raw_name.trim();
+        if name.is_empty() {
+            errors.push("deployment_profile_name must be non-empty when provided".into());
+            None
+        } else {
+            match repo::get_deployment_profile_by_name(pool, name).await? {
+                Some(profile) => Some(profile),
+                None => {
+                    errors.push(format!("deployment profile '{name}' does not exist"));
+                    None
+                }
+            }
+        }
+    } else if project_module.is_empty() {
+        None
+    } else {
+        match repo::get_default_deployment_profile(pool, project_module).await? {
+            Some(profile) => Some(profile),
+            None => {
+                errors.push(format!(
+                    "project '{project_module}' has no default deployment profile; select one explicitly"
+                ));
+                None
+            }
+        }
+    };
+    if let Some(profile) = profile.as_ref() {
+        if profile
+            .project_module
+            .as_deref()
+            .is_some_and(|module| module != project_module)
+        {
+            errors.push(format!(
+                "deployment profile '{}' belongs to project '{}'",
+                profile.name,
+                profile.project_module.as_deref().unwrap_or_default()
+            ));
+        }
+        let profile_spec = json!({
+            "name": profile.name,
+            "description": profile.description,
+            "project_module": profile.project_module,
+            "is_default": profile.is_default,
+            "max_concurrent_executions": profile.max_concurrent_executions,
+            "translation": profile.translation,
+            "deployment": profile.deployment,
+        });
+        match serde_json::from_value::<DeploymentProfile>(profile_spec) {
+            Ok(parsed) => {
+                if let Err(error) = parsed.validate() {
+                    errors.push(format!(
+                        "deployment profile '{}' is invalid: {error}",
+                        profile.name
+                    ));
+                }
+            }
+            Err(error) => errors.push(format!(
+                "deployment profile '{}' is invalid: {error}",
+                profile.name
+            )),
+        }
+    }
+
+    let rows = repo::list_archive_metadata_for_sources(pool, project_module, &sids).await?;
     let mut preview = Vec::new();
     let mut total_datasets = 0usize;
 
-    for sid in sids {
+    for selection in &normalized_sources {
+        let sid = selection.source_identifier.trim();
+        if sid.is_empty() {
+            continue;
+        }
         let source = sqlx::query_as::<_, SourceRegistryRow>(
             "SELECT * FROM source_registry WHERE project_module = $1 AND source_identifier = $2",
         )
-        .bind(&req.project_module)
-        .bind(&sid)
-        .fetch_optional(&state.pool)
+        .bind(project_module)
+        .bind(sid)
+        .fetch_optional(pool)
         .await?;
         let reg = source.as_ref().map(|s| RegisteredSourceReadiness {
             enabled: s.enabled,
@@ -2356,13 +2703,27 @@ async fn prepare_execution(
         });
         let metadata: Vec<ArchiveMetadataReadiness> = rows
             .iter()
-            .filter(|r| r.source_identifier == sid)
+            .filter(|r| {
+                r.source_identifier == sid
+                    && selection.sbids.as_ref().is_none_or(|selected| {
+                        selected
+                            .iter()
+                            .any(|selected_sbid| selected_sbid == &r.sbid)
+                    })
+            })
             .map(|r| ArchiveMetadataReadiness {
                 sbid: r.sbid.clone(),
                 metadata_json: r.metadata_json.clone(),
             })
             .collect();
-        if let Some(err) = parsed_source_readiness_error(&sid, None, reg.as_ref(), &metadata) {
+        if let Some(selected) = selection.sbids.as_ref() {
+            for sbid in selected {
+                if !metadata.iter().any(|item| &item.sbid == sbid) {
+                    errors.push(format!("source '{sid}' has no discovered SBID '{sbid}'"));
+                }
+            }
+        }
+        if let Some(err) = parsed_source_readiness_error(sid, None, reg.as_ref(), &metadata) {
             errors.push(err);
             continue;
         }
@@ -2379,49 +2740,143 @@ async fn prepare_execution(
         }));
     }
 
-    Ok(Json(ExecutionPrepareResponse {
-        project_module: req.project_module,
-        valid: errors.is_empty(),
-        errors,
-        total_datasets,
-        sources_preview: preview,
-    }))
+    Ok(ExecutionAdmission {
+        response: ExecutionPrepareResponse {
+            project_module: req.project_module.clone(),
+            valid: errors.is_empty(),
+            errors,
+            total_datasets,
+            sources_preview: preview,
+        },
+        deployment_profile_id: profile.map(|profile| profile.uuid),
+        project_config_id: project_config.map(|config| config.uuid),
+        sources: normalized_sources,
+    })
 }
 
-#[utoipa::path(post, path = "/api/v2/executions", tag = "executions", request_body = ExecutionCreate, responses((status = 201)))]
+fn execution_source_limit(config: &ProjectConfig) -> Option<usize> {
+    config
+        .automation
+        .execution
+        .as_ref()
+        .and_then(|execution| usize::try_from(execution.max_sources_per_execution).ok())
+        .filter(|limit| *limit > 0)
+}
+
+fn execution_create_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    let key = value
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("Idempotency-Key must be valid ASCII".into()))?;
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+    {
+        return Err(ApiError::BadRequest(
+            "Idempotency-Key must be 1-128 visible ASCII characters without whitespace".into(),
+        ));
+    }
+    Ok(Some(key.to_string()))
+}
+
+fn canonical_execution_create(req: &ExecutionCreate) -> Value {
+    json!({
+        "project_module": req.project_module.trim(),
+        "sources": req.sources.iter().map(|source| json!({
+            "source_identifier": source.source_identifier.trim(),
+            "sbids": source.sbids.as_ref().map(|sbids| {
+                sbids.iter().map(|sbid| sbid.trim()).collect::<Vec<_>>()
+            }),
+        })).collect::<Vec<_>>(),
+        "archive_name": req.archive_name.trim(),
+        "deployment_profile_id": req.deployment_profile_id,
+        "deployment_profile_name": req.deployment_profile_name.as_deref().map(str::trim),
+    })
+}
+
+fn execution_create_request_sha256(req: &ExecutionCreate) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(canonical_execution_create(req).to_string().as_bytes())
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions",
+    tag = "executions",
+    request_body = ExecutionCreate,
+    params(("Idempotency-Key" = Option<String>, Header, description = "Optional per-user retry key. Exact replays return the existing execution; reuse with a different request returns 409.")),
+    responses((status = 201), (status = 200), (status = 409))
+)]
 async fn create_execution(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     AuthUser(user): AuthUser,
+    headers: HeaderMap,
     Json(req): Json<ExecutionCreate>,
 ) -> Result<(StatusCode, Json<ExecutionRead>), ApiError> {
-    let deployment_profile_id = if let Some(id) = req.deployment_profile_id {
-        Some(id)
-    } else if let Some(name) = req.deployment_profile_name.as_deref() {
-        repo::get_deployment_profile_by_name(&state.pool, name)
-            .await?
-            .map(|p| p.uuid)
-    } else {
-        None
-    };
-    let project_config_id = repo::get_active_project_config(&state.pool, &req.project_module)
-        .await?
-        .map(|c| c.uuid);
-    let row = repo::create_execution_with_correlation(
+    let idempotency_key = execution_create_idempotency_key(&headers)?;
+    let request_sha256 = execution_create_request_sha256(&req);
+    if let Some(key) = idempotency_key.as_deref() {
+        if let Some(existing) =
+            repo::get_execution_by_create_idempotency_key(&state.pool, user.id, key).await?
+        {
+            if existing.create_request_sha256.as_deref() != Some(request_sha256.as_str()) {
+                return Err(ApiError::Conflict(
+                    "Idempotency-Key was already used for a different execution request".into(),
+                ));
+            }
+            return Ok((
+                StatusCode::OK,
+                Json(enrich_execution(&state.pool, existing).await?),
+            ));
+        }
+    }
+    let admission = validate_execution_admission(&state.pool, &req).await?;
+    if !admission.response.valid {
+        return Err(ApiError::BadRequest(admission.response.errors.join("; ")));
+    }
+    let (row, created) = repo::create_execution_idempotent_with_correlation(
         &state.pool,
-        &req.project_module,
-        Value::Array(req.sources),
-        &req.archive_name,
-        deployment_profile_id,
-        project_config_id,
+        req.project_module.trim(),
+        serde_json::to_value(&admission.sources)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+        req.archive_name.trim(),
+        admission.deployment_profile_id,
+        admission.project_config_id,
         Some(user.id),
         Some(ctx.correlation_id()),
+        idempotency_key.as_deref(),
+        idempotency_key.as_ref().map(|_| request_sha256.as_str()),
     )
-    .await?;
+    .await
+    .map_err(map_execution_create_error)?;
     Ok((
-        StatusCode::CREATED,
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
         Json(enrich_execution(&state.pool, row).await?),
     ))
+}
+
+fn map_execution_create_error(error: sqlx::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("idempotency key was already used") {
+        ApiError::Conflict(
+            "Idempotency-Key was already used for a different execution request".into(),
+        )
+    } else if message.contains("concurrency limit reached") {
+        ApiError::Conflict(message)
+    } else {
+        ApiError::Db(error)
+    }
 }
 
 #[utoipa::path(get, path = "/api/v2/executions/{id}", tag = "executions", responses((status = 200), (status = 404)))]
@@ -2463,11 +2918,15 @@ async fn enrich_execution(pool: &PgPool, row: ExecutionRow) -> Result<ExecutionR
         remote_session_dir: row.remote_session_dir,
         control_phase: row.control_phase,
         submission_state: row.submission_state,
+        submission_deadline_at: row.submission_deadline_at,
+        submission_abandoned_at: row.submission_abandoned_at,
         scheduler_state: row.scheduler_state,
         scheduler_raw_state: row.scheduler_raw_state,
         scheduler_reason: row.scheduler_reason,
         daliuge_state: row.daliuge_state,
         output_state: row.output_state,
+        output_verification_required: row.output_verification_required,
+        output_verification_policy: row.output_verification_policy,
         terminal_outcome: row.terminal_outcome,
         failure_class: row.failure_class,
         discovery_signature: row.discovery_signature,
@@ -2589,6 +3048,8 @@ async fn execution_status(
         daliuge_session_id: row.daliuge_session_id.clone(),
         control_phase: row.control_phase.clone(),
         submission_state: row.submission_state.clone(),
+        submission_deadline_at: row.submission_deadline_at,
+        submission_abandoned_at: row.submission_abandoned_at,
         scheduler_state: row.scheduler_state.clone(),
         scheduler_raw_state: row.scheduler_raw_state.clone(),
         scheduler_reason: row.scheduler_reason.clone(),
@@ -2677,65 +3138,480 @@ async fn execution_artifacts(
     Ok(Json(artifacts))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputInventoryProduct {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputPublicationAcknowledgement {
+    pub acknowledged: bool,
+    pub publisher: String,
+    pub receipt_id: String,
+    pub published_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionOutputVerificationRequest {
+    pub schema: String,
+    pub patterns: Vec<String>,
+    pub pattern_counts: BTreeMap<String, u64>,
+    pub products: Vec<OutputInventoryProduct>,
+    pub inventory_sha256: String,
+    pub durable_destination_uri: String,
+    pub publication: OutputPublicationAcknowledgement,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionOutputVerificationResponse {
+    pub execution: ExecutionRead,
+    pub artifact: ExecutionArtifactRow,
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, ApiError> {
+    fn write(value: &Value, output: &mut String) -> Result<(), serde_json::Error> {
+        match value {
+            Value::Null => output.push_str("null"),
+            Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+            Value::Number(value) => output.push_str(&value.to_string()),
+            Value::String(value) => output.push_str(&serde_json::to_string(value)?),
+            Value::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write(value, output)?;
+                }
+                output.push(']');
+            }
+            Value::Object(values) => {
+                output.push('{');
+                let mut keys: Vec<_> = values.keys().collect();
+                keys.sort_unstable();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    output.push_str(&serde_json::to_string(key)?);
+                    output.push(':');
+                    write(&values[key], output)?;
+                }
+                output.push('}');
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = String::new();
+    write(value, &mut output).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(output.into_bytes())
+}
+
+fn canonical_products_sha256(products: &[OutputInventoryProduct]) -> Result<String, ApiError> {
+    let value =
+        serde_json::to_value(products).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let bytes = canonical_json_bytes(&value)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn validate_durable_destination_uri(value: &str) -> Result<(), ApiError> {
+    let parsed = url::Url::parse(value).map_err(|_| {
+        ApiError::BadRequest("durable_destination_uri must be an absolute URI".into())
+    })?;
+    if parsed.fragment().is_some() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiError::BadRequest(
+            "durable_destination_uri must not contain credentials or a fragment".into(),
+        ));
+    }
+    match parsed.scheme() {
+        "s3" | "gs" if parsed.host_str().is_some() => Ok(()),
+        "https" if parsed.host_str().is_some() => Ok(()),
+        "file" if parsed.path().starts_with('/') && parsed.path().len() > 1 => Ok(()),
+        _ => Err(ApiError::BadRequest(
+            "durable_destination_uri must use s3, gs, https, or an absolute file URI".into(),
+        )),
+    }
+}
+
+fn validate_output_verification_request(
+    request: &ExecutionOutputVerificationRequest,
+    output_verification_required: bool,
+    output_verification_policy: &Value,
+) -> Result<u64, ApiError> {
+    if !output_verification_required {
+        return Err(ApiError::Conflict(
+            "this execution explicitly opts out of output verification".into(),
+        ));
+    }
+    let expected_schema = output_verification_policy
+        .get("inventory_schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::Conflict("pinned output policy is invalid".into()))?;
+    if request.schema != expected_schema {
+        return Err(ApiError::Conflict(format!(
+            "inventory schema '{}' does not match pinned schema '{expected_schema}'",
+            request.schema
+        )));
+    }
+    if request.patterns.is_empty() {
+        return Err(ApiError::BadRequest(
+            "patterns must contain at least one Wallaby output pattern".into(),
+        ));
+    }
+    let unique_patterns: BTreeSet<_> = request.patterns.iter().collect();
+    if unique_patterns.len() != request.patterns.len()
+        || request.pattern_counts.len() != request.patterns.len()
+        || request.patterns.iter().any(|pattern| {
+            !request.pattern_counts.contains_key(pattern)
+                || pattern.trim().is_empty()
+                || pattern.starts_with('/')
+                || pattern.contains('\\')
+                || pattern
+                    .split('/')
+                    .any(|component| matches!(component, ".."))
+        })
+        || request.pattern_counts.values().any(|count| *count == 0)
+    {
+        return Err(ApiError::BadRequest(
+            "patterns must be unique safe relative patterns and pattern_counts must contain one positive count for each pattern"
+                .into(),
+        ));
+    }
+    if request.products.is_empty() || request.products.len() > 100_000 {
+        return Err(ApiError::BadRequest(
+            "products must contain between 1 and 100000 entries".into(),
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    let mut total_bytes = 0_u64;
+    for product in &request.products {
+        let path = product.path.trim();
+        let unsafe_path = path.is_empty()
+            || path.starts_with('/')
+            || path.starts_with('\\')
+            || path.contains('\\')
+            || path.contains('\0')
+            || path
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."));
+        if unsafe_path {
+            return Err(ApiError::BadRequest(
+                "every output product requires a safe relative path without '.', '..', or empty components"
+                    .into(),
+            ));
+        }
+        if product.bytes == 0 {
+            return Err(ApiError::BadRequest(format!(
+                "output product '{}' must be non-empty",
+                product.path
+            )));
+        }
+        if !paths.insert(product.path.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "output product path is duplicated: {}",
+                product.path
+            )));
+        }
+        if !valid_sha256(&product.sha256) {
+            return Err(ApiError::BadRequest(format!(
+                "output product '{}' has an invalid lowercase SHA-256",
+                product.path
+            )));
+        }
+        total_bytes = total_bytes.checked_add(product.bytes).ok_or_else(|| {
+            ApiError::BadRequest("total output product size overflows u64".into())
+        })?;
+    }
+    if !valid_sha256(&request.inventory_sha256) {
+        return Err(ApiError::BadRequest(
+            "inventory_sha256 must be 64 lowercase hexadecimal characters".into(),
+        ));
+    }
+    let calculated = canonical_products_sha256(&request.products)?;
+    if request.inventory_sha256 != calculated {
+        return Err(ApiError::BadRequest(format!(
+            "inventory_sha256 does not match canonical products JSON (expected {calculated})"
+        )));
+    }
+    validate_durable_destination_uri(&request.durable_destination_uri)?;
+    if !request.publication.acknowledged {
+        return Err(ApiError::BadRequest(
+            "publication.acknowledged must be true".into(),
+        ));
+    }
+    for (field, value) in [
+        (
+            "publication.publisher",
+            request.publication.publisher.as_str(),
+        ),
+        (
+            "publication.receipt_id",
+            request.publication.receipt_id.as_str(),
+        ),
+    ] {
+        if value.trim().is_empty() || value.len() > 256 {
+            return Err(ApiError::BadRequest(format!(
+                "{field} must contain 1-256 characters"
+            )));
+        }
+    }
+    if request.publication.published_at > Utc::now() + chrono::Duration::minutes(5) {
+        return Err(ApiError::BadRequest(
+            "publication.published_at cannot be more than five minutes in the future".into(),
+        ));
+    }
+    Ok(total_bytes)
+}
+
+fn output_inventory_artifact(
+    request: &ExecutionOutputVerificationRequest,
+    total_product_bytes: u64,
+) -> Result<ExecutionArtifactInput, ApiError> {
+    let report =
+        serde_json::to_value(request).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let report_bytes = canonical_json_bytes(&report)?;
+    let report_sha256 = format!("{:x}", Sha256::digest(&report_bytes));
+    Ok(ExecutionArtifactInput {
+        kind: "output_inventory".into(),
+        storage_kind: "remote".into(),
+        uri: Some(request.durable_destination_uri.clone()),
+        inline_json: Some(report),
+        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        sha256: report_sha256,
+        size_bytes: Some(
+            i64::try_from(report_bytes.len())
+                .map_err(|_| ApiError::BadRequest("output inventory report is too large".into()))?,
+        ),
+        producer_phase: "publication_acknowledged".into(),
+        metadata: json!({
+            "inventory_schema": request.schema,
+            "inventory_sha256": request.inventory_sha256,
+            "product_count": request.products.len(),
+            "total_product_bytes": total_product_bytes,
+            "publication": request.publication,
+        }),
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions/{id}/outputs/verify",
+    tag = "executions",
+    request_body = ExecutionOutputVerificationRequest,
+    responses(
+        (status = 200, body = ExecutionOutputVerificationResponse),
+        (status = 400, body = ApiErrorResponse),
+        (status = 403, body = ApiErrorResponse),
+        (status = 404, body = ApiErrorResponse),
+        (status = 409, body = ApiErrorResponse)
+    )
+)]
+async fn verify_execution_outputs(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ExecutionOutputVerificationRequest>,
+) -> Result<Json<ExecutionOutputVerificationResponse>, ApiError> {
+    user.require_superuser()?;
+    let execution = repo::get_execution(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let total_product_bytes = validate_output_verification_request(
+        &request,
+        execution.output_verification_required,
+        &execution.output_verification_policy,
+    )?;
+    let artifact = output_inventory_artifact(&request, total_product_bytes)?;
+    let actor = format!("trusted-publisher:{}", user.0.uuid);
+    let (execution, artifact) = repo::verify_execution_outputs(
+        &state.pool,
+        id,
+        artifact,
+        &actor,
+        Some(ctx.correlation_id()),
+    )
+    .await
+    .map_err(|error| match error {
+        repo::VerifyExecutionOutputsError::NotFound => ApiError::NotFound,
+        repo::VerifyExecutionOutputsError::Rejected(message) => ApiError::Conflict(message),
+        repo::VerifyExecutionOutputsError::Database(error) => ApiError::Db(error),
+    })?;
+    Ok(Json(ExecutionOutputVerificationResponse {
+        execution: enrich_execution(&state.pool, execution).await?,
+        artifact,
+    }))
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPatchRequest {
-    pub status: Option<ExecutionStatus>,
-    pub scheduler_name: Option<String>,
-    pub scheduler_job_id: Option<String>,
-    pub workflow_manifest: Option<Value>,
-    pub last_error: Option<String>,
+    pub status: ExecutionStatus,
 }
 
 #[utoipa::path(patch, path = "/api/v2/executions/{id}", tag = "executions", request_body = ExecutionPatchRequest, responses((status = 200), (status = 404)))]
 async fn patch_execution(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
     AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<ExecutionPatchRequest>,
 ) -> Result<Json<ExecutionRead>, ApiError> {
-    if req.status == Some(ExecutionStatus::Cancelled) {
-        let execution = repo::get_execution(&state.pool, id)
-            .await?
-            .ok_or(ApiError::NotFound)?;
-        if matches!(
-            execution.status_enum(),
-            Some(ExecutionStatus::AwaitingScheduler) | Some(ExecutionStatus::Running)
-        ) {
-            cancel_execution_scheduler(&state.pool, id).await?;
-            repo::insert_provenance_event(
-                &state.pool,
-                "execution.cancelled",
-                &execution.project_module,
-                None,
-                Some(id),
-                Some(&format!("user:{}", user.uuid)),
-                Some(&id.to_string()),
-                &json!({
-                    "scheduler_job_id": execution.scheduler_job_id,
-                    "daliuge_session_id": execution.daliuge_session_id,
-                }),
-            )
-            .await?;
-        }
+    if req.status != ExecutionStatus::Cancelled {
+        return Err(ApiError::BadRequest(
+            "the public execution patch endpoint only supports status=cancelled".into(),
+        ));
     }
-    let patch = LedgerPatch {
-        status: req.status,
-        scheduler_name: req.scheduler_name,
-        scheduler_job_id: req.scheduler_job_id,
-        workflow_manifest: req.workflow_manifest,
-        error: req.last_error,
-        execution_phase: None,
-        clear_error: false,
-    };
-    let row = repo::apply_execution_patch_with_correlation(&state.pool, id, patch, None)
+    let execution = repo::get_execution(&state.pool, id)
         .await?
+        .ok_or(ApiError::NotFound)?;
+    let current = execution
+        .status_enum()
+        .ok_or_else(|| ApiError::Conflict("execution has an unknown ledger status".into()))?;
+    if current.is_terminal() {
+        return Err(ApiError::Conflict(format!(
+            "execution is already terminal ({})",
+            current.as_str()
+        )));
+    }
+    let recovered_uncertain_slurm = cancellation_is_recovered_uncertain_slurm(
+        execution.submission_state.as_deref(),
+        execution.scheduler_name.as_deref(),
+        execution.scheduler_job_id.as_deref(),
+    );
+    if cancellation_submission_is_blocked(
+        execution.submission_state.as_deref(),
+        execution.scheduler_name.as_deref(),
+        execution.scheduler_job_id.as_deref(),
+    ) {
+        return Err(ApiError::Conflict(
+            "execution submission outcome is unresolved; wait for reconciliation to record an exact external job before cancelling"
+                .into(),
+        ));
+    }
+    let external_cancellation_required = recovered_uncertain_slurm
+        || execution_cancel_requires_external(
+            current,
+            execution.scheduler_job_id.as_deref(),
+            execution.scheduler_state.as_deref(),
+            execution.daliuge_session_id.as_deref(),
+            execution.daliuge_state.as_deref(),
+        );
+    let external_confirmation = if external_cancellation_required {
+        Some(cancel_execution_scheduler(&state.pool, id).await?)
+    } else {
+        None
+    };
+    let actor = format!("user:{}", user.uuid);
+    let cancellation = if let Some(confirmation) = external_confirmation {
+        repo::cancel_execution_with_confirmed_external_cancellation(
+            &state.pool,
+            id,
+            &actor,
+            Some(ctx.correlation_id()),
+            confirmation,
+        )
+        .await
+    } else {
+        repo::cancel_execution_with_correlation(&state.pool, id, &actor, Some(ctx.correlation_id()))
+            .await
+    };
+    let row = cancellation
+        .map_err(|error| {
+            if error.to_string().contains("cannot be cancelled") {
+                ApiError::Conflict(error.to_string())
+            } else {
+                ApiError::Db(error)
+            }
+        })?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(enrich_execution(&state.pool, row).await?))
 }
 
-async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
+fn cancellation_is_recovered_uncertain_slurm(
+    submission_state: Option<&str>,
+    scheduler_name: Option<&str>,
+    scheduler_job_id: Option<&str>,
+) -> bool {
+    submission_state.and_then(SubmissionState::parse) == Some(SubmissionState::Uncertain)
+        && scheduler_name == Some("slurm")
+        && scheduler_job_id.is_some_and(|job_id| {
+            beampipe_orchestration::slurm_ssh::validate_slurm_job_id(job_id).is_ok()
+        })
+}
+
+fn cancellation_submission_is_blocked(
+    submission_state: Option<&str>,
+    scheduler_name: Option<&str>,
+    scheduler_job_id: Option<&str>,
+) -> bool {
+    match submission_state.and_then(SubmissionState::parse) {
+        Some(SubmissionState::InFlight) => true,
+        Some(SubmissionState::Uncertain) => !cancellation_is_recovered_uncertain_slurm(
+            submission_state,
+            scheduler_name,
+            scheduler_job_id,
+        ),
+        _ => false,
+    }
+}
+
+fn execution_cancel_requires_external(
+    status: ExecutionStatus,
+    scheduler_job_id: Option<&str>,
+    scheduler_state: Option<&str>,
+    daliuge_session_id: Option<&str>,
+    daliuge_state: Option<&str>,
+) -> bool {
+    if !matches!(
+        status,
+        ExecutionStatus::AwaitingScheduler | ExecutionStatus::Running
+    ) {
+        return false;
+    }
+    let scheduler_active = scheduler_job_id.is_some_and(|id| !id.trim().is_empty())
+        && !matches!(
+            scheduler_state.and_then(SchedulerState::parse),
+            Some(
+                SchedulerState::NotSubmitted
+                    | SchedulerState::Succeeded
+                    | SchedulerState::Failed
+                    | SchedulerState::Cancelled
+                    | SchedulerState::TimedOut
+            )
+        );
+    let daliuge_active = daliuge_session_id.is_some_and(|id| !id.trim().is_empty())
+        && !matches!(
+            daliuge_state.and_then(DaliugeState::parse),
+            Some(
+                DaliugeState::NotCreated
+                    | DaliugeState::Finished
+                    | DaliugeState::Failed
+                    | DaliugeState::Cancelled
+            )
+        );
+    scheduler_active || daliuge_active
+}
+
+async fn cancel_execution_scheduler(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<repo::ConfirmedExternalCancellation, ApiError> {
     let Some(execution) = repo::get_execution(pool, id).await? else {
-        return Ok(());
+        return Err(ApiError::NotFound);
     };
     let deployment = deployment_for_execution(pool, &execution)
         .await?
@@ -2744,9 +3620,44 @@ async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiEr
         deployment.clone(),
     )
     .map_err(|error| ApiError::BadRequest(format!("invalid pinned deployment profile: {error}")))?;
+    let confirmation = match &deployment_kind {
+        beampipe_profiles::DeploymentConfig::SlurmRemote(_) => {
+            let scheduler_job_id = execution
+                .scheduler_job_id
+                .clone()
+                .filter(|job_id| !job_id.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::Conflict(
+                        "Slurm cancellation requires an exact scheduler job ID".into(),
+                    )
+                })?;
+            let parsed = beampipe_domain::slurm::parse_scheduler_job_id(&scheduler_job_id);
+            let exact_job_id = if parsed.slurm_job_id.is_empty() {
+                scheduler_job_id.clone()
+            } else {
+                parsed.slurm_job_id
+            };
+            beampipe_orchestration::slurm_ssh::validate_slurm_job_id(&exact_job_id)
+                .map_err(|error| ApiError::Conflict(error.to_string()))?;
+            repo::ConfirmedExternalCancellation::Slurm {
+                scheduler_job_id,
+                exact_job_id,
+            }
+        }
+        beampipe_profiles::DeploymentConfig::RestRemote(_) => {
+            let session_id = execution
+                .daliuge_session_id
+                .clone()
+                .filter(|session_id| !session_id.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::Conflict("DALiuGE cancellation requires an exact session ID".into())
+                })?;
+            repo::ConfirmedExternalCancellation::Daliuge { session_id }
+        }
+    };
     let result = cancel_scheduler_session(CancelParams {
-        scheduler_job_id: execution.scheduler_job_id,
-        daliuge_session_id: execution.daliuge_session_id,
+        scheduler_job_id: execution.scheduler_job_id.clone(),
+        daliuge_session_id: execution.daliuge_session_id.clone(),
         deployment,
     })
     .await
@@ -2757,18 +3668,7 @@ async fn cancel_execution_scheduler(pool: &PgPool, id: Uuid) -> Result<(), ApiEr
             result.reason.unwrap_or_else(|| "unknown reason".into())
         )));
     }
-    let state_patch = match deployment_kind {
-        beampipe_profiles::DeploymentConfig::RestRemote(_) => ExecutionStatePatch {
-            daliuge_state: Some(DaliugeState::Cancelled),
-            ..Default::default()
-        },
-        beampipe_profiles::DeploymentConfig::SlurmRemote(_) => ExecutionStatePatch {
-            scheduler_state: Some(SchedulerState::Cancelled),
-            ..Default::default()
-        },
-    };
-    repo::apply_execution_state_patch(pool, id, state_patch).await?;
-    Ok(())
+    Ok(confirmation)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -2783,6 +3683,68 @@ pub struct ExecuteRequest {
 pub struct ExecutionRetryRequest {
     /// Required operator recovery rationale, stored in the provenance stream.
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSubmissionAbandonRequest {
+    /// Required operator rationale, stored with the durable abandonment evidence.
+    #[schema(min_length = 1, max_length = 1000)]
+    pub reason: String,
+    /// Compare-and-set guard. Only `in_flight` and `uncertain` may be abandoned.
+    pub expected_submission_state: String,
+    /// Compare-and-set guard for the exact DALiuGE/Slurm submission name.
+    pub expected_daliuge_session_id: String,
+    /// Compare-and-set guard for the persisted backend submission deadline.
+    pub expected_submission_deadline_at: chrono::DateTime<Utc>,
+    /// Explicit acknowledgement that negative scheduler evidence cannot prove non-existence.
+    pub acknowledge_external_job_may_exist: bool,
+    /// Superuser override: start the evidence window after the execute lease is
+    /// durably fenced instead of waiting the default 24-hour quiet grace.
+    #[serde(default)]
+    pub allow_early_after_execute_fenced: bool,
+}
+
+impl ExecutionSubmissionAbandonRequest {
+    fn validate(mut self) -> Result<Self, ApiError> {
+        let reason = self.reason.trim().to_owned();
+        if reason.is_empty() {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_reason_required".into(),
+                message: "an operator rationale is required for the audit trail".into(),
+            });
+        }
+        if reason.len() > 1_000 {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_reason_too_long".into(),
+                message: "the operator rationale must be at most 1000 bytes".into(),
+            });
+        }
+        if !matches!(
+            SubmissionState::parse(&self.expected_submission_state),
+            Some(SubmissionState::InFlight | SubmissionState::Uncertain)
+        ) {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_state_invalid".into(),
+                message: "expected_submission_state must be 'in_flight' or 'uncertain'".into(),
+            });
+        }
+        let session_id = self.expected_daliuge_session_id.trim();
+        if session_id.is_empty() || session_id != self.expected_daliuge_session_id {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_session_id_invalid".into(),
+                message: "expected_daliuge_session_id must be a non-empty exact identifier without surrounding whitespace".into(),
+            });
+        }
+        if !self.acknowledge_external_job_may_exist {
+            return Err(ApiError::SubmissionAbandonmentInvalid {
+                code: "submission_abandonment_orphan_risk_not_acknowledged".into(),
+                message: "acknowledge_external_job_may_exist must be true".into(),
+            });
+        }
+        self.reason = reason;
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -2800,6 +3762,23 @@ fn default_true() -> bool {
     true
 }
 
+fn execute_job_replayable(status: &str) -> bool {
+    matches!(status, "queued" | "running" | "completed")
+}
+
+fn execute_job_options(payload: &Value) -> (bool, bool) {
+    (
+        payload
+            .get("do_stage")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        payload
+            .get("do_submit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    )
+}
+
 #[utoipa::path(post, path = "/api/v2/executions/{id}/execute", tag = "executions", responses((status = 202)))]
 async fn execute_execution(
     State(state): State<Arc<AppState>>,
@@ -2808,6 +3787,39 @@ async fn execute_execution(
     Path(id): Path<Uuid>,
     Json(req): Json<ExecuteRequest>,
 ) -> Result<(StatusCode, Json<ExecuteResponse>), ApiError> {
+    let execution = repo::get_execution(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let idempotency_key = format!("execute:{id}");
+    if let Some(existing) = repo::get_job_by_idempotency_key(&state.pool, &idempotency_key).await? {
+        let (existing_stage, existing_submit) = execute_job_options(&existing.payload);
+        if (existing_stage, existing_submit) != (req.do_stage, req.do_submit) {
+            return Err(ApiError::Conflict(
+                "execution was already queued with different do_stage/do_submit options".into(),
+            ));
+        }
+        if execute_job_replayable(&existing.status) {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(ExecuteResponse {
+                    status: "accepted".into(),
+                    execution_id: id,
+                    job_id: existing.uuid,
+                    do_stage: req.do_stage,
+                    do_submit: req.do_submit,
+                }),
+            ));
+        }
+    }
+    let status = execution
+        .status_enum()
+        .ok_or_else(|| ApiError::Conflict("execution has an unknown ledger status".into()))?;
+    if status != ExecutionStatus::Pending {
+        return Err(ApiError::Conflict(format!(
+            "execution cannot be started from status '{}'",
+            status.as_str()
+        )));
+    }
     let tc = ctx.trace_context();
     let payload = json!({
         "execution_id": id,
@@ -2815,14 +3827,30 @@ async fn execute_execution(
         "do_submit": req.do_submit,
     });
     let payload = metrics::payload_with_trace(payload, &tc);
-    let job = repo::enqueue_job(
+    let job = repo::enqueue_job_with_options(
         &state.pool,
         "execute",
         payload,
-        Some(id),
-        Some(&format!("execute:{id}")),
+        repo::JobEnqueueOptions {
+            execution_id: Some(id),
+            idempotency_key: Some(idempotency_key.clone()),
+            required_capability: Some(repo::execution_required_capability(&execution).to_string()),
+            ..Default::default()
+        },
     )
     .await?;
+    let (queued_stage, queued_submit) = execute_job_options(&job.payload);
+    if (queued_stage, queued_submit) != (req.do_stage, req.do_submit) {
+        return Err(ApiError::Conflict(
+            "a concurrent start request queued different do_stage/do_submit options".into(),
+        ));
+    }
+    if !execute_job_replayable(&job.status) {
+        return Err(ApiError::Conflict(format!(
+            "execution start request already finished with job status '{}'; use the retry endpoint before starting again",
+            job.status
+        )));
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(ExecuteResponse {
@@ -2881,6 +3909,65 @@ async fn retry_execution(
             do_submit: result.plan.do_submit,
         }),
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions/{id}/submission/abandon",
+    tag = "executions",
+    request_body = ExecutionSubmissionAbandonRequest,
+    security(("BearerAuth" = [])),
+    responses(
+        (status = 200, body = ExecutionRead),
+        (status = 400, body = ApiErrorResponse),
+        (status = 401, body = ApiErrorResponse),
+        (status = 403, body = ApiErrorResponse),
+        (status = 404, body = ApiErrorResponse),
+        (status = 409, body = ApiErrorResponse),
+        (status = 429, body = ApiErrorResponse),
+        (status = 500, body = ApiErrorResponse)
+    )
+)]
+async fn abandon_execution_submission(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExecutionSubmissionAbandonRequest>,
+) -> Result<Json<ExecutionRead>, ApiError> {
+    user.require_superuser()?;
+    let req = req.validate()?;
+    let expected_submission_state = SubmissionState::parse(&req.expected_submission_state)
+        .ok_or_else(|| ApiError::SubmissionAbandonmentInvalid {
+            code: "submission_abandonment_state_invalid".into(),
+            message: "expected_submission_state must be 'in_flight' or 'uncertain'".into(),
+        })?;
+    let execution = repo::abandon_slurm_submission(
+        &state.pool,
+        id,
+        repo::AbandonSlurmSubmissionInput {
+            actor: format!("user:{}", user.0.uuid),
+            correlation_id: Some(ctx.correlation_id().to_owned()),
+            reason: req.reason,
+            expected_submission_state,
+            expected_daliuge_session_id: req.expected_daliuge_session_id,
+            expected_submission_deadline_at: req.expected_submission_deadline_at,
+            acknowledge_external_job_may_exist: req.acknowledge_external_job_may_exist,
+            allow_early_after_execute_fenced: req.allow_early_after_execute_fenced,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        repo::AbandonSlurmSubmissionError::NotFound => ApiError::NotFound,
+        repo::AbandonSlurmSubmissionError::Invalid { code, message } => {
+            ApiError::SubmissionAbandonmentInvalid { code, message }
+        }
+        repo::AbandonSlurmSubmissionError::Conflict { code, message } => {
+            ApiError::SubmissionAbandonmentConflict { code, message }
+        }
+        repo::AbandonSlurmSubmissionError::Database(error) => ApiError::Db(error),
+    })?;
+    Ok(Json(enrich_execution(&state.pool, execution).await?))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -3228,7 +4315,8 @@ async fn create_deployment_profile(
         serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
         serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )
-    .await?;
+    .await
+    .map_err(map_deployment_profile_write_error)?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
@@ -3294,10 +4382,19 @@ async fn update_deployment_profile(
         serde_json::to_value(&profile.translation).unwrap_or(Value::Null),
         serde_json::to_value(&profile.deployment).unwrap_or(Value::Null),
     )
-    .await?;
+    .await
+    .map_err(map_deployment_profile_write_error)?;
     row.map(DeploymentProfileResponse::from)
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+fn map_deployment_profile_write_error(error: sqlx::Error) -> ApiError {
+    if error.to_string().contains("already the default") {
+        ApiError::Conflict(error.to_string())
+    } else {
+        ApiError::Db(error)
+    }
 }
 
 #[utoipa::path(delete, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", responses((status = 204), (status = 404)))]
@@ -3315,6 +4412,74 @@ async fn delete_deployment_profile(
         return Err(ApiError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SlurmCredentialSlot {
+    /// Directory name under `BEAMPIPE_SSH_CREDENTIALS_DIR`.
+    pub name: String,
+    pub private_key: bool,
+    pub public_key: bool,
+    pub passphrase: bool,
+    pub known_hosts: bool,
+}
+
+impl From<beampipe_orchestration::SlotPresence> for SlurmCredentialSlot {
+    fn from(slot: beampipe_orchestration::SlotPresence) -> Self {
+        Self {
+            name: slot.name,
+            private_key: slot.private_key,
+            public_key: slot.public_key,
+            passphrase: slot.passphrase,
+            known_hosts: slot.known_hosts,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SlurmCredentialListResponse {
+    pub slots: Vec<SlurmCredentialSlot>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/slurm/credentials",
+    tag = "slurm-credentials",
+    responses((status = 200, body = SlurmCredentialListResponse))
+)]
+async fn list_slurm_credentials(
+    AuthUser(_user): AuthUser,
+) -> Result<Json<SlurmCredentialListResponse>, ApiError> {
+    Ok(Json(SlurmCredentialListResponse {
+        slots: beampipe_orchestration::list_credential_slot_presence()
+            .into_iter()
+            .map(SlurmCredentialSlot::from)
+            .collect(),
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/slurm/credentials/{slot}",
+    tag = "slurm-credentials",
+    params(("slot" = String, Path, description = "Credential slot directory name")),
+    responses((status = 200, body = SlurmCredentialSlot), (status = 400), (status = 404))
+)]
+async fn get_slurm_credential(
+    AuthUser(_user): AuthUser,
+    Path(slot): Path<String>,
+) -> Result<Json<SlurmCredentialSlot>, ApiError> {
+    beampipe_profiles::validate_ssh_credential_name(&slot)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if !beampipe_orchestration::list_credential_slots()
+        .iter()
+        .any(|name| name == &slot)
+    {
+        return Err(ApiError::NotFound);
+    }
+    let presence = beampipe_orchestration::inspect_credential_slot(&slot)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(presence.into()))
 }
 
 fn source_identifiers_from_values(values: &[Value]) -> Vec<String> {
@@ -3352,32 +4517,51 @@ fn observed_slurm_state(row: &ExecutionRow) -> Option<String> {
 }
 
 fn observed_dim_state(row: &ExecutionRow) -> Option<String> {
-    row.workflow_manifest
-        .as_ref()
+    projected_dim_state(row.workflow_manifest.as_ref(), row.daliuge_state.as_deref())
+}
+
+fn projected_dim_state(
+    workflow_manifest: Option<&Value>,
+    persisted_state: Option<&str>,
+) -> Option<String> {
+    let run_record_state = workflow_manifest
         .and_then(|m| m.get("beampipe_run_record"))
         .and_then(|rr| rr.get("dim"))
         .and_then(|d| d.get("last_observation"))
         .and_then(|o| o.get("session_state"))
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str);
+    run_record_state
+        .filter(|state| !state.eq_ignore_ascii_case("unknown"))
+        .or(persisted_state)
+        .or(run_record_state)
         .map(str::to_string)
 }
 
 fn last_observation_at(row: &ExecutionRow) -> Option<chrono::DateTime<Utc>> {
-    let slurm = row.workflow_manifest.as_ref().and_then(|m| {
+    projected_last_observation_at(row.workflow_manifest.as_ref(), row.last_reconciled_at)
+}
+
+fn projected_last_observation_at(
+    workflow_manifest: Option<&Value>,
+    reconciliation_fallback: Option<chrono::DateTime<Utc>>,
+) -> Option<chrono::DateTime<Utc>> {
+    let slurm = workflow_manifest.and_then(|m| {
         m.get("beampipe_run_record")
             .and_then(|rr| rr.get("slurm"))
             .and_then(|s| s.get("last_observation"))
     });
-    let dim = row.workflow_manifest.as_ref().and_then(|m| {
+    let dim = workflow_manifest.and_then(|m| {
         m.get("beampipe_run_record")
             .and_then(|rr| rr.get("dim"))
             .and_then(|d| d.get("last_observation"))
     });
+    let has_observation = slurm.is_some() || dim.is_some();
     [slurm, dim]
         .into_iter()
         .flatten()
         .filter_map(beampipe_domain::run_record::parse_observed_at)
         .max()
+        .or_else(|| has_observation.then_some(reconciliation_fallback).flatten())
 }
 
 fn duration_seconds(row: &ExecutionRow) -> Option<i64> {
@@ -3389,6 +4573,20 @@ fn duration_seconds(row: &ExecutionRow) -> Option<i64> {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn embedded_worker_reuses_the_api_metrics_listener() {
+        let mut worker_config = WorkerConfig::with_polling(Duration::from_millis(250), 30);
+        worker_config.metrics_server_enabled = true;
+        worker_config.metrics_bind_addr = "127.0.0.1:19090".into();
+        let standalone_worker_config = worker_config.clone();
+
+        let embedded = embedded_worker_config(worker_config);
+
+        assert!(!embedded.metrics_server_enabled);
+        assert_eq!(embedded.metrics_bind_addr, "127.0.0.1:19090");
+        assert!(standalone_worker_config.metrics_server_enabled);
+    }
 
     #[test]
     fn current_user_response_excludes_hashed_password() {
@@ -3448,5 +4646,442 @@ adapters:
             .expect("legacy diagnostic");
         assert_eq!(diagnostic.path, "apiVersion");
         assert!(diagnostic.hint.as_deref().unwrap().contains("convert"));
+    }
+
+    #[test]
+    fn source_update_distinguishes_omitted_null_and_value() {
+        let omitted: SourceUpdate = serde_json::from_value(json!({})).unwrap();
+        let cleared: SourceUpdate =
+            serde_json::from_value(json!({"stale_after_hours": null})).unwrap();
+        let set: SourceUpdate = serde_json::from_value(json!({"stale_after_hours": 12})).unwrap();
+        assert_eq!(omitted.stale_after_hours, None);
+        assert_eq!(cleared.stale_after_hours, Some(None));
+        assert_eq!(set.stale_after_hours, Some(Some(12)));
+    }
+
+    #[test]
+    fn logout_rejects_unvalidated_token_material() {
+        let result = validate_logout_tokens(
+            LogoutRequest {
+                access_token: Some("arbitrary attacker-controlled text".into()),
+                refresh_token: None,
+            },
+            "01234567890123456789012345678901",
+        );
+        assert!(matches!(result, Err(ApiError::Auth(_))));
+    }
+
+    #[test]
+    fn execution_create_idempotency_key_is_bounded_and_visible() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("create-01-test"),
+        );
+        assert_eq!(
+            execution_create_idempotency_key(&headers)
+                .unwrap()
+                .as_deref(),
+            Some("create-01-test")
+        );
+
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("contains space"),
+        );
+        assert!(matches!(
+            execution_create_idempotency_key(&headers),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn execution_create_request_hash_is_semantic_and_stable() {
+        let request = ExecutionCreate {
+            project_module: " wallaby_hires ".into(),
+            sources: vec![ExecutionSourceSelection {
+                source_identifier: " source-1 ".into(),
+                sbids: Some(vec![" 123 ".into()]),
+            }],
+            archive_name: " casda ".into(),
+            deployment_profile_id: None,
+            deployment_profile_name: Some(" dlg-dim ".into()),
+        };
+        let equivalent = ExecutionCreate {
+            project_module: "wallaby_hires".into(),
+            sources: vec![ExecutionSourceSelection {
+                source_identifier: "source-1".into(),
+                sbids: Some(vec!["123".into()]),
+            }],
+            archive_name: "casda".into(),
+            deployment_profile_id: None,
+            deployment_profile_name: Some("dlg-dim".into()),
+        };
+        assert_eq!(
+            execution_create_request_sha256(&request),
+            execution_create_request_sha256(&equivalent)
+        );
+    }
+
+    #[test]
+    fn manual_admission_uses_the_project_execution_source_limit() {
+        let config =
+            ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
+                .unwrap();
+        assert_eq!(execution_source_limit(&config), Some(1));
+    }
+
+    #[test]
+    fn completed_execute_job_is_replayed_only_for_identical_options() {
+        let payload = json!({"do_stage": false, "do_submit": true});
+
+        assert!(execute_job_replayable("completed"));
+        assert_eq!(execute_job_options(&payload), (false, true));
+        assert_ne!(execute_job_options(&payload), (true, true));
+        assert!(!execute_job_replayable("failed"));
+        assert!(!execute_job_replayable("cancelled"));
+    }
+
+    fn valid_submission_abandonment_request() -> ExecutionSubmissionAbandonRequest {
+        ExecutionSubmissionAbandonRequest {
+            reason: "  three complete scheduler negatives reviewed  ".into(),
+            expected_submission_state: "uncertain".into(),
+            expected_daliuge_session_id: "beampipe-0198f2f7".into(),
+            expected_submission_deadline_at: Utc::now(),
+            acknowledge_external_job_may_exist: true,
+            allow_early_after_execute_fenced: false,
+        }
+    }
+
+    #[test]
+    fn submission_abandonment_body_accepts_only_explicit_safe_cas_values() {
+        for state in ["in_flight", "uncertain"] {
+            let mut request = valid_submission_abandonment_request();
+            request.expected_submission_state = state.into();
+            let validated = request.validate().unwrap();
+            assert_eq!(
+                validated.reason,
+                "three complete scheduler negatives reviewed"
+            );
+        }
+
+        let mut request = valid_submission_abandonment_request();
+        request.expected_submission_state = "submitted".into();
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_state_invalid"
+        ));
+
+        let mut request = valid_submission_abandonment_request();
+        request.expected_daliuge_session_id = " session-with-space ".into();
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_session_id_invalid"
+        ));
+
+        let mut request = valid_submission_abandonment_request();
+        request.acknowledge_external_job_may_exist = false;
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_orphan_risk_not_acknowledged"
+        ));
+    }
+
+    #[test]
+    fn submission_abandonment_body_rejects_missing_long_and_unknown_input() {
+        let mut request = valid_submission_abandonment_request();
+        request.reason = " \t\n ".into();
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_reason_required"
+        ));
+
+        let mut request = valid_submission_abandonment_request();
+        request.reason = "x".repeat(1_001);
+        assert!(matches!(
+            request.validate(),
+            Err(ApiError::SubmissionAbandonmentInvalid { code, .. })
+                if code == "submission_abandonment_reason_too_long"
+        ));
+
+        let missing_acknowledgement = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "uncertain",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now()
+        });
+        assert!(serde_json::from_value::<ExecutionSubmissionAbandonRequest>(
+            missing_acknowledgement
+        )
+        .is_err());
+
+        let value = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "uncertain",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now(),
+            "acknowledge_external_job_may_exist": true,
+            "grace_period_seconds": 0
+        });
+        assert!(serde_json::from_value::<ExecutionSubmissionAbandonRequest>(value).is_err());
+
+        let early_override = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "in_flight",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now(),
+            "acknowledge_external_job_may_exist": true,
+            "allow_early_after_execute_fenced": true
+        });
+        let parsed = serde_json::from_value::<ExecutionSubmissionAbandonRequest>(early_override)
+            .expect("the explicit early override is part of the strict request schema");
+        assert!(parsed.allow_early_after_execute_fenced);
+
+        let default_override = json!({
+            "reason": "reviewed",
+            "expected_submission_state": "in_flight",
+            "expected_daliuge_session_id": "beampipe-0198f2f7",
+            "expected_submission_deadline_at": Utc::now(),
+            "acknowledge_external_job_may_exist": true
+        });
+        let parsed = serde_json::from_value::<ExecutionSubmissionAbandonRequest>(default_override)
+            .expect("the early override defaults off for existing clients");
+        assert!(!parsed.allow_early_after_execute_fenced);
+    }
+
+    #[test]
+    fn execution_profile_capacity_is_an_admission_conflict() {
+        let error = map_execution_create_error(sqlx::Error::Protocol(
+            "deployment profile 'dlg-dim' concurrency limit reached (1/1)".into(),
+        ));
+        assert!(matches!(
+            error,
+            ApiError::Conflict(message) if message.contains("concurrency limit reached (1/1)")
+        ));
+    }
+
+    #[test]
+    fn staging_execution_without_external_session_cancels_locally() {
+        assert!(!execution_cancel_requires_external(
+            ExecutionStatus::Running,
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(execution_cancel_requires_external(
+            ExecutionStatus::Running,
+            Some("12345"),
+            Some("running"),
+            None,
+            None,
+        ));
+        assert!(execution_cancel_requires_external(
+            ExecutionStatus::AwaitingScheduler,
+            None,
+            None,
+            Some("session-1"),
+            Some("deploying"),
+        ));
+        assert!(!execution_cancel_requires_external(
+            ExecutionStatus::Pending,
+            Some("unexpected"),
+            None,
+            None,
+            None,
+        ));
+        assert!(!execution_cancel_requires_external(
+            ExecutionStatus::Running,
+            Some("12345"),
+            Some("succeeded"),
+            Some("session-1"),
+            Some("finished"),
+        ));
+    }
+
+    #[test]
+    fn only_recovered_exact_slurm_submission_can_attempt_cancellation() {
+        assert!(cancellation_submission_is_blocked(
+            Some("in_flight"),
+            Some("slurm"),
+            Some("4242"),
+        ));
+        assert!(cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("slurm"),
+            None,
+        ));
+        assert!(cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("slurm"),
+            Some("4242; scancel 1"),
+        ));
+        assert!(cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("daliuge"),
+            Some("4242"),
+        ));
+        assert!(!cancellation_submission_is_blocked(
+            Some("uncertain"),
+            Some("slurm"),
+            Some("4242"),
+        ));
+        assert!(cancellation_is_recovered_uncertain_slurm(
+            Some("uncertain"),
+            Some("slurm"),
+            Some("4242"),
+        ));
+        assert!(!cancellation_submission_is_blocked(
+            Some("submitted"),
+            None,
+            None,
+        ));
+        assert!(!cancellation_submission_is_blocked(None, None, None));
+    }
+
+    #[test]
+    fn dim_status_projection_falls_back_to_canonical_persisted_state() {
+        let manifest = json!({
+            "beampipe_run_record": {
+                "dim": {"last_observation": {"session_state": "unknown"}}
+            }
+        });
+
+        assert_eq!(
+            projected_dim_state(Some(&manifest), Some("finished")).as_deref(),
+            Some("finished")
+        );
+    }
+
+    #[test]
+    fn observation_projection_uses_reconciliation_time_for_legacy_record() {
+        let manifest = json!({
+            "beampipe_run_record": {
+                "dim": {"last_observation": {"session_state": "unknown"}}
+            }
+        });
+        let reconciled_at = Utc::now();
+
+        assert_eq!(
+            projected_last_observation_at(Some(&manifest), Some(reconciled_at)),
+            Some(reconciled_at)
+        );
+    }
+
+    fn valid_output_report() -> ExecutionOutputVerificationRequest {
+        let products = vec![OutputInventoryProduct {
+            path: "HIPASSJ1318-21/image.fits".into(),
+            bytes: 42,
+            sha256: "a".repeat(64),
+        }];
+        let inventory_sha256 = canonical_products_sha256(&products).unwrap();
+        ExecutionOutputVerificationRequest {
+            schema: beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA.into(),
+            patterns: vec!["**/image.*.fits".into()],
+            pattern_counts: BTreeMap::from([("**/image.*.fits".into(), 1)]),
+            products,
+            inventory_sha256,
+            durable_destination_uri: "file:///durable/wallaby/run-1".into(),
+            publication: OutputPublicationAcknowledgement {
+                acknowledged: true,
+                publisher: "wallaby-publisher".into(),
+                receipt_id: "publication-1".into(),
+                published_at: Utc::now(),
+            },
+        }
+    }
+
+    #[test]
+    fn output_report_validates_canonical_inventory_and_publication_ack() {
+        let policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+        });
+        let request = valid_output_report();
+        assert_eq!(
+            validate_output_verification_request(&request, true, &policy).unwrap(),
+            42
+        );
+
+        let mut tampered = request.clone();
+        tampered.products[0].bytes = 43;
+        assert!(matches!(
+            validate_output_verification_request(&tampered, true, &policy),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_output_verification_request(&request, false, &policy),
+            Err(ApiError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn output_report_rejects_empty_and_unsafe_products() {
+        let policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+        });
+        for path in ["/absolute.fits", ".", "../escape.fits", "a/../b.fits"] {
+            let mut request = valid_output_report();
+            request.products[0].path = path.into();
+            request.inventory_sha256 = canonical_products_sha256(&request.products).unwrap();
+            assert!(matches!(
+                validate_output_verification_request(&request, true, &policy),
+                Err(ApiError::BadRequest(_))
+            ));
+        }
+
+        let mut request = valid_output_report();
+        request.products[0].bytes = 0;
+        request.inventory_sha256 = canonical_products_sha256(&request.products).unwrap();
+        assert!(matches!(
+            validate_output_verification_request(&request, true, &policy),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn output_report_accepts_wallaby_v1_inventory_fields_and_hashes_stored_report() {
+        let inventory: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/wallaby-output-inventory-v1.json"
+        ))
+        .unwrap();
+        let mut request = inventory.as_object().unwrap().clone();
+        request.insert(
+            "durable_destination_uri".into(),
+            json!("file:///durable/wallaby/run-fixture"),
+        );
+        request.insert(
+            "publication".into(),
+            json!({
+                "acknowledged": true,
+                "publisher": "wallaby-publisher",
+                "receipt_id": "fixture-publication",
+                "published_at": Utc::now(),
+            }),
+        );
+        let request: ExecutionOutputVerificationRequest =
+            serde_json::from_value(Value::Object(request)).unwrap();
+        let policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+        });
+        let total = validate_output_verification_request(&request, true, &policy).unwrap();
+        assert_eq!(total, 28);
+
+        let artifact = output_inventory_artifact(&request, total).unwrap();
+        let stored = artifact.inline_json.as_ref().unwrap();
+        let canonical = canonical_json_bytes(stored).unwrap();
+        assert_eq!(artifact.size_bytes, i64::try_from(canonical.len()).ok());
+        assert_eq!(artifact.sha256, format!("{:x}", Sha256::digest(canonical)));
+        assert_ne!(artifact.sha256, request.inventory_sha256);
+        assert_eq!(
+            artifact.metadata["inventory_sha256"],
+            request.inventory_sha256
+        );
     }
 }

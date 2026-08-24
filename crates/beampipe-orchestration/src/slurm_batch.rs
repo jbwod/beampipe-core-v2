@@ -82,9 +82,20 @@ fn format_squeue_raw(row: &SqueueRow) -> String {
     }
 }
 
-/// Parse `sacct -j … --format=JobID,State,ExitCode -P -n` and fold step rows by base job id.
+#[derive(Default)]
+struct SacctJobRows {
+    root: Option<(i32, SlurmJobPollResult)>,
+    steps: Option<(i32, SlurmJobPollResult)>,
+}
+
+/// Parse `sacct -j … --format=JobID,State,ExitCode -P -n` output.
+///
+/// The allocation/root row is authoritative when present. A `.batch` or
+/// `.extern` step can finish while the allocation is still running, so folding
+/// every row by the highest state rank would report premature completion. Step
+/// rows are aggregated only when Slurm omits the root row.
 pub fn parse_sacct_batch(stdout: &str) -> HashMap<String, SlurmJobPollResult> {
-    let mut by_base: HashMap<String, (i32, SlurmJobPollResult)> = HashMap::new();
+    let mut by_base: HashMap<String, SacctJobRows> = HashMap::new();
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -114,16 +125,19 @@ pub fn parse_sacct_batch(stdout: &str) -> HashMap<String, SlurmJobPollResult> {
             exit_code: parse_sacct_exit_code(exit_code_str),
             raw_line: Some(line.to_string()),
         };
-        match by_base.get(&base) {
-            Some((best_rank, _)) if *best_rank >= rank => {}
-            _ => {
-                by_base.insert(base, (rank, candidate));
-            }
+        let rows = by_base.entry(base).or_default();
+        let slot = if job_id == sacct_base_job_id(job_id) {
+            &mut rows.root
+        } else {
+            &mut rows.steps
+        };
+        if slot.as_ref().is_none_or(|(best_rank, _)| rank > *best_rank) {
+            *slot = Some((rank, candidate));
         }
     }
     by_base
         .into_iter()
-        .map(|(id, (_, result))| (id, result))
+        .filter_map(|(id, rows)| rows.root.or(rows.steps).map(|(_, result)| (id, result)))
         .collect()
 }
 
@@ -184,12 +198,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_sacct_picks_highest_rank_step() {
+    fn parse_sacct_root_row_is_authoritative_over_completed_steps() {
         let stdout = "42|RUNNING|0:0\n42.batch|COMPLETED|0:0\n42.extern|COMPLETED|0:0\n";
         let map = parse_sacct_batch(stdout);
         let r = map.get("42").expect("42");
-        assert_eq!(r.normalized_state, "COMPLETED");
+        assert_eq!(r.normalized_state, "RUNNING");
         assert_eq!(r.exit_code, Some(0));
+        assert_eq!(r.raw_line.as_deref(), Some("42|RUNNING|0:0"));
+    }
+
+    #[test]
+    fn parse_sacct_aggregates_steps_only_when_root_is_absent() {
+        let stdout = "42.batch|COMPLETED|0:0\n42.extern|FAILED|1:0\n";
+        let map = parse_sacct_batch(stdout);
+        let r = map.get("42").expect("42");
+        assert_eq!(r.normalized_state, "FAILED");
+        assert_eq!(r.exit_code, Some(1));
+    }
+
+    #[test]
+    fn parse_sacct_terminal_root_remains_terminal() {
+        let stdout = "42|COMPLETED|0:0\n42.batch|FAILED|1:0\n";
+        let map = parse_sacct_batch(stdout);
+        assert_eq!(map["42"].normalized_state, "COMPLETED");
+        assert_eq!(map["42"].exit_code, Some(0));
     }
 
     #[test]

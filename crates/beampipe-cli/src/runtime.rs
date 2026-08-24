@@ -31,6 +31,56 @@ pub struct DockerStatus {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoleCounts {
+    pub api: usize,
+    pub scheduler: usize,
+    pub worker: usize,
+}
+
+pub fn running_role_counts(context: &InstallationContext) -> RoleCounts {
+    match status(context).docker {
+        Some(docker) if docker.available && docker.error.is_none() => {
+            running_role_counts_from_services(&docker.services)
+        }
+        _ => RoleCounts::default(),
+    }
+}
+
+pub fn running_role_counts_from_services(services: &Value) -> RoleCounts {
+    let mut counts = RoleCounts::default();
+    let Some(entries) = services.as_array() else {
+        return counts;
+    };
+    for entry in entries {
+        if !compose_entry_is_running(entry) {
+            continue;
+        }
+        match compose_entry_service(entry) {
+            Some("api") => counts.api += 1,
+            Some("scheduler") => counts.scheduler += 1,
+            Some("worker") => counts.worker += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+fn compose_entry_service(entry: &Value) -> Option<&str> {
+    entry
+        .get("Service")
+        .or_else(|| entry.get("service"))
+        .and_then(Value::as_str)
+}
+
+fn compose_entry_is_running(entry: &Value) -> bool {
+    entry
+        .get("State")
+        .or_else(|| entry.get("state"))
+        .and_then(Value::as_str)
+        .is_some_and(|state| state.eq_ignore_ascii_case("running"))
+}
+
 pub fn start(context: &InstallationContext) -> Result<()> {
     require_runtime(context, RuntimeMode::Docker)?;
     let mut services = Vec::with_capacity(4);
@@ -76,6 +126,47 @@ pub fn restart(context: &InstallationContext) -> Result<()> {
             "host runtime is not daemonized by Beampipe; restart it with your service manager or stop it and run `beampipe start`"
         ),
     }
+}
+
+pub fn down(context: &InstallationContext, volumes: bool) -> Result<()> {
+    let compose_file = context.home.join("docker-compose.yml");
+    if !compose_file.is_file() {
+        return Ok(());
+    }
+    if require_docker().is_err() {
+        println!("Docker Compose is unavailable; skipping compose down.");
+        return Ok(());
+    }
+    let project = context
+        .state
+        .as_ref()
+        .map(|state| state.compose_project.clone())
+        .unwrap_or_else(|| crate::installation::compose_project_name(&context.home));
+    let mut command = Command::new("docker");
+    command
+        .arg("compose")
+        .arg("--project-directory")
+        .arg(&context.home)
+        .arg("--file")
+        .arg(&compose_file)
+        .arg("--project-name")
+        .arg(&project);
+    if context.environment_file.is_file() {
+        command.arg("--env-file").arg(&context.environment_file);
+    }
+    command.arg("down").arg("--remove-orphans");
+    if volumes {
+        command.arg("--volumes");
+    }
+    println!(
+        "  docker compose down{}",
+        if volumes { " --volumes" } else { "" }
+    );
+    let status = command.status().context("docker compose down")?;
+    if !status.success() {
+        bail!("docker compose down failed with {status}");
+    }
+    Ok(())
 }
 
 fn restart_services(context: &InstallationContext) -> Vec<&'static str> {
@@ -328,5 +419,37 @@ mod tests {
     fn compose_ps_parser_accepts_json_lines() {
         let value = parse_compose_ps(b"{\"Service\":\"api\"}\n{\"Service\":\"worker\"}\n");
         assert_eq!(value.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn running_role_counts_ignore_stopped_and_other_services() {
+        let services = serde_json::json!([
+            {"Service": "api", "State": "running"},
+            {"Service": "api", "State": "running"},
+            {"Service": "scheduler", "State": "running"},
+            {"Service": "worker", "State": "exited"},
+            {"Service": "worker", "State": "running"},
+            {"Service": "postgres", "State": "running"}
+        ]);
+        assert_eq!(
+            running_role_counts_from_services(&services),
+            RoleCounts {
+                api: 2,
+                scheduler: 1,
+                worker: 1
+            }
+        );
+        assert_eq!(
+            running_role_counts_from_services(&serde_json::json!([])),
+            RoleCounts::default()
+        );
+    }
+
+    #[test]
+    fn down_is_noop_without_compose_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap();
+        let context = InstallationContext::from_home(home).unwrap();
+        down(&context, true).unwrap();
     }
 }

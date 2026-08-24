@@ -7,6 +7,32 @@ use uuid::Uuid;
 
 pub const INSTALLATION_STATE_FILE: &str = "installation.json";
 pub const INSTALLATION_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_API_PORT: u16 = 18080;
+pub const DEFAULT_POSTGRES_PORT: u16 = 5432;
+pub const DEFAULT_METRICS_PORT: u16 = 9090;
+
+pub fn parse_host_port(raw: &str) -> Option<u16> {
+    let port: u16 = raw.trim().parse().ok()?;
+    (port > 0).then_some(port)
+}
+
+pub fn api_port_from_bind_addr(bind_addr: &str) -> Option<u16> {
+    bind_addr.rsplit(':').next().and_then(parse_host_port)
+}
+
+pub fn advertised_api_port_from(api_port: Option<&str>, bind_addr: Option<&str>) -> u16 {
+    api_port
+        .and_then(parse_host_port)
+        .or_else(|| bind_addr.and_then(api_port_from_bind_addr))
+        .unwrap_or(DEFAULT_API_PORT)
+}
+
+pub fn advertised_api_port() -> u16 {
+    advertised_api_port_from(
+        std::env::var("BEAMPIPE_API_PORT").ok().as_deref(),
+        std::env::var("BEAMPIPE_BIND_ADDR").ok().as_deref(),
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -346,5 +372,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("multiple non-empty SSH credential roots"));
+    }
+
+    #[test]
+    fn advertised_api_port_prefers_explicit_then_bind_addr() {
+        assert_eq!(advertised_api_port_from(None, None), DEFAULT_API_PORT);
+        assert_eq!(
+            advertised_api_port_from(Some("18181"), Some("127.0.0.1:8080")),
+            18181
+        );
+        assert_eq!(
+            advertised_api_port_from(None, Some("127.0.0.1:18080")),
+            18080
+        );
+        assert_eq!(parse_host_port("0"), None);
+        assert_eq!(parse_host_port("not-a-port"), None);
+        assert_eq!(api_port_from_bind_addr("0.0.0.0:9090"), Some(9090));
     }
 }

@@ -247,6 +247,12 @@ impl DeploymentProfile {
                         "deployment.dlg_root is required".into(),
                     ));
                 }
+                if dep.dlg_root.trim().trim_matches('/').is_empty() {
+                    return Err(ProfileValidationError::Message(
+                        "deployment.dlg_root must be a dedicated directory, not the remote filesystem root"
+                            .into(),
+                    ));
+                }
                 if dep.account.trim().is_empty() {
                     return Err(ProfileValidationError::Message(
                         "deployment.account is required".into(),
@@ -465,6 +471,28 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("ssh_credential"));
+    }
+
+    #[test]
+    fn slurm_profile_rejects_remote_filesystem_root_as_dlg_root() {
+        let profile: DeploymentProfile = serde_json::from_value(json!({
+            "name": "setonix",
+            "translation": {"num_par": 1},
+            "deployment": {
+                "kind": "slurm_remote",
+                "login_node": "setonix.example.org",
+                "account": "project",
+                "home_dir": "/scratch/project",
+                "log_dir": "/scratch/project/logs",
+                "dlg_root": "////"
+            }
+        }))
+        .unwrap();
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("dedicated directory"));
     }
 
     #[test]

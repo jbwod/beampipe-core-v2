@@ -7,12 +7,28 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const OPERATOR_COMPOSE: &str = include_str!("../../../deploy/operator/docker-compose.yml");
-const OPERATOR_ENV_EXAMPLE: &str = include_str!("../../../deploy/operator/.env.example");
-const SAMPLE_PROJECT: &str = include_str!("../../../config/wallaby_hires.v2.yaml");
-const SAMPLE_REST_PROFILE: &str = include_str!("../../../config/deployment_profile.dlg-dim.json");
-const SAMPLE_SLURM_PROFILE: &str =
-    include_str!("../../../config/deployment_profile.slurm-remote.json");
+// Keep these copies inside the crate so `COPY crates` is enough for Docker
+// builds. `embedded_bundle_tracks_repo_sources` fails CI if they drift.
+const OPERATOR_COMPOSE: &str = include_str!("../embedded/docker-compose.yml");
+const OPERATOR_ENV_EXAMPLE: &str = include_str!("../embedded/env.example");
+const SAMPLE_PROJECT: &str = include_str!("../embedded/wallaby_hires.v2.yaml");
+const SAMPLE_NODOWNLOADS_PROJECT: &str =
+    include_str!("../embedded/wallaby_hires_nodownloads.v2.yaml");
+const SAMPLE_REST_PROFILE: &str = include_str!("../embedded/deployment_profile.dlg-dim.json");
+const SAMPLE_SLURM_PROFILE: &str = include_str!("../embedded/deployment_profile.slurm-remote.json");
+const SAMPLE_DEPLOY_GRAPH: &[u8] =
+    include_bytes!("../embedded/graphs/wallaby-hires_deploy-setonix-beampipe.graph");
+const SAMPLE_NODOWNLOADS_GRAPH: &[u8] =
+    include_bytes!("../embedded/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph");
+const PROMETHEUS_CONFIG: &str = include_str!("../embedded/observability/prometheus.yml");
+const PROMETHEUS_ALERTS: &str = include_str!("../embedded/observability/alerts.yml");
+const ALERTMANAGER_CONFIG: &str = include_str!("../embedded/observability/alertmanager.yml");
+const GRAFANA_DATASOURCE: &str =
+    include_str!("../embedded/observability/grafana/provisioning/datasources/prometheus.yml");
+const GRAFANA_DASHBOARD_PROVIDER: &str =
+    include_str!("../embedded/observability/grafana/provisioning/dashboards/beampipe.yml");
+const GRAFANA_OVERVIEW_DASHBOARD: &str =
+    include_str!("../embedded/observability/grafana/dashboards/beampipe-overview.json");
 const BUNDLE_MANIFEST: &str = ".beampipe-operator-bundle.json";
 
 #[derive(Debug, Default, Clone)]
@@ -48,6 +64,10 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
         (".env.example", OPERATOR_ENV_EXAMPLE),
         ("config/wallaby_hires.v2.yaml", SAMPLE_PROJECT),
         (
+            "config/wallaby_hires_nodownloads.v2.yaml",
+            SAMPLE_NODOWNLOADS_PROJECT,
+        ),
+        (
             "config/deployment_profile.dlg-dim.json",
             SAMPLE_REST_PROFILE,
         ),
@@ -55,7 +75,42 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
             "config/deployment_profile.slurm-remote.json",
             SAMPLE_SLURM_PROFILE,
         ),
+        ("observability/prometheus.yml", PROMETHEUS_CONFIG),
+        ("observability/alerts.yml", PROMETHEUS_ALERTS),
+        ("observability/alertmanager.yml", ALERTMANAGER_CONFIG),
+        (
+            "observability/grafana/provisioning/datasources/prometheus.yml",
+            GRAFANA_DATASOURCE,
+        ),
+        (
+            "observability/grafana/provisioning/dashboards/beampipe.yml",
+            GRAFANA_DASHBOARD_PROVIDER,
+        ),
+        (
+            "observability/grafana/dashboards/beampipe-overview.json",
+            GRAFANA_OVERVIEW_DASHBOARD,
+        ),
         ("credentials/ssh/.gitkeep", ""),
+    ] {
+        materialize_file(
+            root,
+            relative,
+            contents.as_bytes(),
+            force,
+            previous.as_ref(),
+            &mut next,
+            &mut report,
+        )?;
+    }
+    for (relative, contents) in [
+        (
+            "config/graphs/wallaby-hires_deploy-setonix-beampipe.graph",
+            SAMPLE_DEPLOY_GRAPH,
+        ),
+        (
+            "config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph",
+            SAMPLE_NODOWNLOADS_GRAPH,
+        ),
     ] {
         materialize_file(
             root,
@@ -74,14 +129,14 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
 fn materialize_file(
     root: &Path,
     relative: &str,
-    contents: &str,
+    contents: &[u8],
     force: bool,
     previous: Option<&BundleManifest>,
     next: &mut BundleManifest,
     report: &mut MaterializeReport,
 ) -> Result<()> {
     let path = root.join(relative);
-    let desired_hash = sha256(contents.as_bytes());
+    let desired_hash = sha256(contents);
     let actual_hash = fs::read(&path).ok().map(|bytes| sha256(&bytes));
     let previous_hash = previous.and_then(|manifest| manifest.files.get(relative));
     let managed = force
@@ -94,7 +149,7 @@ fn materialize_file(
             report.skipped.push(path.clone());
         } else {
             let existed = path.exists();
-            atomic_write(&path, contents.as_bytes())?;
+            atomic_write(&path, contents)?;
             if existed {
                 report.replaced.push(path.clone());
             } else {
@@ -169,6 +224,16 @@ mod tests {
         let project = fs::read(dir.path().join("config/wallaby_hires.v2.yaml")).unwrap();
         let config = ProjectConfig::from_slice(&project).unwrap();
         assert!(config.validate_report().valid);
+        assert_eq!(
+            sha256(
+                &fs::read(
+                    dir.path()
+                        .join("config/graphs/wallaby-hires_deploy-setonix-beampipe.graph")
+                )
+                .unwrap()
+            ),
+            "279776976d0650321a8813aac1ff5f73e81696913480ef045692f7d295696b83"
+        );
 
         fs::write(dir.path().join("docker-compose.yml"), "operator-owned\n").unwrap();
         let second = materialize(dir.path(), false).unwrap();
@@ -177,6 +242,100 @@ mod tests {
             fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap(),
             "operator-owned\n"
         );
+    }
+
+    #[test]
+    fn embedded_bundle_tracks_repo_sources() {
+        assert_eq!(
+            OPERATOR_COMPOSE,
+            include_str!("../../../deploy/operator/docker-compose.yml")
+        );
+        assert_eq!(
+            OPERATOR_ENV_EXAMPLE,
+            include_str!("../../../deploy/operator/.env.example")
+        );
+        assert_eq!(
+            SAMPLE_PROJECT,
+            include_str!("../../../config/wallaby_hires.v2.yaml")
+        );
+        assert_eq!(
+            SAMPLE_NODOWNLOADS_PROJECT,
+            include_str!("../../../config/wallaby_hires_nodownloads.v2.yaml")
+        );
+        assert_eq!(
+            SAMPLE_REST_PROFILE,
+            include_str!("../../../config/deployment_profile.dlg-dim.json")
+        );
+        assert_eq!(
+            SAMPLE_SLURM_PROFILE,
+            include_str!("../../../config/deployment_profile.slurm-remote.json")
+        );
+        assert_eq!(
+            SAMPLE_DEPLOY_GRAPH,
+            include_bytes!("../../../config/graphs/wallaby-hires_deploy-setonix-beampipe.graph")
+        );
+        assert_eq!(
+            SAMPLE_NODOWNLOADS_GRAPH,
+            include_bytes!(
+                "../../../config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph"
+            )
+        );
+        assert_eq!(
+            PROMETHEUS_CONFIG,
+            include_str!("../../../deploy/operator/observability/prometheus.yml")
+        );
+        assert_eq!(
+            PROMETHEUS_ALERTS,
+            include_str!("../../../deploy/operator/observability/alerts.yml")
+        );
+        assert_eq!(
+            ALERTMANAGER_CONFIG,
+            include_str!("../../../deploy/operator/observability/alertmanager.yml")
+        );
+        assert_eq!(
+            GRAFANA_DATASOURCE,
+            include_str!(
+                "../../../deploy/operator/observability/grafana/provisioning/datasources/prometheus.yml"
+            )
+        );
+        assert_eq!(
+            GRAFANA_DASHBOARD_PROVIDER,
+            include_str!(
+                "../../../deploy/operator/observability/grafana/provisioning/dashboards/beampipe.yml"
+            )
+        );
+        assert_eq!(
+            GRAFANA_OVERVIEW_DASHBOARD,
+            include_str!(
+                "../../../deploy/operator/observability/grafana/dashboards/beampipe-overview.json"
+            )
+        );
+    }
+
+    #[test]
+    fn compose_roles_wait_for_the_migrated_api() {
+        for compose in [
+            OPERATOR_COMPOSE,
+            include_str!("../../../docker-compose.yml"),
+        ] {
+            let document: serde_yaml::Value = serde_yaml::from_str(compose).unwrap();
+            let services = &document["services"];
+            assert_eq!(
+                services["api"]["environment"]["BEAMPIPE_MIGRATE_ON_SERVE"].as_str(),
+                Some("true")
+            );
+            assert_eq!(
+                services["api"]["depends_on"]["postgres"]["condition"].as_str(),
+                Some("service_healthy")
+            );
+            for role in ["scheduler", "worker"] {
+                assert_eq!(
+                    services[role]["depends_on"]["api"]["condition"].as_str(),
+                    Some("service_healthy"),
+                    "{role} must not start until the migrated API is healthy"
+                );
+            }
+        }
     }
 
     #[test]
