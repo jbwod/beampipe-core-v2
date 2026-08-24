@@ -3425,12 +3425,15 @@ fn output_inventory_artifact(
     })
 }
 
+/// Verify a durable Beampipe output inventory.
+///
+/// Validates `beampipe-output-inventory/v1`, records its publication
+/// acknowledgement, and releases an execution waiting at the output-verification
+/// completion gate.
 #[utoipa::path(
     post,
     path = "/api/v2/executions/{id}/outputs/verify",
     tag = "executions",
-    summary = "Verify a durable Beampipe output inventory",
-    description = "Validates `beampipe-output-inventory/v1`, records its publication acknowledgement, and releases an execution waiting at the output-verification completion gate.",
     request_body = ExecutionOutputVerificationRequest,
     responses(
         (status = 200, body = ExecutionOutputVerificationResponse),
