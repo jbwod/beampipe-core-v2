@@ -37,8 +37,8 @@ pub async fn probe_dim_reachable(dim_base: &str, timeout: Duration) -> TmProbeRe
 }
 
 pub fn tm_unreachable_message(tm_url: &str, detail: &str) -> String {
-    let host_hint = if tm_url.contains("dlg-tm.desk") || tm_url.contains(".desk") {
-        " If using Pawsey desk hostnames, connect VPN or add /etc/hosts entries."
+    let host_hint = if tm_url.contains(".desk") {
+        " This appears to be a private hostname; verify VPN access and local DNS or hosts configuration."
     } else {
         ""
     };
@@ -89,10 +89,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tm_message_mentions_desk_vpn() {
+    fn tm_message_explains_private_hostname_connectivity() {
         let msg = tm_unreachable_message("http://dlg-tm.desk", "connection failed");
         assert!(msg.contains("dlg-tm.desk"));
         assert!(msg.contains("VPN"));
+        assert!(!msg.contains("Pawsey"));
     }
 
     #[test]
