@@ -1,8 +1,7 @@
 use anyhow::Context;
-use beampipe_adapters::{casda_tap, vizier_tap, TapClient};
 use beampipe_domain::discovery::DiscoverySourceResult;
 use beampipe_jobs::{ConfigDiscoveryRunner, DiscoveryRunner};
-use beampipe_project::{build_template_context, ProjectConfig, TransformRegistry};
+use beampipe_project::ProjectConfig;
 use std::path::Path;
 use std::time::Instant;
 
@@ -22,9 +21,7 @@ struct PhaseResult {
 #[derive(Debug, serde::Serialize)]
 struct BenchReport {
     source_identifier: String,
-    casda_url: String,
-    vizier_url: String,
-    phases: Vec<PhaseResult>,
+    project_id: String,
     full_discovery: PhaseResult,
     concurrent_full: Option<PhaseResult>,
 }
@@ -38,104 +35,6 @@ pub async fn run(
     let bytes = std::fs::read(config_path)
         .with_context(|| format!("read config {}", config_path.display()))?;
     let config = ProjectConfig::from_slice(&bytes)?;
-    let casda_url = std::env::var("BEAMPIPE_CASDA_TAP_URL")
-        .unwrap_or_else(|_| "https://casda.csiro.au/casda_vo_tools/tap/sync".into());
-    let vizier_url = std::env::var("BEAMPIPE_VIZIER_TAP_URL")
-        .unwrap_or_else(|_| "https://tapvizier.cds.unistra.fr/TAPVizieR/tap".into());
-
-    let casda = casda_tap(&casda_url);
-    let vizier = vizier_tap(&vizier_url);
-
-    let registry = TransformRegistry::from_config(&config);
-    let context = build_template_context(source, &config);
-    let source_name = context
-        .get("source_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(source);
-    let visibility_adql = render_wallaby_visibility(source);
-    let vizier_adql = format!(
-        r#"SELECT HIPASS, RAJ2000, DEJ2000, RV50max, RV50min, RVmom FROM "VIII/73/hicat" WHERE HIPASS = '{source_name}'"#
-    );
-
-    let mut phases = Vec::new();
-    phases.push(
-        bench_phase("casda_visibility", runs, |_i| {
-            let client = casda.clone();
-            let adql = visibility_adql.clone();
-            async move {
-                let rows = client.query_rows(&adql).await?;
-                Ok(format!("rows={}", rows.len()))
-            }
-        })
-        .await,
-    );
-    phases.push(
-        bench_phase("vizier_ra_dec_vsys", runs, |_i| {
-            let client = vizier.clone();
-            let adql = vizier_adql.clone();
-            async move {
-                let rows = client.query_rows(&adql).await?;
-                Ok(format!("rows={}", rows.len()))
-            }
-        })
-        .await,
-    );
-
-    // Resolve first SBID from visibility for eval-file phase
-    let eval_phase = match casda.query_rows(&visibility_adql).await {
-        Ok(rows) => {
-            let sbid = rows
-                .first()
-                .and_then(|r| r.get("obs_id"))
-                .and_then(|v| registry.apply_named("extract_askap_sbid", v))
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default();
-            if sbid.is_empty() {
-                PhaseResult {
-                    phase: "casda_eval_file".into(),
-                    runs: 0,
-                    ok: 0,
-                    failed: 1,
-                    min_ms: 0,
-                    max_ms: 0,
-                    avg_ms: 0,
-                    p50_ms: 0,
-                    errors: vec!["no sbid from visibility query".into()],
-                }
-            } else {
-                let eval_adql = format!(
-                    "SELECT * FROM casda.observation_evaluation_file WHERE sbid = '{sbid}'"
-                );
-                bench_phase("casda_eval_file", runs, {
-                    let client = casda.clone();
-                    let adql = eval_adql.clone();
-                    let sbid_label = sbid.clone();
-                    move |_i| {
-                        let client = client.clone();
-                        let adql = adql.clone();
-                        let sbid_label = sbid_label.clone();
-                        async move {
-                            let rows = client.query_rows(&adql).await?;
-                            Ok(format!("sbid={sbid_label} rows={}", rows.len()))
-                        }
-                    }
-                })
-                .await
-            }
-        }
-        Err(e) => PhaseResult {
-            phase: "casda_eval_file".into(),
-            runs: 0,
-            ok: 0,
-            failed: 1,
-            min_ms: 0,
-            max_ms: 0,
-            avg_ms: 0,
-            p50_ms: 0,
-            errors: vec![e.to_string()],
-        },
-    };
-    phases.push(eval_phase);
 
     let runner = ConfigDiscoveryRunner::from_env();
     let full = bench_phase("full_discover_source", runs, {
@@ -150,9 +49,9 @@ pub async fn run(
                     .await;
                 match result {
                     DiscoverySourceResult::HasMetadata { metadata, .. } => {
-                        Ok(format!("datasets={}", metadata.len()))
+                        Ok(format!("records={}", metadata.len()))
                     }
-                    DiscoverySourceResult::NoDatasets { .. } => Ok("no_datasets".into()),
+                    DiscoverySourceResult::NoRecords { .. } => Ok("no_records".into()),
                     DiscoverySourceResult::Unchanged { .. } => Ok("unchanged".into()),
                     DiscoverySourceResult::Error { error, .. } => Err(anyhow::anyhow!(error)),
                     DiscoverySourceResult::Timeout { error, .. } => {
@@ -172,9 +71,7 @@ pub async fn run(
 
     let report = BenchReport {
         source_identifier: source.to_string(),
-        casda_url,
-        vizier_url,
-        phases,
+        project_id: config.metadata.id.clone(),
         full_discovery: full,
         concurrent_full,
     };
@@ -218,7 +115,7 @@ async fn bench_concurrent_full(
             match handle.await {
                 Ok((elapsed, result)) => match result {
                     DiscoverySourceResult::HasMetadata { .. }
-                    | DiscoverySourceResult::NoDatasets { .. }
+                    | DiscoverySourceResult::NoRecords { .. }
                     | DiscoverySourceResult::Unchanged { .. } => {
                         ok += 1;
                         latencies.push(elapsed.as_millis() as u64);
@@ -317,17 +214,4 @@ fn summarize(
         p50_ms: latencies[latencies.len() / 2],
         errors,
     }
-}
-
-fn render_wallaby_visibility(source: &str) -> String {
-    format!(
-        r#"SELECT o.* FROM ivoa.obscore o
-INNER JOIN (
-  SELECT MAX(t_max) AS mx FROM ivoa.obscore
-  WHERE filename LIKE '{source}%'
-  AND obs_collection IN ('ASKAP Pilot Survey for WALLABY', 'WALLABY')
-) AS latest ON o.t_max = latest.mx
-WHERE o.filename LIKE '{source}%'
-AND o.obs_collection IN ('ASKAP Pilot Survey for WALLABY', 'WALLABY')"#
-    )
 }

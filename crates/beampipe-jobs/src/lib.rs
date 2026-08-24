@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use beampipe_adapters::{all_reachable, probe_tap_health, unreachable_adapters, TapClient};
+use beampipe_adapters::{
+    all_reachable, probe_tap_health, unreachable_adapters, HttpTapAdapter, TapClient, TapMode,
+};
 use beampipe_adapters::{casda_tap, vizier_tap, AdapterError, TapRow};
 use beampipe_config::Settings;
 use beampipe_db::{
@@ -38,8 +40,9 @@ use beampipe_profiles::{
     DeploymentConfig, RestRemoteDeploymentConfig, SlurmRemoteDeploymentConfig,
 };
 use beampipe_project::{
-    apply_field_transform, build_template_context, select_eval_file_row, ExecutionAutomationConfig,
-    HookKind, ProjectConfig, TransformRegistry, WasmHost,
+    apply_field_transform, build_template_context, DiscoveryQuery, ExecutionAutomationConfig,
+    HookKind, ProjectConfig, QueryResultPolicy, StagingProvider, TapEndpointMode,
+    TransformRegistry, WasmHost,
 };
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -218,7 +221,7 @@ impl WorkerConfig {
                 instance_name: None,
                 pool: "default".into(),
                 capabilities: vec![
-                    "casda-discovery".into(),
+                    "discovery".into(),
                     "manifest-generation".into(),
                     "daliuge-translation".into(),
                     "daliuge-deployment".into(),
@@ -768,7 +771,7 @@ impl Default for ExecutionAutomationPolicy {
     fn default() -> Self {
         Self {
             enabled: false,
-            archive_name: "casda".into(),
+            archive_name: "none".into(),
             max_sources_per_execution: 20,
             tick_execution_source_limit: 500,
             tick_execution_run_limit: 20,
@@ -873,7 +876,7 @@ impl DiscoveryRunner for DeterministicDiscoveryRunner {
         _project_module: &str,
         source_identifier: &str,
     ) -> DiscoverySourceResult {
-        DiscoverySourceResult::NoDatasets {
+        DiscoverySourceResult::NoRecords {
             source_identifier: source_identifier.to_string(),
             duration_ms: Some(0),
         }
@@ -950,7 +953,23 @@ impl ConfigDiscoveryRunner {
                     .ok_or_else(|| ConfigDiscoveryError::MissingAdapter("vizier".into()))?;
                 Arc::new(vizier_tap(url).with_policy(timeout, retries))
             }
-            other => return Err(ConfigDiscoveryError::MissingAdapter(other.to_string())),
+            other => {
+                let endpoint = config
+                    .adapters
+                    .endpoints
+                    .get(other)
+                    .ok_or_else(|| ConfigDiscoveryError::MissingAdapter(other.to_string()))?;
+                let mode = match endpoint.mode {
+                    TapEndpointMode::SyncGet => TapMode::SyncGet,
+                    TapEndpointMode::SyncPost => TapMode::SyncPost,
+                    TapEndpointMode::AsyncJob => TapMode::AsyncJob,
+                };
+                Arc::new(
+                    HttpTapAdapter::new(&endpoint.url)
+                        .with_policy(timeout, retries)
+                        .with_mode(mode),
+                )
+            }
         };
         Ok(client)
     }
@@ -989,7 +1008,11 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
                 if let Ok(metadata_rows) = repo::list_source_metadata(pool, &source_row).await {
                     let records: Vec<(String, Value)> = metadata_rows
                         .iter()
-                        .filter_map(|r| r.metadata_json.clone().map(|v| (r.sbid.clone(), v)))
+                        .filter_map(|r| {
+                            r.metadata_json
+                                .clone()
+                                .map(|value| (r.group_key.clone(), value))
+                        })
                         .collect();
                     if !records.is_empty() {
                         let sig_opts = config
@@ -1002,7 +1025,7 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
                                 include_discovery_flags: c.include_discovery_flags,
                             })
                             .unwrap_or_default();
-                        if staging_metadata_cache_complete(config, &records)
+                        if prepared_metadata_cache_complete(config, &records)
                             && should_skip_tap(
                                 source_row.discovery_signature.as_deref(),
                                 &records,
@@ -1053,7 +1076,7 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
                     duration_ms: Some(started.elapsed().as_millis() as i64),
                 }
             }
-            Ok(None) => DiscoverySourceResult::NoDatasets {
+            Ok(None) => DiscoverySourceResult::NoRecords {
                 source_identifier: source_identifier.to_string(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
             },
@@ -1073,25 +1096,26 @@ impl DiscoveryRunner for ConfigDiscoveryRunner {
     }
 }
 
-fn staging_metadata_cache_complete(config: &ProjectConfig, records: &[(String, Value)]) -> bool {
-    let requires_casda_evaluation = config
+fn prepared_metadata_cache_complete(config: &ProjectConfig, records: &[(String, Value)]) -> bool {
+    let required_fields = config
         .discovery
-        .enrichments
-        .iter()
-        .any(|query| query.name == "sbid_to_eval_file" && query.adapter == "casda");
-    if !requires_casda_evaluation {
+        .prepare_metadata
+        .as_ref()
+        .map(|prepare| prepare.required_fields.as_slice())
+        .unwrap_or_default();
+    if required_fields.is_empty() {
         return true;
     }
     records.iter().all(|(_, payload)| {
         payload
-            .get("datasets")
+            .get("records")
             .and_then(Value::as_array)
-            .is_some_and(|datasets| {
-                !datasets.is_empty()
-                    && datasets.iter().all(|dataset| {
-                        nonempty_string_field(dataset, "access_url")
-                            && nonempty_string_field(dataset, "evaluation_file")
-                            && nonempty_string_field(dataset, "evaluation_file_access_url")
+            .is_some_and(|records| {
+                !records.is_empty()
+                    && records.iter().all(|record| {
+                        required_fields
+                            .iter()
+                            .all(|field| nonempty_string_field(record, field))
                     })
             })
     })
@@ -1112,10 +1136,15 @@ enum ConfigDiscoveryError {
     MissingAdapter(String),
     #[error("adapter error: {0}")]
     Adapter(#[from] AdapterError),
-    #[error("SBID {sbid} has no valid calibration metadata archive")]
-    MissingCalibrationArchive { sbid: String },
-    #[error("SBID {sbid} has duplicate calibration metadata archive rows for {filename}")]
-    AmbiguousCalibrationArchive { sbid: String, filename: String },
+    #[error("discovery query '{query}' expected {expected} for {context}, received {count} rows")]
+    QueryCardinality {
+        query: String,
+        context: String,
+        expected: String,
+        count: usize,
+    },
+    #[error("enrichment query '{query}' requires for_each.field")]
+    MissingIteration { query: String },
 }
 
 impl ConfigDiscoveryRunner {
@@ -1158,8 +1187,10 @@ impl ConfigDiscoveryRunner {
                 .await
             {
                 Ok(rows) => {
-                    enrichments.insert(name, rows_value(rows));
+                    let value = query_result_value(query, rows, source_identifier)?;
+                    enrichments.insert(name, value);
                 }
+                Err(err) if query.required => return Err(err),
                 Err(err) => {
                     warn!(
                         adapter = query.adapter,
@@ -1167,47 +1198,64 @@ impl ConfigDiscoveryRunner {
                         error = %err,
                         "event=discover_enrichment_query_failed"
                     );
-                    enrichments.insert(name, Value::Array(vec![]));
+                    enrichments.insert(name, empty_query_result(query.result));
                 }
             }
         }
 
-        let sbids: Vec<String> = rows
-            .iter()
-            .filter_map(|row| {
-                field_map_value(row, config, "sbid", &registry).and_then(|v| value_string(Some(&v)))
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let iteration_values = |field: &str| -> Vec<String> {
+            rows.iter()
+                .filter_map(|row| {
+                    field_map_value(row, config, field, &registry)
+                        .and_then(|value| value_string(Some(&value)))
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
         for query in &config.discovery.enrichments {
-            let mut by_sbid = Map::new();
-            for sbid in &sbids {
-                let mut sbid_context = context.clone();
-                sbid_context.insert("sbid".into(), json!(sbid));
-                let rendered = render_template(&query.template, &sbid_context);
+            let iteration =
+                query
+                    .for_each
+                    .as_ref()
+                    .ok_or_else(|| ConfigDiscoveryError::MissingIteration {
+                        query: query.name.clone(),
+                    })?;
+            let variable = iteration
+                .variable
+                .as_deref()
+                .unwrap_or(iteration.field.as_str());
+            let mut by_value = Map::new();
+            for value in iteration_values(&iteration.field) {
+                let mut iteration_context = context.clone();
+                iteration_context.insert(variable.into(), json!(value));
+                let rendered = render_template(&query.template, &iteration_context);
                 match self
                     .query_configured(config, &query.adapter, &rendered)
                     .await
                 {
                     Ok(rows) => {
-                        if let Some(row) = sbid_enrichment_row(&query.name, sbid, &rows)? {
-                            by_sbid.insert(sbid.clone(), Value::Object(row));
-                        }
+                        let result = query_result_value(
+                            query,
+                            rows,
+                            &format!("{}={value}", iteration.field),
+                        )?;
+                        by_value.insert(value.clone(), result);
                     }
-                    Err(err) if query.name == "sbid_to_eval_file" => return Err(err),
+                    Err(err) if query.required => return Err(err),
                     Err(err) => {
                         warn!(
                             adapter = query.adapter,
                             query = query.name,
-                            sbid,
+                            iteration_field = iteration.field,
+                            iteration_value = value,
                             error = %err,
-                            "event=discover_sbid_enrichment_failed"
+                            "event=discover_enrichment_failed"
                         );
                     }
                 }
             }
-            enrichments.insert(query.name.clone(), Value::Object(by_sbid));
+            enrichments.insert(query.name.clone(), Value::Object(by_value));
         }
 
         let discovery_flags = discovery_flags_from_config(config, &enrichments, &registry);
@@ -1638,12 +1686,12 @@ async fn run_discover_batch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
                 project_module,
                 source_identifier, error, "event=discover_source_timeout"
             ),
-            DiscoverySourceResult::NoDatasets {
+            DiscoverySourceResult::NoRecords {
                 source_identifier, ..
             } => {
                 info!(
                     project_module,
-                    source_identifier, "event=discover_source_no_datasets"
+                    source_identifier, "event=discover_source_no_records"
                 )
             }
             _ => {}
@@ -1660,7 +1708,7 @@ async fn run_discover_batch<R: DiscoveryRunner + Clone + Send + Sync + 'static>(
         project_module,
         stats.changed_count,
         stats.unchanged_count,
-        stats.no_datasets_count,
+        stats.no_records_count,
         stats.error_count,
         stats.timeout_count,
     );
@@ -1783,9 +1831,18 @@ fn prepare_metadata_record(
     registry: &TransformRegistry,
 ) -> Value {
     let mut out = Map::new();
+    let group_key = field_map_value(row, config, "group_key", registry)
+        .and_then(|value| value_string(Some(&value)));
     if let Some(prepare) = config.discovery.prepare_metadata.as_ref() {
         for (target, spec) in &prepare.field_map {
-            if let Some(value) = mapped_value(source_identifier, row, spec, enrichments, registry) {
+            if let Some(value) = mapped_value(
+                source_identifier,
+                row,
+                spec,
+                enrichments,
+                group_key.as_deref(),
+                registry,
+            ) {
                 out.insert(target.clone(), value);
             }
         }
@@ -1796,23 +1853,17 @@ fn prepare_metadata_record(
         out.entry(key.to_ascii_lowercase())
             .or_insert_with(|| value.clone());
     }
-    if let Some(sbid) = out.get("sbid").and_then(|v| value_string(Some(v))) {
+    if let Some(group_key) = out
+        .get("group_key")
+        .and_then(|value| value_string(Some(value)))
+    {
         for (name, enrichment) in enrichments {
-            if let Some(value) = enrichment.get(&sbid) {
+            if let Some(value) = enrichment.get(&group_key) {
                 out.insert(name.clone(), value.clone());
             }
         }
     }
-    flatten_eval_enrichment(&mut out);
-    if let Some(v) = discovery_flags.get("ra_string") {
-        out.insert("ra_string".into(), v.clone());
-    }
-    if let Some(v) = discovery_flags.get("dec_string") {
-        out.insert("dec_string".into(), v.clone());
-    }
-    if let Some(v) = discovery_flags.get("vsys") {
-        out.insert("vsys".into(), v.clone());
-    }
+    out.insert("discovery_flags".into(), discovery_flags.clone());
     Value::Object(out)
 }
 
@@ -1821,29 +1872,25 @@ fn mapped_value(
     row: &TapRow,
     spec: &beampipe_project::MappingSpec,
     enrichments: &Map<String, Value>,
+    group_key: Option<&str>,
     registry: &TransformRegistry,
 ) -> Option<Value> {
     let from = spec.from.as_str();
     let value = if from == "source_identifier" {
         json!(source_identifier)
-    } else if let Some(enrichment_key) = from.strip_prefix("enrichments.") {
-        let sbid = row_value(row, "sbid")
-            .or_else(|| row_value(row, "obs_id"))
-            .and_then(|v| value_string(Some(v)))?;
-        enrichments
-            .get(enrichment_key)
-            .and_then(|map| map.get(&sbid))
-            .cloned()
-            .unwrap_or(Value::Null)
-    } else if let Some(enrichment_key) = from.strip_prefix("enrichment.") {
-        let sbid = row_value(row, "sbid")
-            .or_else(|| row_value(row, "obs_id"))
-            .and_then(|v| value_string(Some(v)))?;
-        enrichments
-            .get(enrichment_key)
-            .and_then(|map| map.get(&sbid))
-            .cloned()
-            .unwrap_or(Value::Null)
+    } else if let Some(enrichment_path) = from
+        .strip_prefix("enrichments.")
+        .or_else(|| from.strip_prefix("enrichment."))
+    {
+        let (name, nested_path) = enrichment_path
+            .split_once('.')
+            .map_or((enrichment_path, None), |(name, path)| (name, Some(path)));
+        let group_key = group_key?;
+        let value = enrichments.get(name)?.get(group_key)?;
+        match nested_path {
+            Some(path) => value_at_path(value, path)?.clone(),
+            None => value.clone(),
+        }
     } else {
         row_value(row, from)?.clone()
     };
@@ -1865,7 +1912,7 @@ fn field_map_value(
         .as_ref()?
         .field_map
         .get(target)?;
-    mapped_value("", row, spec, &Map::new(), registry)
+    mapped_value("", row, spec, &Map::new(), None, registry)
 }
 
 fn discovery_flags_from_config(
@@ -1887,145 +1934,54 @@ fn discovery_flags_from_config(
             out.insert(target.clone(), value);
         }
     }
-    if let Some(Value::Array(rows)) = enrichments.get("ra_dec_vsys") {
-        if let Some(Value::Object(row)) = rows.first() {
-            insert_ra_dec_vsys_flags(&mut out, row);
-        }
-    }
     Value::Object(out)
-}
-
-fn flatten_eval_enrichment(out: &mut Map<String, Value>) {
-    let eval = out
-        .get("sbid_to_eval_file")
-        .and_then(Value::as_object)
-        .cloned();
-    let Some(eval) = eval else {
-        return;
-    };
-    if let Some(url) = eval.get("access_url") {
-        out.insert("evaluation_file_access_url".into(), url.clone());
-    }
-    if let Some(filename) = eval
-        .get("filename")
-        .or_else(|| eval.get("file_name"))
-        .cloned()
-    {
-        out.entry("evaluation_file".to_string()).or_insert(filename);
-    }
-}
-
-fn sbid_enrichment_row(
-    query_name: &str,
-    sbid: &str,
-    rows: &[TapRow],
-) -> Result<Option<TapRow>, ConfigDiscoveryError> {
-    if query_name != "sbid_to_eval_file" {
-        return Ok(rows.first().cloned());
-    }
-
-    let expected_prefix = format!("calibration-metadata-processing-logs-SB{sbid}_");
-    let candidates: Vec<Value> = rows
-        .iter()
-        .filter(|row| {
-            value_string(row_value(row, "filename")).is_some_and(|filename| {
-                filename.starts_with(&expected_prefix) && filename.ends_with(".tar")
-            })
-        })
-        .cloned()
-        .map(Value::Object)
-        .collect();
-    let selected = select_eval_file_row(&Value::Array(candidates)).ok_or_else(|| {
-        ConfigDiscoveryError::MissingCalibrationArchive {
-            sbid: sbid.to_string(),
-        }
-    })?;
-    let selected_filename = value_string(row_value(&selected, "filename")).unwrap_or_default();
-    let duplicate_count = rows
-        .iter()
-        .filter(|row| {
-            value_string(row_value(row, "filename")).as_deref() == Some(selected_filename.as_str())
-                && value_string(row_value(row, "format"))
-                    .is_some_and(|format| format.eq_ignore_ascii_case("calibration"))
-        })
-        .count();
-    if duplicate_count > 1 {
-        return Err(ConfigDiscoveryError::AmbiguousCalibrationArchive {
-            sbid: sbid.to_string(),
-            filename: selected_filename,
-        });
-    }
-    Ok(Some(selected))
-}
-
-fn insert_flag_from_row(
-    out: &mut Map<String, Value>,
-    row: &Map<String, Value>,
-    key: &str,
-    candidates: &[&str],
-) {
-    if out.contains_key(key) {
-        return;
-    }
-    for candidate in candidates {
-        if let Some(value) = row_value(row, candidate) {
-            out.insert(key.into(), value.clone());
-            return;
-        }
-    }
-}
-
-fn insert_ra_dec_vsys_flags(out: &mut Map<String, Value>, row: &Map<String, Value>) {
-    if let Some(ra_deg) = numeric_row_value(row, &["RAJ2000", "ra_j2000"]) {
-        out.insert("ra_string".into(), json!(degrees_to_ra_string(ra_deg)));
-    } else {
-        insert_flag_from_row(out, row, "ra_string", &["RAJ2000", "ra_j2000"]);
-    }
-    if let Some(dec_deg) = numeric_row_value(row, &["DEJ2000", "dec_j2000"]) {
-        out.insert("dec_string".into(), json!(degrees_to_dec_string(dec_deg)));
-    } else {
-        insert_flag_from_row(out, row, "dec_string", &["DEJ2000", "dec_j2000"]);
-    }
-    insert_flag_from_row(out, row, "vsys", &["RVmom", "RV50max", "RV50min"]);
-}
-
-fn numeric_row_value(row: &TapRow, candidates: &[&str]) -> Option<f64> {
-    for candidate in candidates {
-        if let Some(value) = row_value(row, candidate) {
-            if let Some(n) = value.as_f64() {
-                return Some(n);
-            }
-            if let Some(s) = value.as_str() {
-                if let Ok(n) = s.trim().parse::<f64>() {
-                    return Some(n);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Match Python `degrees_to_hms` + `f"{h}h{m}m{s}s"` (seconds rounded to 2 dp).
-fn degrees_to_ra_string(degrees: f64) -> String {
-    let hours = degrees / 15.0;
-    let h = hours.trunc() as i32;
-    let rem_h = hours - f64::from(h);
-    let m = (rem_h * 60.0).trunc() as i32;
-    let s = ((rem_h - f64::from(m) / 60.0) * 3600.0 * 100.0).round() / 100.0;
-    format!("{h}h{m}m{s}s")
-}
-
-/// Match Python `degrees_to_dms` + `f"{d}.{m}.{s}"` (seconds rounded to 2 dp).
-fn degrees_to_dec_string(degrees: f64) -> String {
-    let d = degrees.trunc() as i32;
-    let rem = (degrees - f64::from(d)).abs();
-    let m = (rem * 60.0).trunc() as i32;
-    let s = ((rem - f64::from(m) / 60.0) * 3600.0 * 100.0).round() / 100.0;
-    format!("{d}.{m}.{s}")
 }
 
 fn rows_value(rows: Vec<TapRow>) -> Value {
     Value::Array(rows.into_iter().map(Value::Object).collect())
+}
+
+fn empty_query_result(policy: QueryResultPolicy) -> Value {
+    match policy {
+        QueryResultPolicy::Many => Value::Array(Vec::new()),
+        QueryResultPolicy::First | QueryResultPolicy::ExactlyOne => Value::Null,
+    }
+}
+
+fn query_result_value(
+    query: &DiscoveryQuery,
+    rows: Vec<TapRow>,
+    context: &str,
+) -> Result<Value, ConfigDiscoveryError> {
+    let count = rows.len();
+    match query.result {
+        QueryResultPolicy::Many if !query.required || count > 0 => Ok(rows_value(rows)),
+        QueryResultPolicy::First if count > 0 => Ok(Value::Object(
+            rows.into_iter().next().expect("checked non-empty"),
+        )),
+        QueryResultPolicy::First if !query.required => Ok(Value::Null),
+        QueryResultPolicy::ExactlyOne if count == 1 => Ok(Value::Object(
+            rows.into_iter().next().expect("checked one row"),
+        )),
+        QueryResultPolicy::Many => Err(ConfigDiscoveryError::QueryCardinality {
+            query: query.name.clone(),
+            context: context.into(),
+            expected: "at least one row".into(),
+            count,
+        }),
+        QueryResultPolicy::First => Err(ConfigDiscoveryError::QueryCardinality {
+            query: query.name.clone(),
+            context: context.into(),
+            expected: "at least one row".into(),
+            count,
+        }),
+        QueryResultPolicy::ExactlyOne => Err(ConfigDiscoveryError::QueryCardinality {
+            query: query.name.clone(),
+            context: context.into(),
+            expected: "exactly one row".into(),
+            count,
+        }),
+    }
 }
 
 fn row_value<'a>(row: &'a TapRow, key: &str) -> Option<&'a Value> {
@@ -2037,7 +1993,11 @@ fn row_value<'a>(row: &'a TapRow, key: &str) -> Option<&'a Value> {
 fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     let mut current = value;
     for part in path.split('.') {
-        current = current.get(part)?;
+        current = match current {
+            Value::Array(items) => items.get(part.parse::<usize>().ok()?)?,
+            Value::Object(map) => map.get(part)?,
+            _ => return None,
+        };
     }
     Some(current)
 }
@@ -2056,28 +2016,33 @@ fn escape_adql_string(value: &str) -> String {
 }
 
 fn staging_context_from_metadata(metadata: &[Value]) -> Value {
-    let mut data_url_by_scan_id = Map::new();
-    let mut checksum_url_by_scan_id = Map::new();
-    let mut eval_url_by_sbid = Map::new();
+    let mut url_by_record_id = Map::new();
+    let mut checksum_url_by_record_id = Map::new();
+    let mut url_by_group = Map::new();
+    let mut checksum_url_by_group = Map::new();
     for record in metadata {
-        if let Some(scan) = record.get("scan_id").and_then(Value::as_str) {
-            if let Some(url) = record.get("data_url").and_then(Value::as_str) {
-                data_url_by_scan_id.insert(scan.into(), json!(url));
+        if let Some(record_id) = record.get("record_id").and_then(Value::as_str) {
+            if let Some(url) = record.get("staged_url").and_then(Value::as_str) {
+                url_by_record_id.insert(record_id.into(), json!(url));
             }
-            if let Some(url) = record.get("checksum_url").and_then(Value::as_str) {
-                checksum_url_by_scan_id.insert(scan.into(), json!(url));
+            if let Some(url) = record.get("staged_checksum_url").and_then(Value::as_str) {
+                checksum_url_by_record_id.insert(record_id.into(), json!(url));
             }
         }
-        if let Some(sbid) = record.get("sbid").and_then(Value::as_str) {
-            if let Some(url) = record.get("eval_url").and_then(Value::as_str) {
-                eval_url_by_sbid.insert(sbid.into(), json!(url));
+        if let Some(group_key) = record.get("group_key").and_then(Value::as_str) {
+            if let Some(url) = record.get("group_staged_url").and_then(Value::as_str) {
+                url_by_group.insert(group_key.into(), json!(url));
+            }
+            if let Some(url) = record.get("group_checksum_url").and_then(Value::as_str) {
+                checksum_url_by_group.insert(group_key.into(), json!(url));
             }
         }
     }
     json!({
-        "data_url_by_scan_id": data_url_by_scan_id,
-        "checksum_url_by_scan_id": checksum_url_by_scan_id,
-        "eval_url_by_sbid": eval_url_by_sbid,
+        "url_by_record_id": url_by_record_id,
+        "checksum_url_by_record_id": checksum_url_by_record_id,
+        "url_by_group": url_by_group,
+        "checksum_url_by_group": checksum_url_by_group,
     })
 }
 
@@ -2541,7 +2506,7 @@ pub async fn prepare_execution_graph(
         .filter_map(|row| row.metadata_json)
         .flat_map(|value| {
             value
-                .get("datasets")
+                .get("records")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default()
@@ -2823,14 +2788,8 @@ fn profile_tm_url(profile: Option<&DeploymentProfileRow>) -> Option<String> {
     })
 }
 
-fn execution_requires_casda(
-    execution: &beampipe_db::models::ExecutionRow,
-    project_config: Option<&ProjectConfig>,
-) -> bool {
-    execution.archive_name == "casda"
-        || project_config
-            .and_then(|c| c.automation.execution.as_ref())
-            .is_some_and(|e| e.archive_name == "casda")
+fn execution_requires_casda(project_config: &ProjectConfig) -> bool {
+    project_config.staging.provider == StagingProvider::CasdaUws
 }
 
 async fn preflight_execute(
@@ -3077,10 +3036,10 @@ fn submission_state_holds_automatic_work(state: Option<SubmissionState>) -> bool
     )
 }
 
-type ExecutionDatasetScope = BTreeMap<(String, String), BTreeSet<String>>;
+type ExecutionRecordScope = BTreeMap<(String, String), BTreeSet<String>>;
 
-fn required_dataset_string(dataset: &Value, field: &str, context: &str) -> Result<String, String> {
-    dataset
+fn required_record_string(record: &Value, field: &str, context: &str) -> Result<String, String> {
+    record
         .get(field)
         .and_then(Value::as_str)
         .map(str::trim)
@@ -3089,53 +3048,47 @@ fn required_dataset_string(dataset: &Value, field: &str, context: &str) -> Resul
         .ok_or_else(|| format!("{context} requires a non-empty string '{field}'"))
 }
 
-fn dataset_identity(dataset: &Value, context: &str) -> Result<String, String> {
-    let object = dataset
+fn record_identity(record: &Value, context: &str) -> Result<String, String> {
+    let object = record
         .as_object()
         .ok_or_else(|| format!("{context} must be a JSON object"))?;
-    for field in ["dataset_id", "visibility_filename"] {
-        if let Some(identity) = object
-            .get(field)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Ok(format!("{field}:{identity}"));
-        }
-    }
-    Err(format!(
-        "{context} requires a non-empty string 'dataset_id' or 'visibility_filename'"
-    ))
+    object
+        .get("record_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{context} requires a non-empty string 'record_id'"))
 }
 
-fn add_dataset_scope_entry(
-    scope: &mut ExecutionDatasetScope,
-    dataset: &Value,
+fn add_record_scope_entry(
+    scope: &mut ExecutionRecordScope,
+    record: &Value,
     expected_parent: Option<(&str, &str)>,
     context: &str,
 ) -> Result<(), String> {
-    let source = required_dataset_string(dataset, "source_identifier", context)?;
-    let sbid = required_dataset_string(dataset, "sbid", context)?;
-    if let Some((parent_source, parent_sbid)) = expected_parent {
+    let source = required_record_string(record, "source_identifier", context)?;
+    let group_key = required_record_string(record, "group_key", context)?;
+    if let Some((parent_source, parent_group)) = expected_parent {
         if source != parent_source {
             return Err(format!(
                 "{context} source_identifier '{source}' does not match archive/manifest parent '{parent_source}'"
             ));
         }
-        if sbid != parent_sbid {
+        if group_key != parent_group {
             return Err(format!(
-                "{context} SBID '{sbid}' does not match archive/manifest parent '{parent_sbid}'"
+                "{context} group_key '{group_key}' does not match archive parent '{parent_group}'"
             ));
         }
     }
-    let identity = dataset_identity(dataset, context)?;
+    let identity = record_identity(record, context)?;
     if !scope
-        .entry((source.clone(), sbid.clone()))
+        .entry((source.clone(), group_key.clone()))
         .or_default()
         .insert(identity.clone())
     {
         return Err(format!(
-            "{context} duplicates dataset '{identity}' for source '{source}' SBID '{sbid}'"
+            "{context} duplicates record '{identity}' for source '{source}' group '{group_key}'"
         ));
     }
     Ok(())
@@ -3144,43 +3097,43 @@ fn add_dataset_scope_entry(
 fn select_execution_archive_metadata(
     selection: &repo::ExecutionSourceScope,
     rows: &[ArchiveMetadataRow],
-) -> Result<(Vec<Value>, ExecutionDatasetScope), String> {
+) -> Result<(Vec<Value>, ExecutionRecordScope), String> {
     let mut metadata = Vec::new();
-    let mut expected_scope = ExecutionDatasetScope::new();
+    let mut expected_scope = ExecutionRecordScope::new();
 
-    for (source, selected_sbids) in &selection.sources {
+    for (source, selected_groups) in &selection.sources {
         let selected_rows = rows
             .iter()
             .filter(|row| {
                 row.source_identifier == *source
-                    && selected_sbids
+                    && selected_groups
                         .as_ref()
-                        .is_none_or(|sbids| sbids.contains(&row.sbid))
+                        .is_none_or(|groups| groups.contains(&row.group_key))
             })
             .collect::<Vec<_>>();
         if selected_rows.is_empty() {
-            return Err(match selected_sbids {
-                Some(sbids) => format!(
-                    "source '{source}' has no archive metadata for selected SBIDs {}",
-                    sbids.iter().cloned().collect::<Vec<_>>().join(", ")
+            return Err(match selected_groups {
+                Some(groups) => format!(
+                    "source '{source}' has no archive metadata for selected groups {}",
+                    groups.iter().cloned().collect::<Vec<_>>().join(", ")
                 ),
                 None => format!("source '{source}' has no archive metadata"),
             });
         }
 
-        if let Some(sbids) = selected_sbids {
+        if let Some(groups) = selected_groups {
             let covered = selected_rows
                 .iter()
-                .map(|row| row.sbid.as_str())
+                .map(|row| row.group_key.as_str())
                 .collect::<BTreeSet<_>>();
-            let missing = sbids
+            let missing = groups
                 .iter()
-                .filter(|sbid| !covered.contains(sbid.as_str()))
+                .filter(|group| !covered.contains(group.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
                 return Err(format!(
-                    "source '{source}' is missing archive metadata for selected SBIDs {}",
+                    "source '{source}' is missing archive metadata for selected groups {}",
                     missing.join(", ")
                 ));
             }
@@ -3188,30 +3141,30 @@ fn select_execution_archive_metadata(
 
         for row in selected_rows {
             let row_context = format!(
-                "archive metadata for source '{}' SBID '{}'",
-                row.source_identifier, row.sbid
+                "archive metadata for source '{}' group '{}'",
+                row.source_identifier, row.group_key
             );
             let payload = row
                 .metadata_json
                 .as_ref()
                 .and_then(Value::as_object)
                 .ok_or_else(|| format!("{row_context} must be a JSON object"))?;
-            let datasets = payload
-                .get("datasets")
+            let records = payload
+                .get("records")
                 .and_then(Value::as_array)
-                .ok_or_else(|| format!("{row_context} requires a datasets array"))?;
-            if datasets.is_empty() {
-                return Err(format!("{row_context} contains no datasets"));
+                .ok_or_else(|| format!("{row_context} requires a records array"))?;
+            if records.is_empty() {
+                return Err(format!("{row_context} contains no records"));
             }
-            for (index, dataset) in datasets.iter().enumerate() {
-                let context = format!("{row_context} dataset[{index}]");
-                add_dataset_scope_entry(
+            for (index, record) in records.iter().enumerate() {
+                let context = format!("{row_context} record[{index}]");
+                add_record_scope_entry(
                     &mut expected_scope,
-                    dataset,
-                    Some((&row.source_identifier, &row.sbid)),
+                    record,
+                    Some((&row.source_identifier, &row.group_key)),
                     &context,
                 )?;
-                metadata.push(dataset.clone());
+                metadata.push(record.clone());
             }
         }
     }
@@ -3219,37 +3172,37 @@ fn select_execution_archive_metadata(
     Ok((metadata, expected_scope))
 }
 
-fn dataset_scope_from_records(
+fn record_scope_from_records(
     records: &[Value],
     context: &str,
-) -> Result<ExecutionDatasetScope, String> {
-    let mut scope = ExecutionDatasetScope::new();
-    for (index, dataset) in records.iter().enumerate() {
-        add_dataset_scope_entry(
+) -> Result<ExecutionRecordScope, String> {
+    let mut scope = ExecutionRecordScope::new();
+    for (index, record) in records.iter().enumerate() {
+        add_record_scope_entry(
             &mut scope,
-            dataset,
+            record,
             None,
-            &format!("{context} dataset[{index}]"),
+            &format!("{context} record[{index}]"),
         )?;
     }
     Ok(scope)
 }
 
-fn validate_staged_dataset_scope(
+fn validate_staged_record_scope(
     records: &[Value],
-    skipped_sbids: &[String],
-    expected: &ExecutionDatasetScope,
+    skipped_groups: &[String],
+    expected: &ExecutionRecordScope,
 ) -> Result<(), String> {
-    if !skipped_sbids.is_empty() {
+    if !skipped_groups.is_empty() {
         return Err(format!(
-            "staging skipped selected SBIDs {}; execution requires exact selected coverage",
-            skipped_sbids.join(", ")
+            "staging skipped selected groups {}; execution requires exact selected coverage",
+            skipped_groups.join(", ")
         ));
     }
-    let actual = dataset_scope_from_records(records, "staged metadata")?;
+    let actual = record_scope_from_records(records, "staged metadata")?;
     if &actual != expected {
         return Err(format!(
-            "staging changed selected dataset scope (expected {} datasets across {} source/SBID groups, received {} across {})",
+            "staging changed selected record scope (expected {} records across {} source/group pairs, received {} across {})",
             expected.values().map(BTreeSet::len).sum::<usize>(),
             expected.len(),
             actual.values().map(BTreeSet::len).sum::<usize>(),
@@ -3259,83 +3212,50 @@ fn validate_staged_dataset_scope(
     Ok(())
 }
 
-fn dataset_scope_from_manifest(manifest: &Value) -> Result<ExecutionDatasetScope, String> {
-    let sources = manifest
-        .get("sources")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "workflow manifest requires a sources array".to_string())?;
-    let mut scope = ExecutionDatasetScope::new();
-    let mut seen_sources = BTreeSet::new();
-    for (source_index, source_value) in sources.iter().enumerate() {
-        let source = required_dataset_string(
-            source_value,
-            "source_identifier",
-            &format!("workflow manifest sources[{source_index}]"),
-        )?;
-        if !seen_sources.insert(source.clone()) {
-            return Err(format!(
-                "workflow manifest selects source '{source}' more than once"
-            ));
-        }
-        let sbids = source_value
-            .get("sbids")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                format!("workflow manifest source '{source}' requires an sbids array")
-            })?;
-        let mut seen_sbids = BTreeSet::new();
-        for (sbid_index, sbid_value) in sbids.iter().enumerate() {
-            let sbid = required_dataset_string(
-                sbid_value,
-                "sbid",
-                &format!("workflow manifest source '{source}' sbids[{sbid_index}]"),
-            )?;
-            if !seen_sbids.insert(sbid.clone()) {
-                return Err(format!(
-                    "workflow manifest source '{source}' selects SBID '{sbid}' more than once"
-                ));
-            }
-            let datasets = sbid_value
-                .get("datasets")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    format!(
-                        "workflow manifest source '{source}' SBID '{sbid}' requires a datasets array"
-                    )
-                })?;
-            if datasets.is_empty() {
-                return Err(format!(
-                    "workflow manifest source '{source}' SBID '{sbid}' contains no datasets"
-                ));
-            }
-            for (dataset_index, dataset) in datasets.iter().enumerate() {
-                add_dataset_scope_entry(
-                    &mut scope,
-                    dataset,
-                    Some((&source, &sbid)),
-                    &format!(
-                        "workflow manifest source '{source}' SBID '{sbid}' dataset[{dataset_index}]"
-                    ),
-                )?;
-            }
-        }
-    }
-    Ok(scope)
+fn selection_proof(scope: &ExecutionRecordScope) -> Value {
+    Value::Array(
+        scope
+            .iter()
+            .map(|((source_identifier, group_key), record_ids)| {
+                json!({
+                    "source_identifier": source_identifier,
+                    "group_key": group_key,
+                    "record_ids": record_ids,
+                })
+            })
+            .collect(),
+    )
 }
 
-fn validate_manifest_dataset_scope(
-    manifest: &Value,
-    expected: &ExecutionDatasetScope,
+fn attach_selection_proof(
+    manifest: &mut Value,
+    expected: &ExecutionRecordScope,
 ) -> Result<(), String> {
-    let actual = dataset_scope_from_manifest(manifest)?;
-    if &actual != expected {
-        return Err(format!(
-            "workflow manifest changed selected dataset scope (expected {} datasets across {} source/SBID groups, received {} across {})",
-            expected.values().map(BTreeSet::len).sum::<usize>(),
-            expected.len(),
-            actual.values().map(BTreeSet::len).sum::<usize>(),
-            actual.len(),
-        ));
+    let root = manifest
+        .as_object_mut()
+        .ok_or_else(|| "workflow manifest must be a JSON object".to_string())?;
+    let beampipe = root
+        .entry("_beampipe")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            "workflow manifest reserved '_beampipe' field must be an object".to_string()
+        })?;
+    beampipe.insert("selection".into(), selection_proof(expected));
+    Ok(())
+}
+
+fn validate_manifest_selection_proof(
+    manifest: &Value,
+    expected: &ExecutionRecordScope,
+) -> Result<(), String> {
+    let actual = manifest
+        .get("_beampipe")
+        .and_then(|value| value.get("selection"))
+        .ok_or_else(|| "workflow manifest is missing Core-owned selection proof".to_string())?;
+    let expected = selection_proof(expected);
+    if actual != &expected {
+        return Err("workflow manifest Core-owned selection proof does not match the admitted source records".into());
     }
     Ok(())
 }
@@ -3380,9 +3300,13 @@ async fn run_execute_body(
     let project_config_row = repo::get_project_config_for_execution(pool, execution)
         .await
         .map_err(|e| e.to_string())?;
-    let project_config: Option<ProjectConfig> = project_config_row
+    let project_config: ProjectConfig = project_config_row
         .as_ref()
-        .and_then(|row| serde_json::from_value(row.spec.clone()).ok());
+        .ok_or_else(|| "execution requires a pinned project configuration".to_string())
+        .and_then(|row| {
+            serde_json::from_value(row.spec.clone())
+                .map_err(|error| format!("execution project configuration is invalid: {error}"))
+        })?;
     let profile = deployment_profile_for_execution(pool, execution)
         .await
         .map_err(|e| e.to_string())?;
@@ -3390,7 +3314,7 @@ async fn run_execute_body(
         .as_ref()
         .and_then(|row| deployment_kind(&row.deployment))
         .unwrap_or("rest_remote");
-    let requires_casda = execution_requires_casda(execution, project_config.as_ref());
+    let requires_casda = use_real && execution_requires_casda(&project_config);
     let casda_client = CasdaStagingClient::from_env();
     ensure_execution_active(pool, execution_id, true).await?;
     let source_scope = repo::parse_execution_source_scope(&execution.sources)?;
@@ -3402,11 +3326,11 @@ async fn run_execute_body(
     )
     .await
     .map_err(|error| error.to_string())?;
-    let (selected_metadata, expected_dataset_scope) =
+    let (selected_metadata, expected_record_scope) =
         select_execution_archive_metadata(&source_scope, &metadata_rows)?;
     preflight_execute(
         do_stage,
-        do_submit,
+        do_submit && use_real,
         requires_casda,
         backend_kind,
         profile.as_ref(),
@@ -3454,11 +3378,11 @@ async fn run_execute_body(
     }
     let manifest = if replay_manifest {
         let replayed = execution.workflow_manifest.clone().unwrap_or(json!({}));
-        validate_manifest_dataset_scope(&replayed, &expected_dataset_scope)?;
+        validate_manifest_selection_proof(&replayed, &expected_record_scope)?;
         replayed
     } else {
         ensure_execution_active(pool, execution_id, false).await?;
-        let (metadata, skipped_sbids) = run_stage_phase(
+        let (metadata, skipped_groups) = run_stage_phase(
             execution_id,
             do_stage,
             requires_casda,
@@ -3467,47 +3391,35 @@ async fn run_execute_body(
             correlation_id,
         )
         .await?;
-        validate_staged_dataset_scope(&metadata, &skipped_sbids, &expected_dataset_scope)?;
+        validate_staged_record_scope(&metadata, &skipped_groups, &expected_record_scope)?;
         let staging_context = staging_context_from_metadata(&metadata);
-        let mut built = if let Some(ref cfg) = project_config {
-            build_manifest_from_config_with_staging(
-                cfg,
-                &metadata,
-                &skipped_sbids,
-                &staging_context,
-            )
-            .map_err(|e| e.to_string())?
-        } else {
-            beampipe_orchestration::build_wallaby_manifest(&metadata).map_err(|e| e.to_string())?
-        };
-        validate_manifest_dataset_scope(&built, &expected_dataset_scope)?;
-        if let Some(ref cfg) = project_config {
-            built = apply_wasm_manifest(pool, cfg, &metadata, built)
-                .await
-                .map_err(|e| e.to_string())?;
-            apply_project_graph_patches(&mut built, cfg);
-            built = apply_wasm_graph_patches(pool, cfg, &built)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        validate_manifest_dataset_scope(&built, &expected_dataset_scope)?;
+        let cfg = &project_config;
+        let mut built = build_manifest_from_config_with_staging(
+            cfg,
+            &metadata,
+            &skipped_groups,
+            &staging_context,
+        )
+        .map_err(|e| e.to_string())?;
+        built = apply_wasm_manifest(pool, cfg, &metadata, built)
+            .await
+            .map_err(|e| e.to_string())?;
+        apply_project_graph_patches(&mut built, cfg);
+        built = apply_wasm_graph_patches(pool, cfg, &built)
+            .await
+            .map_err(|e| e.to_string())?;
+        attach_selection_proof(&mut built, &expected_record_scope)?;
+        validate_manifest_selection_proof(&built, &expected_record_scope)?;
         built
     };
     let manifest_path = project_config
+        .manifest
         .as_ref()
-        .and_then(|c| c.manifest.as_ref())
         .map(|m| m.path.as_str())
         .unwrap_or("manifest.json");
-    let source_graph = if let Some(ref cfg) = project_config {
-        resolve_graph(cfg).await.map_err(|e| e.to_string())?
-    } else {
-        json!({
-            "nodeDataArray": [
-                {"name": "beampipe-ingest", "fields": []},
-                {"name": "Scatter/GenericScatterApp/Beam", "fields": [{"name": "num_of_copies", "type": "Integer"}]}
-            ]
-        })
-    };
+    let source_graph = resolve_graph(&project_config)
+        .await
+        .map_err(|error| error.to_string())?;
     let graph = prepare_graph_for_manifest(source_graph.clone(), &manifest, manifest_path)
         .map_err(|e| e.to_string())?;
     let manifest_sha256 = persist_inline_json_artifact(
@@ -3624,10 +3536,11 @@ async fn run_stage_phase(
         return Ok((metadata, Vec::new()));
     }
 
-    let staging: Arc<dyn StagingClient> = if let Some(client) = casda_client {
-        Arc::new(client)
-    } else if requires_casda {
-        return Err("CASDA staging credentials required but not configured".into());
+    let staging: Arc<dyn StagingClient> = if requires_casda {
+        match casda_client {
+            Some(client) => Arc::new(client),
+            None => return Err("CASDA staging credentials required but not configured".into()),
+        }
     } else {
         Arc::new(PassThroughStagingClient)
     };
@@ -3652,9 +3565,9 @@ async fn run_stage_phase(
         event = "execute_stage_complete",
         execution_id = %execution_id,
         staged_count = outcome.staged_count,
-        skipped_sbids = ?outcome.skipped_sbids
+        skipped_groups = ?outcome.skipped_groups
     );
-    Ok((outcome.metadata, outcome.skipped_sbids))
+    Ok((outcome.metadata, outcome.skipped_groups))
 }
 
 fn execution_backend(
@@ -3680,7 +3593,7 @@ fn execution_backend(
 fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
     match error {
         OrchestrationError::GraphNotObject
-        | OrchestrationError::NoUsableDatasets
+        | OrchestrationError::NoUsableRecords
         | OrchestrationError::GraphPatchNodeNotFound(_)
         | OrchestrationError::GraphPatchFieldNotFound { .. } => false,
         OrchestrationError::Daliuge(error) => {
@@ -5761,34 +5674,23 @@ mod tests {
     use beampipe_adapters::MockTapClient;
     use serde_json::json;
 
-    fn archive_row(source: &str, sbid: &str, datasets: Vec<Value>) -> ArchiveMetadataRow {
+    fn archive_row(source: &str, group_key: &str, records: Vec<Value>) -> ArchiveMetadataRow {
         ArchiveMetadataRow {
             uuid: Uuid::now_v7(),
             project_module: "scope-test".into(),
             source_identifier: source.into(),
-            sbid: sbid.into(),
-            metadata_json: Some(json!({"datasets": datasets})),
+            group_key: group_key.into(),
+            metadata_json: Some(json!({"records": records})),
             created_at: Utc::now(),
             updated_at: None,
         }
     }
 
-    fn scoped_dataset(source: &str, sbid: &str, dataset_id: &str) -> Value {
+    fn scoped_record(source: &str, group_key: &str, record_id: &str) -> Value {
         json!({
             "source_identifier": source,
-            "sbid": sbid,
-            "dataset_id": dataset_id,
-        })
-    }
-
-    fn scoped_manifest(datasets: Vec<Value>) -> Value {
-        let source = datasets[0]["source_identifier"].as_str().unwrap();
-        let sbid = datasets[0]["sbid"].as_str().unwrap();
-        json!({
-            "sources": [{
-                "source_identifier": source,
-                "sbids": [{"sbid": sbid, "datasets": datasets}],
-            }]
+            "group_key": group_key,
+            "record_id": record_id,
         })
     }
 
@@ -5889,14 +5791,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_sbid_scope_filters_archive_rows_exactly() {
+    fn selected_group_scope_filters_archive_rows_exactly() {
         let scope = repo::parse_execution_source_scope(&json!([{
             "source_identifier": "source-1",
-            "sbids": ["1"]
+            "groups": ["1"]
         }]))
         .unwrap();
-        let selected = scoped_dataset("source-1", "1", "dataset-1");
-        let unselected = scoped_dataset("source-1", "2", "dataset-2");
+        let selected = scoped_record("source-1", "1", "record-1");
+        let unselected = scoped_record("source-1", "2", "record-2");
         let rows = vec![
             archive_row("source-1", "1", vec![selected.clone()]),
             archive_row("source-1", "2", vec![unselected]),
@@ -5911,10 +5813,10 @@ mod tests {
     }
 
     #[test]
-    fn selected_sbid_scope_rejects_missing_or_misparented_datasets() {
+    fn selected_group_scope_rejects_missing_or_misparented_records() {
         let scope = repo::parse_execution_source_scope(&json!([{
             "source_identifier": "source-1",
-            "sbids": ["1"]
+            "groups": ["1"]
         }]))
         .unwrap();
         let missing = select_execution_archive_metadata(
@@ -5922,68 +5824,66 @@ mod tests {
             &[archive_row(
                 "source-1",
                 "2",
-                vec![scoped_dataset("source-1", "2", "dataset-2")],
+                vec![scoped_record("source-1", "2", "record-2")],
             )],
         )
         .unwrap_err();
-        assert!(missing.contains("selected SBIDs 1"));
+        assert!(missing.contains("selected groups 1"));
 
         let misparented = select_execution_archive_metadata(
             &scope,
             &[archive_row(
                 "source-1",
                 "1",
-                vec![scoped_dataset("source-2", "1", "dataset-1")],
+                vec![scoped_record("source-2", "1", "record-1")],
             )],
         )
         .unwrap_err();
         assert!(misparented.contains("does not match archive/manifest parent 'source-1'"));
 
-        let wrong_sbid = select_execution_archive_metadata(
+        let wrong_group = select_execution_archive_metadata(
             &scope,
             &[archive_row(
                 "source-1",
                 "1",
-                vec![scoped_dataset("source-1", "2", "dataset-1")],
+                vec![scoped_record("source-1", "2", "record-1")],
             )],
         )
         .unwrap_err();
-        assert!(wrong_sbid.contains("does not match archive/manifest parent '1'"));
+        assert!(wrong_group.contains("does not match archive parent '1'"));
     }
 
     #[test]
-    fn staging_and_manifest_must_preserve_exact_selected_scope() {
-        let selected = scoped_dataset("source-1", "1", "dataset-1");
+    fn staging_and_core_proof_must_preserve_exact_selected_scope() {
+        let selected = scoped_record("source-1", "1", "record-1");
         let expected =
-            dataset_scope_from_records(std::slice::from_ref(&selected), "expected").unwrap();
-        validate_staged_dataset_scope(std::slice::from_ref(&selected), &[], &expected).unwrap();
-        validate_manifest_dataset_scope(&scoped_manifest(vec![selected.clone()]), &expected)
-            .unwrap();
+            record_scope_from_records(std::slice::from_ref(&selected), "expected").unwrap();
+        validate_staged_record_scope(std::slice::from_ref(&selected), &[], &expected).unwrap();
+        let mut manifest = json!({"pipeline": "neutral"});
+        attach_selection_proof(&mut manifest, &expected).unwrap();
+        validate_manifest_selection_proof(&manifest, &expected).unwrap();
 
-        assert!(validate_staged_dataset_scope(&[], &[], &expected)
+        assert!(validate_staged_record_scope(&[], &[], &expected)
             .unwrap_err()
-            .contains("changed selected dataset scope"));
-        assert!(validate_staged_dataset_scope(
+            .contains("changed selected record scope"));
+        assert!(validate_staged_record_scope(
             std::slice::from_ref(&selected),
             &["1".into()],
             &expected
         )
         .unwrap_err()
-        .contains("skipped selected SBIDs 1"));
+        .contains("skipped selected groups 1"));
 
-        let extra = scoped_dataset("source-1", "1", "dataset-2");
-        assert!(validate_manifest_dataset_scope(
-            &scoped_manifest(vec![selected.clone(), extra]),
-            &expected,
-        )
-        .unwrap_err()
-        .contains("changed selected dataset scope"));
-
-        let mut misparented = scoped_manifest(vec![selected]);
-        misparented["sources"][0]["sbids"][0]["datasets"][0]["sbid"] = json!("2");
-        assert!(validate_manifest_dataset_scope(&misparented, &expected)
+        let mut changed = manifest.clone();
+        changed["_beampipe"]["selection"][0]["record_ids"] = json!(["record-1", "record-2"]);
+        assert!(validate_manifest_selection_proof(&changed, &expected)
             .unwrap_err()
-            .contains("does not match archive/manifest parent '1'"));
+            .contains("does not match the admitted source records"));
+
+        let misparented = scoped_record("source-1", "2", "record-1");
+        assert!(validate_staged_record_scope(&[misparented], &[], &expected)
+            .unwrap_err()
+            .contains("changed selected record scope"));
     }
 
     #[test]
@@ -6775,17 +6675,17 @@ mod tests {
     fn execution_policy_defaults_disabled() {
         let policy = ExecutionAutomationPolicy::from_spec(&json!({}));
         assert!(!policy.enabled);
-        assert_eq!(policy.archive_name, "casda");
+        assert_eq!(policy.archive_name, "none");
         assert_eq!(policy.max_sources_per_execution, 20);
     }
 
     #[test]
-    fn execution_policy_reads_wallaby_shape() {
+    fn execution_policy_reads_project_config_shape() {
         let policy = ExecutionAutomationPolicy::from_spec(&json!({
             "automation": {
                 "execution": {
                     "enabled": true,
-                    "archive_name": "casda",
+                    "archive_name": "catalog",
                     "max_sources_per_execution": 1,
                     "tick_execution_source_limit": 200,
                     "tick_execution_run_limit": 5,
@@ -6798,6 +6698,7 @@ mod tests {
             }
         }));
         assert!(policy.enabled);
+        assert_eq!(policy.archive_name, "catalog");
         assert_eq!(policy.max_sources_per_execution, 1);
         assert_eq!(policy.tick_execution_run_limit, 5);
         assert_eq!(policy.concurrent_execution_run_limit, Some(5));
@@ -6807,8 +6708,280 @@ mod tests {
         );
     }
 
+    #[test]
+    fn staging_backend_is_selected_only_by_the_project_provider() {
+        let mut config = ProjectConfig::default();
+        assert!(!execution_requires_casda(&config));
+        config.staging.provider = StagingProvider::CasdaUws;
+        assert!(execution_requires_casda(&config));
+    }
+
     #[tokio::test]
-    async fn config_discovery_selects_calibration_archive_and_preserves_it_in_manifest() {
+    async fn neutral_project_discovers_records_and_builds_a_generic_manifest() {
+        let source = include_str!("../../../config/examples/minimal_survey.v2.yaml");
+        let lower = source.to_ascii_lowercase();
+        for forbidden in ["wallaby", "askap", "hipass", "casda", "vizier", "sbid"] {
+            assert!(
+                !lower.contains(forbidden),
+                "neutral example unexpectedly contains {forbidden}"
+            );
+        }
+
+        let config = ProjectConfig::from_slice(source.as_bytes()).unwrap();
+        let clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::from([(
+            "catalog".into(),
+            Arc::new(MockTapClient::with_rows(
+                "project_records",
+                vec![json!({
+                    "object_id": "record-1",
+                    "collection_id": "group-1",
+                    "access_url": "https://data.example.invalid/record-1"
+                })],
+            )) as Arc<dyn TapClient>,
+        )]);
+        let result = ConfigDiscoveryRunner::with_clients(clients)
+            .discover_source(Some(&config), "minimal_survey", "source-1")
+            .await;
+        let DiscoverySourceResult::HasMetadata { metadata, .. } = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(metadata[0]["source_identifier"], "source-1");
+        assert_eq!(metadata[0]["group_key"], "group-1");
+        assert_eq!(metadata[0]["record_id"], "record-1");
+
+        let manifest =
+            build_manifest_from_config_with_staging(&config, &metadata, &[], &json!({})).unwrap();
+        assert_eq!(manifest["sources"][0]["source_identifier"], "source-1");
+        assert_eq!(manifest["sources"][0]["groups"][0]["group_key"], "group-1");
+        assert_eq!(
+            manifest["sources"][0]["groups"][0]["records"][0]["record_id"],
+            "record-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn neutral_project_runs_offline_end_to_end() {
+        let Some(pool) = test_pool().await else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must provide DATABASE_URL for the neutral end-to-end acceptance test"
+            );
+            eprintln!("DATABASE_URL not set; skipping neutral end-to-end acceptance test");
+            return;
+        };
+        let fixture = include_str!("../../../config/examples/minimal_survey.v2.yaml");
+        let lower = fixture.to_ascii_lowercase();
+        for forbidden in ["wallaby", "askap", "hipass", "casda", "vizier", "sbid"] {
+            assert!(!lower.contains(forbidden));
+        }
+
+        let suffix = Uuid::now_v7().simple().to_string();
+        let module = format!("neutral_e2e_{}", &suffix[..16]);
+        let source_identifier = "source-1";
+        let mut project = ProjectConfig::from_slice(fixture.as_bytes()).unwrap();
+        project.metadata.id.clone_from(&module);
+        project.graph.as_mut().expect("neutral graph").path = Some(format!(
+            "{}/../../config/examples/neutral_demo.graph",
+            env!("CARGO_MANIFEST_DIR")
+        ));
+        let report = project.validate_report();
+        assert!(report.valid, "neutral config invalid: {:?}", report.errors);
+        let spec = serde_json::to_value(&project).unwrap();
+        let spec_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&spec).unwrap()));
+        let config_row = repo::insert_project_config(&pool, &module, spec, &spec_sha256)
+            .await
+            .unwrap();
+        repo::upsert_source(&pool, &module, source_identifier, true)
+            .await
+            .unwrap();
+        repo::mark_sources_for_rediscovery(&pool, &module, Some(&[source_identifier.into()]))
+            .await
+            .unwrap();
+        let (claim_token, claimed) =
+            repo::claim_source_rows_for_discovery(&pool, Some(&module), 24, 1, 180)
+                .await
+                .unwrap();
+        let claim_token = claim_token.expect("neutral source claim");
+        assert_eq!(claimed, vec![(module.clone(), source_identifier.into())]);
+
+        let clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::from([(
+            "catalog".into(),
+            Arc::new(MockTapClient::with_rows(
+                "project_records",
+                vec![json!({
+                    "object_id": "record-1",
+                    "collection_id": "group-1",
+                    "access_url": "https://data.example.invalid/record-1"
+                })],
+            )) as Arc<dyn TapClient>,
+        )]);
+        let mut worker = WorkerConfig::with_polling(Duration::from_millis(1), 60);
+        worker.use_real_backends = false;
+        worker.metrics_server_enabled = false;
+        run_discover_batch(
+            &pool,
+            &worker,
+            &ConfigDiscoveryRunner::with_clients(clients),
+            &json!({
+                "project_module": module,
+                "source_identifiers": [source_identifier],
+                "claim_token": claim_token,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let metadata =
+            repo::list_archive_metadata_for_sources(&pool, &module, &[source_identifier.into()])
+                .await
+                .unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].group_key, "group-1");
+        assert_eq!(
+            metadata[0].metadata_json.as_ref().unwrap()["records"][0]["record_id"],
+            "record-1"
+        );
+
+        let (ready, skipped) = repo::partition_sources_ready_for_execution(
+            &pool,
+            &module,
+            &[source_identifier.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(ready, vec![source_identifier]);
+        assert!(skipped.is_empty());
+        let preview = prepare_execution_graph(&pool, &module, &[source_identifier.into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.manifest["sources"][0]["groups"][0]["group_key"],
+            "group-1"
+        );
+
+        let execution = repo::create_execution(
+            &pool,
+            &module,
+            json!([{"source_identifier": source_identifier, "groups": ["group-1"]}]),
+            "catalog",
+            None,
+            Some(config_row.uuid),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(repo::execution_source_readiness_errors(&pool, &execution)
+            .await
+            .unwrap()
+            .is_empty());
+        run_execute(
+            &pool,
+            &worker,
+            &json!({
+                "execution_id": execution.uuid,
+                "do_stage": true,
+                "do_submit": true,
+                "use_real_backends": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let submitted = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(submitted.submission_state.as_deref(), Some("submitted"));
+        assert_eq!(submitted.scheduler_name.as_deref(), Some("daliuge"));
+        assert_eq!(
+            submitted.workflow_manifest.as_ref().unwrap()["_beampipe"]["selection"][0]["group_key"],
+            "group-1"
+        );
+        let artifacts = repo::list_execution_artifacts(&pool, execution.uuid)
+            .await
+            .unwrap();
+        for required in [
+            "manifest",
+            "source_graph",
+            "patched_graph",
+            "physical_graph",
+        ] {
+            assert!(artifacts.iter().any(|artifact| artifact.kind == required));
+        }
+
+        run_dim_poll(
+            &pool,
+            &worker,
+            &json!({
+                "execution_id": execution.uuid,
+                "poll_round": 0,
+                "use_real_backends": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let held = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.status, "running");
+        assert_eq!(held.control_phase.as_deref(), Some("output_verification"));
+        assert_eq!(held.daliuge_state.as_deref(), Some("finished"));
+        assert_eq!(held.output_state.as_deref(), Some("pending"));
+
+        let inventory_sha256 = "a".repeat(64);
+        let (completed, inventory) = repo::verify_execution_outputs(
+            &pool,
+            execution.uuid,
+            ExecutionArtifactInput {
+                kind: "output_inventory".into(),
+                storage_kind: "remote".into(),
+                uri: Some("file:///durable/neutral/source-1".into()),
+                inline_json: Some(json!({
+                    "schema": "beampipe-output-inventory/v1",
+                    "products": [{
+                        "path": "result.bin",
+                        "bytes": 4,
+                        "sha256": "b".repeat(64),
+                    }],
+                    "inventory_sha256": inventory_sha256,
+                })),
+                media_type: "application/vnd.beampipe.output-inventory+json".into(),
+                sha256: "c".repeat(64),
+                size_bytes: Some(256),
+                producer_phase: "publication_acknowledged".into(),
+                metadata: json!({
+                    "inventory_schema": "beampipe-output-inventory/v1",
+                    "inventory_sha256": inventory_sha256,
+                    "publication": {"acknowledged": true, "receipt_id": "neutral-1"},
+                }),
+            },
+            "trusted-publisher:neutral-test",
+            Some("neutral-e2e"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.output_state.as_deref(), Some("verified"));
+        assert_eq!(completed.terminal_outcome.as_deref(), Some("succeeded"));
+        assert_eq!(inventory.kind, "output_inventory");
+        assert_eq!(
+            completed.workflow_manifest.as_ref().unwrap()["sources"][0]["groups"][0]["records"][0]
+                ["record_id"],
+            "record-1"
+        );
+        let source = repo::get_source_by_identifier(&pool, &module, source_identifier)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.discovery_signature,
+            source.last_executed_discovery_signature
+        );
+        assert!(!source.workflow_run_pending);
+    }
+
+    #[tokio::test]
+    async fn wallaby_config_maps_calibration_metadata_declaratively() {
         let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
         let mut casda = MockTapClient::default();
         casda.insert_rows(
@@ -6816,41 +6989,19 @@ mod tests {
             vec![json!({
                 "filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
                 "obs_id": "ASKAP-72962",
-                "obs_publisher_did": "scan-9"
+                "obs_publisher_did": "scan-9",
+                "access_url": "https://example.test/visibility"
             })],
         );
         casda.insert_rows(
             "observation_evaluation_file",
-            vec![
-                json!({
-                    "sbid": "72962",
-                    "filename": "calibration-metadata-processing-logs-SB72962_2025-04-20-063210.tar",
-                    "format": "calibration",
-                    "filesize": 12_800_000,
-                    "access_url": "https://example.test/calibration-old"
-                }),
-                json!({
-                    "sbid": "72962",
-                    "filename": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
-                    "format": "calibration",
-                    "filesize": 16_700_000,
-                    "access_url": "https://example.test/calibration-expected"
-                }),
-                json!({
-                    "sbid": "72962",
-                    "filename": "diagnostics-SB72962.tar",
-                    "format": "diagnostics",
-                    "filesize": 115_000_000,
-                    "access_url": "https://example.test/diagnostics"
-                }),
-                json!({
-                    "sbid": "72962",
-                    "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
-                    "format": "validation-report",
-                    "filesize": 898_000_000,
-                    "access_url": "https://example.test/validation"
-                }),
-            ],
+            vec![json!({
+                "sbid": "72962",
+                "filename": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                "format": "calibration",
+                "filesize": 16_700_000,
+                "access_url": "https://example.test/calibration-expected"
+            })],
         );
         let vizier = MockTapClient::with_rows(
             "VIII/73/hicat",
@@ -6872,14 +7023,14 @@ mod tests {
                 ..
             } => {
                 let expected = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
-                assert_eq!(metadata[0]["sbid"], "72962");
+                assert_eq!(metadata[0]["group_key"], "72962");
                 assert_eq!(
-                    metadata[0]["dataset_id"],
+                    metadata[0]["record_id"],
                     "HIPASSJ1317-16_SB72962_F00_B00.ms.tar"
                 );
-                assert_eq!(metadata[0]["evaluation_file"], expected);
+                assert_eq!(metadata[0]["group_artifact_filename"], expected);
                 assert_eq!(
-                    metadata[0]["evaluation_file_access_url"],
+                    metadata[0]["group_artifact_access_url"],
                     "https://example.test/calibration-expected"
                 );
                 assert_eq!(discovery_flags["ra_dec_vsys_complete"], true);
@@ -6887,10 +7038,10 @@ mod tests {
                 let manifest =
                     build_manifest_from_config_with_staging(&config, &metadata, &[], &json!({}))
                         .unwrap();
-                let dataset = &manifest["sources"][0]["sbids"][0]["datasets"][0];
-                assert_eq!(dataset["evaluation_file"], expected);
+                let record = &manifest["sources"][0]["sbids"][0]["datasets"][0];
+                assert_eq!(record["evaluation_file"], expected);
                 assert_eq!(
-                    dataset["evaluation_file_access_url"],
+                    record["evaluation_file_access_url"],
                     "https://example.test/calibration-expected"
                 );
             }
@@ -6899,34 +7050,37 @@ mod tests {
     }
 
     #[test]
-    fn wallaby_cache_requires_visibility_and_evaluation_staging_urls() {
+    fn prepared_cache_uses_project_declared_required_fields() {
         let config =
             ProjectConfig::from_slice(include_bytes!("../../../config/wallaby_hires.v2.yaml"))
                 .unwrap();
         let complete = vec![(
             "72962".into(),
             json!({
-                "datasets": [{
+                "records": [{
+                    "record_id": "record-1",
+                    "group_key": "72962",
                     "access_url": "https://example.test/visibility",
-                    "evaluation_file": "calibration-metadata-processing-logs-SB72962.tar",
-                    "evaluation_file_access_url": "https://example.test/evaluation"
+                    "staging_id": "scan-1",
+                    "group_artifact_filename": "calibration-metadata-processing-logs-SB72962.tar",
+                    "group_artifact_access_url": "https://example.test/evaluation"
                 }]
             }),
         )];
-        assert!(staging_metadata_cache_complete(&config, &complete));
+        assert!(prepared_metadata_cache_complete(&config, &complete));
 
-        for missing in ["access_url", "evaluation_file_access_url"] {
+        for missing in ["access_url", "group_artifact_access_url"] {
             let mut damaged = complete.clone();
-            damaged[0].1["datasets"][0]
+            damaged[0].1["records"][0]
                 .as_object_mut()
                 .unwrap()
                 .remove(missing);
-            assert!(!staging_metadata_cache_complete(&config, &damaged));
+            assert!(!prepared_metadata_cache_complete(&config, &damaged));
         }
     }
 
     #[tokio::test]
-    async fn config_discovery_fails_without_calibration_archive() {
+    async fn required_exactly_one_enrichment_fails_closed_when_empty() {
         let mut clients: BTreeMap<String, Arc<dyn TapClient>> = BTreeMap::new();
         let mut casda = MockTapClient::default();
         casda.insert_rows(
@@ -6934,19 +7088,11 @@ mod tests {
             vec![json!({
                 "filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
                 "obs_id": "ASKAP-72962",
-                "obs_publisher_did": "scan-9"
+                "obs_publisher_did": "scan-9",
+                "access_url": "https://example.test/visibility"
             })],
         );
-        casda.insert_rows(
-            "observation_evaluation_file",
-            vec![json!({
-                "sbid": "72962",
-                "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
-                "format": "validation-report",
-                "filesize": 8980,
-                "access_url": "https://example.test/validation"
-            })],
-        );
+        casda.insert_rows("observation_evaluation_file", Vec::new());
         clients.insert("casda".into(), Arc::new(casda));
         clients.insert(
             "vizier".into(),
@@ -6966,51 +7112,29 @@ mod tests {
 
         match result {
             DiscoverySourceResult::Error { error, .. } => {
-                assert!(error.contains("SBID 72962 has no valid calibration metadata archive"));
+                assert!(error.contains("expected exactly one"));
+                assert!(error.contains("group_key=72962"));
             }
             other => panic!("unexpected result: {other:?}"),
         }
     }
 
     #[test]
-    fn duplicate_winning_calibration_archive_fails_closed() {
-        let filename = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
-        let rows = vec![
-            json!({
-                "sbid": "72962",
-                "filename": filename,
-                "format": "calibration",
-                "filesize": 16_700_000,
-                "access_url": "https://example.test/calibration-a"
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
-            json!({
-                "sbid": "72962",
-                "filename": filename,
-                "format": "calibration",
-                "filesize": 16_700_000,
-                "access_url": "https://example.test/calibration-b"
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
-        ];
-
-        let error = sbid_enrichment_row("sbid_to_eval_file", "72962", &rows).unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigDiscoveryError::AmbiguousCalibrationArchive { .. }
-        ));
-    }
-
-    #[test]
     fn deployment_kind_reads_typed_profile_json() {
         assert_eq!(
-            deployment_kind(
-                &json!({"kind": "slurm_remote", "login_node": "setonix", "account": "a", "home_dir": "/h", "log_dir": "/l", "dlg_root": "/d"})
-            ),
+            deployment_kind(&json!({
+                "kind": "slurm_remote",
+                "login_node": "cluster.example",
+                "account": "a",
+                "facility": "generic",
+                "home_dir": "/h",
+                "log_dir": "/l",
+                "dlg_root": "/d",
+                "runtime_contract": {
+                    "output_subdirectory": "outputs",
+                    "shared_staging_subdirectory": "shared_staging"
+                }
+            })),
             Some("slurm_remote")
         );
     }
@@ -7024,9 +7148,14 @@ mod tests {
             "remote_user": "operator-a",
             "ssh_credential": "hpc",
             "account": "project",
+            "facility": "generic",
             "home_dir": "/home/operator-a",
             "log_dir": "/scratch/project/logs",
-            "dlg_root": "/scratch/project/dlg"
+            "dlg_root": "/scratch/project/dlg",
+            "runtime_contract": {
+                "output_subdirectory": "outputs",
+                "shared_staging_subdirectory": "shared_staging"
+            }
         }))
         .unwrap() else {
             panic!("expected Slurm profile");

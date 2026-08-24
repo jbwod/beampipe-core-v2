@@ -43,12 +43,12 @@ pub fn merge_execution_request_into_run_record(
             let sid = obj.get("source_identifier")?.as_str()?;
             let mut entry = Map::new();
             entry.insert("source_identifier".into(), Value::String(sid.to_string()));
-            if let Some(Value::Array(sbids)) = obj.get("sbids") {
-                if !sbids.is_empty() {
+            if let Some(Value::Array(groups)) = obj.get("groups") {
+                if !groups.is_empty() {
                     entry.insert(
-                        "sbids".into(),
+                        "groups".into(),
                         Value::Array(
-                            sbids
+                            groups
                                 .iter()
                                 .map(|s| Value::String(s.to_string().trim_matches('"').to_string()))
                                 .collect(),
@@ -432,11 +432,11 @@ mod tests {
     fn requested_sources_are_captured() {
         let out = merge_execution_request_into_run_record(
             None,
-            &[json!({"source_identifier": "HIPASSJ1318-21", "sbids": ["1"]})],
+            &[json!({"source_identifier": "example-source", "groups": ["1"]})],
         );
         assert_eq!(
             out["beampipe_run_record"]["requested_sources"]["source_identifiers"][0],
-            "HIPASSJ1318-21"
+            "example-source"
         );
     }
 

@@ -40,10 +40,10 @@ async fn discovery_signature_unchanged_skips_pending() {
         .unwrap();
 
     let metadata = vec![json!({
-        "sbid": "123",
-        "dataset_id": "HIPASSJ0001-00.ms",
-        "visibility_filename": "HIPASSJ0001-00.ms",
-        "scan_id": "9"
+        "group_key": "group-123",
+        "record_id": "record-1",
+        "filename": "record-1.bin",
+        "staging_id": "9"
     })];
     let flags = json!({"ra_dec_vsys_complete": true});
     let signature = SignatureOptions::default();
@@ -147,19 +147,19 @@ async fn excluded_staging_urls_are_stored_and_refreshed_without_changing_signatu
     let signature = SignatureConfig {
         exclude_fields: vec![
             "access_url".into(),
-            "evaluation_file_access_url".into(),
+            "group_artifact_access_url".into(),
             "filesize".into(),
         ],
         include_discovery_flags: true,
     };
     let metadata = |suffix: &str| {
         vec![json!({
-            "sbid": "72962",
-            "dataset_id": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
-            "visibility_filename": "HIPASSJ1317-16_SB72962_F00_B00.ms.tar",
+            "group_key": "group-1",
+            "record_id": "record-1",
+            "filename": "record-1.bin",
             "access_url": format!("https://example.test/visibility-{suffix}"),
-            "evaluation_file": "calibration-metadata-processing-logs-SB72962.tar",
-            "evaluation_file_access_url": format!("https://example.test/evaluation-{suffix}"),
+            "group_artifact_filename": "group-1-metadata.tar",
+            "group_artifact_access_url": format!("https://example.test/group-{suffix}"),
             "filesize": if suffix == "old" { 1 } else { 2 }
         })]
     };
@@ -207,7 +207,7 @@ async fn excluded_staging_urls_are_stored_and_refreshed_without_changing_signatu
     .unwrap();
     assert_eq!(second.unchanged_count, 1);
     let stored: serde_json::Value = sqlx::query_scalar(
-        "SELECT metadata_json FROM archive_metadata WHERE project_module = $1 AND source_identifier = $2 AND sbid = '72962'",
+        "SELECT metadata_json FROM archive_metadata WHERE project_module = $1 AND source_identifier = $2 AND group_key = 'group-1'",
     )
     .bind(&module)
     .bind(&source)
@@ -215,12 +215,12 @@ async fn excluded_staging_urls_are_stored_and_refreshed_without_changing_signatu
     .await
     .unwrap();
     assert_eq!(
-        stored["datasets"][0]["access_url"],
+        stored["records"][0]["access_url"],
         "https://example.test/visibility-new"
     );
     assert_eq!(
-        stored["datasets"][0]["evaluation_file_access_url"],
-        "https://example.test/evaluation-new"
+        stored["records"][0]["group_artifact_access_url"],
+        "https://example.test/group-new"
     );
     let second_signature: String = sqlx::query_scalar(
         "SELECT discovery_signature FROM source_registry WHERE project_module = $1 AND source_identifier = $2",

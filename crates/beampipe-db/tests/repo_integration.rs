@@ -1274,8 +1274,8 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
     .unwrap();
     sqlx::query(
         r#"
-        INSERT INTO archive_metadata (uuid, project_module, source_identifier, sbid, metadata_json)
-        VALUES ($1, $2, $3, '1', '{"discovery_flags":{"ready":true}}'::jsonb)
+        INSERT INTO archive_metadata (uuid, project_module, source_identifier, group_key, metadata_json)
+        VALUES ($1, $2, $3, '1', '{"records":[{"source_identifier":"source-1","group_key":"1","record_id":"record-1"}],"discovery_flags":{"ready":true}}'::jsonb)
         "#,
     )
     .bind(Uuid::now_v7())
@@ -1287,7 +1287,7 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
     let execution = repo::create_execution(
         &pool,
         &module,
-        json!([{"source_identifier": source, "sbids": ["1"]}]),
+        json!([{"source_identifier": source, "groups": ["1"]}]),
         "local",
         None,
         None,
@@ -1300,10 +1300,10 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
         .unwrap()
         .is_empty());
 
-    let missing_sbid = repo::create_execution(
+    let missing_group = repo::create_execution(
         &pool,
         &module,
-        json!([{"source_identifier": source, "sbids": ["2"]}]),
+        json!([{"source_identifier": source, "groups": ["2"]}]),
         "local",
         None,
         None,
@@ -1311,7 +1311,7 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
     )
     .await
     .unwrap();
-    let errors = repo::execution_source_readiness_errors(&pool, &missing_sbid)
+    let errors = repo::execution_source_readiness_errors(&pool, &missing_group)
         .await
         .unwrap();
     assert!(errors
@@ -1321,7 +1321,7 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
     let malformed = repo::create_execution(
         &pool,
         &module,
-        json!([{"source_identifier": source, "sbids": ["1", 2]}]),
+        json!([{"source_identifier": source, "groups": ["1", 2]}]),
         "local",
         None,
         None,
@@ -1333,7 +1333,7 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
         .await
         .unwrap();
     assert_eq!(errors.len(), 1);
-    assert!(errors[0].contains("sbids[1] must be a non-empty string"));
+    assert!(errors[0].contains("groups[1] must be a non-empty string"));
 
     sqlx::query(
         "UPDATE source_registry SET enabled = false WHERE project_module = $1 AND source_identifier = $2",
@@ -1363,7 +1363,7 @@ async fn execution_source_readiness_is_rechecked_after_admission() {
 #[test]
 fn persisted_execution_scope_parser_rejects_ambiguous_selections() {
     let parsed = repo::parse_execution_source_scope(&json!([
-        {"source_identifier": " source-1 ", "sbids": [" 2 ", "1"]},
+        {"source_identifier": " source-1 ", "groups": [" 2 ", "1"]},
         {"source_identifier": "source-2"}
     ]))
     .unwrap();
@@ -1384,8 +1384,8 @@ fn persisted_execution_scope_parser_rejects_ambiguous_selections() {
     for invalid in [
         json!([]),
         json!([{"source_identifier": ""}]),
-        json!([{"source_identifier": "source-1", "sbids": []}]),
-        json!([{"source_identifier": "source-1", "sbids": ["1", " 1 "]}]),
+        json!([{"source_identifier": "source-1", "groups": []}]),
+        json!([{"source_identifier": "source-1", "groups": ["1", " 1 "]}]),
         json!([
             {"source_identifier": "source-1"},
             {"source_identifier": " source-1 "}
@@ -1404,7 +1404,7 @@ async fn prepare_submission_receipt_execution(
     let execution = repo::create_execution(
         pool,
         module,
-        json!([{"source_identifier": "source-1", "sbids": ["1"]}]),
+        json!([{"source_identifier": "source-1", "groups": ["1"]}]),
         "local",
         None,
         None,
@@ -3083,18 +3083,12 @@ async fn active_job_lease_cannot_be_stolen() {
     let queue = format!("lease_active_{}", Uuid::now_v7());
     let first = Uuid::now_v7();
     let second = Uuid::now_v7();
-    repo::register_worker_instance(
-        &pool,
-        &worker_registration(first, &queue, &["casda-discovery"]),
-    )
-    .await
-    .unwrap();
-    repo::register_worker_instance(
-        &pool,
-        &worker_registration(second, &queue, &["casda-discovery"]),
-    )
-    .await
-    .unwrap();
+    repo::register_worker_instance(&pool, &worker_registration(first, &queue, &["discovery"]))
+        .await
+        .unwrap();
+    repo::register_worker_instance(&pool, &worker_registration(second, &queue, &["discovery"]))
+        .await
+        .unwrap();
     let job = repo::enqueue_job_with_options(
         &pool,
         "lease_test",
@@ -3102,21 +3096,19 @@ async fn active_job_lease_cannot_be_stolen() {
         repo::JobEnqueueOptions {
             idempotency_key: Some(format!("lease-active:{}", Uuid::now_v7())),
             pool: Some(queue.clone()),
-            required_capability: Some("casda-discovery".into()),
+            required_capability: Some("discovery".into()),
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    let claimed =
-        repo::claim_next_job_for_worker(&pool, first, &queue, &["casda-discovery".into()], 60)
-            .await
-            .unwrap()
-            .expect("first worker claims job");
-    let stolen =
-        repo::claim_next_job_for_worker(&pool, second, &queue, &["casda-discovery".into()], 60)
-            .await
-            .unwrap();
+    let claimed = repo::claim_next_job_for_worker(&pool, first, &queue, &["discovery".into()], 60)
+        .await
+        .unwrap()
+        .expect("first worker claims job");
+    let stolen = repo::claim_next_job_for_worker(&pool, second, &queue, &["discovery".into()], 60)
+        .await
+        .unwrap();
     assert!(stolen.is_none());
     assert!(
         repo::complete_job_with_lease(&pool, job.uuid, first, claimed.lease_token.unwrap(),)
@@ -3201,7 +3193,7 @@ async fn claim_requires_advertised_capability() {
     let slurm_worker = Uuid::now_v7();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(discovery_worker, &queue, &["casda-discovery"]),
+        &worker_registration(discovery_worker, &queue, &["discovery"]),
     )
     .await
     .unwrap();
@@ -3224,15 +3216,10 @@ async fn claim_requires_advertised_capability() {
     )
     .await
     .unwrap();
-    let ineligible = repo::claim_next_job_for_worker(
-        &pool,
-        discovery_worker,
-        &queue,
-        &["casda-discovery".into()],
-        60,
-    )
-    .await
-    .unwrap();
+    let ineligible =
+        repo::claim_next_job_for_worker(&pool, discovery_worker, &queue, &["discovery".into()], 60)
+            .await
+            .unwrap();
     assert!(ineligible.is_none());
     let eligible =
         repo::claim_next_job_for_worker(&pool, slurm_worker, &queue, &["slurm-remote".into()], 60)

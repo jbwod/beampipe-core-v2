@@ -900,7 +900,7 @@ fn split_csv(value: &str) -> Vec<String> {
 
 fn default_worker_capabilities() -> Vec<String> {
     [
-        "casda-discovery",
+        "discovery",
         "manifest-generation",
         "daliuge-translation",
         "daliuge-deployment",

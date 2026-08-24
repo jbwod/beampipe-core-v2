@@ -20,7 +20,7 @@ pub struct CasdaStagingClient {
     pub password: String,
     pub login_url: String,
     pub client: Client,
-    pub stage_by_sbid: bool,
+    pub stage_by_group: bool,
 }
 
 /// Password from `CASDA_PASSWORD_FILE` when that path is non-empty, else `CASDA_PASSWORD`.
@@ -56,7 +56,7 @@ impl CasdaStagingClient {
                 .timeout(Duration::from_secs(120))
                 .build()
                 .ok()?,
-            stage_by_sbid: std::env::var("CASDA_STAGE_BY_SBID")
+            stage_by_group: std::env::var("CASDA_STAGE_BY_GROUP")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(true),
         })
@@ -86,8 +86,8 @@ impl CasdaStagingClient {
         self.authenticate().await
     }
 
-    fn sort_sbids(sbids: impl IntoIterator<Item = String>) -> Vec<String> {
-        let mut items: Vec<(i64, String)> = sbids
+    fn sort_groups(groups: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut items: Vec<(i64, String)> = groups
             .into_iter()
             .map(|s| (s.parse::<i64>().unwrap_or(i64::MAX), s))
             .collect();
@@ -102,8 +102,8 @@ impl StagingClient for CasdaStagingClient {
         if metadata.is_empty() {
             return Ok(StageOutcome::default());
         }
-        let eval_inputs =
-            evaluation_staging_inputs(metadata).map_err(OrchestrationError::Backend)?;
+        let group_inputs =
+            group_artifact_staging_inputs(metadata).map_err(OrchestrationError::Backend)?;
         self.authenticate()
             .await
             .map_err(OrchestrationError::Backend)?;
@@ -111,34 +111,34 @@ impl StagingClient for CasdaStagingClient {
         let mut skipped = Vec::new();
         let mut staged_urls = HashMap::new();
         let mut checksum_urls = HashMap::new();
-        let mut eval_urls = HashMap::new();
-        let mut eval_checksum_urls = HashMap::new();
+        let mut group_urls = HashMap::new();
+        let mut group_checksum_urls = HashMap::new();
 
-        let batches: BTreeMap<String, Vec<Value>> = if self.stage_by_sbid {
-            let mut by_sbid: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        let batches: BTreeMap<String, Vec<Value>> = if self.stage_by_group {
+            let mut by_group: BTreeMap<String, Vec<Value>> = BTreeMap::new();
             for rec in metadata {
-                let sbid = rec
-                    .get("sbid")
+                let group_key = rec
+                    .get("group_key")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_string();
-                by_sbid.entry(sbid).or_default().push(rec.clone());
+                by_group.entry(group_key).or_default().push(rec.clone());
             }
-            by_sbid
+            by_group
         } else {
             let mut map = BTreeMap::new();
             map.insert("combined".into(), metadata.to_vec());
             map
         };
 
-        let sbid_order: Vec<String> = if self.stage_by_sbid {
-            Self::sort_sbids(batches.keys().cloned())
+        let group_order: Vec<String> = if self.stage_by_group {
+            Self::sort_groups(batches.keys().cloned())
         } else {
             batches.keys().cloned().collect()
         };
 
-        for sbid in sbid_order {
-            let Some(records) = batches.get(&sbid) else {
+        for group_key in group_order {
+            let Some(records) = batches.get(&group_key) else {
                 continue;
             };
             match self.stage_visibility_batch(records).await {
@@ -149,8 +149,8 @@ impl StagingClient for CasdaStagingClient {
                 }
                 Err(err) => {
                     if err.contains("do not have access") {
-                        debug!(sbid = %sbid, "event=casda_stage_access_denied");
-                        skipped.push(sbid);
+                        debug!(group_key = %group_key, "event=casda_stage_access_denied");
+                        skipped.push(group_key);
                     } else {
                         return Err(OrchestrationError::Backend(err));
                     }
@@ -158,30 +158,32 @@ impl StagingClient for CasdaStagingClient {
             }
         }
 
-        let (eval_data, eval_checksum) = self
-            .stage_eval_batch(&eval_inputs)
+        let (group_data, group_checksum) = self
+            .stage_group_artifact_batch(&group_inputs)
             .await
             .map_err(OrchestrationError::Backend)?;
-        eval_urls.extend(eval_data);
-        eval_checksum_urls.extend(eval_checksum);
+        group_urls.extend(group_data);
+        group_checksum_urls.extend(group_checksum);
 
         apply_url_maps(
             &mut staged_metadata,
             &staged_urls,
             &checksum_urls,
-            &eval_urls,
-            &eval_checksum_urls,
+            &group_urls,
+            &group_checksum_urls,
         )
         .map_err(OrchestrationError::Backend)?;
+
+        let (record_urls, record_checksums) = staged_record_maps(&staged_metadata)?;
 
         Ok(StageOutcome {
             staged_count: staged_metadata.len(),
             metadata: staged_metadata,
-            skipped_sbids: skipped,
-            staged_urls_by_scan_id: staged_urls,
-            checksum_urls_by_scan_id: checksum_urls,
-            eval_urls_by_sbid: eval_urls,
-            eval_checksum_urls_by_sbid: eval_checksum_urls,
+            skipped_groups: skipped,
+            staged_urls_by_record_id: record_urls,
+            checksum_urls_by_record_id: record_checksums,
+            staged_urls_by_group: group_urls,
+            checksum_urls_by_group: group_checksum_urls,
         })
     }
 }
@@ -196,7 +198,7 @@ impl CasdaStagingClient {
         Ok(parse_job_results(&xml))
     }
 
-    async fn stage_eval_batch(
+    async fn stage_group_artifact_batch(
         &self,
         inputs: &BTreeMap<String, (String, String)>,
     ) -> Result<StagingUrlMaps, String> {
@@ -209,7 +211,7 @@ impl CasdaStagingClient {
         }
         let xml = self.create_and_run_soda_job(&access_urls).await?;
         let (by_filename, by_filename_cs) = parse_eval_job_results(&xml);
-        map_eval_staging_results(inputs, &by_filename, &by_filename_cs)
+        map_group_staging_results(inputs, &by_filename, &by_filename_cs)
     }
 
     async fn create_and_run_soda_job(&self, access_urls: &[String]) -> Result<String, String> {
@@ -326,69 +328,63 @@ fn ensure_casda_http_status(status: reqwest::StatusCode, operation: &str) -> Res
     }
 }
 
-fn evaluation_staging_inputs(
+fn group_artifact_staging_inputs(
     records: &[Value],
 ) -> Result<BTreeMap<String, (String, String)>, String> {
     let mut inputs = BTreeMap::new();
     for record in records {
-        let sbid = record
-            .get("sbid")
+        let group_key = record
+            .get("group_key")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| "CASDA evaluation staging metadata is missing sbid".to_string())?;
+            .ok_or_else(|| "staging metadata is missing group_key".to_string())?;
         let filename = record
-            .get("evaluation_file")
+            .get("group_artifact_filename")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| format!("SBID {sbid} is missing evaluation_file"))?;
-        let expected_prefix = format!("calibration-metadata-processing-logs-SB{sbid}_");
-        if !filename.starts_with(&expected_prefix) || !filename.ends_with(".tar") {
-            return Err(format!(
-                "SBID {sbid} evaluation_file is not a calibration metadata archive"
-            ));
-        }
+            .ok_or_else(|| format!("group {group_key} is missing group_artifact_filename"))?;
         let access_url = record
-            .get("evaluation_file_access_url")
+            .get("group_artifact_access_url")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| format!("SBID {sbid} is missing evaluation_file_access_url"))?;
+            .ok_or_else(|| format!("group {group_key} is missing group_artifact_access_url"))?;
         let input = (filename.to_string(), access_url.to_string());
-        if let Some(existing) = inputs.get(sbid) {
+        if let Some(existing) = inputs.get(group_key) {
             if existing != &input {
                 return Err(format!(
-                    "SBID {sbid} has inconsistent evaluation staging metadata"
+                    "group {group_key} has inconsistent group artifact metadata"
                 ));
             }
         } else {
-            inputs.insert(sbid.to_string(), input);
+            inputs.insert(group_key.to_string(), input);
         }
     }
     if inputs.is_empty() {
-        return Err("no calibration evaluation archives in CASDA staging metadata".into());
+        return Err("no group artifacts in staging metadata".into());
     }
     Ok(inputs)
 }
 
-fn map_eval_staging_results(
+fn map_group_staging_results(
     inputs: &BTreeMap<String, (String, String)>,
     by_filename: &HashMap<String, String>,
     by_filename_checksum: &HashMap<String, String>,
 ) -> Result<StagingUrlMaps, String> {
-    let mut by_sbid = HashMap::new();
-    let mut by_sbid_checksum = HashMap::new();
-    for (sbid, (filename, _)) in inputs {
+    let mut by_group = HashMap::new();
+    let mut by_group_checksum = HashMap::new();
+    for (group_key, (filename, _)) in inputs {
         let staged_url = by_filename.get(filename).ok_or_else(|| {
-            format!("CASDA evaluation staging result is missing {filename} for SBID {sbid}")
+            format!("CASDA staging result is missing group artifact {filename} for {group_key}")
         })?;
         let checksum_url = by_filename_checksum.get(filename).ok_or_else(|| {
             format!(
-                "CASDA evaluation staging result is missing the checksum for {filename} (SBID {sbid})"
+                "CASDA staging result is missing the checksum for group artifact {filename} ({group_key})"
             )
         })?;
-        by_sbid.insert(sbid.clone(), staged_url.clone());
-        by_sbid_checksum.insert(sbid.clone(), checksum_url.clone());
+        by_group.insert(group_key.clone(), staged_url.clone());
+        by_group_checksum.insert(group_key.clone(), checksum_url.clone());
     }
-    Ok((by_sbid, by_sbid_checksum))
+    Ok((by_group, by_group_checksum))
 }
 
 fn collect_access_urls(records: &[Value], fields: &[&str]) -> Vec<String> {
@@ -437,15 +433,15 @@ fn apply_url_maps(
     metadata: &mut [Value],
     staged_urls: &HashMap<String, String>,
     checksum_urls: &HashMap<String, String>,
-    eval_urls: &HashMap<String, String>,
-    eval_checksum_urls: &HashMap<String, String>,
+    group_urls: &HashMap<String, String>,
+    group_checksum_urls: &HashMap<String, String>,
 ) -> Result<(), String> {
     for rec in metadata.iter_mut() {
         let obj = rec
             .as_object_mut()
             .ok_or_else(|| "CASDA staged metadata record is not an object".to_string())?;
-        let scan_id = obj
-            .get("scan_id")
+        let staging_id = obj
+            .get("staging_id")
             .and_then(Value::as_str)
             .map(|value| extract_scan_id(value).unwrap_or_else(|| value.to_string()))
             .or_else(|| {
@@ -454,42 +450,76 @@ fn apply_url_maps(
                     .and_then(extract_scan_id)
             })
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| "CASDA staged metadata record is missing scan_id".to_string())?;
-        let sbid = obj
-            .get("sbid")
+            .ok_or_else(|| "CASDA staged metadata record is missing staging_id".to_string())?;
+        let group_key = obj
+            .get("group_key")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| "CASDA staged metadata record is missing sbid".to_string())?;
-        let dataset_name = obj
-            .get("dataset_id")
-            .or_else(|| obj.get("name"))
-            .or_else(|| obj.get("visibility_filename"))
+            .ok_or_else(|| "CASDA staged metadata record is missing group_key".to_string())?;
+        let record_id = obj
+            .get("record_id")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                format!("CASDA staged metadata for scan {scan_id} has no dataset name")
-            })?;
+            .ok_or_else(|| format!("CASDA staged metadata for {staging_id} has no record_id"))?;
 
-        let staged_url = required_http_map_value(staged_urls, &scan_id, "visibility data")?;
-        let checksum_url = required_http_map_value(checksum_urls, &scan_id, "visibility checksum")?;
-        if !checksum_url.contains(dataset_name) {
+        let staged_url = required_http_map_value(staged_urls, &staging_id, "record data")?;
+        let checksum_url = required_http_map_value(checksum_urls, &staging_id, "record checksum")?;
+        if !checksum_url.contains(record_id) {
             return Err(format!(
-                "CASDA visibility checksum for scan {scan_id} does not match dataset {dataset_name}"
+                "CASDA checksum for staging id {staging_id} does not match record {record_id}"
             ));
         }
-        let eval_url = required_http_map_value(eval_urls, sbid, "evaluation archive")?;
-        let eval_checksum_url =
-            required_http_map_value(eval_checksum_urls, sbid, "evaluation checksum")?;
+        let group_url = required_http_map_value(group_urls, group_key, "group artifact")?;
+        let group_checksum_url =
+            required_http_map_value(group_checksum_urls, group_key, "group checksum")?;
 
         obj.insert("staged_url".into(), Value::String(staged_url));
-        obj.insert("checksum_url".into(), Value::String(checksum_url));
-        obj.insert("evaluation_file_url".into(), Value::String(eval_url));
+        obj.insert("staged_checksum_url".into(), Value::String(checksum_url));
+        obj.insert("group_staged_url".into(), Value::String(group_url));
         obj.insert(
-            "evaluation_file_checksum_url".into(),
-            Value::String(eval_checksum_url),
+            "group_checksum_url".into(),
+            Value::String(group_checksum_url),
         );
     }
     Ok(())
+}
+
+fn staged_record_maps(metadata: &[Value]) -> Result<StagingUrlMaps, OrchestrationError> {
+    let mut urls = HashMap::new();
+    let mut checksums = HashMap::new();
+    for record in metadata {
+        let record_id = record
+            .get("record_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                OrchestrationError::Backend("staged record is missing record_id".into())
+            })?;
+        let url = record
+            .get("staged_url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OrchestrationError::Backend(format!("record {record_id} is missing staged_url"))
+            })?;
+        let checksum = record
+            .get("staged_checksum_url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OrchestrationError::Backend(format!(
+                    "record {record_id} is missing staged_checksum_url"
+                ))
+            })?;
+        if urls.insert(record_id.into(), url.into()).is_some()
+            || checksums
+                .insert(record_id.into(), checksum.into())
+                .is_some()
+        {
+            return Err(OrchestrationError::Backend(format!(
+                "duplicate record_id {record_id} in staged metadata"
+            )));
+        }
+    }
+    Ok((urls, checksums))
 }
 
 fn required_http_map_value(
@@ -522,65 +552,68 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_staging_requires_explicit_eval_access_url() {
-        let error = evaluation_staging_inputs(&[serde_json::json!({
-            "sbid": "72962",
-            "evaluation_file": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+    fn group_staging_requires_explicit_access_url() {
+        let error = group_artifact_staging_inputs(&[serde_json::json!({
+            "group_key": "group-1",
+            "group_artifact_filename": "metadata.tar",
             "access_url": "https://example.test/visibility"
         })])
         .unwrap_err();
 
-        assert_eq!(error, "SBID 72962 is missing evaluation_file_access_url");
+        assert_eq!(error, "group group-1 is missing group_artifact_access_url");
     }
 
     #[test]
-    fn staged_metadata_requires_complete_visibility_and_evaluation_evidence() {
+    fn staged_metadata_requires_complete_record_and_group_evidence() {
         let mut metadata = vec![serde_json::json!({
-            "sbid": "72962",
-            "scan_id": "scan-9",
-            "dataset_id": "HIPASSJ1317-16_SB72962.ms.tar"
+            "group_key": "group-1",
+            "staging_id": "scan-9",
+            "record_id": "record-1.tar"
         })];
-        let data = HashMap::from([(
-            "9".into(),
-            "https://example.test/HIPASSJ1317-16_SB72962.ms.tar".into(),
-        )]);
+        let data = HashMap::from([("9".into(), "https://example.test/record-1.tar".into())]);
         let checksum = HashMap::from([(
             "9".into(),
-            "https://example.test/HIPASSJ1317-16_SB72962.ms.tar.checksum".into(),
+            "https://example.test/record-1.tar.checksum".into(),
         )]);
-        let eval = HashMap::from([(
-            "72962".into(),
-            "https://example.test/calibration-SB72962.tar".into(),
+        let group = HashMap::from([(
+            "group-1".into(),
+            "https://example.test/group-metadata.tar".into(),
         )]);
-        let eval_checksum = HashMap::from([(
-            "72962".into(),
-            "https://example.test/calibration-SB72962.tar.checksum".into(),
+        let group_checksum = HashMap::from([(
+            "group-1".into(),
+            "https://example.test/group-metadata.tar.checksum".into(),
         )]);
 
-        apply_url_maps(&mut metadata, &data, &checksum, &eval, &eval_checksum).unwrap();
+        apply_url_maps(&mut metadata, &data, &checksum, &group, &group_checksum).unwrap();
         assert!(metadata[0]["staged_url"]
             .as_str()
             .unwrap()
             .starts_with("https://"));
 
-        let error = apply_url_maps(&mut metadata, &data, &HashMap::new(), &eval, &eval_checksum)
-            .unwrap_err();
-        assert!(error.contains("visibility checksum"));
+        let error = apply_url_maps(
+            &mut metadata,
+            &data,
+            &HashMap::new(),
+            &group,
+            &group_checksum,
+        )
+        .unwrap_err();
+        assert!(error.contains("record checksum"));
     }
 
     #[tokio::test]
-    async fn stage_propagates_eval_preflight_error_before_authentication() {
+    async fn stage_propagates_group_preflight_error_before_authentication() {
         let client = CasdaStagingClient {
             username: "unused".into(),
             password: "unused".into(),
             login_url: "http://127.0.0.1:1/must-not-be-called".into(),
             client: Client::new(),
-            stage_by_sbid: true,
+            stage_by_group: true,
         };
         let error = client
             .stage(&[serde_json::json!({
-                "sbid": "72962",
-                "evaluation_file": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
+                "group_key": "group-1",
+                "group_artifact_filename": "metadata.tar",
                 "access_url": "https://example.test/visibility"
             })])
             .await
@@ -589,44 +622,40 @@ mod tests {
         assert!(matches!(
             error,
             OrchestrationError::Backend(message)
-                if message == "SBID 72962 is missing evaluation_file_access_url"
+                if message == "group group-1 is missing group_artifact_access_url"
         ));
     }
 
     #[test]
-    fn evaluation_staging_rejects_non_calibration_archive() {
-        let error = evaluation_staging_inputs(&[serde_json::json!({
-            "sbid": "72962",
-            "evaluation_file": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
-            "evaluation_file_access_url": "https://example.test/validation"
+    fn group_staging_accepts_project_defined_artifact_names() {
+        let inputs = group_artifact_staging_inputs(&[serde_json::json!({
+            "group_key": "group-1",
+            "group_artifact_filename": "project-metadata.bin",
+            "group_artifact_access_url": "https://example.test/project-metadata"
         })])
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            "SBID 72962 evaluation_file is not a calibration metadata archive"
-        );
+        .unwrap();
+        assert_eq!(inputs["group-1"].0, "project-metadata.bin");
     }
 
     #[test]
-    fn evaluation_staging_results_must_cover_every_expected_archive() {
-        let filename = "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar";
-        let inputs = evaluation_staging_inputs(&[serde_json::json!({
-            "sbid": "72962",
-            "evaluation_file": filename,
-            "evaluation_file_access_url": "https://example.test/calibration"
+    fn group_staging_results_must_cover_every_expected_artifact() {
+        let filename = "project-metadata.bin";
+        let inputs = group_artifact_staging_inputs(&[serde_json::json!({
+            "group_key": "group-1",
+            "group_artifact_filename": filename,
+            "group_artifact_access_url": "https://example.test/project-metadata"
         })])
         .unwrap();
 
         let error =
-            map_eval_staging_results(&inputs, &HashMap::new(), &HashMap::new()).unwrap_err();
-        assert!(error.contains("CASDA evaluation staging result is missing"));
+            map_group_staging_results(&inputs, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(error.contains("group artifact"));
 
         let staged = HashMap::from([(
             filename.to_string(),
-            "https://example.test/staged-calibration".to_string(),
+            "https://example.test/staged-project-metadata".to_string(),
         )]);
-        let error = map_eval_staging_results(&inputs, &staged, &HashMap::new()).unwrap_err();
+        let error = map_group_staging_results(&inputs, &staged, &HashMap::new()).unwrap_err();
         assert!(error.contains("missing the checksum"));
     }
 }

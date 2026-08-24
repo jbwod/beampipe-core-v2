@@ -67,7 +67,7 @@ pub async fn source_timeline(pool: &PgPool, id: Uuid) -> anyhow::Result<SourceTi
     let metadata: Vec<ArchiveMetadataReadiness> = metadata_rows
         .iter()
         .map(|r| ArchiveMetadataReadiness {
-            sbid: r.sbid.clone(),
+            group_key: r.group_key.clone(),
             metadata_json: r.metadata_json.clone(),
         })
         .collect();

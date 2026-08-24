@@ -26,23 +26,8 @@ impl TransformRegistry {
         None
     }
 
-    #[cfg(test)]
-    pub fn resolve_spec_with_legacy(&self, name: &str) -> Option<TransformSpec> {
-        self.resolve_spec(name)
-            .or_else(|| legacy_transform_spec(name))
-    }
-
     pub fn apply_named(&self, name: &str, input: &Value) -> Option<Value> {
         let spec = self.resolve_spec(name)?;
-        if spec.kind == TransformKind::Chain {
-            return apply_chain(self, &spec, input);
-        }
-        apply_transform_spec(&spec, input)
-    }
-
-    #[cfg(test)]
-    pub fn apply_named_with_legacy(&self, name: &str, input: &Value) -> Option<Value> {
-        let spec = self.resolve_spec_with_legacy(name)?;
         if spec.kind == TransformKind::Chain {
             return apply_chain(self, &spec, input);
         }
@@ -61,38 +46,6 @@ impl TransformRegistry {
 fn apply_chain(registry: &TransformRegistry, spec: &TransformSpec, input: &Value) -> Option<Value> {
     let steps = spec.steps.as_ref()?;
     registry.apply_steps(steps, input)
-}
-
-#[cfg(test)]
-fn legacy_transform_spec(name: &str) -> Option<TransformSpec> {
-    let mut spec = TransformSpec {
-        kind: TransformKind::Unknown,
-        prefix: None,
-        suffix: None,
-        separators: None,
-        pattern: None,
-        group: None,
-        from: None,
-        to: None,
-        default: None,
-        steps: None,
-    };
-    match name {
-        "strip_hipass_prefix" => {
-            spec.kind = TransformKind::StripPrefix;
-            spec.prefix = Some("HIPASS".into());
-        }
-        "extract_askap_sbid" => spec.kind = TransformKind::ExtractDigits,
-        "extract_scan_id" => {
-            spec.kind = TransformKind::SplitLast;
-            spec.separators = Some(vec!["/".into(), ":".into(), "#".into()]);
-        }
-        "is_present" => spec.kind = TransformKind::IsPresent,
-        "select_eval_file_by_size" => spec.kind = TransformKind::SelectEvalFileBySize,
-        "identity" => spec.kind = TransformKind::Identity,
-        _ => return None,
-    }
-    Some(spec)
 }
 
 pub fn apply_transform_spec(spec: &TransformSpec, input: &Value) -> Option<Value> {
@@ -156,7 +109,8 @@ pub fn apply_transform_spec(spec: &TransformSpec, input: &Value) -> Option<Value
             Some(Value::String(segment.to_string()))
         }
         TransformKind::IsPresent => Some(json!(!is_empty_value(input))),
-        TransformKind::SelectEvalFileBySize => select_eval_file_by_size(input),
+        TransformKind::DegreesToHms => value_number(input).map(degrees_to_hms).map(Value::String),
+        TransformKind::DegreesToDms => value_number(input).map(degrees_to_dms).map(Value::String),
         TransformKind::RegexExtract => {
             let pattern = spec.pattern.as_deref()?;
             let group = spec.group.unwrap_or(1) as usize;
@@ -444,100 +398,31 @@ pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<ValidationDiagnost
     errors
 }
 
-fn select_eval_file_by_size(value: &Value) -> Option<Value> {
-    let row = select_eval_file_row(value)?;
-    row_filename(&row).map(Value::String)
+fn value_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|raw| raw.trim().parse().ok()))
 }
 
-/// Pick the largest valid CASDA calibration metadata archive.
-///
-/// Evaluation-file TAP results also contain diagnostics and validation reports.
-/// Those products are not interchangeable with the calibration tar consumed by
-/// WALLABY, so the selector deliberately has no non-calibration fallback. Equal
-/// sizes are resolved by the lexically latest filename (the archive name embeds
-/// its production timestamp).
-pub fn select_eval_file_row(value: &Value) -> Option<Map<String, Value>> {
-    if let Some(obj) = value.as_object() {
-        if is_calibration_metadata_archive(obj) && row_byte_size(obj).is_some() {
-            return Some(obj.clone());
-        }
-        return None;
-    }
-    let rows = value.as_array()?;
-    let mut best: Option<(i64, String, &Map<String, Value>)> = None;
-    for row in rows {
-        let Some(obj) = row.as_object() else {
-            continue;
-        };
-        if !is_calibration_metadata_archive(obj) {
-            continue;
-        }
-        let Some(size) = row_byte_size(obj) else {
-            continue;
-        };
-        let filename = row_filename(obj)?;
-        let is_better = best
-            .as_ref()
-            .map(|(best_size, best_filename, _)| {
-                size > *best_size || (size == *best_size && filename > *best_filename)
-            })
-            .unwrap_or(true);
-        if is_better {
-            best = Some((size, filename, obj));
-        }
-    }
-    best.map(|(_, _, obj)| obj.clone())
+fn degrees_to_hms(degrees: f64) -> String {
+    let day_centiseconds = 24 * 60 * 60 * 100;
+    let total = ((degrees / 15.0) * 60.0 * 60.0 * 100.0).round() as i64;
+    let total = total.rem_euclid(day_centiseconds);
+    let h = total / (60 * 60 * 100);
+    let remainder = total % (60 * 60 * 100);
+    let m = remainder / (60 * 100);
+    let s = (remainder % (60 * 100)) as f64 / 100.0;
+    format!("{h}h{m}m{s}s")
 }
 
-fn is_calibration_metadata_archive(obj: &Map<String, Value>) -> bool {
-    let format_is_calibration = row_field(obj, "format")
-        .and_then(|value| value_string(Some(value)))
-        .is_some_and(|format| format.eq_ignore_ascii_case("calibration"));
-    let filename_is_archive = row_filename(obj).is_some_and(|filename| {
-        filename.starts_with("calibration-metadata-processing-logs-SB")
-            && filename.ends_with(".tar")
-    });
-    let has_access_url = row_field(obj, "access_url")
-        .and_then(|value| value_string(Some(value)))
-        .is_some();
-    format_is_calibration && filename_is_archive && has_access_url
-}
-
-fn row_filename(obj: &Map<String, Value>) -> Option<String> {
-    row_field(obj, "filename")
-        .or_else(|| row_field(obj, "file_name"))
-        .and_then(|value| value_string(Some(value)))
-}
-
-fn row_field<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
-    obj.get(key)
-        .or_else(|| obj.get(&key.to_ascii_lowercase()))
-        .or_else(|| obj.get(&key.to_ascii_uppercase()))
-}
-
-fn row_byte_size(obj: &Map<String, Value>) -> Option<i64> {
-    const KEYS: [&str; 4] = ["filesize", "file_size", "access_estsize", "size"];
-    for key in KEYS {
-        if let Some(value) = obj.get(key).or_else(|| obj.get(&key.to_ascii_uppercase())) {
-            if let Some(size) = json_byte_size(value) {
-                return (size >= 0).then_some(size);
-            }
-        }
-    }
-    None
-}
-
-fn json_byte_size(value: &Value) -> Option<i64> {
-    if let Some(n) = value.as_i64() {
-        return Some(n);
-    }
-    if let Some(n) = value.as_u64() {
-        return Some(i64::try_from(n).unwrap_or(i64::MAX));
-    }
-    if let Some(n) = value.as_f64() {
-        return Some(n as i64);
-    }
-    value_string(Some(value))?.parse().ok()
+fn degrees_to_dms(degrees: f64) -> String {
+    let total = (degrees.abs() * 60.0 * 60.0 * 100.0).round() as i64;
+    let d = total / (60 * 60 * 100);
+    let remainder = total % (60 * 60 * 100);
+    let m = remainder / (60 * 100);
+    let s = (remainder % (60 * 100)) as f64 / 100.0;
+    let sign = if degrees.is_sign_negative() { "-" } else { "" };
+    format!("{sign}{d}.{m}.{s}")
 }
 
 pub fn value_string(value: Option<&Value>) -> Option<String> {
@@ -595,15 +480,6 @@ mod tests {
         };
         let out = registry
             .apply_named("hipass_source_name", &json!("HIPASSJ1313-15"))
-            .unwrap();
-        assert_eq!(out, json!("J1313-15"));
-    }
-
-    #[test]
-    fn legacy_strip_hipass_alias() {
-        let registry = TransformRegistry::from_config(&ProjectConfig::default());
-        let out = registry
-            .apply_named_with_legacy("strip_hipass_prefix", &json!("HIPASSJ1313-15"))
             .unwrap();
         assert_eq!(out, json!("J1313-15"));
     }
@@ -757,66 +633,12 @@ mod tests {
             Some(json!(true))
         );
         assert_eq!(
-            apply_transform_spec(
-                &spec(TransformKind::SelectEvalFileBySize),
-                &json!([
-                    {
-                        "filename": "calibration-metadata-processing-logs-SB1_2026-01-01-000000.tar",
-                        "format": "calibration",
-                        "filesize": 1,
-                        "access_url": "https://example.test/old"
-                    },
-                    {
-                        "filename": "calibration-metadata-processing-logs-SB1_2026-01-02-000000.tar",
-                        "format": "calibration",
-                        "filesize": 2,
-                        "access_url": "https://example.test/new"
-                    }
-                ])
-            ),
-            Some(json!(
-                "calibration-metadata-processing-logs-SB1_2026-01-02-000000.tar"
-            ))
+            apply_transform_spec(&spec(TransformKind::DegreesToHms), &json!(197.5)),
+            Some(json!("13h10m0s"))
         );
         assert_eq!(
-            apply_transform_spec(
-                &spec(TransformKind::SelectEvalFileBySize),
-                &json!([
-                    {
-                        "filename": "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar",
-                        "format": "calibration",
-                        "filesize": 10,
-                        "access_url": "https://example.test/calibration"
-                    },
-                    {
-                        "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
-                        "format": "validation-report",
-                        "filesize": 999,
-                        "access_url": "https://example.test/validation"
-                    },
-                    {
-                        "filename": "diagnostics-SB72962.tar",
-                        "format": "diagnostics",
-                        "filesize": 9999,
-                        "access_url": "https://example.test/diagnostics"
-                    }
-                ])
-            ),
-            Some(json!(
-                "calibration-metadata-processing-logs-SB72962_2025-04-21-063210.tar"
-            ))
-        );
-        assert_eq!(
-            apply_transform_spec(
-                &spec(TransformKind::SelectEvalFileBySize),
-                &json!([{
-                    "filename": "WALLABY-validation-SB72962.cube.MilkyWay.tar",
-                    "format": "validation-report",
-                    "filesize": 999,
-                    "access_url": "https://example.test/validation"
-                }])
-            ),
-            None
+            apply_transform_spec(&spec(TransformKind::DegreesToDms), &json!(-16.5)),
+            Some(json!("-16.30.0"))
         );
         let mut regex = spec(TransformKind::RegexExtract);
         regex.pattern = Some("SB([0-9]+)".into());
@@ -1035,29 +857,5 @@ discovery:
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         let errors = validate_transform_refs(&config);
         assert!(errors.iter().any(|e| e.message.contains("missing_step")));
-    }
-
-    #[test]
-    fn eval_selector_uses_filename_as_a_deterministic_size_tie_break() {
-        let selected = select_eval_file_row(&json!([
-            {
-                "filename": "calibration-metadata-processing-logs-SB34166_2021-12-30-000000.tar",
-                "format": "calibration",
-                "filesize": 11_100_000,
-                "access_url": "https://example.test/older"
-            },
-            {
-                "filename": "calibration-metadata-processing-logs-SB34166_2021-12-31-011733.tar",
-                "format": "calibration",
-                "filesize": 11_100_000,
-                "access_url": "https://example.test/newer"
-            }
-        ]))
-        .unwrap();
-
-        assert_eq!(
-            selected["filename"],
-            "calibration-metadata-processing-logs-SB34166_2021-12-31-011733.tar"
-        );
     }
 }

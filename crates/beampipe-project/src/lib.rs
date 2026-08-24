@@ -31,8 +31,8 @@ pub fn is_supported_output_inventory_schema(schema: &str) -> bool {
 
 pub use expressions::evaluate_expression;
 pub use transforms::{
-    apply_field_transform, apply_transform_spec, build_template_context, select_eval_file_row,
-    validate_transform_refs, TransformRegistry,
+    apply_field_transform, apply_transform_spec, build_template_context, validate_transform_refs,
+    TransformRegistry,
 };
 pub use wasm::{shared_host, HookKind, WasmHost, WasmHostError};
 
@@ -81,7 +81,8 @@ pub enum TransformKind {
     ExtractDigits,
     SplitLast,
     IsPresent,
-    SelectEvalFileBySize,
+    DegreesToHms,
+    DegreesToDms,
     RegexExtract,
     #[serde(other)]
     Unknown,
@@ -103,7 +104,8 @@ impl TransformKind {
             Self::ExtractDigits => "extract_digits",
             Self::SplitLast => "split_last",
             Self::IsPresent => "is_present",
-            Self::SelectEvalFileBySize => "select_eval_file_by_size",
+            Self::DegreesToHms => "degrees_to_hms",
+            Self::DegreesToDms => "degrees_to_dms",
             Self::RegexExtract => "regex_extract",
             Self::Unknown => "unknown",
         }
@@ -126,7 +128,8 @@ impl From<&str> for TransformKind {
             "extract_digits" => Self::ExtractDigits,
             "split_last" => Self::SplitLast,
             "is_present" => Self::IsPresent,
-            "select_eval_file_by_size" => Self::SelectEvalFileBySize,
+            "degrees_to_hms" => Self::DegreesToHms,
+            "degrees_to_dms" => Self::DegreesToDms,
             "regex_extract" => Self::RegexExtract,
             _ => Self::Unknown,
         }
@@ -200,6 +203,8 @@ pub struct ProjectConfig {
     pub metadata: ProjectMetadata,
     #[serde(default)]
     pub adapters: AdapterConfig,
+    #[serde(default)]
+    pub staging: StagingConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphConfig>,
     #[serde(default)]
@@ -230,6 +235,7 @@ impl Default for ProjectConfig {
                 description: None,
             },
             adapters: AdapterConfig::default(),
+            staging: StagingConfig::default(),
             graph: None,
             discovery: DiscoveryConfig::default(),
             manifest: None,
@@ -283,8 +289,44 @@ pub struct AdapterConfig {
     pub casda_tap_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vizier_tap_url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endpoints: BTreeMap<String, TapEndpointConfig>,
     #[serde(default)]
     pub tap: TapConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TapEndpointConfig {
+    pub url: String,
+    #[serde(default)]
+    pub mode: TapEndpointMode,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TapEndpointMode {
+    #[default]
+    SyncGet,
+    SyncPost,
+    AsyncJob,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StagingConfig {
+    #[serde(default)]
+    pub provider: StagingProvider,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StagingProvider {
+    #[default]
+    None,
+    CasdaUws,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -338,6 +380,33 @@ pub struct DiscoveryQuery {
     pub template: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id_transform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_each: Option<QueryIteration>,
+    #[serde(default)]
+    pub result: QueryResultPolicy,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryIteration {
+    /// Prepared field-map target used to derive distinct iteration values.
+    pub field: String,
+    /// Template variable populated for each value. Defaults to `field`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variable: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryResultPolicy {
+    #[default]
+    Many,
+    First,
+    ExactlyOne,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -349,6 +418,8 @@ pub struct PrepareMetadataConfig {
     pub discovery_flags: BTreeMap<String, MappingSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<SignatureConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -378,11 +449,29 @@ pub struct ManifestConfig {
     #[serde(default)]
     pub source_template: ManifestTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dataset_template: Option<ManifestTemplate>,
+    pub record_template: Option<ManifestTemplate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand_from: Option<String>,
+    #[serde(default = "default_groups_output_field")]
+    pub groups_output_field: String,
+    #[serde(default = "default_group_key_output_field")]
+    pub group_key_output_field: String,
+    #[serde(default = "default_records_output_field")]
+    pub records_output_field: String,
     #[serde(default = "default_manifest_path")]
     pub path: String,
+}
+
+fn default_groups_output_field() -> String {
+    "groups".into()
+}
+
+fn default_group_key_output_field() -> String {
+    "group_key".into()
+}
+
+fn default_records_output_field() -> String {
+    "records".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -698,6 +787,22 @@ impl ProjectConfig {
                 ));
             }
         }
+        for (name, endpoint) in &self.adapters.endpoints {
+            if name.trim().is_empty() {
+                errors.push(ValidationDiagnostic::error(
+                    "adapters.endpoints",
+                    "required",
+                    "adapter endpoint names must be non-empty",
+                ));
+            }
+            if endpoint.url.trim().is_empty() {
+                errors.push(ValidationDiagnostic::error(
+                    format!("adapters.endpoints.{name}.url"),
+                    "required",
+                    "adapter endpoint URLs must be non-empty",
+                ));
+            }
+        }
         if self.adapters.tap.timeout_seconds == 0 {
             errors.push(ValidationDiagnostic::error(
                 "adapters.tap.timeout_seconds",
@@ -753,6 +858,19 @@ impl ProjectConfig {
             }
         }
         if let Some(execution) = &self.automation.execution {
+            if execution.enabled
+                && !self
+                    .adapters
+                    .required
+                    .iter()
+                    .any(|adapter| adapter == &execution.archive_name)
+            {
+                errors.push(ValidationDiagnostic::error(
+                    "automation.execution.archive_name",
+                    "unknown_adapter",
+                    "automation.execution.archive_name must name an adapter in adapters.required",
+                ));
+            }
             if execution.max_sources_per_execution <= 0 {
                 errors.push(ValidationDiagnostic::error(
                     "automation.execution.max_sources_per_execution",
@@ -901,6 +1019,33 @@ impl ProjectConfig {
                         ));
                     }
                 }
+                if collection == "enrichments" && query.for_each.is_none() {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("discovery.{collection}[{index}].for_each"),
+                        "required",
+                        "enrichment queries must declare their iteration field",
+                    ));
+                }
+                if let Some(iteration) = &query.for_each {
+                    if iteration.field.trim().is_empty() {
+                        errors.push(ValidationDiagnostic::error(
+                            format!("discovery.{collection}[{index}].for_each.field"),
+                            "required",
+                            "query iteration field must be non-empty",
+                        ));
+                    }
+                    if iteration
+                        .variable
+                        .as_deref()
+                        .is_some_and(|value| value.trim().is_empty())
+                    {
+                        errors.push(ValidationDiagnostic::error(
+                            format!("discovery.{collection}[{index}].for_each.variable"),
+                            "required",
+                            "query iteration variable must be non-empty when set",
+                        ));
+                    }
+                }
             }
         }
         if let Some(identity) = &self.source_identity {
@@ -940,6 +1085,24 @@ impl ProjectConfig {
         errors.extend(validate_transform_refs(self));
         errors.extend(validate_graph_patches(self));
         if let Some(prepare) = &self.discovery.prepare_metadata {
+            for required in ["group_key", "record_id"] {
+                if !prepare.field_map.contains_key(required) {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("discovery.prepare_metadata.field_map.{required}"),
+                        "required",
+                        format!("prepared metadata must define the generic '{required}' identity"),
+                    ));
+                }
+            }
+            for (index, field) in prepare.required_fields.iter().enumerate() {
+                if field.trim().is_empty() {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("discovery.prepare_metadata.required_fields[{index}]"),
+                        "required",
+                        "required prepared-metadata fields must be non-empty",
+                    ));
+                }
+            }
             if let Some(sig) = &prepare.signature {
                 for (i, field) in sig.exclude_fields.iter().enumerate() {
                     if field.trim().is_empty() {
@@ -949,6 +1112,28 @@ impl ProjectConfig {
                             "signature exclude fields must be non-empty",
                         ));
                     }
+                }
+            }
+        }
+        if let Some(manifest) = &self.manifest {
+            let output_fields = [
+                ("groups_output_field", manifest.groups_output_field.as_str()),
+                (
+                    "group_key_output_field",
+                    manifest.group_key_output_field.as_str(),
+                ),
+                (
+                    "records_output_field",
+                    manifest.records_output_field.as_str(),
+                ),
+            ];
+            for (field, value) in output_fields {
+                if value.trim().is_empty() {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("manifest.{field}"),
+                        "required",
+                        format!("manifest.{field} must be non-empty"),
+                    ));
                 }
             }
         }
@@ -1143,7 +1328,7 @@ fn default_claim_ttl_minutes() -> i64 {
 }
 
 fn default_archive_name() -> String {
-    "casda".into()
+    "none".into()
 }
 
 fn default_max_sources_per_execution() -> i64 {
@@ -1201,13 +1386,14 @@ kind: ProjectConfig
 metadata:
   id: legacy
 adapters:
-  required: [casda]
+  required: [catalog]
 discovery:
   prepare_metadata:
     field_map:
-      sbid:
-        from: obs_id
-        transform: extract_askap_sbid
+      group_key:
+        from: collection_id
+      record_id:
+        from: object_id
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         let report = config.validate_report();
@@ -1223,19 +1409,24 @@ kind: ProjectConfig
 metadata:
   id: chain-test
 adapters:
-  required: [casda]
+  required: [catalog]
+  endpoints:
+    catalog:
+      url: https://catalog.example.test/tap
 definitions:
   transforms:
-    askap_sbid:
+    digits:
       kind: extract_digits
     trim:
       kind: trim
 discovery:
   prepare_metadata:
     field_map:
-      sbid:
+      group_key:
         from: obs_id
-        transform: [askap_sbid, trim]
+        transform: [digits, trim]
+      record_id:
+        from: filename
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         assert!(config.validate_report().valid);

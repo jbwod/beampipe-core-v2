@@ -320,7 +320,7 @@ fn apply_operation_docs(spec: &mut Value) {
         ("get", "/api/v2/sources/{id}/status", "Source execution status", "Readiness and blockers for execution scheduling."),
         ("get", "/api/v2/sources/{id}/metadata", "Source archive metadata", "Persisted discovery metadata for a source."),
         ("get", "/api/v2/sources/{id}/executions", "List executions for source", "Executions that include this source."),
-        ("post", "/api/v2/executions/prepare", "Prepare execution", "Validate sources and preview datasets without creating a ledger row."),
+        ("post", "/api/v2/executions/prepare", "Prepare execution", "Validate sources and preview discovered records without creating a ledger row."),
         ("post", "/api/v2/executions", "Create execution", "Create a batch execution ledger record."),
         ("get", "/api/v2/executions", "List executions", "Filter executions by project module and status."),
         ("get", "/api/v2/executions/{id}", "Get execution", "Full execution record including manifest and scheduler fields."),

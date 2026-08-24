@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 pub struct SourceSpec {
     pub source_identifier: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sbids: Option<Vec<String>>,
+    pub groups: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -21,26 +21,28 @@ pub struct RegisteredSourceReadiness {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct ArchiveMetadataReadiness {
-    pub sbid: String,
+    pub group_key: String,
     pub metadata_json: Option<Value>,
 }
 
-pub fn filter_archive_rows_by_sbids<'a>(
+pub fn filter_archive_rows_by_groups<'a>(
     rows: &'a [ArchiveMetadataReadiness],
-    sbids: Option<&[String]>,
+    groups: Option<&[String]>,
 ) -> Vec<&'a ArchiveMetadataReadiness> {
-    let Some(sbids) = sbids else {
+    let Some(groups) = groups else {
         return rows.iter().collect();
     };
-    if sbids.is_empty() {
+    if groups.is_empty() {
         return rows.iter().collect();
     }
-    rows.iter().filter(|r| sbids.contains(&r.sbid)).collect()
+    rows.iter()
+        .filter(|row| groups.contains(&row.group_key))
+        .collect()
 }
 
 pub fn parsed_source_readiness_error(
     sid: &str,
-    sbids: Option<&[String]>,
+    groups: Option<&[String]>,
     registered: Option<&RegisteredSourceReadiness>,
     rows: &[ArchiveMetadataReadiness],
 ) -> Option<String> {
@@ -73,10 +75,10 @@ pub fn parsed_source_readiness_error(
         ));
     }
 
-    let metadata = filter_archive_rows_by_sbids(rows, sbids);
+    let metadata = filter_archive_rows_by_groups(rows, groups);
     if metadata.is_empty() {
-        let hint = sbids
-            .map(|s| format!(" (SBIDs: {s:?})"))
+        let hint = groups
+            .map(|selected| format!(" (groups: {selected:?})"))
             .unwrap_or_default();
         return Some(format!(
             "Source {sid} has no discovered metadata{hint}. Run discovery first (POST /api/v2/sources/discover)."
@@ -133,7 +135,7 @@ pub fn source_execution_status(
     workflow_run_pending: bool,
     workflow_run_pending_at: Option<DateTime<Utc>>,
     metadata_rows: &[ArchiveMetadataReadiness],
-    sbids: Option<&[String]>,
+    groups: Option<&[String]>,
 ) -> SourceExecutionStatus {
     let registered = RegisteredSourceReadiness {
         enabled,
@@ -156,7 +158,8 @@ pub fn source_execution_status(
         && registered.discovery_claim_token.is_none();
 
     let mut blockers = Vec::new();
-    if let Some(err) = parsed_source_readiness_error(sid, sbids, Some(&registered), metadata_rows) {
+    if let Some(err) = parsed_source_readiness_error(sid, groups, Some(&registered), metadata_rows)
+    {
         blockers.push(err);
     }
     if signature_matches_last_execution {
@@ -217,7 +220,7 @@ mod tests {
     #[test]
     fn signature_match_blocks_ready() {
         let rows = vec![ArchiveMetadataReadiness {
-            sbid: "123".into(),
+            group_key: "123".into(),
             metadata_json: Some(json!({"discovery_flags": {"ok": true}})),
         }];
         let status = source_execution_status(
@@ -243,7 +246,7 @@ mod tests {
     #[test]
     fn ready_source_returns_none() {
         let rows = vec![ArchiveMetadataReadiness {
-            sbid: "123".into(),
+            group_key: "123".into(),
             metadata_json: Some(json!({"discovery_flags": {"ok": true}})),
         }];
         assert!(parsed_source_readiness_error("S", None, Some(&reg()), &rows).is_none());
@@ -257,14 +260,14 @@ mod tests {
     }
 
     #[test]
-    fn sbid_filter_must_match() {
+    fn group_filter_must_match() {
         let rows = vec![ArchiveMetadataReadiness {
-            sbid: "123".into(),
+            group_key: "123".into(),
             metadata_json: Some(json!({})),
         }];
-        let sbids = vec!["456".to_string()];
+        let groups = vec!["456".to_string()];
         assert!(
-            parsed_source_readiness_error("S", Some(&sbids), Some(&reg()), &rows)
+            parsed_source_readiness_error("S", Some(&groups), Some(&reg()), &rows)
                 .unwrap()
                 .contains("no discovered metadata")
         );
@@ -273,7 +276,7 @@ mod tests {
     #[test]
     fn string_and_numeric_flags_use_python_truthiness() {
         let rows = vec![ArchiveMetadataReadiness {
-            sbid: "123".into(),
+            group_key: "123".into(),
             metadata_json: Some(json!({
                 "discovery_flags": {
                     "ra_dec_vsys_complete": true,
@@ -289,7 +292,7 @@ mod tests {
     #[test]
     fn bad_flags_block_execution() {
         let rows = vec![ArchiveMetadataReadiness {
-            sbid: "123".into(),
+            group_key: "123".into(),
             metadata_json: Some(json!({"discovery_flags": {"ra_dec_vsys_complete": false}})),
         }];
         assert!(

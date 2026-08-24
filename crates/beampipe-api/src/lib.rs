@@ -113,10 +113,16 @@ pub struct AppState {
         beampipe_domain::ExecutionRetryStage,
         beampipe_project::ProjectMetadata,
         beampipe_project::AdapterConfig,
+        beampipe_project::TapEndpointConfig,
+        beampipe_project::TapEndpointMode,
         beampipe_project::TapConfig,
+        beampipe_project::StagingConfig,
+        beampipe_project::StagingProvider,
         beampipe_project::GraphConfig,
         beampipe_project::DiscoveryConfig,
         beampipe_project::DiscoveryQuery,
+        beampipe_project::QueryIteration,
+        beampipe_project::QueryResultPolicy,
         beampipe_project::PrepareMetadataConfig,
         beampipe_project::SignatureConfig,
         beampipe_project::ManifestConfig,
@@ -146,6 +152,9 @@ pub struct AppState {
         beampipe_profiles::RestRemoteDeploymentConfig,
         beampipe_profiles::SlurmRemoteDeploymentConfig,
         beampipe_profiles::SlurmResourceConfig,
+        beampipe_profiles::SlurmRuntimeContractConfig,
+        beampipe_profiles::SlurmRuntimeEnvironmentRequirement,
+        beampipe_profiles::SlurmRuntimeEnvironmentKind,
         beampipe_profiles::DaliugeManagerTopologyConfig,
         SourceExecutionStatus,
         observability::NotificationChannelCreate, observability::NotificationChannelUpdate,
@@ -2074,7 +2083,7 @@ pub struct ArchiveMetadataResponse {
     pub uuid: Uuid,
     pub project_module: String,
     pub source_identifier: String,
-    pub sbid: String,
+    pub group_key: String,
     pub metadata_json: Option<Value>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: Option<chrono::DateTime<Utc>>,
@@ -2086,7 +2095,7 @@ impl From<ArchiveMetadataRow> for ArchiveMetadataResponse {
             uuid: row.uuid,
             project_module: row.project_module,
             source_identifier: row.source_identifier,
-            sbid: row.sbid,
+            group_key: row.group_key,
             metadata_json: row.metadata_json.map(|v| redact_value(&v)),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -2237,7 +2246,7 @@ async fn get_source_status(
     let metadata: Vec<ArchiveMetadataReadiness> = metadata_rows
         .iter()
         .map(|r| ArchiveMetadataReadiness {
-            sbid: r.sbid.clone(),
+            group_key: r.group_key.clone(),
             metadata_json: r.metadata_json.clone(),
         })
         .collect();
@@ -2327,7 +2336,7 @@ async fn list_source_executions(
 pub struct ExecutionSourceSelection {
     pub source_identifier: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sbids: Option<Vec<String>>,
+    pub groups: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -2411,7 +2420,7 @@ pub struct ExecutionPrepareResponse {
     pub project_module: String,
     pub valid: bool,
     pub errors: Vec<String>,
-    pub total_datasets: usize,
+    pub total_records: usize,
     pub sources_preview: Vec<Value>,
 }
 
@@ -2514,27 +2523,27 @@ async fn validate_execution_admission(
             errors.push(format!("source '{sid}' is selected more than once"));
             continue;
         }
-        let normalized_sbids = selection.sbids.as_ref().map(|sbids| {
-            sbids
+        let normalized_groups = selection.groups.as_ref().map(|groups| {
+            groups
                 .iter()
-                .map(|sbid| sbid.trim().to_string())
+                .map(|group| group.trim().to_string())
                 .collect::<Vec<_>>()
         });
-        if let Some(sbids) = normalized_sbids.as_ref() {
-            if sbids.is_empty() || sbids.iter().any(|sbid| sbid.trim().is_empty()) {
+        if let Some(groups) = normalized_groups.as_ref() {
+            if groups.is_empty() || groups.iter().any(|group| group.trim().is_empty()) {
                 errors.push(format!(
-                    "sources[{index}].sbids must contain at least one non-empty SBID when set"
+                    "sources[{index}].groups must contain at least one non-empty group when set"
                 ));
             }
-            let unique = sbids.iter().collect::<std::collections::BTreeSet<_>>();
-            if unique.len() != sbids.len() {
-                errors.push(format!("sources[{index}].sbids contains duplicates"));
+            let unique = groups.iter().collect::<std::collections::BTreeSet<_>>();
+            if unique.len() != groups.len() {
+                errors.push(format!("sources[{index}].groups contains duplicates"));
             }
         }
         sids.push(sid.to_string());
         normalized_sources.push(ExecutionSourceSelection {
             source_identifier: sid.to_string(),
-            sbids: normalized_sbids,
+            groups: normalized_groups,
         });
     }
 
@@ -2682,7 +2691,7 @@ async fn validate_execution_admission(
 
     let rows = repo::list_archive_metadata_for_sources(pool, project_module, &sids).await?;
     let mut preview = Vec::new();
-    let mut total_datasets = 0usize;
+    let mut total_records = 0usize;
 
     for selection in &normalized_sources {
         let sid = selection.source_identifier.trim();
@@ -2706,21 +2715,21 @@ async fn validate_execution_admission(
             .iter()
             .filter(|r| {
                 r.source_identifier == sid
-                    && selection.sbids.as_ref().is_none_or(|selected| {
+                    && selection.groups.as_ref().is_none_or(|selected| {
                         selected
                             .iter()
-                            .any(|selected_sbid| selected_sbid == &r.sbid)
+                            .any(|selected_group| selected_group == &r.group_key)
                     })
             })
             .map(|r| ArchiveMetadataReadiness {
-                sbid: r.sbid.clone(),
+                group_key: r.group_key.clone(),
                 metadata_json: r.metadata_json.clone(),
             })
             .collect();
-        if let Some(selected) = selection.sbids.as_ref() {
-            for sbid in selected {
-                if !metadata.iter().any(|item| &item.sbid == sbid) {
-                    errors.push(format!("source '{sid}' has no discovered SBID '{sbid}'"));
+        if let Some(selected) = selection.groups.as_ref() {
+            for group in selected {
+                if !metadata.iter().any(|item| &item.group_key == group) {
+                    errors.push(format!("source '{sid}' has no discovered group '{group}'"));
                 }
             }
         }
@@ -2728,16 +2737,16 @@ async fn validate_execution_admission(
             errors.push(err);
             continue;
         }
-        let dataset_count = metadata
+        let record_count = metadata
             .iter()
             .filter_map(|m| m.metadata_json.as_ref())
-            .map(dataset_count_from_metadata_json)
+            .map(record_count_from_metadata_json)
             .sum::<usize>();
-        total_datasets += dataset_count;
+        total_records += record_count;
         preview.push(json!({
             "source_identifier": sid,
-            "sbid_count": metadata.len(),
-            "dataset_count": dataset_count,
+            "group_count": metadata.len(),
+            "record_count": record_count,
         }));
     }
 
@@ -2746,7 +2755,7 @@ async fn validate_execution_admission(
             project_module: req.project_module.clone(),
             valid: errors.is_empty(),
             errors,
-            total_datasets,
+            total_records,
             sources_preview: preview,
         },
         deployment_profile_id: profile.map(|profile| profile.uuid),
@@ -2789,8 +2798,8 @@ fn canonical_execution_create(req: &ExecutionCreate) -> Value {
         "project_module": req.project_module.trim(),
         "sources": req.sources.iter().map(|source| json!({
             "source_identifier": source.source_identifier.trim(),
-            "sbids": source.sbids.as_ref().map(|sbids| {
-                sbids.iter().map(|sbid| sbid.trim()).collect::<Vec<_>>()
+            "groups": source.groups.as_ref().map(|groups| {
+                groups.iter().map(|group| group.trim()).collect::<Vec<_>>()
             }),
         })).collect::<Vec<_>>(),
         "archive_name": req.archive_name.trim(),
@@ -4521,9 +4530,9 @@ fn source_identifiers_from_json(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn dataset_count_from_metadata_json(value: &Value) -> usize {
+fn record_count_from_metadata_json(value: &Value) -> usize {
     value
-        .get("datasets")
+        .get("records")
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0)
@@ -4725,7 +4734,7 @@ adapters:
             project_module: " wallaby_hires ".into(),
             sources: vec![ExecutionSourceSelection {
                 source_identifier: " source-1 ".into(),
-                sbids: Some(vec![" 123 ".into()]),
+                groups: Some(vec![" group-a ".into()]),
             }],
             archive_name: " casda ".into(),
             deployment_profile_id: None,
@@ -4735,7 +4744,7 @@ adapters:
             project_module: "wallaby_hires".into(),
             sources: vec![ExecutionSourceSelection {
                 source_identifier: "source-1".into(),
-                sbids: Some(vec!["123".into()]),
+                groups: Some(vec!["group-a".into()]),
             }],
             archive_name: "casda".into(),
             deployment_profile_id: None,

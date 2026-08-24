@@ -2,12 +2,10 @@ apiVersion: beampipe.dev/v2
 kind: ProjectConfig
 metadata:
   id: minimal_survey
-  description: Generic single-archive survey
+  description: Project-neutral catalog and manifest example
 
 definitions:
   transforms:
-    has_rows:
-      kind: is_present
     trim:
       kind: trim
     lowercase:
@@ -23,36 +21,53 @@ source_identity:
 
 adapters:
   required:
-    - casda
+    - catalog
+  endpoints:
+    catalog:
+      url: https://catalog.example.invalid/tap
+      mode: sync_post
   tap:
     timeout_seconds: 60
     retries: 1
 
+staging:
+  provider: none
+
+graph:
+  path: config/examples/neutral_demo.graph
+  sha256: f1feee266fcdbdc7006e090533b94ec3d8bee14d91b11b7b9dcb22bcc8ef21c3
+
 discovery:
   queries:
-    - name: visibility
-      adapter: casda
+    - name: records
+      adapter: catalog
       template: |
-        SELECT o.* FROM ivoa.obscore o
-        WHERE o.filename LIKE '{source_identifier}%'
+        SELECT object_id, collection_id, access_url
+        FROM project_records
+        WHERE source_id = '{source_identifier}'
   prepare_metadata:
     field_map:
       source_identifier:
         from: source_identifier
-      dataset_id:
-        from: filename
-      visibility_filename:
-        from: filename
-    discovery_flags:
-      visibility_complete:
-        from: enrichments.visibility
-        transform: has_rows
+      group_key:
+        from: collection_id
+      record_id:
+        from: object_id
+    required_fields:
+      - access_url
 
 manifest:
   group_by:
     - source_identifier
   source_template:
     source_identifier: "{source_identifier}"
+  record_template:
+    record_id: "{record_id}"
+    access_url: "{access_url}"
+
+output_verification:
+  required: true
+  inventory_schema: beampipe-output-inventory/v1
 
 automation:
   discovery:

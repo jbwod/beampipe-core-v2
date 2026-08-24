@@ -417,7 +417,7 @@ enum ExecutionCommand {
 enum GraphCommand {
     /// Build a manifest and patched graph without submitting external work.
     Prepare {
-        #[arg(long, default_value = "wallaby_hires")]
+        #[arg(long)]
         project: String,
         #[arg(long, required = true, num_args = 1..)]
         source: Vec<String>,
@@ -578,11 +578,11 @@ enum SlurmCredentialsCommand {
 
 #[derive(Debug, Subcommand)]
 enum BenchCommand {
-    /// Benchmark CASDA/Vizier TAP and full discover_source for one source.
+    /// Benchmark the configured project discovery pipeline for one source.
     Tap {
-        #[arg(long, default_value = "HIPASSJ1313-15")]
+        #[arg(long)]
         source: String,
-        #[arg(long, default_value = "config/wallaby_hires.v2.yaml")]
+        #[arg(long)]
         config: PathBuf,
         #[arg(long, default_value_t = 3)]
         runs: u32,

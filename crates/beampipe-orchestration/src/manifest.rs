@@ -8,28 +8,28 @@ use std::collections::BTreeMap;
 pub fn build_manifest_from_config(
     config: &ProjectConfig,
     metadata: &[Value],
-    exclude_sbids: &[String],
+    exclude_groups: &[String],
 ) -> Result<Value, OrchestrationError> {
-    build_manifest_from_config_with_staging(config, metadata, exclude_sbids, &json!({}))
+    build_manifest_from_config_with_staging(config, metadata, exclude_groups, &json!({}))
 }
 
 pub fn build_manifest_from_config_with_staging(
     config: &ProjectConfig,
     metadata: &[Value],
-    exclude_sbids: &[String],
+    exclude_groups: &[String],
     staging: &Value,
 ) -> Result<Value, OrchestrationError> {
     if let Some(manifest_cfg) = config.manifest.as_ref() {
-        build_from_manifest_config(manifest_cfg, metadata, exclude_sbids, staging)
+        build_from_manifest_config(manifest_cfg, metadata, exclude_groups, staging)
     } else {
-        crate::build_wallaby_manifest(metadata)
+        crate::build_generic_manifest(metadata)
     }
 }
 
 fn build_from_manifest_config(
     cfg: &ManifestConfig,
     metadata: &[Value],
-    exclude_sbids: &[String],
+    exclude_groups: &[String],
     staging: &Value,
 ) -> Result<Value, OrchestrationError> {
     let mut grouped: BTreeMap<String, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
@@ -46,26 +46,26 @@ fn build_from_manifest_config(
             })
             .collect();
         let group_key = keys.join("\0");
-        let sbid_key = record
-            .get("sbid")
+        let collection_key = record
+            .get("group_key")
             .map(value_key)
             .filter(|v| v != "0" && !v.is_empty())
             .unwrap_or_else(|| "0".into());
-        if sbid_key == "0" || exclude_sbids.iter().any(|s| s == &sbid_key) {
+        if collection_key == "0" || exclude_groups.iter().any(|value| value == &collection_key) {
             continue;
         }
         grouped
             .entry(group_key)
             .or_default()
-            .entry(sbid_key)
+            .entry(collection_key)
             .or_default()
             .push(record.clone());
     }
 
     let mut sources = Vec::new();
-    let mut total_datasets = 0usize;
-    for (_group, by_sbid) in grouped {
-        let first = by_sbid
+    let mut total_records = 0usize;
+    for (_group, by_collection) in grouped {
+        let first = by_collection
             .values()
             .flatten()
             .next()
@@ -75,14 +75,14 @@ fn build_from_manifest_config(
             .get("source_identifier")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        let mut sbids = Vec::new();
-        for (sbid, datasets) in by_sbid {
-            total_datasets += datasets.len();
+        let mut collections = Vec::new();
+        for (collection_key, records) in by_collection {
+            total_records += records.len();
             let rendered: Vec<Value> = if cfg.expand_from.as_deref() == Some("metadata") {
-                datasets
+                records
                     .iter()
                     .map(|record| {
-                        if let Some(template) = cfg.dataset_template.as_ref() {
+                        if let Some(template) = cfg.record_template.as_ref() {
                             render_manifest_template(template, record, staging)
                         } else {
                             record.clone()
@@ -90,32 +90,27 @@ fn build_from_manifest_config(
                     })
                     .collect()
             } else {
-                datasets.clone()
+                records.clone()
             };
-            sbids.push(json!({"sbid": sbid, "datasets": rendered}));
+            let mut collection = Map::new();
+            collection.insert(
+                cfg.group_key_output_field.clone(),
+                Value::String(collection_key),
+            );
+            collection.insert(cfg.records_output_field.clone(), Value::Array(rendered));
+            collections.push(Value::Object(collection));
         }
         let mut source_obj = render_manifest_template(&cfg.source_template, &first, staging);
         if let Some(obj) = source_obj.as_object_mut() {
             obj.insert("source_identifier".into(), json!(source_id));
-            obj.insert("sbids".into(), json!(sbids));
+            obj.insert(cfg.groups_output_field.clone(), json!(collections));
         }
         sources.push(source_obj);
     }
-    if total_datasets == 0 {
-        return Err(OrchestrationError::NoUsableDatasets);
+    if total_records == 0 {
+        return Err(OrchestrationError::NoUsableRecords);
     }
-    let mut manifest = json!({"inputs": {}, "sources": sources});
-    apply_graph_patches_to_manifest(&mut manifest, cfg, total_datasets);
-    Ok(manifest)
-}
-
-fn apply_graph_patches_to_manifest(manifest: &mut Value, _cfg: &ManifestConfig, total: usize) {
-    manifest["graph_overrides"] = json!({
-        "patches": [{
-            "match": {"equals": "Scatter/GenericScatterApp/Beam"},
-            "fields": [{"name": "num_of_copies", "value": total}]
-        }]
-    });
+    Ok(json!({"inputs": {}, "sources": sources}))
 }
 
 pub fn apply_project_graph_patches(manifest: &mut Value, config: &ProjectConfig) {
@@ -149,7 +144,7 @@ pub fn apply_project_graph_patches(manifest: &mut Value, config: &ProjectConfig)
     }
 }
 
-/// Expression context for YAML graph_patches (Wallaby uses per-source sbids).
+/// Expression context for project-defined YAML graph patches.
 fn graph_patch_expression_context(manifest: &Value) -> Cow<'_, Value> {
     manifest
         .get("sources")

@@ -16,6 +16,10 @@ definitions:
       separators: ["/", ":", "#"]
     has_rows:
       kind: is_present
+    ra_hms:
+      kind: degrees_to_hms
+    dec_dms:
+      kind: degrees_to_dms
     normalized_sbid:
       kind: chain
       steps: [askap_sbid, trim]
@@ -38,6 +42,9 @@ adapters:
     timeout_seconds: 90
     retries: 2
 
+staging:
+  provider: casda_uws
+
 graph:
   # Vendored from wallaby-hires-beampipe release commit d38286095073a7ef21b759143ab91019187bcbc0.
   path: config/graphs/wallaby-hires_deploy-setonix-beampipe.graph
@@ -58,12 +65,19 @@ discovery:
         AND o.obs_collection IN ('ASKAP Pilot Survey for WALLABY', 'WALLABY')
     - name: ra_dec_vsys
       adapter: vizier
+      result: exactly_one
+      required: true
       template: |
         SELECT HIPASS, RAJ2000, DEJ2000, RV50max, RV50min, RVmom
         FROM "VIII/73/hicat" WHERE HIPASS = '{source_name}'
   enrichments:
-    - name: sbid_to_eval_file
+    - name: calibration_metadata
       adapter: casda
+      for_each:
+        field: group_key
+        variable: sbid
+      result: exactly_one
+      required: true
       template: |
         SELECT * FROM casda.observation_evaluation_file
         WHERE sbid = '{sbid}'
@@ -73,20 +87,37 @@ discovery:
     field_map:
       source_identifier:
         from: source_identifier
-      dataset_id:
+      record_id:
         from: filename
       visibility_filename:
         from: filename
-      sbid:
+      group_key:
         from: obs_id
         transform: normalized_sbid
-      scan_id:
+      staging_id:
         from: obs_publisher_did
         transform: scan_id_from_did
+      group_artifact_filename:
+        from: enrichments.calibration_metadata.filename
+      group_artifact_access_url:
+        from: enrichments.calibration_metadata.access_url
     discovery_flags:
       ra_dec_vsys_complete:
         from: enrichments.ra_dec_vsys
         transform: has_rows
+      ra_string:
+        from: enrichments.ra_dec_vsys.RAJ2000
+        transform: ra_hms
+      dec_string:
+        from: enrichments.ra_dec_vsys.DEJ2000
+        transform: dec_dms
+      vsys:
+        from: enrichments.ra_dec_vsys.RVmom
+    required_fields:
+      - access_url
+      - staging_id
+      - group_artifact_filename
+      - group_artifact_access_url
     signature:
       exclude_fields:
         - access_url
@@ -99,12 +130,28 @@ discovery:
 manifest:
   group_by:
     - source_identifier
-    - sbid
+  groups_output_field: sbids
+  group_key_output_field: sbid
+  records_output_field: datasets
+  expand_from: metadata
   source_template:
     source_identifier: "{source_identifier}"
     ra_string: "{flags.ra_string}"
     dec_string: "{flags.dec_string}"
     vsys: "{flags.vsys}"
+  record_template:
+    source_identifier: "{source_identifier}"
+    sbid: "{group_key}"
+    dataset_id: "{record_id}"
+    visibility_filename: "{visibility_filename}"
+    scan_id: "{staging_id}"
+    access_url: "{access_url}"
+    data_url: "{staged_url}"
+    checksum_url: "{staged_checksum_url}"
+    evaluation_file: "{group_artifact_filename}"
+    evaluation_file_access_url: "{group_artifact_access_url}"
+    evaluation_file_url: "{group_staged_url}"
+    evaluation_file_checksum_url: "{group_checksum_url}"
 
 graph_patches:
   - match:

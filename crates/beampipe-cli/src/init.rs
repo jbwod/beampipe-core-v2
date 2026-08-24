@@ -150,7 +150,7 @@ worker:
   submission_timeout_seconds: 1800
   scheduler_enabled: true
   capabilities:
-    - casda-discovery
+    - discovery
     - manifest-generation
     - daliuge-translation
     - daliuge-deployment
@@ -191,7 +191,7 @@ worker:
   submission_timeout_seconds: 1800
   scheduler_enabled: true
   capabilities:
-    - casda-discovery
+    - discovery
     - manifest-generation
     - daliuge-translation
     - daliuge-deployment

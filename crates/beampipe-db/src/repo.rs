@@ -6,9 +6,9 @@ use crate::models::{
 };
 use beampipe_domain::{
     discovery::{
-        discovery_signature, existing_signature_from_records, group_metadata_by_sbid,
-        metadata_payload_by_sbid, metadata_storage_payload_by_sbid, no_datasets_payload,
-        no_datasets_signature, validate_prepared_metadata_records, DiscoveryBatchStats,
+        discovery_signature, existing_signature_from_records, group_metadata_by_group_key,
+        metadata_payload_by_group, metadata_storage_payload_by_group, no_records_payload,
+        no_records_signature, validate_prepared_metadata_records, DiscoveryBatchStats,
         DiscoverySourceResult, SignatureOptions,
     },
     plan_execution_retry,
@@ -171,7 +171,7 @@ pub async fn list_source_metadata(
         SELECT *
         FROM archive_metadata
         WHERE project_module = $1 AND source_identifier = $2
-        ORDER BY sbid ASC, created_at ASC
+        ORDER BY group_key ASC, created_at ASC
         "#,
     )
     .bind(&source.project_module)
@@ -867,7 +867,7 @@ pub async fn partition_sources_ready_for_execution(
             .iter()
             .filter(|r| &r.source_identifier == sid)
             .map(|r| ArchiveMetadataReadiness {
-                sbid: r.sbid.clone(),
+                group_key: r.group_key.clone(),
                 metadata_json: r.metadata_json.clone(),
             })
             .collect();
@@ -924,32 +924,32 @@ pub fn parse_execution_source_scope(value: &Value) -> Result<ExecutionSourceScop
             })?
             .to_string();
 
-        let sbids = match object.get("sbids") {
+        let groups = match object.get("groups") {
             None | Some(Value::Null) => None,
             Some(value) => {
                 let values = value.as_array().ok_or_else(|| {
-                    format!("execution sources[{index}].sbids must be a JSON array when set")
+                    format!("execution sources[{index}].groups must be a JSON array when set")
                 })?;
                 if values.is_empty() {
                     return Err(format!(
-                        "execution sources[{index}].sbids must contain at least one SBID when set"
+                        "execution sources[{index}].groups must contain at least one group when set"
                     ));
                 }
                 let mut selected = BTreeSet::new();
-                for (sbid_index, sbid) in values.iter().enumerate() {
-                    let sbid = sbid
+                for (group_index, group) in values.iter().enumerate() {
+                    let group = group
                         .as_str()
                         .map(str::trim)
-                        .filter(|sbid| !sbid.is_empty())
+                        .filter(|group| !group.is_empty())
                         .ok_or_else(|| {
                             format!(
-                                "execution sources[{index}].sbids[{sbid_index}] must be a non-empty string"
+                                "execution sources[{index}].groups[{group_index}] must be a non-empty string"
                             )
                         })?
                         .to_string();
-                    if !selected.insert(sbid.clone()) {
+                    if !selected.insert(group.clone()) {
                         return Err(format!(
-                            "execution sources[{index}].sbids contains duplicate SBID '{sbid}'"
+                            "execution sources[{index}].groups contains duplicate group '{group}'"
                         ));
                     }
                 }
@@ -957,7 +957,7 @@ pub fn parse_execution_source_scope(value: &Value) -> Result<ExecutionSourceScop
             }
         };
 
-        if sources.insert(source_identifier.clone(), sbids).is_some() {
+        if sources.insert(source_identifier.clone(), groups).is_some() {
             return Err(format!(
                 "execution source '{source_identifier}' is selected more than once"
             ));
@@ -992,7 +992,7 @@ pub async fn execution_source_readiness_errors(
             .await?;
     let mut errors = Vec::new();
     let mut signatures = BTreeMap::new();
-    for (sid, sbids) in scope.sources {
+    for (sid, groups) in scope.sources {
         let registry = registry_rows
             .iter()
             .find(|row| row.source_identifier == sid);
@@ -1006,16 +1006,16 @@ pub async fn execution_source_readiness_errors(
             .iter()
             .filter(|row| row.source_identifier == sid)
             .map(|row| ArchiveMetadataReadiness {
-                sbid: row.sbid.clone(),
+                group_key: row.group_key.clone(),
                 metadata_json: row.metadata_json.clone(),
             })
             .collect();
-        let selected_sbids = sbids
+        let selected_groups = groups
             .as_ref()
             .map(|selected| selected.iter().cloned().collect::<Vec<_>>());
         if let Some(error) = parsed_source_readiness_error(
             &sid,
-            selected_sbids.as_deref(),
+            selected_groups.as_deref(),
             readiness.as_ref(),
             &metadata,
         ) {
@@ -1094,21 +1094,21 @@ pub async fn persist_discovery_results(
                 .await?
                 {
                     PersistOutcome::Changed {
-                        sbids, datasets, ..
+                        groups, records, ..
                     } => {
                         stats.changed_count += 1;
-                        stats.total_sbids += sbids;
-                        stats.total_datasets += datasets;
+                        stats.total_groups += groups;
+                        stats.total_records += records;
                         stats
                             .changed_source_identifiers
                             .push(source_identifier.clone());
                     }
                     PersistOutcome::Unchanged {
-                        sbids, datasets, ..
+                        groups, records, ..
                     } => {
                         stats.unchanged_count += 1;
-                        stats.total_sbids += sbids;
-                        stats.total_datasets += datasets;
+                        stats.total_groups += groups;
+                        stats.total_records += records;
                         checked.push(source_identifier.clone());
                     }
                     PersistOutcome::MissingRegistry => {
@@ -1116,17 +1116,16 @@ pub async fn persist_discovery_results(
                     }
                 }
             }
-            DiscoverySourceResult::NoDatasets {
+            DiscoverySourceResult::NoRecords {
                 source_identifier, ..
             } => {
-                if persist_no_datasets(pool, project_module, source_identifier, claim_token).await?
-                {
+                if persist_no_records(pool, project_module, source_identifier, claim_token).await? {
                     stats.changed_count += 1;
                 } else {
                     stats.unchanged_count += 1;
                     checked.push(source_identifier.clone());
                 }
-                stats.no_datasets_count += 1;
+                stats.no_records_count += 1;
             }
             DiscoverySourceResult::Unchanged {
                 source_identifier, ..
@@ -1197,7 +1196,7 @@ pub async fn persist_discovery_results(
             DiscoverySourceResult::HasMetadata {
                 source_identifier, ..
             }
-            | DiscoverySourceResult::NoDatasets {
+            | DiscoverySourceResult::NoRecords {
                 source_identifier, ..
             }
             | DiscoverySourceResult::Unchanged {
@@ -1216,8 +1215,8 @@ pub async fn persist_discovery_results(
 }
 
 enum PersistOutcome {
-    Changed { sbids: usize, datasets: usize },
-    Unchanged { sbids: usize, datasets: usize },
+    Changed { groups: usize, records: usize },
+    Unchanged { groups: usize, records: usize },
     MissingRegistry,
 }
 
@@ -1232,10 +1231,10 @@ async fn persist_changed_or_unchanged(
 ) -> Result<PersistOutcome, sqlx::Error> {
     validate_prepared_metadata_records(metadata)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    let grouped = group_metadata_by_sbid(metadata);
+    let grouped = group_metadata_by_group_key(metadata);
     let signature_payload =
-        metadata_payload_by_sbid(&grouped, Some(discovery_flags), Some(signature));
-    let storage_payload = metadata_storage_payload_by_sbid(&grouped, Some(discovery_flags));
+        metadata_payload_by_group(&grouped, Some(discovery_flags), Some(signature));
+    let storage_payload = metadata_storage_payload_by_group(&grouped, Some(discovery_flags));
     let new_sig = discovery_signature(&signature_payload);
     let mut tx = pool.begin().await?;
     let source: Option<(Uuid, Option<String>)> = sqlx::query_as(
@@ -1262,7 +1261,7 @@ async fn persist_changed_or_unchanged(
     } else {
         let records: Vec<(String, Value)> = sqlx::query_as(
             r#"
-            SELECT sbid, COALESCE(metadata_json, '{}'::jsonb)
+            SELECT group_key, COALESCE(metadata_json, '{}'::jsonb)
             FROM archive_metadata
             WHERE project_module = $1 AND source_identifier = $2
             "#,
@@ -1273,8 +1272,8 @@ async fn persist_changed_or_unchanged(
         .await?;
         existing_signature_from_records(&records, Some(signature))
     };
-    let sbids = storage_payload.len();
-    let datasets = metadata.len();
+    let groups = storage_payload.len();
+    let records = metadata.len();
     if existing_sig == new_sig {
         debug!(
             project_module,
@@ -1307,7 +1306,7 @@ async fn persist_changed_or_unchanged(
             &serde_json::json!({"signature_prefix": &new_sig[..16.min(new_sig.len())]}),
         )
         .await;
-        return Ok(PersistOutcome::Unchanged { sbids, datasets });
+        return Ok(PersistOutcome::Unchanged { groups, records });
     }
     info!(
         project_module,
@@ -1344,12 +1343,12 @@ async fn persist_changed_or_unchanged(
         Some(claim_token),
         &serde_json::json!({
             "signature": new_sig,
-            "sbids": sbids,
-            "datasets": datasets,
+            "groups": groups,
+            "records": records,
         }),
     )
     .await;
-    Ok(PersistOutcome::Changed { sbids, datasets })
+    Ok(PersistOutcome::Changed { groups, records })
 }
 
 async fn synchronize_archive_metadata(
@@ -1358,33 +1357,33 @@ async fn synchronize_archive_metadata(
     source_identifier: &str,
     payload: &BTreeMap<String, Value>,
 ) -> Result<(), sqlx::Error> {
-    let keep_sbids: Vec<String> = payload.keys().cloned().collect();
+    let keep_groups: Vec<String> = payload.keys().cloned().collect();
     sqlx::query(
         r#"
         DELETE FROM archive_metadata
         WHERE project_module = $1
           AND source_identifier = $2
-          AND NOT (sbid = ANY($3))
+          AND NOT (group_key = ANY($3))
         "#,
     )
     .bind(project_module)
     .bind(source_identifier)
-    .bind(&keep_sbids)
+    .bind(&keep_groups)
     .execute(&mut **tx)
     .await?;
-    for (sbid, metadata_json) in payload {
+    for (group_key, metadata_json) in payload {
         sqlx::query(
             r#"
-            INSERT INTO archive_metadata (uuid, project_module, source_identifier, sbid, metadata_json)
+            INSERT INTO archive_metadata (uuid, project_module, source_identifier, group_key, metadata_json)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (project_module, source_identifier, sbid)
+            ON CONFLICT (project_module, source_identifier, group_key)
             DO UPDATE SET metadata_json = EXCLUDED.metadata_json, updated_at = now()
             "#,
         )
         .bind(Uuid::now_v7())
         .bind(project_module)
         .bind(source_identifier)
-        .bind(sbid)
+        .bind(group_key)
         .bind(metadata_json)
         .execute(&mut **tx)
         .await?;
@@ -1392,7 +1391,7 @@ async fn synchronize_archive_metadata(
     Ok(())
 }
 
-async fn persist_no_datasets(
+async fn persist_no_records(
     pool: &PgPool,
     project_module: &str,
     source_identifier: &str,
@@ -1418,7 +1417,7 @@ async fn persist_no_datasets(
         tx.rollback().await?;
         return Ok(false);
     };
-    let sig = no_datasets_signature();
+    let sig = no_records_signature();
     if stored_sig.as_deref() == Some(&sig) {
         sqlx::query("UPDATE source_registry SET last_checked_at = now() WHERE uuid = $1")
             .bind(source_id)
@@ -1430,26 +1429,26 @@ async fn persist_no_datasets(
     sqlx::query(
         r#"
         DELETE FROM archive_metadata
-        WHERE project_module = $1 AND source_identifier = $2 AND sbid <> '0'
+        WHERE project_module = $1 AND source_identifier = $2 AND group_key <> 'default'
         "#,
     )
     .bind(project_module)
     .bind(source_identifier)
     .execute(&mut *tx)
     .await?;
-    for (sbid, metadata_json) in no_datasets_payload() {
+    for (group_key, metadata_json) in no_records_payload() {
         sqlx::query(
             r#"
-            INSERT INTO archive_metadata (uuid, project_module, source_identifier, sbid, metadata_json)
+            INSERT INTO archive_metadata (uuid, project_module, source_identifier, group_key, metadata_json)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (project_module, source_identifier, sbid)
+            ON CONFLICT (project_module, source_identifier, group_key)
             DO UPDATE SET metadata_json = EXCLUDED.metadata_json, updated_at = now()
             "#,
         )
         .bind(Uuid::now_v7())
         .bind(project_module)
         .bind(source_identifier)
-        .bind(sbid)
+        .bind(group_key)
         .bind(metadata_json)
         .execute(&mut *tx)
         .await?;
@@ -4836,7 +4835,7 @@ pub async fn list_archive_metadata_for_sources(
         FROM archive_metadata
         WHERE project_module = $1
           AND source_identifier = ANY($2)
-        ORDER BY source_identifier ASC, sbid ASC
+        ORDER BY source_identifier ASC, group_key ASC
         "#,
     )
     .bind(project_module)
@@ -5466,7 +5465,7 @@ pub async fn enqueue_job_with_options(
 
 fn job_kind_capability(kind: &str) -> Option<&'static str> {
     match kind {
-        "scheduler_tick" | "discover_batch" => Some("casda-discovery"),
+        "scheduler_tick" | "discover_batch" => Some("discovery"),
         "execution_scheduler_tick" => Some("manifest-generation"),
         "execute" | "dim_poll" | "dim_poll_tick" => Some("daliuge-deployment"),
         "slurm_poll_tick" => Some("slurm-remote"),

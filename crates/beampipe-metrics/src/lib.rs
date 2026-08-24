@@ -324,7 +324,7 @@ pub fn record_discovery_batch_stats(
     project_module: &str,
     changed: usize,
     unchanged: usize,
-    no_datasets: usize,
+    no_records: usize,
     errors: usize,
     timeouts: usize,
 ) {
@@ -334,8 +334,8 @@ pub fn record_discovery_batch_stats(
     for _ in 0..unchanged {
         record_discovery_outcome(project_module, "unchanged");
     }
-    for _ in 0..no_datasets {
-        record_discovery_outcome(project_module, "no_datasets");
+    for _ in 0..no_records {
+        record_discovery_outcome(project_module, "no_records");
     }
     for _ in 0..errors {
         record_discovery_outcome(project_module, "error");

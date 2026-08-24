@@ -1,0 +1,17 @@
+{
+  "nodeDataArray": [
+    {
+      "id": "neutral-ingest",
+      "name": "beampipe-ingest",
+      "fields": [
+        {
+          "id": "neutral-manifest",
+          "name": "manifest_path",
+          "type": "String",
+          "value": "manifest.json"
+        }
+      ]
+    }
+  ],
+  "linkDataArray": []
+}

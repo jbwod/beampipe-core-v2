@@ -69,8 +69,8 @@ pub const MANIFEST_PATH_FIELD_NAME: &str = "manifest_path";
 pub enum OrchestrationError {
     #[error("graph is not a JSON object")]
     GraphNotObject,
-    #[error("manifest has no usable datasets")]
-    NoUsableDatasets,
+    #[error("manifest has no usable records")]
+    NoUsableRecords,
     #[error("graph patch target node not found: {0}")]
     GraphPatchNodeNotFound(String),
     #[error("graph patch field not found on node {node}: {field}")]
@@ -527,18 +527,14 @@ pub fn build_generic_manifest(metadata: &[Value]) -> Result<Value, Orchestration
             .map(value_key)
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
-                OrchestrationError::Backend(
-                    "metadata record requires a non-empty group_key".into(),
-                )
+                OrchestrationError::Backend("metadata record requires a non-empty group_key".into())
             })?;
         let record_id = record
             .get("record_id")
             .map(value_key)
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
-                OrchestrationError::Backend(
-                    "metadata record requires a non-empty record_id".into(),
-                )
+                OrchestrationError::Backend("metadata record requires a non-empty record_id".into())
             })?;
         let mut record = record.clone();
         record["record_id"] = Value::String(record_id);
@@ -566,7 +562,7 @@ pub fn build_generic_manifest(metadata: &[Value]) -> Result<Value, Orchestration
         }));
     }
     if total_records == 0 {
-        return Err(OrchestrationError::NoUsableDatasets);
+        return Err(OrchestrationError::NoUsableRecords);
     }
     Ok(serde_json::json!({"inputs": {}, "sources": sources}))
 }
@@ -882,8 +878,14 @@ mod tests {
             serde_json::json!({"source_identifier": "s1", "group_key": "g2", "record_id": "r2"}),
         ])
         .unwrap();
-        assert_eq!(manifest["sources"][0]["groups"].as_array().unwrap().len(), 2);
-        assert_eq!(manifest["sources"][0]["groups"][0]["records"][0]["record_id"], "r1");
+        assert_eq!(
+            manifest["sources"][0]["groups"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            manifest["sources"][0]["groups"][0]["records"][0]["record_id"],
+            "r1"
+        );
         assert!(manifest.get("graph_overrides").is_none());
     }
 

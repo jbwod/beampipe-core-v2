@@ -52,7 +52,7 @@ pub struct ArchiveMetadataRow {
     pub uuid: Uuid,
     pub project_module: String,
     pub source_identifier: String,
-    pub sbid: String,
+    pub group_key: String,
     pub metadata_json: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
