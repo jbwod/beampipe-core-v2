@@ -7,14 +7,77 @@
 #     --api-port 18080 --postgres-port 5432 --metrics-port 9090
 #   curl -fsSL .../install.sh | sh -s -- --yes --runtime docker --use-real-backends
 # Linux archives need glibc and OpenSSL 3 (Ubuntu 22.04 / Debian bookworm or newer).
-# After the binary is installed this runs `beampipe setup`. Interactive setup
-# starts the stack and prompts Next actions (live backends, profiles, Slurm
-# credentials, CASDA credentials, doctor --profile). --yes prints that recipe
-# instead of prompting.
+# After the binary is installed this runs `beampipe setup`. The CLI owns the
+# guided questions, summary, and next-action recipe. Headless callers must pass
+# --yes and an explicit runtime; the wrapper never guesses unattended intent.
 set -eu
 
 REPO="${BEAMPIPE_REPO:-jbwod/beampipe-core-v2}"
 RELEASES="https://github.com/${REPO}/releases"
+BEAMPIPE_UI_BOLD=
+BEAMPIPE_UI_DIM=
+BEAMPIPE_UI_CYAN=
+BEAMPIPE_UI_GREEN=
+BEAMPIPE_UI_RED=
+BEAMPIPE_UI_RESET=
+
+beampipe_init_ui() {
+  if [ -t 1 ] && [ "${NO_COLOR+x}" != "x" ] && [ "${TERM:-}" != "dumb" ]; then
+    BEAMPIPE_UI_BOLD=$(printf '\033[1m')
+    BEAMPIPE_UI_DIM=$(printf '\033[2m')
+    BEAMPIPE_UI_CYAN=$(printf '\033[36m')
+    BEAMPIPE_UI_GREEN=$(printf '\033[32m')
+    BEAMPIPE_UI_RED=$(printf '\033[31m')
+    BEAMPIPE_UI_RESET=$(printf '\033[0m')
+  fi
+}
+
+beampipe_step() {
+  current=$1
+  total=$2
+  label=$3
+  printf '\n%s[%s/%s]%s %s%s%s\n' \
+    "$BEAMPIPE_UI_CYAN" "$current" "$total" "$BEAMPIPE_UI_RESET" \
+    "$BEAMPIPE_UI_BOLD" "$label" "$BEAMPIPE_UI_RESET"
+}
+
+beampipe_detail() {
+  label=$1
+  value=$2
+  printf '      %s%-12s%s %s\n' "$BEAMPIPE_UI_DIM" "${label}:" "$BEAMPIPE_UI_RESET" "$value"
+}
+
+beampipe_ok() {
+  printf '      %s[ok]%s %s\n' "$BEAMPIPE_UI_GREEN" "$BEAMPIPE_UI_RESET" "$1"
+}
+
+beampipe_error() {
+  printf '      %s[error]%s %s\n' "$BEAMPIPE_UI_RED" "$BEAMPIPE_UI_RESET" "$1" >&2
+}
+
+beampipe_require_command() {
+  if command -v "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  beampipe_error "${1} is required but was not found on PATH"
+  return 1
+}
+
+beampipe_check_install_requirements() {
+  for required in awk basename curl dirname grep install mkdir mktemp rm sed tar tr uname; do
+    beampipe_require_command "$required" || return 1
+  done
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    beampipe_error "sha256sum or shasum is required to verify the release"
+    return 1
+  fi
+}
+
+beampipe_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
 
 beampipe_release_target_from() {
   os=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
@@ -54,7 +117,7 @@ beampipe_verify_checksum() {
     echo "checksum verification failed for ${archive}" >&2
     return 1
   fi
-  echo "${archive}: OK"
+  beampipe_ok "SHA-256 verified for ${archive}"
 }
 
 beampipe_archive_name() {
@@ -66,6 +129,11 @@ install_beampipe() {
   version="${BEAMPIPE_VERSION:-latest}"
   bindir="${BEAMPIPE_BIN:-$HOME/.local/bin}"
   mkdir -p "$bindir"
+
+  beampipe_step 2 3 "Download and install"
+  beampipe_detail "Release" "$version"
+  beampipe_detail "Platform" "$target"
+  beampipe_detail "Binary" "${bindir}/beampipe"
 
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
@@ -81,7 +149,7 @@ install_beampipe() {
     base="${RELEASES}/download/${tag}"
   fi
 
-  echo "Downloading ${archive} from ${base}"
+  beampipe_detail "Download" "${base}/${archive}"
   curl -fsSL -o "${tmp}/${archive}" "${base}/${archive}"
   curl -fsSL -o "${tmp}/SHA256SUMS" "${base}/SHA256SUMS"
   (
@@ -90,7 +158,7 @@ install_beampipe() {
     tar -xzf "$archive"
   )
   install -m 0755 "${tmp}/beampipe-${target}/beampipe" "${bindir}/beampipe"
-  echo "Installed ${bindir}/beampipe"
+  beampipe_ok "Installed ${bindir}/beampipe"
 
   case ":${PATH}:" in
     *":${bindir}:"*) ;;
@@ -117,23 +185,28 @@ beampipe_has_runtime_flag() {
     if [ "$prev" = "--runtime" ] || [ "$arg" = "--docker" ] || [ "$arg" = "--skip-docker" ]; then
       return 0
     fi
+    case "$arg" in
+      --runtime=*) return 0 ;;
+    esac
     prev=$arg
   done
   return 1
 }
 
-beampipe_has_wallaby_sample() {
-  previous=
-  for arg in "$@"; do
-    if [ "$previous" = "--sample" ] && [ "$arg" = "wallaby-hires" ]; then
-      return 0
-    fi
-    case "$arg" in
-      --sample=wallaby-hires) return 0 ;;
-    esac
-    previous=$arg
-  done
-  return 1
+beampipe_require_explicit_unattended() {
+  if [ -t 0 ] || { [ -t 1 ] && [ -c /dev/tty ]; }; then
+    return 0
+  fi
+  if ! beampipe_has_flag --yes "$@"; then
+    beampipe_error "No interactive terminal is available and --yes was not supplied"
+    echo "Run unattended setup explicitly:" >&2
+    echo "  curl -fsSL ${RELEASES}/latest/download/install.sh | sh -s -- --yes --runtime docker" >&2
+    return 2
+  fi
+  if ! beampipe_has_runtime_flag "$@"; then
+    beampipe_error "--yes requires an explicit --runtime docker or --runtime host"
+    return 2
+  fi
 }
 
 beampipe_path_export() {
@@ -204,33 +277,20 @@ beampipe_persist_path() {
 beampipe_print_path_hint() {
   bindir="${BEAMPIPE_BIN:-$HOME/.local/bin}"
   echo
-  echo "The beampipe command is ${bindir}/beampipe"
-  echo "This installer already updated PATH for its own process. This terminal may still need:"
+  echo "Command installed: ${bindir}/beampipe"
+  echo "A new terminal will pick up the PATH change. For this terminal, run:"
   echo "  export PATH=\"${bindir}:\$PATH\""
 }
 
-beampipe_print_next_actions() {
+beampipe_print_setup_failure() {
   home=$1
-  wallaby_sample=$2
+  status=$2
+  quoted_home=$(beampipe_shell_quote "$home")
   echo
-  echo "Next actions (not applied with --yes):"
-  echo "  Mock submissions finish immediately and never create a DIM session."
-  echo "  beampipe doctor"
-  echo "  Add a project config and matching deployment profile before real work:"
-  echo "    beampipe project add -f PROJECT_CONFIG"
-  echo "    beampipe profile add -f DEPLOYMENT_PROFILE"
-  echo "    beampipe doctor --profile NAME"
-  echo "  After the project and profile checks pass:"
-  echo "    set BEAMPIPE_USE_REAL_BACKENDS=true in ${home}/.env"
-  echo "    beampipe restart"
-  if [ "$wallaby_sample" -eq 1 ]; then
-    echo "  WALLABY HiRes sample:"
-    echo "    beampipe profile add -f ${home}/config/deployment_profile.dlg-dim.json"
-    echo "    beampipe doctor --profile dlg-dim"
-    echo "    beampipe slurm credentials init --slot hpc --host LOGIN_NODE"
-    echo "    beampipe profile add -f ${home}/config/deployment_profile.slurm-remote.json --ssh-slot hpc"
-    echo "    configure CASDA staging credentials as described in the WALLABY runbook"
-  fi
+  beampipe_error "Setup stopped with exit status ${status}"
+  echo "The verified beampipe binary is installed; no automatic rollback was attempted."
+  echo "Review the message above, then resume safely with:"
+  echo "  beampipe --home ${quoted_home} setup"
 }
 
 beampipe_run_cli_setup() {
@@ -242,41 +302,36 @@ beampipe_run_cli_setup() {
 run_setup() {
   home="${BEAMPIPE_HOME:-$HOME/beampipe}"
   status=0
-  print_next_recipe=0
-  wallaby_sample=0
-  if beampipe_has_wallaby_sample "$@"; then
-    wallaby_sample=1
-  fi
+  beampipe_step 3 3 "Configure Beampipe"
+  beampipe_detail "Home" "$home"
   if [ -t 0 ] || beampipe_has_flag --yes "$@"; then
-    beampipe_run_cli_setup "$home" "$@" || status=$?
     if beampipe_has_flag --yes "$@"; then
-      print_next_recipe=1
+      beampipe_detail "Mode" "unattended"
+    else
+      beampipe_detail "Mode" "guided wizard"
     fi
+    beampipe_run_cli_setup "$home" "$@" || status=$?
   elif [ -t 1 ] && [ -c /dev/tty ]; then
-    echo "stdin is a pipe; reading setup prompts from the terminal."
+    beampipe_detail "Mode" "guided wizard (prompts use this terminal)"
     beampipe_run_cli_setup "$home" "$@" </dev/tty || status=$?
-  elif ! beampipe_has_runtime_flag "$@"; then
-    echo "stdin is not a terminal; running non-interactive Docker setup."
-    echo "  curl -fsSL ${RELEASES}/latest/download/install.sh | sh -s -- --yes --runtime docker"
-    beampipe_run_cli_setup "$home" --yes --runtime docker "$@" || status=$?
-    print_next_recipe=1
   else
-    echo "stdin is not a terminal; adding --yes."
-    beampipe_run_cli_setup "$home" --yes "$@" || status=$?
-    print_next_recipe=1
+    beampipe_error "No interactive terminal is available and --yes was not supplied"
+    return 2
   fi
   beampipe_print_path_hint
-  if [ "$print_next_recipe" -eq 1 ]; then
-    beampipe_print_next_actions "$home" "$wallaby_sample"
+  if [ "$status" -ne 0 ]; then
+    beampipe_print_setup_failure "$home" "$status"
   fi
   return "$status"
 }
 
 main() {
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required" >&2
-    exit 1
-  fi
+  beampipe_init_ui
+  beampipe_step 1 3 "Check this machine"
+  beampipe_check_install_requirements
+  beampipe_require_explicit_unattended "$@"
+  beampipe_detail "System" "$(uname -s) $(uname -m)"
+  beampipe_ok "Installer requirements available"
   install_beampipe
   run_setup "$@"
 }

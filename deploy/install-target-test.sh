@@ -68,16 +68,8 @@ if ! beampipe_has_runtime_flag --skip-docker; then
   echo "beampipe_has_runtime_flag missed --skip-docker" >&2
   exit 1
 fi
-if beampipe_has_wallaby_sample --yes --runtime docker; then
-  echo "beampipe_has_wallaby_sample false positive" >&2
-  exit 1
-fi
-if ! beampipe_has_wallaby_sample --yes --sample wallaby-hires; then
-  echo "beampipe_has_wallaby_sample missed split sample argument" >&2
-  exit 1
-fi
-if ! beampipe_has_wallaby_sample --sample=wallaby-hires; then
-  echo "beampipe_has_wallaby_sample missed equals sample argument" >&2
+if ! beampipe_has_runtime_flag --runtime=host; then
+  echo "beampipe_has_runtime_flag missed equals runtime" >&2
   exit 1
 fi
 echo "install target mapping ok"
@@ -109,33 +101,59 @@ if grep -Fq 'Added by Beampipe installer' "$HOME_TMP/.zshrc"; then
 fi
 echo "install PATH persistence ok"
 
-HOME_NEXT=$(mktemp -d)
-beampipe_print_next_actions "$HOME_NEXT" 0 > "$HOME_NEXT/out"
-if ! grep -Fq "BEAMPIPE_USE_REAL_BACKENDS=true" "$HOME_NEXT/out"; then
-  echo "next actions omitted live backends" >&2
+HOME_OUTPUT=$(mktemp -d)
+if beampipe_require_explicit_unattended --runtime docker < /dev/null > "$HOME_OUTPUT/implicit" 2>&1; then
+  echo "headless setup accepted implicit unattended mode" >&2
   exit 1
 fi
-if ! grep -Fq "beampipe project add -f PROJECT_CONFIG" "$HOME_NEXT/out"; then
-  echo "neutral next actions omitted generic project setup" >&2
+if ! grep -Fq -- "--yes --runtime docker" "$HOME_OUTPUT/implicit"; then
+  echo "headless setup rejection omitted the explicit command" >&2
   exit 1
 fi
-if grep -Eq 'WALLABY|deployment_profile\.dlg-dim|slurm credentials|CASDA' "$HOME_NEXT/out"; then
-  echo "neutral next actions included provider-specific setup" >&2
+if ! beampipe_require_explicit_unattended --yes --runtime=host < /dev/null > /dev/null; then
+  echo "explicit unattended host setup was rejected" >&2
   exit 1
 fi
-
-beampipe_print_next_actions "$HOME_NEXT" 1 > "$HOME_NEXT/wallaby-out"
-if ! grep -Fq "beampipe slurm credentials init" "$HOME_NEXT/wallaby-out"; then
-  echo "WALLABY next actions omitted Slurm credentials" >&2
+if beampipe_require_explicit_unattended --yes < /dev/null > "$HOME_OUTPUT/runtime" 2>&1; then
+  echo "headless --yes setup accepted an implicit runtime" >&2
   exit 1
 fi
-if ! grep -Fq "$HOME_NEXT/config/deployment_profile.dlg-dim.json" "$HOME_NEXT/wallaby-out"; then
-  echo "WALLABY next actions omitted DIM profile path" >&2
+if ! grep -Fq -- "--yes requires an explicit --runtime" "$HOME_OUTPUT/runtime"; then
+  echo "missing-runtime rejection was unclear" >&2
   exit 1
 fi
-if ! grep -Fq "CASDA staging credentials" "$HOME_NEXT/wallaby-out"; then
-  echo "WALLABY next actions omitted CASDA credentials" >&2
+HEADLESS_BIN="$HOME_OUTPUT/bin"
+mkdir -p "$HEADLESS_BIN"
+printf '%s\n' '#!/bin/sh' ': > "$BEAMPIPE_CURL_CALLED"' > "$HEADLESS_BIN/curl"
+chmod +x "$HEADLESS_BIN/curl"
+if BEAMPIPE_CURL_CALLED="$HOME_OUTPUT/curl-called" HOME="$HOME_OUTPUT/home" \
+  PATH="$HEADLESS_BIN:/usr/bin:/bin" sh "$root/deploy/install.sh" \
+  < /dev/null > "$HOME_OUTPUT/headless-main" 2>&1; then
+  echo "headless installer without --yes unexpectedly succeeded" >&2
   exit 1
 fi
-rm -rf "$HOME_NEXT"
-echo "install next-actions recipe ok"
+if [ -e "$HOME_OUTPUT/curl-called" ]; then
+  echo "headless installer downloaded before confirming unattended intent" >&2
+  exit 1
+fi
+beampipe_step 1 3 "Check this machine" > "$HOME_OUTPUT/step"
+if ! grep -Fq "[1/3] Check this machine" "$HOME_OUTPUT/step"; then
+  echo "installer progress output is unclear" >&2
+  exit 1
+fi
+if LC_ALL=C grep -q "$(printf '\033')" "$HOME_OUTPUT/step"; then
+  echo "non-terminal installer output contained ANSI escapes" >&2
+  exit 1
+fi
+RESUME_HOME="$HOME_OUTPUT/Jack's install"
+beampipe_print_setup_failure "$RESUME_HOME" 7 > "$HOME_OUTPUT/failure" 2>&1
+if ! grep -Fq "Setup stopped with exit status 7" "$HOME_OUTPUT/failure"; then
+  echo "setup failure omitted its exit status" >&2
+  exit 1
+fi
+if ! grep -Fq "beampipe --home '$HOME_OUTPUT/Jack'\\''s install' setup" "$HOME_OUTPUT/failure"; then
+  echo "setup failure omitted its safe resume command" >&2
+  exit 1
+fi
+rm -rf "$HOME_OUTPUT"
+echo "install progress and recovery output ok"
