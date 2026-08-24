@@ -24,6 +24,7 @@ const DEFAULT_WORKER_CAPABILITIES: &str =
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
 const DEFAULT_WORKER_POOL: &str = "default";
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/beampipe";
+const DEFAULT_INTERACTIVE_DASHBOARD: bool = true;
 const SETUP_LOGO: &str = include_str!("../../../assets/brand/beampipe-terminal-logo.txt");
 
 #[derive(Debug, Clone, Default)]
@@ -115,13 +116,37 @@ fn stdout_is_tty() -> bool {
     io::stdout().is_terminal()
 }
 
-fn format_step(n: usize, total: usize, title: &str) -> String {
-    format!("== {n}/{total}  {title} ==")
+fn color_enabled_for(stdout_tty: bool, no_color: bool, term: Option<&str>) -> bool {
+    stdout_tty && !no_color && !matches!(term, Some(value) if value.eq_ignore_ascii_case("dumb"))
 }
 
-fn print_setup_logo() {
+fn color_enabled() -> bool {
+    color_enabled_for(
+        stdout_is_tty(),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
+fn interactive_setup(yes: bool) -> bool {
+    !yes && stdin_is_tty() && stdout_is_tty()
+}
+
+fn full_logo_fits(interactive: bool, terminal_width: Option<u16>) -> bool {
+    interactive && terminal_width.is_some_and(|width| width >= 90)
+}
+
+fn format_step(n: usize, total: usize, title: &str) -> String {
+    format!("STEP {n} OF {total}  {title}")
+}
+
+fn print_setup_logo(interactive: bool) {
+    let terminal_width = crossterm::terminal::size().ok().map(|(width, _)| width);
+    if !full_logo_fits(interactive, terminal_width) {
+        return;
+    }
     let logo = SETUP_LOGO.trim_end();
-    if stdout_is_tty() {
+    if color_enabled() {
         println!("{}", logo.cyan());
     } else {
         println!("{logo}");
@@ -130,32 +155,33 @@ fn print_setup_logo() {
 }
 
 fn print_banner(start: bool, yes: bool) {
-    print_setup_logo();
-    let title = "Beampipe setup";
-    if stdout_is_tty() {
-        println!("{}", title.bold());
+    let interactive = interactive_setup(yes);
+    print_setup_logo(interactive);
+    let title = format!("BEAMPIPE  /  SETUP  v{}", env!("CARGO_PKG_VERSION"));
+    if color_enabled() {
+        println!("{}", title.bold().cyan());
     } else {
         println!("{title}");
     }
+    println!("{}", "─".repeat(62));
+    print_hint("A guided setup for the API, scheduler, workers, and database.");
     if start {
-        print_hint("Writes files, then starts Postgres and the stack.");
+        print_hint("Services will start only after configuration and safety checks pass.");
     } else {
-        print_hint("Writes files. Does not start Postgres or the stack (--no-start).");
+        print_hint("Configure only: no services will be started (--no-start).");
     }
     if yes {
-        print_hint("Non-interactive (--yes): Next actions are printed as a recipe.");
-    } else {
-        print_hint(
-            "After the stack is up, setup prompts Next actions (live backends, profiles, Slurm, CASDA).",
-        );
+        print_hint("Automatic mode: supplied values and safe defaults will be used (--yes).");
+    } else if interactive {
+        print_hint("Press Enter to accept the highlighted default. Live backends stay off by default.");
     }
 }
 
 fn print_step(n: usize, total: usize, title: &str) {
     let heading = format_step(n, total, title);
     println!();
-    if stdout_is_tty() {
-        println!("{}", heading.bold());
+    if color_enabled() {
+        println!("{}", heading.bold().cyan());
     } else {
         println!("{heading}");
     }
@@ -163,6 +189,31 @@ fn print_step(n: usize, total: usize, title: &str) {
 
 fn print_hint(text: &str) {
     println!("  {text}");
+}
+
+fn print_status(label: &str, detail: impl std::fmt::Display) {
+    if color_enabled() {
+        println!("  {} {:<20} {detail}", "[done]".green().bold(), label);
+    } else {
+        println!("  [done] {label:<20} {detail}");
+    }
+}
+
+fn print_pending(label: &str, detail: impl std::fmt::Display) {
+    if color_enabled() {
+        println!("  {} {:<20} {detail}", "[later]".yellow().bold(), label);
+    } else {
+        println!("  [later] {label:<19} {detail}");
+    }
+}
+
+fn print_section(title: &str) {
+    println!();
+    if color_enabled() {
+        println!("{}", title.bold());
+    } else {
+        println!("{title}");
+    }
 }
 
 fn parse_choice(input: &str, items: &[ChoiceItem], default_index: usize) -> Option<usize> {
@@ -181,41 +232,45 @@ fn parse_choice(input: &str, items: &[ChoiceItem], default_index: usize) -> Opti
         .position(|item| item.key.eq_ignore_ascii_case(trimmed))
 }
 
+fn read_prompt_line(label: &str) -> Result<String> {
+    let mut line = String::new();
+    let bytes = io::stdin().read_line(&mut line)?;
+    if bytes == 0 {
+        bail!(
+            "input ended while waiting for {label}; rerun in a terminal or use --yes with explicit runtime options"
+        );
+    }
+    Ok(line)
+}
+
 fn print_choice_items(items: &[ChoiceItem], default_index: usize) {
     for (index, item) in items.iter().enumerate() {
-        let marker = if index == default_index {
-            "  [default]"
+        let default = index == default_index;
+        let marker = if default { " (default)" } else { "" };
+        if color_enabled() && default {
+            println!(
+                "  {}) {}{}",
+                index + 1,
+                item.label.bold(),
+                marker.cyan()
+            );
         } else {
-            ""
-        };
-        println!("  {}) {}   {}{marker}", index + 1, item.label, item.hint);
+            println!("  {}) {}{marker}", index + 1, item.label);
+        }
+        println!("     {}", item.hint);
     }
 }
 
 fn prompt_choice(label: &str, items: &[ChoiceItem], default_index: usize) -> Result<usize> {
-    let _ = label;
     loop {
         print_choice_items(items, default_index);
-        print!("> ");
+        print!("Choose {label} [{}]: ", default_index + 1);
         io::stdout().flush()?;
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
+        let line = read_prompt_line(label)?;
         if let Some(index) = parse_choice(&line, items, default_index) {
             return Ok(index);
         }
         print_hint("Enter a number or the option name.");
-    }
-}
-
-fn recipe_lines(commands: &[String]) -> Vec<String> {
-    let mut lines = vec![String::new(), "Next (nothing was started)".into()];
-    lines.extend(commands.iter().cloned());
-    lines
-}
-
-fn print_recipe(commands: &[String]) {
-    for line in recipe_lines(commands) {
-        println!("{line}");
     }
 }
 
@@ -286,17 +341,85 @@ fn resolve_use_real_backends(
     "false"
 }
 
+fn validate_live_request(requested: bool, profile_path: Option<&Path>) -> Result<()> {
+    if requested && profile_path.is_none() {
+        bail!(
+            "--use-real-backends requires --profile-config (or an interactively selected profile) so setup can run profile doctor before enabling submission"
+        );
+    }
+    Ok(())
+}
+
 fn stdin_is_tty() -> bool {
     io::stdin().is_terminal()
 }
 
+fn validate_setup_input(yes: bool, input_is_tty: bool) -> Result<()> {
+    if !yes && !input_is_tty {
+        bail!(
+            "interactive setup requires a terminal; rerun in a terminal or use --yes with explicit runtime options"
+        );
+    }
+    Ok(())
+}
+
+fn resolve_path_from(base: &Path, path: &Path) -> PathBuf {
+    let path = expand_user_path(path);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn resolve_setup_option_paths(opts: &mut SetupOptions, launch_dir: &Path) {
+    for path in [
+        &mut opts.admin_password_file,
+        &mut opts.project_config,
+        &mut opts.profile_config,
+        &mut opts.ssh_private_key,
+        &mut opts.ssh_public_key,
+        &mut opts.ssh_known_hosts,
+        &mut opts.ssh_passphrase_file,
+        &mut opts.dash_dir,
+        &mut opts.directory,
+        &mut opts.credentials_dir,
+    ] {
+        if let Some(value) = path.as_mut() {
+            *value = resolve_path_from(launch_dir, value);
+        }
+    }
+}
+
+fn installation_services_running(context: &installation::InstallationContext) -> bool {
+    if !context.exists()
+        || !context
+            .state
+            .as_ref()
+            .is_some_and(|state| state.runtime == RuntimeKind::Docker)
+    {
+        return false;
+    }
+    let Ok(mut command) = runtime::compose_command(context) else {
+        return false;
+    };
+    command.args(["ps", "--status", "running", "--quiet"]);
+    command
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
 pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
+    validate_setup_input(opts.yes, stdin_is_tty())?;
+    let launch_dir = std::env::current_dir().context("current directory")?;
+    resolve_setup_option_paths(&mut opts, &launch_dir);
     let mut root = resolve_operator_root(&opts)?;
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     root = root
         .canonicalize()
         .with_context(|| format!("resolve {}", root.display()))?;
     let existing_context = installation::InstallationContext::from_home(root.clone())?;
+    let existing_services_running = installation_services_running(&existing_context);
     let env_existed = existing_context.environment_file.is_file();
     let compose_preexisting = root.join("docker-compose.yml").is_file();
     if existing_context.exists() {
@@ -317,29 +440,44 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     }
 
     print_banner(opts.start, opts.yes);
-    preflight_before_materialize(&opts)?;
+    print_hint(&format!("Installation home: {}", root.display()));
+    if interactive_setup(opts.yes)
+        && !prompt_yes_no(
+            if existing_context.exists() {
+                "Update this Beampipe installation?"
+            } else {
+                "Set up Beampipe here?"
+            },
+            true,
+        )?
+    {
+        bail!("setup aborted before writing installation files");
+    }
+    preflight_before_materialize(&opts, existing_services_running)?;
     std::env::set_current_dir(&root).with_context(|| format!("chdir {}", root.display()))?;
     let env_path = existing_context.environment_file.clone();
 
     let materialized = materialize::materialize(&root, false, opts.wallaby_sample)?;
-    for path in &materialized.created {
-        println!("Created {}", path.display());
-    }
-    for path in &materialized.replaced {
-        println!("Updated managed file {}", path.display());
-    }
+    print_status(
+        "Installation files",
+        format!(
+            "{} created, {} updated",
+            materialized.created.len(),
+            materialized.replaced.len()
+        ),
+    );
     if !materialized.bundle_current {
         println!(
             "Preserved operator-modified bundle files. Review them before relying on new release defaults."
         );
     }
-    let selected_project = load_selected_project_config(&root, &opts)?;
+    let mut selected_project = load_selected_project_config(&root, &opts)?;
     let compose_exists = compose_file_exists(&root);
     let tentative_docker = !matches!(decide_runtime(&opts)?, Some(RuntimeKind::Host));
     let total_steps = setup_step_total(&opts, tentative_docker);
     let mut step = 1;
 
-    print_step(step, total_steps, "How will you run Beampipe?");
+    print_step(step, total_steps, "Runtime");
     step += 1;
     let runtime = resolve_runtime(&opts, compose_exists)?;
     if runtime == RuntimeKind::Docker && !compose_exists {
@@ -348,10 +486,13 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             root.display()
         );
     }
-    print_hint(match runtime {
-        RuntimeKind::Docker => "Docker Compose: API, scheduler, and workers in containers.",
-        RuntimeKind::Host => "Host binary: beampipe start on this machine.",
-    });
+    print_status(
+        "Selected",
+        match runtime {
+            RuntimeKind::Docker => "Docker Compose (API, scheduler, and workers)",
+            RuntimeKind::Host => "Host binary (beampipe start)",
+        },
+    );
 
     print_step(step, total_steps, "PostgreSQL");
     step += 1;
@@ -378,7 +519,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             })
     });
     if postgres == PostgresKind::Compose {
-        print_hint("Using the installation-managed PostgreSQL service.");
+        print_status("Selected", "Managed Compose PostgreSQL");
         if !env_existed {
             refuse_stale_compose_postgres_volume(&root)?;
         }
@@ -387,17 +528,25 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         } else {
             print_hint("Start it later with: docker compose up -d postgres");
         }
+    } else {
+        print_status("Selected", "Existing PostgreSQL URL");
     }
 
-    print_step(step, total_steps, "Host ports");
+    print_step(step, total_steps, "Network");
     step += 1;
     let host_ports = resolve_host_ports(&opts, runtime, postgres)?;
-    print_hint(&format!("API http://127.0.0.1:{}/api/v2", host_ports.api));
+    print_status(
+        "API",
+        format!("http://127.0.0.1:{}/api/v2", host_ports.api),
+    );
     if postgres == PostgresKind::Compose {
-        print_hint(&format!("PostgreSQL 127.0.0.1:{}", host_ports.postgres));
+        print_status(
+            "PostgreSQL",
+            format!("127.0.0.1:{}", host_ports.postgres),
+        );
     }
     if runtime == RuntimeKind::Docker {
-        print_hint(&format!("Metrics 127.0.0.1:{}", host_ports.metrics));
+        print_status("Metrics", format!("127.0.0.1:{}", host_ports.metrics));
     }
 
     let database_url = if postgres == PostgresKind::Compose
@@ -421,38 +570,104 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     }
 
     let prepare_docker = runtime == RuntimeKind::Docker;
-    preflight_after_choices(&opts, runtime, postgres, host_ports)?;
+    preflight_after_choices(
+        &opts,
+        runtime,
+        postgres,
+        host_ports,
+        existing_services_running,
+    )?;
 
-    let mut dash_dir = None;
-    if decide_dashboard(&opts, prepare_docker) != Some(false) {
-        print_step(step, total_steps, "Dashboard");
-        step += 1;
-        if resolve_prepare_dashboard(&opts, prepare_docker)? {
-            match prepare_dashboard(&root, &opts, &compose_network_name(&root)) {
-                Ok(prepared) => {
-                    println!("Prepared Beampipe Dash at {}.", prepared.display());
-                    dash_dir = Some(prepared);
-                }
-                Err(error) => {
-                    println!("Dash preparation skipped: {error}");
-                }
-            }
+    print_step(step, total_steps, "Dashboard");
+    step += 1;
+    let mut prepare_dash = false;
+    if prepare_docker {
+        if decide_dashboard(&opts, prepare_docker) != Some(false) {
+            prepare_dash = resolve_prepare_dashboard(&opts, prepare_docker)?;
         }
-    } else if opts.dashboard && !prepare_docker {
-        println!("--dashboard requires --runtime docker; skipped.");
+        if prepare_dash {
+            print_status("Dashboard", "will be installed");
+        } else {
+            print_pending("Dashboard", "skipped");
+        }
+    } else {
+        if opts.dashboard {
+            bail!("--dashboard requires --runtime docker");
+        }
+        print_pending("Dashboard", "requires Docker runtime; skipped");
     }
 
-    print_step(step, total_steps, "Files");
+    print_step(step, total_steps, "Project and deployment");
+    step += 1;
+    if selected_project.is_none() && interactive_setup(opts.yes) {
+        selected_project = prompt_project_config(&root)?;
+    }
+    if let Some(selected) = selected_project.as_ref() {
+        print_status("Project", &selected.config.metadata.id);
+    } else {
+        print_pending("Project", "configure later");
+    }
+    let selected_profile_path = select_profile_path(&opts, &root)?;
+    if let Some(path) = selected_profile_path.as_ref() {
+        print_status("Profile file", path.display());
+    } else {
+        print_pending("Profile", "configure later");
+    }
+    validate_live_request(opts.use_real_backends, selected_profile_path.as_deref())?;
+
+    let activate_live_after_doctor = opts.use_real_backends;
+    let mut use_real_backends = resolve_use_real_backends(
+        opts.use_real_backends,
+        std::env::var("BEAMPIPE_USE_REAL_BACKENDS").ok().as_deref(),
+        env_file_value(&env_path, "BEAMPIPE_USE_REAL_BACKENDS").as_deref(),
+    )
+    .to_string();
+    if activate_live_after_doctor {
+        use_real_backends = "false".into();
+    }
+
+    print_step(step, total_steps, "Review");
+    step += 1;
+    print_setup_plan(&SetupPlan {
+        root: &root,
+        runtime,
+        postgres,
+        ports: host_ports,
+        dashboard: prepare_dash,
+        start: opts.start,
+        project_id: selected_project
+            .as_ref()
+            .map(|selected| selected.config.metadata.id.as_str()),
+        profile_path: selected_profile_path.as_deref(),
+        live_backends: use_real_backends == "true",
+        live_requested: activate_live_after_doctor,
+    });
+    if !opts.yes && !prompt_yes_no("Continue with this configuration?", true)? {
+        bail!("setup aborted before environment configuration");
+    }
+
+    print_step(step, total_steps, "Configure");
+    step += 1;
+    let mut dash_dir = None;
+    if prepare_dash {
+        match prepare_dashboard(&root, &opts, &compose_network_name(&root)) {
+            Ok(prepared) => {
+                print_status("Dashboard", prepared.display());
+                dash_dir = Some(prepared);
+            }
+            Err(error) if !opts.dashboard => {
+                print_pending("Dashboard", format!("not prepared: {error}"));
+            }
+            Err(error) => return Err(error).context("prepare requested dashboard"),
+        }
+    }
+
     if !env_path.exists() {
         seed_env_file(&root, &env_path)?;
-    } else if !opts.yes {
-        print!("`.env` already exists. Continue without overwriting? [Y/n] ");
-        io::stdout().flush()?;
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        if line.trim().eq_ignore_ascii_case("n") {
-            bail!("setup aborted");
-        }
+    } else if !opts.yes
+        && !prompt_yes_no("Update Beampipe-managed settings in the existing `.env`?", true)?
+    {
+        bail!("setup aborted");
     }
 
     let credential_root =
@@ -509,13 +724,6 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         "BEAMPIPE_WORKER_POOL",
         DEFAULT_WORKER_POOL,
     );
-    let mut use_real_backends = resolve_use_real_backends(
-        opts.use_real_backends,
-        std::env::var("BEAMPIPE_USE_REAL_BACKENDS").ok().as_deref(),
-        env_file_value(&env_path, "BEAMPIPE_USE_REAL_BACKENDS").as_deref(),
-    )
-    .to_string();
-
     update_env_file(&env_path, "DATABASE_URL", &database_url)?;
     if let Some(password) = postgres_password.as_deref() {
         update_env_file(&env_path, "BEAMPIPE_POSTGRES_PASSWORD", password)?;
@@ -664,11 +872,11 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         compose_up_postgres(&root)?;
     }
 
-    let (profile_path, mut prepared_profile) =
-        match select_and_prepare_profile(&opts, &root, runtime)? {
-            Some((path, profile)) => (Some(path), Some(profile)),
-            None => (None, None),
-        };
+    let profile_path = selected_profile_path;
+    let mut prepared_profile = profile_path
+        .as_deref()
+        .map(|path| prepare_deployment_profile(&opts, path, runtime))
+        .transpose()?;
     if let Some(deployment_capability) =
         prepared_profile
             .as_ref()
@@ -693,6 +901,8 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         std::env::set_var("BEAMPIPE_WORKER_CAPABILITIES", &worker_capabilities);
     }
 
+    print_step(step, total_steps, "Initialize and verify");
+
     let pool = match beampipe_db::connect(&database_url).await {
         Ok(pool) => Some(pool),
         Err(error) if postgres == PostgresKind::Compose => {
@@ -701,11 +911,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             );
             if database_error_is_password_auth(&error) {
                 println!(
-                    "Compose Postgres kept an older password in its volume. Reset it, then re-run setup:"
-                );
-                println!(
-                    "  docker compose --project-directory {} down --volumes",
-                    root.display()
+                    "Compose PostgreSQL kept an older password in its existing volume. Setup will not delete it. Restore the original BEAMPIPE_POSTGRES_PASSWORD or back up and reset that database deliberately, then rerun setup."
                 );
             } else {
                 println!("PostgreSQL is not up. Seed is in the recipe.");
@@ -721,13 +927,14 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
 
     let mut db_applied = false;
     let mut admin_ready = false;
+    let mut project_uploaded = false;
     if let Some(pool) = pool.as_ref() {
         beampipe_db::migrate(pool).await.context("migrate")?;
         println!("Migrations applied.");
         db_applied = true;
 
         if !opts.skip_admin {
-            create_admin_user(pool, &opts, host_ports.api).await?;
+            create_admin_user(pool, &opts, host_ports.api, &root).await?;
             admin_ready = true;
         }
 
@@ -743,6 +950,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             {
                 upload_project_config(pool, &selected.config, &selected.spec_sha256).await?;
                 println!("Uploaded project config '{}'.", selected.config.metadata.id);
+                project_uploaded = true;
             }
         } else {
             println!("No project selected; skipped project validation and upload.");
@@ -756,13 +964,40 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             );
         }
 
+        let doctor_profile = if activate_live_after_doctor {
+            Some(
+                prepared_profile
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--use-real-backends requires a deployment profile so setup can run its doctor checks"
+                        )
+                    })?
+                    .name
+                    .as_str(),
+            )
+        } else {
+            None
+        };
         let settings = Settings::load()?.settings;
         let setup_context = installation::InstallationContext::from_home(root.clone())?;
-        let report =
-            doctor::run_doctor(pool, &settings, None, Vec::new(), Some(&setup_context)).await;
+        let report = doctor::run_doctor(
+            pool,
+            &settings,
+            doctor_profile,
+            Vec::new(),
+            Some(&setup_context),
+        )
+        .await;
         doctor::print_human(&report);
         if !report.ok {
             bail!("setup completed with doctor failures; fix checks above");
+        }
+        if activate_live_after_doctor {
+            update_env_file(&env_path, "BEAMPIPE_USE_REAL_BACKENDS", "true")?;
+            std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", "true");
+            use_real_backends = "true".into();
+            print_status("Live backends", "enabled after profile doctor passed");
         }
     } else if let Some(selected) = selected_project.as_ref() {
         println!(
@@ -774,51 +1009,77 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         println!("No project selected; skipped project validation and upload.");
     }
 
+    if activate_live_after_doctor && use_real_backends != "true" {
+        bail!(
+            "--use-real-backends was not enabled because PostgreSQL/profile doctor checks did not run; it remains false"
+        );
+    }
+
     let commands = next_steps_lines(&SetupNextSteps {
         runtime_docker: prepare_docker,
         compose_postgres: postgres == PostgresKind::Compose,
         docker_context,
         db_applied,
         admin_ready,
+        project_uploaded,
         core_home: Some(root.clone()),
         dash_dir: dash_dir.clone(),
         project_file: selected_project
             .as_ref()
-            .map(|selected| display_repo_path(&root, &selected.path)),
+            .map(|selected| selected.path.display().to_string()),
         profile_file: profile_path
             .as_deref()
             .filter(|path| path.exists())
-            .map(|path| display_repo_path(&root, path)),
+            .map(|path| path.display().to_string()),
     });
+    let mut core_started = existing_services_running;
     if opts.start {
-        finish_start(&root, prepare_docker, &opts, host_ports)?;
+        core_started = finish_start(&root, prepare_docker, &opts, host_ports)?;
         if let Some(dash) = dash_dir.as_ref() {
             start_dashboard(&root, dash);
         }
-    } else {
-        print_recipe(&commands);
     }
-    print_setup_summary(
-        &root,
-        runtime,
-        postgres,
-        host_ports,
-        opts.start,
-        prepared_profile.as_ref(),
-        &use_real_backends,
-    );
+    let mut casda_staging = selected_project
+        .as_ref()
+        .is_some_and(|selected| selected.config.staging.provider == StagingProvider::CasdaUws);
     offer_next_actions(&mut NextActions {
         opts: &opts,
         root: &root,
         env_path: &env_path,
         runtime,
-        started: opts.start,
+        started: core_started,
         pool: pool.as_ref(),
         prepared_profile: &mut prepared_profile,
         use_real_backends: &mut use_real_backends,
+        casda_staging: &mut casda_staging,
     })
     .await?;
-    print_access_summary(&root, runtime, host_ports, opts.start, dash_dir.as_deref());
+    print_setup_summary(
+        &root,
+        runtime,
+        postgres,
+        host_ports,
+        core_started,
+        prepared_profile.as_ref(),
+        &use_real_backends,
+    );
+    print_access_summary(
+        &root,
+        runtime,
+        host_ports,
+        core_started,
+        dash_dir.as_deref(),
+    );
+    print_final_next_steps(
+        if core_started { &[] } else { &commands },
+        &root,
+        use_real_backends == "true",
+        prepared_profile
+            .as_ref()
+            .is_some_and(|profile| matches!(&profile.deployment, DeploymentConfig::SlurmRemote(_))),
+        casda_staging,
+        opts.wallaby_sample,
+    );
     Ok(())
 }
 
@@ -1118,10 +1379,84 @@ fn require_docker_compose() -> Result<()> {
 }
 
 fn setup_step_total(opts: &SetupOptions, docker: bool) -> usize {
-    if decide_dashboard(opts, docker) == Some(false) {
-        4
-    } else {
-        5
+    let _ = (opts, docker);
+    8
+}
+
+struct SetupPlan<'a> {
+    root: &'a Path,
+    runtime: RuntimeKind,
+    postgres: PostgresKind,
+    ports: HostPorts,
+    dashboard: bool,
+    start: bool,
+    project_id: Option<&'a str>,
+    profile_path: Option<&'a Path>,
+    live_backends: bool,
+    live_requested: bool,
+}
+
+fn setup_plan_lines(plan: &SetupPlan<'_>) -> Vec<String> {
+    let runtime = match plan.runtime {
+        RuntimeKind::Docker => "Docker Compose",
+        RuntimeKind::Host => "host binary",
+    };
+    let database = match plan.postgres {
+        PostgresKind::Compose => "managed Compose PostgreSQL",
+        PostgresKind::Existing => "existing PostgreSQL URL",
+    };
+    let mut ports = format!("API {}", plan.ports.api);
+    if plan.postgres == PostgresKind::Compose {
+        ports.push_str(&format!(", PostgreSQL {}", plan.ports.postgres));
+    }
+    if plan.runtime == RuntimeKind::Docker {
+        ports.push_str(&format!(", metrics {}", plan.ports.metrics));
+    }
+    vec![
+        format!("Installation       {}", plan.root.display()),
+        format!("Runtime            {runtime}"),
+        format!("Database           {database}"),
+        format!("Host ports         {ports}"),
+        format!(
+            "Dashboard          {}",
+            if plan.dashboard { "install" } else { "skip" }
+        ),
+        format!(
+            "Project            {}",
+            plan.project_id.unwrap_or("configure later")
+        ),
+        format!(
+            "Profile            {}",
+            plan.profile_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "configure later".into())
+        ),
+        format!(
+            "Live backends       {}",
+            if plan.live_requested {
+                "enable only after profile doctor passes"
+            } else if plan.live_backends {
+                "enabled"
+            } else {
+                "off (safe default)"
+            }
+        ),
+        format!(
+            "Services            {}",
+            if plan.start && plan.runtime == RuntimeKind::Docker {
+                "start after checks"
+            } else if plan.start {
+                "start PostgreSQL if managed; host command follows"
+            } else {
+                "configure only"
+            }
+        ),
+    ]
+}
+
+fn print_setup_plan(plan: &SetupPlan<'_>) {
+    for line in setup_plan_lines(plan) {
+        print_hint(&line);
     }
 }
 
@@ -1139,7 +1474,7 @@ fn require_bind_ports_free(ports: &[(u16, &str)]) -> Result<()> {
     }
     if !busy.is_empty() {
         bail!(
-            "bind ports already in use: {}. If this is leftover Beampipe Compose from a failed setup, stop it with `docker compose down --volumes` in the install home, then retry. Or pass --no-start.",
+            "bind ports already in use: {}. Stop the service that owns the port or choose a different setup port. For a running Beampipe installation, use `beampipe stop`; use --no-start to configure without binding ports.",
             busy.join(", ")
         );
     }
@@ -1333,11 +1668,14 @@ fn guessed_postgres_for_preflight(opts: &SetupOptions, runtime: RuntimeKind) -> 
     }
 }
 
-fn preflight_before_materialize(opts: &SetupOptions) -> Result<()> {
+fn preflight_before_materialize(
+    opts: &SetupOptions,
+    existing_services_running: bool,
+) -> Result<()> {
     match decide_runtime(opts)? {
         Some(RuntimeKind::Docker) => {
             require_docker_compose()?;
-            if opts.yes && opts.start {
+            if opts.yes && opts.start && !existing_services_running {
                 require_bind_ports_free(&bind_ports_for_start(
                     resolved_host_ports(opts)?,
                     RuntimeKind::Docker,
@@ -1345,14 +1683,14 @@ fn preflight_before_materialize(opts: &SetupOptions) -> Result<()> {
                 ))?;
             }
         }
-        Some(RuntimeKind::Host) if opts.yes && opts.start => {
+        Some(RuntimeKind::Host) if opts.yes && opts.start && !existing_services_running => {
             require_bind_ports_free(&bind_ports_for_start(
                 resolved_host_ports(opts)?,
                 RuntimeKind::Host,
                 guessed_postgres_for_preflight(opts, RuntimeKind::Host),
             ))?;
         }
-        None if opts.start => {
+        None if opts.start && !existing_services_running => {
             require_bind_ports_free(&[(resolved_host_ports(opts)?.api, "API")])?;
         }
         _ => {}
@@ -1365,36 +1703,40 @@ fn preflight_after_choices(
     runtime: RuntimeKind,
     postgres: PostgresKind,
     ports: HostPorts,
+    existing_services_running: bool,
 ) -> Result<()> {
     if runtime == RuntimeKind::Docker {
         require_docker_compose()?;
     }
-    if !opts.start {
+    if !opts.start || existing_services_running {
         return Ok(());
     }
     require_bind_ports_free(&bind_ports_for_start(ports, runtime, postgres))
 }
 
-fn host_start_command(root: &Path) -> String {
-    format!("  beampipe --home {} start", root.display())
+fn shell_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', "'\"'\"'"))
 }
 
-fn login_snippet_lines(username: &str, api_port: u16) -> Vec<String> {
-    vec![
-        format!("  export ADMIN_USER={username}"),
-        "  export ADMIN_PASSWORD=\"${ADMIN_PASSWORD:?set to the password setup printed}\"".into(),
-        format!("  curl -fsS -X POST http://127.0.0.1:{api_port}/api/v2/login \\"),
-        "    -H 'Content-Type: application/json' \\".into(),
-        "    -d \"{\\\"username\\\":\\\"${ADMIN_USER}\\\",\\\"password\\\":\\\"${ADMIN_PASSWORD}\\\"}\""
-            .into(),
-    ]
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+fn beampipe_recipe_command(root: Option<&Path>, args: &str) -> String {
+    match root {
+        Some(root) => format!("  beampipe --home {} {args}", shell_quote_path(root)),
+        None => format!("  beampipe {args}"),
+    }
+}
+
+fn host_start_command(root: &Path) -> String {
+    beampipe_recipe_command(Some(root), "start")
 }
 
 fn print_login_snippet(username: &str, api_port: u16) {
-    println!("Login once the API is up:");
-    for line in login_snippet_lines(username, api_port) {
-        println!("{line}");
-    }
+    print_hint(&format!(
+        "Sign in as '{username}' through Beampipe Dash or http://127.0.0.1:{api_port}/api/v2/docs."
+    ));
 }
 
 fn compose_cmd(root: &Path, args: &[&str]) -> Result<()> {
@@ -1452,8 +1794,7 @@ fn refuse_stale_compose_postgres_volume(root: &Path) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "Compose PostgreSQL volume `{volume}` already exists from a previous install. Postgres keeps the original password in that volume, so a new .env will not authenticate. Reset it, then re-run setup:\n  docker compose --project-directory {} down --volumes",
-        root.display()
+        "Compose PostgreSQL volume `{volume}` already exists from a previous install, but this installation has no .env password to reuse. Setup will not delete the volume. Restore its original BEAMPIPE_POSTGRES_PASSWORD or back up and reset that database deliberately, then rerun setup"
     );
 }
 
@@ -1480,43 +1821,27 @@ fn check_api_health(api_port: u16) {
 fn finish_start(
     root: &Path,
     runtime_docker: bool,
-    opts: &SetupOptions,
+    _opts: &SetupOptions,
     ports: HostPorts,
-) -> Result<()> {
+) -> Result<bool> {
     if runtime_docker {
         let context = installation::InstallationContext::from_home(root.to_path_buf())?;
         runtime::start(&context)?;
         check_api_health(ports.api);
-        println!("Beampipe is running from {}.", root.display());
-        return Ok(());
+        print_status("Core services", "started");
+        return Ok(true);
     }
-    if opts.yes {
-        println!("The API is not up yet. PostgreSQL is ready. Start the host process with:");
-        println!("{}", host_start_command(root));
-        return Ok(());
-    }
-    if prompt_yes_no("Start beampipe now?", true)? {
-        let exe = std::env::current_exe().context("current executable")?;
-        let status = Command::new(exe)
-            .arg("start")
-            .current_dir(root)
-            .status()
-            .context("beampipe start")?;
-        if !status.success() {
-            bail!("beampipe start failed");
-        }
-    } else {
-        println!("The API is not up yet. Start the host process with:");
-        println!("{}", host_start_command(root));
-    }
-    Ok(())
+    print_pending(
+        "Host process",
+        "run the foreground start command shown in Next actions",
+    );
+    Ok(false)
 }
 
 fn prompt_default(label: &str, default: &str) -> Result<String> {
     print!("{label} [{default}]: ");
     io::stdout().flush()?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
+    let line = read_prompt_line(label)?;
     let trimmed = line.trim();
     if trimmed.is_empty() {
         Ok(default.to_string())
@@ -1525,17 +1850,26 @@ fn prompt_default(label: &str, default: &str) -> Result<String> {
     }
 }
 
+fn parse_yes_no(input: &str, default_yes: bool) -> Option<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" => Some(default_yes),
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
     let hint = if default_yes { "Y/n" } else { "y/N" };
-    print!("{label} [{hint}]: ");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    let t = line.trim();
-    if t.is_empty() {
-        return Ok(default_yes);
+    loop {
+        print!("{label} [{hint}]: ");
+        io::stdout().flush()?;
+        let line = read_prompt_line(label)?;
+        if let Some(answer) = parse_yes_no(&line, default_yes) {
+            return Ok(answer);
+        }
+        print_hint("Enter yes or no.");
     }
-    Ok(!t.eq_ignore_ascii_case("n"))
 }
 
 fn update_env_file(path: &Path, key: &str, value: &str) -> Result<()> {
@@ -1567,9 +1901,41 @@ fn update_env_file(path: &Path, key: &str, value: &str) -> Result<()> {
     if !found {
         lines.push(format!("{key}={value}"));
     }
-    std::fs::write(path, lines.join("\n") + "\n")?;
-    set_private_file_permissions(path)?;
-    Ok(())
+    write_private_file_atomic(path, &(lines.join("\n") + "\n"))
+}
+
+fn write_private_file_atomic(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("beampipe-env");
+    let temporary = parent.join(format!(".{file_name}.tmp-{}", Uuid::new_v4().simple()));
+    let result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("create {}", temporary.display()))?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        set_private_file_permissions(&temporary)?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+            .with_context(|| format!("replace {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -1791,7 +2157,10 @@ fn decide_dashboard(opts: &SetupOptions, docker: bool) -> Option<bool> {
 fn resolve_prepare_dashboard(opts: &SetupOptions, docker: bool) -> Result<bool> {
     match decide_dashboard(opts, docker) {
         Some(value) => Ok(value),
-        None => prompt_yes_no("Install and start Beampipe Dash?", false),
+        None => prompt_yes_no(
+            "Install Beampipe Dash?",
+            DEFAULT_INTERACTIVE_DASHBOARD,
+        ),
     }
 }
 
@@ -1938,14 +2307,14 @@ fn dash_install_recipe_line(core_home: Option<&Path>, dash_dir: &Path) -> String
     match core_home {
         Some(home) => format!(
             "  sh {} --core-home {} --dash-dir {}",
-            script.display(),
-            home.display(),
-            dash_dir.display()
+            shell_quote_path(&script),
+            shell_quote_path(home),
+            shell_quote_path(dash_dir)
         ),
         None => format!(
             "  sh {} --dash-dir {}",
-            script.display(),
-            dash_dir.display()
+            shell_quote_path(&script),
+            shell_quote_path(dash_dir)
         ),
     }
 }
@@ -2051,12 +2420,17 @@ fn prepare_dashboard(root: &Path, opts: &SetupOptions, network: &str) -> Result<
     Ok(dash_dir)
 }
 
-async fn create_admin_user(pool: &PgPool, opts: &SetupOptions, api_port: u16) -> Result<()> {
+async fn create_admin_user(
+    pool: &PgPool,
+    opts: &SetupOptions,
+    api_port: u16,
+    root: &Path,
+) -> Result<()> {
     if opts.yes {
-        return create_admin_user_once(pool, opts, api_port).await;
+        return create_admin_user_once(pool, opts, api_port, root).await;
     }
     loop {
-        match create_admin_user_once(pool, opts, api_port).await {
+        match create_admin_user_once(pool, opts, api_port, root).await {
             Ok(()) => return Ok(()),
             Err(error) if is_retryable_admin_error(&error) => {
                 print_hint(&error.to_string());
@@ -2067,7 +2441,12 @@ async fn create_admin_user(pool: &PgPool, opts: &SetupOptions, api_port: u16) ->
     }
 }
 
-async fn create_admin_user_once(pool: &PgPool, opts: &SetupOptions, api_port: u16) -> Result<()> {
+async fn create_admin_user_once(
+    pool: &PgPool,
+    opts: &SetupOptions,
+    api_port: u16,
+    root: &Path,
+) -> Result<()> {
     let username = if opts.yes {
         opts.admin_user.clone().unwrap_or_else(|| "admin".into())
     } else {
@@ -2100,7 +2479,11 @@ async fn create_admin_user_once(pool: &PgPool, opts: &SetupOptions, api_port: u1
                     read_secret_file(path, "admin password")?
                 } else {
                     let password = generate_admin_password();
-                    println!("Generated admin password (shown once): {password}");
+                    let path = write_generated_admin_password(root, &password)?;
+                    println!(
+                        "Generated admin password and stored it at {} (0600).",
+                        path.display()
+                    );
                     password
                 }
             }
@@ -2108,10 +2491,16 @@ async fn create_admin_user_once(pool: &PgPool, opts: &SetupOptions, api_port: u1
     } else {
         loop {
             let password = rpassword::prompt_password("Admin password (12+ characters): ")?;
-            match validate_admin_password(&password) {
-                Ok(()) => break password,
-                Err(error) => print_hint(&error.to_string()),
+            if let Err(error) = validate_admin_password(&password) {
+                print_hint(&error.to_string());
+                continue;
             }
+            let confirmation = rpassword::prompt_password("Confirm admin password: ")?;
+            if password != confirmation {
+                print_hint("Passwords do not match. Try again.");
+                continue;
+            }
+            break password;
         }
     };
     validate_admin_password(&password)?;
@@ -2131,6 +2520,16 @@ async fn create_admin_user_once(pool: &PgPool, opts: &SetupOptions, api_port: u1
     println!("Created admin user '{username}'.");
     print_login_snippet(&username, api_port);
     Ok(())
+}
+
+fn write_generated_admin_password(root: &Path, password: &str) -> Result<PathBuf> {
+    let path = root.join("credentials/admin/password");
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("admin password path has no parent"))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    write_private_file_atomic(&path, &format!("{password}\n"))?;
+    Ok(path)
 }
 
 fn validate_admin_password(password: &str) -> Result<()> {
@@ -2155,6 +2554,10 @@ fn load_selected_project_config(
     let Some(project_path) = project_config_path(root, opts) else {
         return Ok(None);
     };
+    load_project_config(&project_path).map(Some)
+}
+
+fn load_project_config(project_path: &Path) -> Result<SelectedProjectConfig> {
     if !project_path.exists() {
         bail!(
             "selected project config was not found at {}",
@@ -2168,11 +2571,29 @@ fn load_selected_project_config(
     if !report.valid {
         bail!("project config invalid: {:?}", report.errors);
     }
-    Ok(Some(SelectedProjectConfig {
-        path: project_path,
+    Ok(SelectedProjectConfig {
+        path: project_path.to_path_buf(),
         config,
         spec_sha256: report.spec_sha256,
-    }))
+    })
+}
+
+fn prompt_project_config(root: &Path) -> Result<Option<SelectedProjectConfig>> {
+    print_hint("Choose a project YAML/JSON now, or add one later with `beampipe project add`.");
+    loop {
+        let raw = prompt_default("Project config file (or skip)", "skip")?;
+        if raw.eq_ignore_ascii_case("skip") {
+            return Ok(None);
+        }
+        let path = resolve_under_root(root, &raw);
+        match load_project_config(&path) {
+            Ok(selected) => return Ok(Some(selected)),
+            Err(error) => {
+                print_hint(&error.to_string());
+                print_hint("Enter another path, or type skip to continue.");
+            }
+        }
+    }
 }
 
 fn project_config_path(root: &Path, opts: &SetupOptions) -> Option<PathBuf> {
@@ -2184,14 +2605,9 @@ fn project_config_path(root: &Path, opts: &SetupOptions) -> Option<PathBuf> {
 }
 
 fn resolve_explicit_path(path: &Path) -> PathBuf {
-    let path = expand_user_path(path);
-    if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&path))
-            .unwrap_or(path)
-    }
+    std::env::current_dir()
+        .map(|cwd| resolve_path_from(&cwd, path))
+        .unwrap_or_else(|_| expand_user_path(path))
 }
 
 fn expand_user_path(path: &Path) -> PathBuf {
@@ -2218,20 +2634,47 @@ fn resolve_under_root(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
-fn select_and_prepare_profile(
-    opts: &SetupOptions,
-    root: &Path,
-    runtime: RuntimeKind,
-) -> Result<Option<(PathBuf, DeploymentProfile)>> {
+fn select_profile_path(opts: &SetupOptions, root: &Path) -> Result<Option<PathBuf>> {
     if let Some(path) = opts.profile_config.as_ref() {
         let path = resolve_explicit_path(path);
-        let profile = prepare_deployment_profile(opts, &path, runtime)?;
-        return Ok(Some((path, profile)));
+        validate_profile_file(&path)?;
+        return Ok(Some(path));
     }
     if opts.yes || !prompt_yes_no("Configure a deployment profile now?", false)? {
         return Ok(None);
     }
-    prompt_profile_file(opts, root, runtime)
+    prompt_profile_path(opts, root)
+}
+
+fn validate_profile_file(path: &Path) -> Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let profile: DeploymentProfile =
+        serde_yaml::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    Ok(profile.validate()?)
+}
+
+fn prompt_profile_path(opts: &SetupOptions, root: &Path) -> Result<Option<PathBuf>> {
+    let default_display = if opts.wallaby_sample {
+        root.join("config/deployment_profile.dlg-dim.json")
+            .display()
+            .to_string()
+    } else {
+        "skip".to_string()
+    };
+    loop {
+        let raw = prompt_default("Deployment profile file (or skip)", &default_display)?;
+        if raw.trim().eq_ignore_ascii_case("skip") {
+            return Ok(None);
+        }
+        let path = resolve_under_root(root, &raw);
+        match validate_profile_file(&path) {
+            Ok(()) => return Ok(Some(path)),
+            Err(error) => {
+                print_hint(&error.to_string());
+                print_hint("Enter another path, or type skip to continue without a profile.");
+            }
+        }
+    }
 }
 
 fn prompt_profile_file(
@@ -2398,24 +2841,19 @@ struct SetupNextSteps {
     docker_context: Option<String>,
     db_applied: bool,
     admin_ready: bool,
+    project_uploaded: bool,
     core_home: Option<PathBuf>,
     dash_dir: Option<PathBuf>,
     project_file: Option<String>,
     profile_file: Option<String>,
 }
 
-fn display_repo_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .map(|relative| relative.display().to_string())
-        .unwrap_or_else(|_| path.display().to_string())
-}
-
-fn next_action_choices(wallaby_sample: bool) -> Vec<ChoiceItem> {
+fn next_action_choices(slurm_profile: bool, casda_staging: bool) -> Vec<ChoiceItem> {
     let mut choices = vec![
         ChoiceItem {
-            key: "live",
-            label: "Enable live backends",
-            hint: "BEAMPIPE_USE_REAL_BACKENDS=true after doctor --profile",
+            key: "project",
+            label: "Add or change project",
+            hint: "validate and upload a project YAML/JSON",
         },
         ChoiceItem {
             key: "profile",
@@ -2423,25 +2861,30 @@ fn next_action_choices(wallaby_sample: bool) -> Vec<ChoiceItem> {
             hint: "REST DIM or Slurm JSON from the install config dir",
         },
     ];
-    if wallaby_sample {
-        choices.extend([
-            ChoiceItem {
-                key: "slurm",
-                label: "Set up Slurm SSH credentials",
-                hint: "generate or import a managed key slot",
-            },
-            ChoiceItem {
-                key: "casda",
-                label: "Set CASDA credentials",
-                hint: "username and password for staging downloads",
-            },
-        ]);
+    if slurm_profile {
+        choices.push(ChoiceItem {
+            key: "slurm",
+            label: "Set up Slurm SSH credentials",
+            hint: "generate or import the selected profile's managed key slot",
+        });
+    }
+    if casda_staging {
+        choices.push(ChoiceItem {
+            key: "casda",
+            label: "Set CASDA credentials",
+            hint: "username and password required by the selected project",
+        });
     }
     choices.extend([
         ChoiceItem {
             key: "doctor",
             label: "Run doctor for a profile",
             hint: "beampipe doctor --profile NAME",
+        },
+        ChoiceItem {
+            key: "live",
+            label: "Enable live backends",
+            hint: "available only after profile doctor passes",
         },
         ChoiceItem {
             key: "done",
@@ -2452,46 +2895,88 @@ fn next_action_choices(wallaby_sample: bool) -> Vec<ChoiceItem> {
     choices
 }
 
-fn next_action_recipe_lines(root: &Path, live_already: bool, wallaby_sample: bool) -> Vec<String> {
+fn next_action_recipe_lines(
+    root: &Path,
+    live_already: bool,
+    slurm_profile: bool,
+    casda_staging: bool,
+    wallaby_sample: bool,
+) -> Vec<String> {
     let home = root.display();
     let mut lines = vec![
-        String::new(),
-        "Next actions".into(),
-        "  Mock submissions finish immediately and never create a DIM session.".into(),
+        "Check the installation:".into(),
+        beampipe_recipe_command(Some(root), "status"),
+        beampipe_recipe_command(Some(root), "doctor"),
+        "Add or update workload contracts when needed:".into(),
+        beampipe_recipe_command(Some(root), "project add -f PROJECT_CONFIG"),
+        beampipe_recipe_command(Some(root), "profile add -f PROFILE_CONFIG"),
+        beampipe_recipe_command(Some(root), "doctor --profile PROFILE_NAME"),
     ];
-    if live_already {
-        lines.push("  Live backends are on (BEAMPIPE_USE_REAL_BACKENDS=true).".into());
-    } else {
-        lines.push("  Enable live TM/DIM or Slurm only after doctor --profile passes:".into());
-        lines.push(format!(
-            "    set BEAMPIPE_USE_REAL_BACKENDS=true in {home}/.env"
+    if slurm_profile {
+        lines.push("Complete the selected Slurm profile's SSH credential slot:".into());
+        lines.push(beampipe_recipe_command(
+            Some(root),
+            "slurm credentials init --slot SLOT --host LOGIN_NODE",
         ));
-        lines.push("    beampipe restart".into());
     }
-    lines.push("  Add a project: beampipe project add -f PROJECT_CONFIG".into());
-    lines.push("  Add a deployment profile: beampipe profile add -f PROFILE_CONFIG".into());
-    lines.push("  Verify it: beampipe doctor --profile PROFILE_NAME".into());
+    if casda_staging {
+        lines.push("Add the CASDA credentials required by the selected project:".into());
+        lines.push(format!(
+            "  set CASDA_USERNAME in {home}/.env and store the password under {home}/credentials/casda"
+        ));
+    }
+    if live_already {
+        lines.push("Live backends are enabled (BEAMPIPE_USE_REAL_BACKENDS=true).".into());
+    } else {
+        lines.push("Keep mock submission on until the profile doctor passes, then:".into());
+        lines.push(format!(
+            "  set BEAMPIPE_USE_REAL_BACKENDS=true in {home}/.env"
+        ));
+        lines.push(beampipe_recipe_command(Some(root), "restart"));
+    }
     if wallaby_sample {
         let dlg = root.join("config/deployment_profile.dlg-dim.json");
         let slurm = root.join("config/deployment_profile.slurm-remote.json");
-        lines.push("  WALLABY HiRes sample:".into());
-        lines.push(format!("    beampipe profile add -f {}", dlg.display()));
-        lines.push("    beampipe doctor --profile dlg-dim".into());
-        lines.push("    beampipe slurm credentials init --slot hpc --host LOGIN_NODE".into());
-        lines.push(format!(
-            "    beampipe profile add -f {} --ssh-slot hpc",
-            slurm.display()
+        lines.push("WALLABY HiRes sample profiles:".into());
+        lines.push(beampipe_recipe_command(
+            Some(root),
+            &format!("profile add -f {}", shell_quote_path(&dlg)),
         ));
-        lines.push(format!(
-            "    set CASDA_USERNAME in {home}/.env (Docker: CASDA_PASSWORD; host: CASDA_PASSWORD_FILE={home}/credentials/casda/password)"
+        lines.push(beampipe_recipe_command(
+            Some(root),
+            "doctor --profile dlg-dim",
         ));
-        lines.push("    beampipe restart".into());
+        lines.push(beampipe_recipe_command(
+            Some(root),
+            &format!("profile add -f {} --ssh-slot hpc", shell_quote_path(&slurm)),
+        ));
     }
     lines
 }
 
-fn print_next_action_recipe(root: &Path, live_already: bool, wallaby_sample: bool) {
-    for line in next_action_recipe_lines(root, live_already, wallaby_sample) {
+fn print_final_next_steps(
+    startup_commands: &[String],
+    root: &Path,
+    live_already: bool,
+    slurm_profile: bool,
+    casda_staging: bool,
+    wallaby_sample: bool,
+) {
+    print_section("NEXT ACTIONS");
+    if !startup_commands.is_empty() {
+        print_hint("Start the services when you are ready:");
+        for command in startup_commands {
+            println!("{command}");
+        }
+        println!();
+    }
+    for line in next_action_recipe_lines(
+        root,
+        live_already,
+        slurm_profile,
+        casda_staging,
+        wallaby_sample,
+    ) {
         println!("{line}");
     }
 }
@@ -2509,24 +2994,15 @@ struct NextActions<'a> {
     pool: Option<&'a PgPool>,
     prepared_profile: &'a mut Option<DeploymentProfile>,
     use_real_backends: &'a mut String,
+    casda_staging: &'a mut bool,
 }
 
 async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
     if !next_actions_should_prompt(ctx.opts) {
-        print_next_action_recipe(
-            ctx.root,
-            ctx.use_real_backends.as_str() == "true",
-            ctx.opts.wallaby_sample,
-        );
         return Ok(());
     }
 
-    println!();
-    if stdout_is_tty() {
-        println!("{}", "Next actions".bold());
-    } else {
-        println!("Next actions");
-    }
+    print_section("OPTIONAL CONFIGURATION");
     print_hint("Mock submissions finish immediately and never create a DIM session.");
     print_hint(&format!(
         "BEAMPIPE_USE_REAL_BACKENDS={}",
@@ -2534,20 +3010,30 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
     ));
     print_hint("Enable live backends only after `beampipe doctor --profile NAME` passes.");
 
-    let items = next_action_choices(ctx.opts.wallaby_sample);
     loop {
+        let slurm_profile = ctx.prepared_profile.as_ref().is_some_and(|profile| {
+            matches!(profile.deployment, DeploymentConfig::SlurmRemote(_))
+        });
+        let items = next_action_choices(slurm_profile, *ctx.casda_staging);
         let default_index = items.len() - 1;
         let choice = prompt_choice("Next action", &items, default_index)?;
         match items[choice].key {
+            "project" => match next_action_project(ctx).await {
+                Ok(()) => {}
+                Err(error) => print_hint(&error.to_string()),
+            },
             "live" => {
                 if let Err(error) = enable_live_backends(
                     ctx.root,
                     ctx.env_path,
                     ctx.runtime,
                     ctx.started,
+                    ctx.pool,
                     ctx.prepared_profile.as_ref(),
                     ctx.use_real_backends,
-                ) {
+                )
+                .await
+                {
                     print_hint(&error.to_string());
                 }
             }
@@ -2597,6 +3083,36 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
     Ok(())
 }
 
+async fn next_action_project(ctx: &mut NextActions<'_>) -> Result<()> {
+    let Some(selected) = prompt_project_config(ctx.root)? else {
+        return Ok(());
+    };
+    let pool = ctx
+        .pool
+        .ok_or_else(|| anyhow::anyhow!("PostgreSQL is not reachable; add the project later"))?;
+    upload_project_config(pool, &selected.config, &selected.spec_sha256).await?;
+    println!("Uploaded project config '{}'.", selected.config.metadata.id);
+
+    let backend = env_file_value(ctx.env_path, "BEAMPIPE_BACKEND_CAPABILITIES")
+        .unwrap_or_default();
+    let worker = env_file_value(ctx.env_path, "BEAMPIPE_WORKER_CAPABILITIES")
+        .unwrap_or_else(|| DEFAULT_WORKER_CAPABILITIES.into());
+    let backend = with_project_staging_capabilities(&backend, Some(&selected.config));
+    let worker = with_project_staging_capabilities(&worker, Some(&selected.config));
+    update_env_file(ctx.env_path, "BEAMPIPE_BACKEND_CAPABILITIES", &backend)?;
+    update_env_file(ctx.env_path, "BEAMPIPE_WORKER_CAPABILITIES", &worker)?;
+    std::env::set_var("BEAMPIPE_BACKEND_CAPABILITIES", &backend);
+    std::env::set_var("BEAMPIPE_WORKER_CAPABILITIES", &worker);
+    *ctx.casda_staging = selected.config.staging.provider == StagingProvider::CasdaUws;
+    restart_stack_if_needed(
+        ctx.root,
+        ctx.runtime,
+        ctx.started,
+        "the selected project's capabilities",
+    )?;
+    Ok(())
+}
+
 async fn install_prepared_profile(
     pool: Option<&PgPool>,
     profile: &DeploymentProfile,
@@ -2616,11 +3132,12 @@ async fn install_prepared_profile(
     Ok(())
 }
 
-fn enable_live_backends(
+async fn enable_live_backends(
     root: &Path,
     env_path: &Path,
     runtime: RuntimeKind,
     started: bool,
+    pool: Option<&PgPool>,
     profile: Option<&DeploymentProfile>,
     use_real_backends: &mut String,
 ) -> Result<()> {
@@ -2629,12 +3146,31 @@ fn enable_live_backends(
         return Ok(());
     }
     print_hint("Workers will submit to real TM/DIM or Slurm instead of completing locally.");
-    if profile.is_none() {
-        print_hint(
-            "No profile is loaded yet. Run `beampipe doctor --profile NAME` before enabling live submission.",
+    let profile = profile.ok_or_else(|| {
+        anyhow::anyhow!("add a deployment profile before enabling live backends")
+    })?;
+    let pool = pool.ok_or_else(|| {
+        anyhow::anyhow!("PostgreSQL must be reachable before enabling live backends")
+    })?;
+    print_hint(&format!(
+        "Running required checks for profile '{}' before enabling submission.",
+        profile.name
+    ));
+    let settings = Settings::load()?.settings;
+    let context = installation::InstallationContext::from_home(root.to_path_buf())?;
+    let report = doctor::run_doctor(
+        pool,
+        &settings,
+        Some(&profile.name),
+        Vec::new(),
+        Some(&context),
+    )
+    .await;
+    doctor::print_human(&report);
+    if !report.ok {
+        bail!(
+            "profile doctor failed; live backends remain disabled until every required check passes"
         );
-    } else {
-        print_hint("Do this only after `beampipe doctor --profile NAME` is clean.");
     }
     if !prompt_yes_no("Set BEAMPIPE_USE_REAL_BACKENDS=true?", false)? {
         return Ok(());
@@ -2658,11 +3194,15 @@ fn restart_stack_if_needed(
         match runtime::restart(&context) {
             Ok(()) => println!("Recreated API, scheduler, and worker so they load {what}."),
             Err(error) => print_hint(&format!(
-                "Could not recreate the stack ({error}). Run `beampipe restart`."
+                "Could not recreate the stack ({error}). Run `{}`.",
+                beampipe_recipe_command(Some(root), "restart").trim()
             )),
         }
     } else if runtime == RuntimeKind::Docker {
-        print_hint("When the stack is up: beampipe restart");
+        print_hint(&format!(
+            "When the stack is up: {}",
+            beampipe_recipe_command(Some(root), "restart").trim()
+        ));
     } else {
         print_hint("Restart the host `beampipe start` process to load the new setting.");
     }
@@ -2794,9 +3334,7 @@ fn write_casda_credentials(
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::write(&file_path, format!("{password}\n"))
-        .with_context(|| format!("write {}", file_path.display()))?;
-    set_private_file_permissions(&file_path)?;
+    write_private_file_atomic(&file_path, &format!("{password}\n"))?;
 
     update_env_file(env_path, "CASDA_USERNAME", username)?;
     match runtime {
@@ -2926,27 +3464,51 @@ async fn next_action_doctor_profile(
 fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
     let mut lines = Vec::new();
     if steps.compose_postgres && !steps.runtime_docker {
-        lines.push("  docker compose up -d postgres".into());
+        if let Some(root) = steps.core_home.as_deref() {
+            lines.push(format!(
+                "  docker compose --project-directory {} up -d postgres",
+                shell_quote_path(root)
+            ));
+        } else {
+            lines.push("  docker compose up -d postgres".into());
+        }
     }
     if steps.runtime_docker {
         if let Some(context) = &steps.docker_context {
             lines.push(format!("  # docker context: {context}"));
         }
-        lines.push("  beampipe start".into());
+        lines.push(match steps.core_home.as_deref() {
+            Some(root) => host_start_command(root),
+            None => beampipe_recipe_command(None, "start"),
+        });
         if !steps.db_applied {
-            lines.push("  beampipe migrate".into());
+            lines.push(beampipe_recipe_command(
+                steps.core_home.as_deref(),
+                "migrate",
+            ));
         }
         if !steps.admin_ready {
-            lines.push("  beampipe admin create-user \\".into());
+            lines.push(format!(
+                "{} \\",
+                beampipe_recipe_command(steps.core_home.as_deref(), "admin create-user")
+            ));
             lines.push("    --username admin --email admin@example.test \\".into());
             lines.push("    --password-file /path/to/protected/admin-password --superuser".into());
         }
-        if !steps.db_applied {
+        if !steps.project_uploaded {
             if let Some(project) = &steps.project_file {
-                lines.push(format!("  beampipe project add -f {project}"));
+                lines.push(beampipe_recipe_command(
+                    steps.core_home.as_deref(),
+                    &format!("project add -f {}", shell_quote(project)),
+                ));
             }
+        }
+        if !steps.db_applied {
             if let Some(profile) = &steps.profile_file {
-                lines.push(format!("  beampipe profile add -f {profile}"));
+                lines.push(beampipe_recipe_command(
+                    steps.core_home.as_deref(),
+                    &format!("profile add -f {}", shell_quote(profile)),
+                ));
             }
         }
         if let Some(dash_dir) = &steps.dash_dir {
@@ -2957,22 +3519,39 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
         }
     } else {
         if !steps.db_applied {
-            lines.push("  beampipe migrate".into());
+            lines.push(beampipe_recipe_command(
+                steps.core_home.as_deref(),
+                "migrate",
+            ));
         }
         if !steps.admin_ready {
-            lines.push("  beampipe admin create-user \\".into());
+            lines.push(format!(
+                "{} \\",
+                beampipe_recipe_command(steps.core_home.as_deref(), "admin create-user")
+            ));
             lines.push("    --username admin --email admin@example.test \\".into());
             lines.push("    --password-file /path/to/protected/admin-password --superuser".into());
         }
-        if !steps.db_applied {
+        if !steps.project_uploaded {
             if let Some(project) = &steps.project_file {
-                lines.push(format!("  beampipe project add -f {project}"));
-            }
-            if let Some(profile) = &steps.profile_file {
-                lines.push(format!("  beampipe profile add -f {profile}"));
+                lines.push(beampipe_recipe_command(
+                    steps.core_home.as_deref(),
+                    &format!("project add -f {}", shell_quote(project)),
+                ));
             }
         }
-        lines.push("  beampipe start".into());
+        if !steps.db_applied {
+            if let Some(profile) = &steps.profile_file {
+                lines.push(beampipe_recipe_command(
+                    steps.core_home.as_deref(),
+                    &format!("profile add -f {}", shell_quote(profile)),
+                ));
+            }
+        }
+        lines.push(beampipe_recipe_command(
+            steps.core_home.as_deref(),
+            "start",
+        ));
     }
     lines
 }
@@ -3026,10 +3605,26 @@ fn access_summary_lines(
     counts: runtime::RoleCounts,
     started: bool,
 ) -> Vec<String> {
-    let api = format!("http://127.0.0.1:{api_port}/api/v2");
-    let docs = format!("{api}/docs");
+    let api_url = format!("http://127.0.0.1:{api_port}/api/v2");
+    let docs_url = format!("{api_url}/docs");
+    let api = if started {
+        api_url
+    } else {
+        format!("{api_url}  (after start)")
+    };
+    let docs = if started {
+        docs_url
+    } else {
+        format!("{docs_url}  (after start)")
+    };
     let dashboard = dashboard
-        .map(str::to_string)
+        .map(|url| {
+            if started {
+                url.to_string()
+            } else {
+                format!("{url}  (after start)")
+            }
+        })
         .unwrap_or_else(|| "not installed".into());
     let status = if started && (counts.api + counts.scheduler + counts.worker) > 0 {
         format!(
@@ -3048,11 +3643,10 @@ fn access_summary_lines(
         )
     };
     vec![
-        String::new(),
-        "Summary".into(),
-        format!("  API available here:       {api}"),
-        format!("  API docs here:            {docs}"),
-        format!("  Dashboard available here: {dashboard}"),
+        "ACCESS".into(),
+        format!("  API             {api}"),
+        format!("  API docs        {docs}"),
+        format!("  Dashboard       {dashboard}"),
         format!("  {status}"),
     ]
 }
@@ -3066,8 +3660,13 @@ fn print_access_summary(
 ) {
     let counts = collect_role_counts(root, runtime, started, ports.api);
     let dashboard = dashboard_listen_url(dash_dir);
+    println!();
     for line in access_summary_lines(ports.api, dashboard.as_deref(), counts, started) {
-        println!("{line}");
+        if line == "ACCESS" && color_enabled() {
+            println!("{}", line.bold());
+        } else {
+            println!("{line}");
+        }
     }
 }
 
@@ -3080,58 +3679,33 @@ fn print_setup_summary(
     profile: Option<&DeploymentProfile>,
     use_real_backends: &str,
 ) {
-    println!("\nBeampipe setup complete");
-    println!("  [OK] Home: {}", root.display());
-    println!("  [OK] Runtime: {}", runtime.as_str());
-    println!("  [OK] Database: {}", postgres.as_str());
-    println!("  [OK] API: http://127.0.0.1:{}/api/v2", ports.api);
-    println!(
-        "  [{}] Services: {}",
-        if started { "OK" } else { "--" },
-        if started {
-            "start requested"
-        } else {
-            "not started"
-        }
-    );
-    println!(
-        "  [{}] Live backends: {}",
-        if use_real_backends == "true" {
-            "OK"
-        } else {
-            "--"
-        },
-        if use_real_backends == "true" {
-            "BEAMPIPE_USE_REAL_BACKENDS=true"
-        } else {
-            "mock (enable after doctor --profile)"
-        }
-    );
+    let _ = ports;
+    print_section("SETUP COMPLETE");
+    print_status("Home", root.display());
+    print_status("Runtime", runtime.as_str());
+    print_status("Database", postgres.as_str());
+    if started {
+        print_status("Core services", "running");
+    } else {
+        print_pending("Core services", "not started");
+    }
+    if use_real_backends == "true" {
+        print_status("Live backends", "enabled");
+    } else {
+        print_pending("Live backends", "mock mode until profile doctor passes");
+    }
     if let Some(profile) = profile {
-        println!("  [OK] Profile: {}", profile.name);
+        print_status("Profile", &profile.name);
         if let DeploymentConfig::SlurmRemote(slurm) = &profile.deployment {
-            println!(
-                "  [{}] SSH slot: {}",
-                if slurm.ssh_credential.is_some() {
-                    "OK"
-                } else {
-                    "--"
-                },
-                slurm.ssh_credential.as_deref().unwrap_or("configure later")
-            );
+            if let Some(slot) = slurm.ssh_credential.as_deref() {
+                print_status("SSH slot", slot);
+            } else {
+                print_pending("SSH slot", "configure later");
+            }
         }
     } else {
-        println!("  [--] Profile: configure later with `beampipe profile add`");
+        print_pending("Profile", "configure later");
     }
-    println!("\nUseful commands:");
-    println!("  beampipe status");
-    println!("  beampipe doctor");
-    println!("  beampipe logs --follow");
-    println!("  beampipe profile list");
-    if let Some(binary) = default_release_binary() {
-        println!("  Binary: {}", binary.display());
-    }
-    println!("  If `beampipe` is not found: export PATH=\"$HOME/.local/bin:$PATH\"");
 }
 
 #[cfg(test)]
@@ -3180,16 +3754,86 @@ staging:
         assert_eq!(parse_choice("compose", &postgres, 1), Some(0));
         assert_eq!(parse_choice("existing", &postgres, 0), Some(1));
 
-        let next = next_action_choices(true);
-        assert_eq!(parse_choice("", &next, 5), Some(5));
-        assert_eq!(parse_choice("done", &next, 0), Some(5));
-        assert_eq!(parse_choice("live", &next, 5), Some(0));
-        assert_eq!(parse_choice("profile", &next, 5), Some(1));
-        assert_eq!(parse_choice("slurm", &next, 5), Some(2));
-        assert_eq!(parse_choice("casda", &next, 5), Some(3));
-        assert_eq!(parse_choice("doctor", &next, 5), Some(4));
-        assert_eq!(parse_choice("5", &next, 5), Some(4));
-        assert_eq!(parse_choice("6", &next, 5), Some(5));
+        let next = next_action_choices(true, true);
+        assert_eq!(parse_choice("", &next, 6), Some(6));
+        assert_eq!(parse_choice("done", &next, 0), Some(6));
+        assert_eq!(parse_choice("project", &next, 6), Some(0));
+        assert_eq!(parse_choice("profile", &next, 6), Some(1));
+        assert_eq!(parse_choice("slurm", &next, 6), Some(2));
+        assert_eq!(parse_choice("casda", &next, 6), Some(3));
+        assert_eq!(parse_choice("doctor", &next, 6), Some(4));
+        assert_eq!(parse_choice("live", &next, 6), Some(5));
+        assert_eq!(parse_choice("7", &next, 6), Some(6));
+    }
+
+    #[test]
+    fn yes_no_parser_accepts_only_explicit_answers() {
+        assert_eq!(parse_yes_no("", true), Some(true));
+        assert_eq!(parse_yes_no("", false), Some(false));
+        assert_eq!(parse_yes_no("y", false), Some(true));
+        assert_eq!(parse_yes_no("YES", false), Some(true));
+        assert_eq!(parse_yes_no("n", true), Some(false));
+        assert_eq!(parse_yes_no("No", true), Some(false));
+        assert_eq!(parse_yes_no("banana", true), None);
+    }
+
+    #[test]
+    fn styling_respects_no_color_and_limited_terminals() {
+        assert!(color_enabled_for(true, false, Some("xterm-256color")));
+        assert!(!color_enabled_for(true, true, Some("xterm-256color")));
+        assert!(!color_enabled_for(true, false, Some("dumb")));
+        assert!(!color_enabled_for(false, false, Some("xterm-256color")));
+        assert!(full_logo_fits(true, Some(90)));
+        assert!(!full_logo_fits(true, Some(89)));
+        assert!(!full_logo_fits(false, Some(120)));
+    }
+
+    #[test]
+    fn noninteractive_input_requires_yes_before_setup_writes() {
+        let error = validate_setup_input(false, false).unwrap_err();
+        assert!(error.to_string().contains("--yes"));
+        assert!(validate_setup_input(true, false).is_ok());
+        assert!(validate_setup_input(false, true).is_ok());
+    }
+
+    #[test]
+    fn setup_paths_are_resolved_against_the_launch_directory() {
+        let launch = Path::new("/launch/worktree");
+        let mut opts = SetupOptions {
+            project_config: Some("projects/example.yaml".into()),
+            profile_config: Some("profiles/local.json".into()),
+            admin_password_file: Some("secrets/admin".into()),
+            directory: Some("operator".into()),
+            ..Default::default()
+        };
+        resolve_setup_option_paths(&mut opts, launch);
+        assert_eq!(
+            opts.project_config.as_deref(),
+            Some(Path::new("/launch/worktree/projects/example.yaml"))
+        );
+        assert_eq!(
+            opts.profile_config.as_deref(),
+            Some(Path::new("/launch/worktree/profiles/local.json"))
+        );
+        assert_eq!(
+            opts.admin_password_file.as_deref(),
+            Some(Path::new("/launch/worktree/secrets/admin"))
+        );
+        assert_eq!(
+            opts.directory.as_deref(),
+            Some(Path::new("/launch/worktree/operator"))
+        );
+    }
+
+    #[test]
+    fn capability_actions_follow_the_selected_contracts() {
+        let neutral = next_action_choices(false, false);
+        assert!(neutral.iter().all(|item| item.key != "slurm"));
+        assert!(neutral.iter().all(|item| item.key != "casda"));
+
+        let configured = next_action_choices(true, true);
+        assert!(configured.iter().any(|item| item.key == "slurm"));
+        assert!(configured.iter().any(|item| item.key == "casda"));
     }
 
     #[test]
@@ -3212,6 +3856,14 @@ staging:
             resolve_use_real_backends(false, Some("maybe"), Some("no")),
             "false"
         );
+    }
+
+    #[test]
+    fn explicit_live_request_requires_a_profile_before_configuration() {
+        let error = validate_live_request(true, None).unwrap_err();
+        assert!(error.to_string().contains("--profile-config"));
+        assert!(validate_live_request(true, Some(Path::new("profile.json"))).is_ok());
+        assert!(validate_live_request(false, None).is_ok());
     }
 
     #[test]
@@ -3321,7 +3973,7 @@ staging:
     #[test]
     fn next_action_recipe_is_neutral_unless_wallaby_is_selected() {
         let root = Path::new("/home/op/beampipe");
-        let mock = next_action_recipe_lines(root, false, false).join("\n");
+        let mock = next_action_recipe_lines(root, false, false, false, false).join("\n");
         assert!(mock.contains("BEAMPIPE_USE_REAL_BACKENDS=true"));
         assert!(mock.contains("PROJECT_CONFIG"));
         assert!(mock.contains("PROFILE_CONFIG"));
@@ -3329,13 +3981,13 @@ staging:
         assert!(!mock.contains("CASDA"));
         assert!(!mock.contains("Live backends are on"));
 
-        let wallaby = next_action_recipe_lines(root, false, true).join("\n");
+        let wallaby = next_action_recipe_lines(root, false, true, true, true).join("\n");
         assert!(wallaby.contains("deployment_profile.dlg-dim.json"));
-        assert!(wallaby.contains("beampipe slurm credentials init"));
+        assert!(wallaby.contains("slurm credentials init"));
         assert!(wallaby.contains("CASDA_USERNAME"));
 
-        let live = next_action_recipe_lines(root, true, false).join("\n");
-        assert!(live.contains("Live backends are on"));
+        let live = next_action_recipe_lines(root, true, false, false, false).join("\n");
+        assert!(live.contains("Live backends are enabled"));
         assert!(!live.contains("set BEAMPIPE_USE_REAL_BACKENDS=true"));
     }
 
@@ -3429,9 +4081,10 @@ staging:
             true,
         );
         let joined = lines.join("\n");
-        assert!(joined.contains("API available here:       http://127.0.0.1:18080/api/v2"));
-        assert!(joined.contains("API docs here:            http://127.0.0.1:18080/api/v2/docs"));
-        assert!(joined.contains("Dashboard available here: http://127.0.0.1:3000"));
+        assert!(joined.contains("ACCESS"));
+        assert!(joined.contains("API             http://127.0.0.1:18080/api/v2"));
+        assert!(joined.contains("API docs        http://127.0.0.1:18080/api/v2/docs"));
+        assert!(joined.contains("Dashboard       http://127.0.0.1:3000"));
         assert!(joined.contains("Beampipe is now up with 1 scheduler, 2 worker, 1 API"));
     }
 
@@ -3439,7 +4092,8 @@ staging:
     fn access_summary_without_dashboard_or_start() {
         let lines = access_summary_lines(18080, None, runtime::RoleCounts::default(), false);
         let joined = lines.join("\n");
-        assert!(joined.contains("Dashboard available here: not installed"));
+        assert!(joined.contains("Dashboard       not installed"));
+        assert!(joined.contains("http://127.0.0.1:18080/api/v2  (after start)"));
         assert!(joined.contains("Beampipe is not started (0 scheduler, 0 worker, 0 API)"));
     }
 
@@ -3466,51 +4120,86 @@ staging:
     fn format_step_is_numbered() {
         assert_eq!(
             format_step(1, 4, "How will you run Beampipe?"),
-            "== 1/4  How will you run Beampipe? =="
+            "STEP 1 OF 4  How will you run Beampipe?"
         );
     }
 
     #[test]
-    fn setup_step_total_skips_dashboard_when_it_cannot_apply() {
+    fn setup_uses_a_stable_eight_step_progress_sequence() {
         let yes_docker = SetupOptions {
             yes: true,
             runtime: Some("docker".into()),
             ..Default::default()
         };
-        assert_eq!(setup_step_total(&yes_docker, true), 4);
+        assert_eq!(setup_step_total(&yes_docker, true), 8);
 
         let host = SetupOptions {
             yes: true,
             runtime: Some("host".into()),
             ..Default::default()
         };
-        assert_eq!(setup_step_total(&host, false), 4);
+        assert_eq!(setup_step_total(&host, false), 8);
 
         let with_dash = SetupOptions {
             yes: true,
             dashboard: true,
             ..Default::default()
         };
-        assert_eq!(setup_step_total(&with_dash, true), 5);
+        assert_eq!(setup_step_total(&with_dash, true), 8);
 
         let interactive = SetupOptions::default();
-        assert_eq!(setup_step_total(&interactive, true), 5);
+        assert_eq!(setup_step_total(&interactive, true), 8);
+    }
+
+    #[test]
+    fn review_plan_is_complete_and_marks_safe_defaults() {
+        let lines = setup_plan_lines(&SetupPlan {
+            root: Path::new("/home/op/beampipe"),
+            runtime: RuntimeKind::Docker,
+            postgres: PostgresKind::Compose,
+            ports: HostPorts {
+                api: 18080,
+                postgres: 5432,
+                metrics: 9090,
+            },
+            dashboard: true,
+            start: true,
+            project_id: None,
+            profile_path: None,
+            live_backends: false,
+            live_requested: false,
+        })
+        .join("\n");
+        assert!(lines.contains("/home/op/beampipe"));
+        assert!(lines.contains("Docker Compose"));
+        assert!(lines.contains("API 18080, PostgreSQL 5432, metrics 9090"));
+        assert!(lines.contains("Dashboard          install"));
+        assert!(lines.contains("Project            configure later"));
+        assert!(lines.contains("Profile            configure later"));
+        assert!(lines.contains("Live backends       off (safe default)"));
+        assert!(lines.contains("Services            start after checks"));
     }
 
     #[test]
     fn host_start_command_selects_installation_without_chdir() {
         let command = host_start_command(Path::new("/home/op/beampipe"));
-        assert_eq!(command, "  beampipe --home /home/op/beampipe start");
+        assert_eq!(command, "  beampipe --home '/home/op/beampipe' start");
     }
 
     #[test]
-    fn login_snippet_reads_password_from_the_environment() {
-        let joined = login_snippet_lines("admin", installation::DEFAULT_API_PORT).join("\n");
-        assert!(joined.contains("export ADMIN_USER=admin"));
-        assert!(joined.contains("ADMIN_PASSWORD:?set to the password setup printed"));
-        assert!(joined.contains("http://127.0.0.1:18080/api/v2/login"));
-        assert!(joined.contains("/api/v2/login"));
-        assert!(!joined.contains("replace-this-local-password"));
+    fn shell_quoted_paths_round_trip_spaces_and_single_quotes() {
+        let path = "/tmp/Beampipe operator's files";
+        let quoted = shell_quote(path);
+        let output = Command::new("sh")
+            .args(["-c", &format!("printf '%s' {quoted}")])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), path);
+        assert_eq!(
+            host_start_command(Path::new(path)),
+            "  beampipe --home '/tmp/Beampipe operator'\"'\"'s files' start"
+        );
     }
 
     #[test]
@@ -3522,7 +4211,8 @@ staging:
         assert!(message.contains("API"));
         assert!(message.contains(&port.to_string()));
         assert!(message.contains("--no-start"));
-        assert!(message.contains("down --volumes"));
+        assert!(message.contains("beampipe stop"));
+        assert!(!message.contains("down --volumes"));
     }
 
     #[test]
@@ -3539,15 +4229,6 @@ staging:
             &"error returned from database: password authentication failed for user \"postgres\""
         ));
         assert!(!database_error_is_password_auth(&"connection refused"));
-    }
-
-    #[test]
-    fn recipe_lines_start_with_print_only_header() {
-        let commands = vec!["  docker compose up -d postgres".into()];
-        let lines = recipe_lines(&commands);
-        assert_eq!(lines[0], "");
-        assert_eq!(lines[1], "Next (nothing was started)");
-        assert_eq!(lines[2], "  docker compose up -d postgres");
     }
 
     #[test]
@@ -3607,6 +4288,25 @@ staging:
         let password = generate_admin_password();
         assert!(password.len() >= 12);
         assert!(password.starts_with("bp-"));
+    }
+
+    #[test]
+    fn generated_admin_password_is_stored_privately() {
+        let root = tempfile::tempdir().unwrap();
+        let path = write_generated_admin_password(root.path(), "unit-test-password").unwrap();
+        assert_eq!(path, root.path().join("credentials/admin/password"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "unit-test-password\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
@@ -3881,14 +4581,15 @@ staging:
             compose_postgres: true,
             db_applied: false,
             admin_ready: false,
+            core_home: Some(PathBuf::from("/home/op/beampipe")),
             project_file: Some("config/wallaby_hires.v2.yaml".into()),
             ..Default::default()
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("docker compose up -d postgres"));
-        assert!(joined.contains("beampipe migrate"));
-        assert!(joined.contains("beampipe project add -f config/wallaby_hires.v2.yaml"));
-        assert!(joined.contains("beampipe start"));
+        assert!(joined.contains("up -d postgres"));
+        assert!(joined.contains("--home '/home/op/beampipe' migrate"));
+        assert!(joined.contains("project add -f 'config/wallaby_hires.v2.yaml'"));
+        assert!(joined.contains("--home '/home/op/beampipe' start"));
         assert!(!joined.contains("profile add"));
         assert!(!joined.contains("docker compose up -d api"));
         assert!(!joined.contains("--deployment"));
@@ -3910,6 +4611,32 @@ staging:
     }
 
     #[test]
+    fn skipped_project_upload_is_kept_in_the_recipe_after_migration() {
+        let pending = next_steps_lines(&SetupNextSteps {
+            runtime_docker: false,
+            db_applied: true,
+            admin_ready: true,
+            project_uploaded: false,
+            core_home: Some(PathBuf::from("/home/op/beampipe")),
+            project_file: Some("config/project.yaml".into()),
+            ..Default::default()
+        })
+        .join("\n");
+        assert!(pending.contains("project add -f 'config/project.yaml'"));
+
+        let uploaded = next_steps_lines(&SetupNextSteps {
+            runtime_docker: false,
+            db_applied: true,
+            admin_ready: true,
+            project_uploaded: true,
+            project_file: Some("config/project.yaml".into()),
+            ..Default::default()
+        })
+        .join("\n");
+        assert!(!uploaded.contains("beampipe project add"));
+    }
+
+    #[test]
     fn docker_recipe_starts_dash_via_install_script() {
         let lines = next_steps_lines(&SetupNextSteps {
             runtime_docker: true,
@@ -3921,10 +4648,10 @@ staging:
             ..Default::default()
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("beampipe start"));
+        assert!(joined.contains("--home '/home/op/beampipe' start"));
         assert!(joined.contains("scripts/install.sh"));
-        assert!(joined.contains("--core-home /home/op/beampipe"));
-        assert!(joined.contains("--dash-dir /home/op/beampipe-dash"));
+        assert!(joined.contains("--core-home '/home/op/beampipe'"));
+        assert!(joined.contains("--dash-dir '/home/op/beampipe-dash'"));
         assert!(!joined.contains("compose.beampipe-local.yml"));
         assert!(!joined.contains("docker compose -f compose.yaml"));
     }
@@ -3936,13 +4663,14 @@ staging:
             compose_postgres: true,
             db_applied: false,
             admin_ready: false,
+            core_home: Some(PathBuf::from("/home/op/beampipe")),
             project_file: Some("config/wallaby_hires.v2.yaml".into()),
             ..Default::default()
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("beampipe start"));
-        assert!(joined.contains("beampipe migrate"));
-        assert!(joined.contains("beampipe project add -f config/wallaby_hires.v2.yaml"));
+        assert!(joined.contains("--home '/home/op/beampipe' start"));
+        assert!(joined.contains("--home '/home/op/beampipe' migrate"));
+        assert!(joined.contains("project add -f 'config/wallaby_hires.v2.yaml'"));
         assert!(!joined.contains("docker compose up"));
         assert!(!joined.contains("docker compose run"));
         assert!(!joined.contains("profile add"));
