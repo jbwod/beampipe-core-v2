@@ -39,9 +39,9 @@ adapters:
     retries: 2
 
 graph:
-  # Vendored from wallaby-hires-beampipe release commit c327d0b75c479629498d195d7b84d991515ff5d7.
+  # Vendored from wallaby-hires-beampipe release commit 96e00fb5a64353fc9e7de10214c35a3555fee995.
   path: config/graphs/wallaby-hires_deploy-setonix-beampipe.graph
-  sha256: b53e6a52d847c9c2957c07ab3b5cbcb34ffaf9bc9f4da7211f87171c2036c7ff
+  sha256: 279776976d0650321a8813aac1ff5f73e81696913480ef045692f7d295696b83
 
 discovery:
   queries:
