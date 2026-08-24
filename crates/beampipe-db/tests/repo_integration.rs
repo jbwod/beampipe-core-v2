@@ -6,7 +6,7 @@ use beampipe_db::{
     repo,
 };
 use beampipe_domain::{ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch, SubmissionState};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -1524,7 +1524,11 @@ async fn prepare_abandonable_slurm_submission(
                 daliuge_session_id: session_id.into(),
                 profile_sha256: profile_sha256.into(),
                 target_fingerprint: "integration-target-sha".into(),
-                accounting_not_before: intent.observed_at,
+                accounting_not_before: DateTime::<Utc>::from_timestamp(
+                    intent.observed_at.timestamp(),
+                    0,
+                )
+                .unwrap(),
                 query_started_at: completed_at - Duration::seconds(1),
                 query_completed_at: completed_at,
                 squeue_complete: true,
@@ -1836,7 +1840,11 @@ async fn abandonment_rejects_an_active_execute_lease() {
             daliuge_session_id: session_id.clone(),
             profile_sha256: "integration-profile-sha".into(),
             target_fingerprint: "integration-target-sha".into(),
-            accounting_not_before: intent.observed_at,
+            accounting_not_before: DateTime::<Utc>::from_timestamp(
+                intent.observed_at.timestamp(),
+                0,
+            )
+            .unwrap(),
             query_started_at: lookup_at - Duration::seconds(1),
             query_completed_at: lookup_at,
             squeue_complete: true,
@@ -1909,7 +1917,11 @@ async fn abandonment_rejects_a_scheduler_match_after_negative_evidence() {
             daliuge_session_id: session_id.clone(),
             profile_sha256: "integration-profile-sha".into(),
             target_fingerprint: "integration-target-sha".into(),
-            accounting_not_before: intent.observed_at,
+            accounting_not_before: DateTime::<Utc>::from_timestamp(
+                intent.observed_at.timestamp(),
+                0,
+            )
+            .unwrap(),
             query_started_at: lookup_at - Duration::seconds(1),
             query_completed_at: lookup_at,
             squeue_complete: true,
@@ -1970,7 +1982,11 @@ async fn submission_receipt_winning_the_row_lock_prevents_abandonment() {
             daliuge_session_id: session_id.clone(),
             profile_sha256: "integration-profile-sha".into(),
             target_fingerprint: "different-resolved-user".into(),
-            accounting_not_before: intent.observed_at,
+            accounting_not_before: DateTime::<Utc>::from_timestamp(
+                intent.observed_at.timestamp(),
+                0,
+            )
+            .unwrap(),
             query_started_at: mismatch_at - Duration::seconds(1),
             query_completed_at: mismatch_at,
             squeue_complete: true,
@@ -2012,7 +2028,11 @@ async fn submission_receipt_winning_the_row_lock_prevents_abandonment() {
             daliuge_session_id: session_id.clone(),
             profile_sha256: "integration-profile-sha".into(),
             target_fingerprint: "integration-target-sha".into(),
-            accounting_not_before: intent.observed_at,
+            accounting_not_before: DateTime::<Utc>::from_timestamp(
+                intent.observed_at.timestamp(),
+                0,
+            )
+            .unwrap(),
             query_started_at: lookup_at - Duration::seconds(1),
             query_completed_at: lookup_at,
             squeue_complete: true,
@@ -2201,7 +2221,7 @@ async fn slurm_submission_receipt_is_atomic_idempotent_and_conflict_safe() {
     conflicts.push(changed_manifest);
     let mut changed_path = input;
     changed_path.remote_session_dir = Some("/remote/sessions/other".into());
-    changed_path.staging_root = Some("/remote/other_staging_data".into());
+    changed_path.staging_root = Some("/remote/sessions/other/wallaby_outputs".into());
     conflicts.push(changed_path);
     for conflict in conflicts {
         let error = repo::record_submission_receipt(&pool, execution.uuid, conflict)

@@ -2899,8 +2899,11 @@ pub async fn record_slurm_name_lookup(
         .get("target_fingerprint")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty());
+    let expected_accounting_not_before =
+        DateTime::<Utc>::from_timestamp(intent.observed_at.timestamp(), 0)
+            .expect("a persisted UTC timestamp remains valid when truncated to whole seconds");
     if intent.uuid != input.intent_observation_id
-        || input.accounting_not_before != intent.observed_at
+        || input.accounting_not_before != expected_accounting_not_before
         || persisted_target_fingerprint != Some(input.target_fingerprint.as_str())
     {
         tx.rollback().await?;
@@ -3226,13 +3229,16 @@ pub struct SlurmAbandonmentEvidenceExpectation<'a> {
 
 impl SlurmAbandonmentEvidenceExpectation<'_> {
     fn matches_attempt(&self, attempt: &SlurmLookupEvidenceAttempt) -> bool {
+        let expected_accounting_not_before =
+            DateTime::<Utc>::from_timestamp(self.intent_observed_at.timestamp(), 0)
+                .expect("a persisted UTC timestamp remains valid when truncated to whole seconds");
         attempt.observed_at >= self.quiet_eligible_at
             && attempt.query_completed_at >= self.quiet_eligible_at
             && attempt.daliuge_session_id == self.session_id
             && attempt.intent_observation_id == self.intent_id
             && attempt.profile_sha256 == self.profile_sha256
             && attempt.target_fingerprint == self.target_fingerprint
-            && attempt.accounting_not_before == self.intent_observed_at
+            && attempt.accounting_not_before == expected_accounting_not_before
     }
 }
 
@@ -7561,7 +7567,7 @@ mod tests {
         validate_slurm_abandonment_evidence, SlurmAbandonmentEvidenceExpectation,
         SlurmLookupEvidenceAttempt,
     };
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -7632,7 +7638,8 @@ mod tests {
             intent_observation_id: intent_id,
             profile_sha256: "profile-sha".into(),
             target_fingerprint: "target-sha".into(),
-            accounting_not_before: intent_at,
+            accounting_not_before: DateTime::<Utc>::from_timestamp(intent_at.timestamp(), 0)
+                .unwrap(),
             query_completed_at: completed_at,
             squeue_complete: true,
             sacct_complete: true,
