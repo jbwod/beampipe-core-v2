@@ -4,9 +4,11 @@
       "AdapterConfig": {
         "additionalProperties": false,
         "properties": {
-          "casda_tap_url": {
-            "nullable": true,
-            "type": "string"
+          "endpoints": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TapEndpointConfig"
+            },
+            "type": "object"
           },
           "required": {
             "items": {
@@ -16,12 +18,31 @@
           },
           "tap": {
             "$ref": "#/components/schemas/TapConfig"
+          }
+        },
+        "type": "object"
+      },
+      "AdapterHealthResponse": {
+        "properties": {
+          "adapter": {
+            "type": "string"
           },
-          "vizier_tap_url": {
-            "nullable": true,
+          "project_module": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "status": {
             "type": "string"
           }
         },
+        "required": [
+          "project_module",
+          "adapter",
+          "required",
+          "status"
+        ],
         "type": "object"
       },
       "AlertDeliveryResponse": {
@@ -272,13 +293,13 @@
             "format": "date-time",
             "type": "string"
           },
+          "group_key": {
+            "type": "string"
+          },
           "metadata_json": {
             "nullable": true
           },
           "project_module": {
-            "type": "string"
-          },
-          "sbid": {
             "type": "string"
           },
           "source_identifier": {
@@ -298,7 +319,7 @@
           "uuid",
           "project_module",
           "source_identifier",
-          "sbid",
+          "group_key",
           "created_at"
         ],
         "type": "object"
@@ -761,8 +782,22 @@
           "adapter": {
             "type": "string"
           },
+          "for_each": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/QueryIteration"
+              }
+            ],
+            "nullable": true
+          },
           "name": {
             "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "result": {
+            "$ref": "#/components/schemas/QueryResultPolicy"
           },
           "source_id_transform": {
             "nullable": true,
@@ -1335,7 +1370,7 @@
       "ExecutionSourceSelection": {
         "additionalProperties": false,
         "properties": {
-          "sbids": {
+          "groups": {
             "items": {
               "type": "string"
             },
@@ -1935,14 +1970,6 @@
       "ManifestConfig": {
         "additionalProperties": false,
         "properties": {
-          "dataset_template": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/ManifestTemplate"
-              }
-            ],
-            "nullable": true
-          },
           "expand_from": {
             "nullable": true,
             "type": "string"
@@ -1953,7 +1980,24 @@
             },
             "type": "array"
           },
+          "group_key_output_field": {
+            "type": "string"
+          },
+          "groups_output_field": {
+            "type": "string"
+          },
           "path": {
+            "type": "string"
+          },
+          "record_template": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ManifestTemplate"
+              }
+            ],
+            "nullable": true
+          },
+          "records_output_field": {
             "type": "string"
           },
           "source_template": {
@@ -2159,8 +2203,11 @@
           },
           {
             "properties": {
-              "casda": {
-                "type": "string"
+              "adapters": {
+                "items": {
+                  "$ref": "#/components/schemas/AdapterHealthResponse"
+                },
+                "type": "array"
               },
               "daliuge": {
                 "type": "string"
@@ -2171,11 +2218,23 @@
               },
               "scheduler": {
                 "type": "string"
+              },
+              "unroutable_job_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "unroutable_jobs": {
+                "items": {
+                  "$ref": "#/components/schemas/UnroutableJobResponse"
+                },
+                "type": "array"
               }
             },
             "required": [
               "generated_at",
-              "casda",
+              "adapters",
+              "unroutable_job_count",
+              "unroutable_jobs",
               "daliuge",
               "scheduler"
             ],
@@ -2258,6 +2317,12 @@
             },
             "type": "object"
           },
+          "required_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "signature": {
             "allOf": [
               {
@@ -2338,6 +2403,9 @@
               }
             ],
             "nullable": true
+          },
+          "staging": {
+            "$ref": "#/components/schemas/StagingConfig"
           }
         },
         "required": [
@@ -2474,8 +2542,40 @@
         ],
         "type": "object"
       },
+      "QueryIteration": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "description": "Prepared field-map target used to derive distinct iteration values.",
+            "type": "string"
+          },
+          "variable": {
+            "description": "Template variable populated for each value. Defaults to `field`.",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "type": "object"
+      },
+      "QueryResultPolicy": {
+        "enum": [
+          "many",
+          "first",
+          "exactly_one"
+        ],
+        "type": "string"
+      },
       "ReadyResponse": {
         "properties": {
+          "adapters": {
+            "items": {
+              "$ref": "#/components/schemas/AdapterHealthResponse"
+            },
+            "type": "array"
+          },
           "database": {
             "type": "string"
           },
@@ -2495,12 +2595,6 @@
           },
           "status": {
             "type": "string"
-          },
-          "tap_casda": {
-            "type": "string"
-          },
-          "tap_vizier": {
-            "type": "string"
           }
         },
         "required": [
@@ -2508,8 +2602,7 @@
           "service",
           "database",
           "redis",
-          "tap_casda",
-          "tap_vizier",
+          "adapters",
           "queue_depth",
           "jobs_running"
         ],
@@ -2797,6 +2890,9 @@
           "resources": {
             "$ref": "#/components/schemas/SlurmResourceConfig"
           },
+          "runtime_contract": {
+            "$ref": "#/components/schemas/SlurmRuntimeContractConfig"
+          },
           "sleepncopy": {
             "type": "boolean"
           },
@@ -2834,7 +2930,9 @@
           "account",
           "home_dir",
           "log_dir",
-          "dlg_root"
+          "dlg_root",
+          "facility",
+          "runtime_contract"
         ],
         "type": "object"
       },
@@ -2878,6 +2976,78 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "SlurmRuntimeContractConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "output_environment_variable": {
+            "description": "Optional variable exported to the output directory path.",
+            "nullable": true,
+            "type": "string"
+          },
+          "output_subdirectory": {
+            "description": "Run-scoped directory beneath the generated DALiuGE session directory.",
+            "type": "string"
+          },
+          "required_commands": {
+            "description": "Project/runtime commands in addition to Core's Slurm and Python tools.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_environment": {
+            "description": "Non-secret environment values that must be present on the Beampipe\nprocess and are forwarded to the outer allocation.",
+            "items": {
+              "$ref": "#/components/schemas/SlurmRuntimeEnvironmentRequirement"
+            },
+            "type": "array"
+          },
+          "required_python_modules": {
+            "description": "Python modules in addition to `dlg.deploy.create_dlg_job`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "shared_staging_environment_variable": {
+            "description": "Optional variable exported to the shared staging directory path.",
+            "nullable": true,
+            "type": "string"
+          },
+          "shared_staging_subdirectory": {
+            "description": "Reusable directory beneath `dlg_root`, shared by executions using the\nprofile.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "output_subdirectory",
+          "shared_staging_subdirectory"
+        ],
+        "type": "object"
+      },
+      "SlurmRuntimeEnvironmentKind": {
+        "enum": [
+          "non_empty",
+          "readable_file"
+        ],
+        "type": "string"
+      },
+      "SlurmRuntimeEnvironmentRequirement": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/SlurmRuntimeEnvironmentKind"
+          },
+          "name": {
+            "description": "Environment variable read from the Beampipe process and forwarded into\nthe remote login shell and outer allocation. Profiles contain the name,\nnever the value.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
         "type": "object"
       },
       "SourceBulkCreate": {
@@ -3087,6 +3257,22 @@
         },
         "type": "object"
       },
+      "StagingConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/StagingProvider"
+          }
+        },
+        "type": "object"
+      },
+      "StagingProvider": {
+        "enum": [
+          "none",
+          "casda_uws"
+        ],
+        "type": "string"
+      },
       "TapConfig": {
         "additionalProperties": false,
         "properties": {
@@ -3104,6 +3290,43 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "TapEndpointConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/TapEndpointMode"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "TapEndpointMode": {
+        "enum": [
+          "sync_get",
+          "sync_post",
+          "async_job"
+        ],
+        "type": "string"
+      },
+      "TapHealthResponse": {
+        "properties": {
+          "adapters": {
+            "items": {
+              "$ref": "#/components/schemas/AdapterHealthResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "adapters"
+        ],
         "type": "object"
       },
       "TemplateVarSpec": {
@@ -3154,7 +3377,8 @@
           "extract_digits",
           "split_last",
           "is_present",
-          "select_eval_file_by_size",
+          "degrees_to_hms",
+          "degrees_to_dms",
           "regex_extract",
           "unknown"
         ],
@@ -3226,6 +3450,40 @@
         },
         "required": [
           "kind"
+        ],
+        "type": "object"
+      },
+      "UnroutableJobResponse": {
+        "properties": {
+          "job_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "pool": {
+            "type": "string"
+          },
+          "queued_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "required_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_labels": {}
+        },
+        "required": [
+          "job_id",
+          "kind",
+          "pool",
+          "required_capabilities",
+          "required_labels",
+          "queued_at"
         ],
         "type": "object"
       },
@@ -3441,9 +3699,11 @@
           "pool": {
             "type": "string"
           },
-          "required_capability": {
-            "nullable": true,
-            "type": "string"
+          "required_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "worker_id": {
             "format": "uuid",
@@ -3455,6 +3715,7 @@
           "job_id",
           "kind",
           "pool",
+          "required_capabilities",
           "attempts"
         ],
         "type": "object"
@@ -4636,7 +4897,7 @@
     },
     "/api/v2/executions/prepare": {
       "post": {
-        "description": "Validate sources and preview datasets without creating a ledger row.",
+        "description": "Validate sources and preview discovered records without creating a ledger row.",
         "operationId": "prepare_execution",
         "requestBody": {
           "content": {
@@ -5128,7 +5389,7 @@
     },
     "/api/v2/executions/{id}/outputs/verify": {
       "post": {
-        "description": "Validates `beampipe-output-inventory/v1`, records its publication acknowledgement, and releases an execution waiting at the output-verification completion gate.",
+        "description": "Validates `beampipe-output-inventory/v1`, records its publication\nacknowledgement, and releases an execution waiting at the output-verification\ncompletion gate.",
         "operationId": "verify_execution_outputs",
         "parameters": [
           {
@@ -5218,7 +5479,7 @@
             "BearerAuth": []
           }
         ],
-        "summary": "Verify a durable Beampipe output inventory",
+        "summary": "Verify a durable Beampipe output inventory.",
         "tags": [
           "executions"
         ]
@@ -8022,7 +8283,7 @@
   ],
   "tags": [
     {
-      "description": "Liveness, readiness, and archive TAP connectivity probes.",
+      "description": "Liveness, readiness, and configured project TAP connectivity probes.",
       "name": "health"
     },
     {
@@ -8030,7 +8291,7 @@
       "name": "auth"
     },
     {
-      "description": "Source registry: register astronomical sources, trigger discovery, and read archive metadata.",
+      "description": "Source registry: register sources, trigger discovery, and read adapter metadata.",
       "name": "sources"
     },
     {
@@ -8038,7 +8299,7 @@
       "name": "executions"
     },
     {
-      "description": "Registered project modules and versioned survey configuration.",
+      "description": "Registered project modules and versioned project configuration.",
       "name": "project-configs"
     },
     {

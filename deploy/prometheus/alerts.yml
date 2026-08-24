@@ -62,7 +62,25 @@ groups:
           severity: critical
         annotations:
           summary: "Dependency unreachable"
-          description: "Postgres or TAP dependency gauge reports down (refreshed from metrics server)."
+          description: "A Beampipe control-plane dependency reports down (refreshed from metrics server)."
+
+      - alert: BeampipeProjectAdapterDown
+        expr: max by (project_module, adapter) (last_over_time(beampipe_project_adapter_up{required="true"}[5m])) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Project adapter unreachable"
+          description: "TAP adapter {{ $labels.adapter }} for project {{ $labels.project_module }} is unreachable."
+
+      - alert: BeampipeJobsUnroutable
+        expr: max(beampipe_jobs_unroutable) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Queued jobs have no eligible worker"
+          description: "At least one runnable job has no live worker satisfying its pool, capability, and label contract."
 
       - alert: BeampipeDeploymentProfileDependencyDown
         expr: max by (profile, dependency) (last_over_time(beampipe_deployment_profile_dependency_up[5m])) == 0

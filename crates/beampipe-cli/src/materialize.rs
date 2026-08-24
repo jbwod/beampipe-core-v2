@@ -305,6 +305,10 @@ mod tests {
             include_str!("../../../deploy/operator/observability/alerts.yml")
         );
         assert_eq!(
+            PROMETHEUS_ALERTS,
+            include_str!("../../../deploy/prometheus/alerts.yml")
+        );
+        assert_eq!(
             ALERTMANAGER_CONFIG,
             include_str!("../../../deploy/operator/observability/alertmanager.yml")
         );
@@ -325,6 +329,10 @@ mod tests {
             include_str!(
                 "../../../deploy/operator/observability/grafana/dashboards/beampipe-overview.json"
             )
+        );
+        assert_eq!(
+            GRAFANA_OVERVIEW_DASHBOARD,
+            include_str!("../../../deploy/grafana/dashboards/beampipe-overview.json")
         );
     }
 
