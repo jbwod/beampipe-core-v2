@@ -806,23 +806,31 @@ mod tests {
 
     #[test]
     fn runtime_contract_rejects_unsafe_names_and_paths() {
-        let mut contract = SlurmRuntimeContractConfig::default();
-        contract.output_subdirectory = "../outside".into();
+        let contract = SlurmRuntimeContractConfig {
+            output_subdirectory: "../outside".into(),
+            ..Default::default()
+        };
         assert!(contract.validate().is_err());
 
-        let mut contract = SlurmRuntimeContractConfig::default();
-        contract.required_python_modules = vec!["science; os.system('bad')".into()];
+        let contract = SlurmRuntimeContractConfig {
+            required_python_modules: vec!["science; os.system('bad')".into()],
+            ..Default::default()
+        };
         assert!(contract.validate().is_err());
 
-        let mut contract = SlurmRuntimeContractConfig::default();
-        contract.required_environment = vec![SlurmRuntimeEnvironmentRequirement {
-            name: "NOT-A-VARIABLE".into(),
-            kind: SlurmRuntimeEnvironmentKind::NonEmpty,
-        }];
+        let contract = SlurmRuntimeContractConfig {
+            required_environment: vec![SlurmRuntimeEnvironmentRequirement {
+                name: "NOT-A-VARIABLE".into(),
+                kind: SlurmRuntimeEnvironmentKind::NonEmpty,
+            }],
+            ..Default::default()
+        };
         assert!(contract.validate().is_err());
 
-        let mut contract = SlurmRuntimeContractConfig::default();
-        contract.output_environment_variable = Some("BEAMPIPE_SLURM_ACCOUNT".into());
+        let contract = SlurmRuntimeContractConfig {
+            output_environment_variable: Some("BEAMPIPE_SLURM_ACCOUNT".into()),
+            ..Default::default()
+        };
         assert!(contract.validate().is_err());
     }
 }
