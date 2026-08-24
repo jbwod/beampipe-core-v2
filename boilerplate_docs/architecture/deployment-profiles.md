@@ -48,8 +48,8 @@ Place operator-owned copies in a private directory if you do not want to edit th
 ```json
 {
   "name": "slurm-hpc",
-  "description": "WALLABY qualification profile",
-  "project_module": "wallaby_hires",
+  "description": "Science pipeline qualification profile",
+  "project_module": "science_pipeline",
   "is_default": true,
   "max_concurrent_executions": 1,
   "translation": {
@@ -101,7 +101,9 @@ beampipe daliuge sessions --profile local-daliuge
 
 ## Slurm remote
 
-Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_dir`, and `dlg_root`. Resource settings belong under `resources`; manager placement belongs under `manager_topology`.
+Required profile fields are `login_node`, `account`, absolute `home_dir`,
+`log_dir`, `dlg_root`, and a typed `runtime_contract`. Resource settings belong
+under `resources`; manager placement belongs under `manager_topology`.
 
 ```json
 {
@@ -116,7 +118,17 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
   "dlg_root": "/scratch/project_account/operator/dlg",
   "modules": "module load singularity",
   "venv": "source /software/project/venv/bin/activate",
-  "environment_setup": "export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"",
+  "runtime_contract": {
+    "required_commands": ["science_pipeline"],
+    "required_python_modules": ["science_pipeline"],
+    "required_environment": [
+      {"name": "SCIENCE_PIPELINE_IMAGE", "kind": "readable_file"}
+    ],
+    "output_subdirectory": "science_outputs",
+    "shared_staging_subdirectory": "science_staging_data",
+    "output_environment_variable": "SCIENCE_OUTPUT_ROOT",
+    "shared_staging_environment_variable": "SCIENCE_STAGING_ROOT"
+  },
   "exec_prefix": "srun -l",
   "facility": "hpc",
   "resources": {
@@ -137,16 +149,29 @@ Required profile fields are `login_node`, `account`, absolute `home_dir`, `log_d
 
 `beampipe profile render PROFILE_NAME` shows effective `#SBATCH` directives and DALiuGE settings before submission.
 
-`environment_setup` runs on the remote login node before DALiuGE creates the
-job script and again in the same remote shell that invokes `sbatch`. Named
-runtime inputs are explicitly propagated into the allocation. Beampipe always
-derives `BEAMPIPE_SLURM_ACCOUNT` from the profile's `deployment.account`, so
-outer and nested allocations cannot drift. Set `BEAMPIPE_ASKAPSOFT_SIF` in the
-installation `.env` when the setup references it; submission fails before
-`sbatch` when it is empty. The bundled WALLABY graph uses these values for its
-nested Slurm jobs and immutable ASKAPsoft image. The bundled Slurm profile is
-deliberately not a default: edit and qualify its account, paths, credentials,
-and SIF before selecting it.
+The runtime contract is the project boundary. Core itself preflights only Slurm,
+Python, DALiuGE, and the writable `dlg_root`. Every additional executable,
+Python module, host environment value, directory name, and directory environment
+binding must be declared by the profile. `non_empty` environment requirements
+are checked for a value; `readable_file` additionally verifies a readable regular
+file on the login node. Values come from the Beampipe process and are forwarded
+into the outer allocation, while profiles store names only.
+`BEAMPIPE_SLURM_ACCOUNT` and `PYTHONPATH` are Core-managed and cannot be used as
+contract variable names.
+
+`environment_setup` remains available for operator-reviewed shell initialization
+that cannot be expressed by the typed contract. It runs before DALiuGE creates
+the job script and again in the shell that invokes `sbatch`. Do not use it as an
+implicit environment-forwarding mechanism.
+
+Beampipe always derives `BEAMPIPE_SLURM_ACCOUNT` from
+`deployment.account`, so outer and nested allocations cannot drift. The bundled
+WALLABY profile explicitly declares `wallaby_hires`, Singularity, its Python
+module, `BEAMPIPE_ASKAPSOFT_SIF`, `wallaby_outputs`, and
+`wallaby_staging_data`; none is a generic Slurm default. Existing Slurm profile
+files without `runtime_contract` must be revised before installation. The
+bundled profile is deliberately not a default: edit and qualify its account,
+paths, credentials, and SIF before selecting it.
 
 ## Preferred SSH key model
 

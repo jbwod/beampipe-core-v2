@@ -22,7 +22,20 @@
     "log_dir": "/scratch/pawsey0411/jblackwood/dlg/log",
     "modules": "module load singularity/4.1.0-askap && module load py-numpy/1.26.4 && module use /group/askap/modulefiles",
     "venv": "source /software/projects/pawsey0411/jblackwood/venv/bin/activate",
-    "environment_setup": "export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"",
+    "runtime_contract": {
+      "required_commands": ["wallaby_hires", "singularity"],
+      "required_python_modules": ["wallaby_hires"],
+      "required_environment": [
+        {
+          "name": "BEAMPIPE_ASKAPSOFT_SIF",
+          "kind": "readable_file"
+        }
+      ],
+      "output_subdirectory": "wallaby_outputs",
+      "shared_staging_subdirectory": "wallaby_staging_data",
+      "output_environment_variable": "WALLABY_HIRES_STAGING_ROOT",
+      "shared_staging_environment_variable": "WALLABY_HIRES_CACHE_ROOT"
+    },
     "exec_prefix": "srun -l",
     "job_duration_minutes": 50,
     "num_nodes": 1,

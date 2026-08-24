@@ -136,15 +136,17 @@ command -v scontrol
 command -v srun
 command -v python3
 command -v wallaby_hires
-wallaby_hires --version
 sinfo --version
-python3 -c 'import dlg.deploy.create_dlg_job; import wallaby_hires'
+python3 -c '<import every runtime_contract.required_python_modules entry>'
 test -d '<DLG_ROOT>' && test -w '<DLG_ROOT>'
 command -v singularity
 test -f "$BEAMPIPE_ASKAPSOFT_SIF" && test -r "$BEAMPIPE_ASKAPSOFT_SIF"
 ```
 
-Stop if Wallaby is not `0.1.11`, imports resolve from an unexpected environment,
+The Wallaby commands, module, SIF, and directory bindings above come from the
+bundled profile's `runtime_contract`; they are not built into Core's Slurm
+backend. Check `wallaby_hires --version` separately as a read-only qualification
+command. Stop if Wallaby is not the approved version, imports resolve from an unexpected environment,
 the SIF differs, or the dedicated DLG root is not writable. Transferring or
 installing the wheel is a separate remote-mutation approval. A compute-node
 import or container smoke test consumes an allocation and is not part of this

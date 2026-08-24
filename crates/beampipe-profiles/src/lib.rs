@@ -1,7 +1,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::{Component, Path};
 use thiserror::Error;
 use utoipa::ToSchema;
+
+const RESERVED_SLURM_RUNTIME_ENVIRONMENT: [&str; 2] = ["BEAMPIPE_SLURM_ACCOUNT", "PYTHONPATH"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +96,71 @@ pub struct DaliugeManagerTopologyConfig {
     pub co_host_dim: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SlurmRuntimeEnvironmentKind {
+    #[default]
+    NonEmpty,
+    ReadableFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SlurmRuntimeEnvironmentRequirement {
+    /// Environment variable read from the Beampipe process and forwarded into
+    /// the remote login shell and outer allocation. Profiles contain the name,
+    /// never the value.
+    pub name: String,
+    #[serde(default)]
+    pub kind: SlurmRuntimeEnvironmentKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SlurmRuntimeContractConfig {
+    /// Project/runtime commands in addition to Core's Slurm and Python tools.
+    #[serde(default)]
+    pub required_commands: Vec<String>,
+    /// Python modules in addition to `dlg.deploy.create_dlg_job`.
+    #[serde(default)]
+    pub required_python_modules: Vec<String>,
+    /// Non-secret environment values that must be present on the Beampipe
+    /// process and are forwarded to the outer allocation.
+    #[serde(default)]
+    pub required_environment: Vec<SlurmRuntimeEnvironmentRequirement>,
+    /// Run-scoped directory beneath the generated DALiuGE session directory.
+    pub output_subdirectory: String,
+    /// Reusable directory beneath `dlg_root`, shared by executions using the
+    /// profile.
+    pub shared_staging_subdirectory: String,
+    /// Optional variable exported to the output directory path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_environment_variable: Option<String>,
+    /// Optional variable exported to the shared staging directory path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_staging_environment_variable: Option<String>,
+}
+
+impl Default for SlurmRuntimeContractConfig {
+    fn default() -> Self {
+        Self {
+            required_commands: Vec::new(),
+            required_python_modules: Vec::new(),
+            required_environment: Vec::new(),
+            output_subdirectory: "outputs".into(),
+            shared_staging_subdirectory: "shared_staging".into(),
+            output_environment_variable: None,
+            shared_staging_environment_variable: None,
+        }
+    }
+}
+
+impl SlurmRuntimeContractConfig {
+    pub fn validate(&self) -> Result<(), ProfileValidationError> {
+        validate_slurm_runtime_contract(self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SlurmRemoteDeploymentConfig {
@@ -115,7 +184,6 @@ pub struct SlurmRemoteDeploymentConfig {
     pub venv: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modules: Option<String>,
-    #[serde(default = "facility")]
     pub facility: String,
     #[serde(default = "job_duration")]
     pub job_duration_minutes: i32,
@@ -147,6 +215,9 @@ pub struct SlurmRemoteDeploymentConfig {
     pub container_runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_setup: Option<String>,
+    /// Typed, project-specific runtime requirements. This field is required so
+    /// a Slurm profile cannot silently inherit a bundled project's runtime.
+    pub runtime_contract: SlurmRuntimeContractConfig,
 }
 
 impl SlurmRemoteDeploymentConfig {
@@ -258,6 +329,11 @@ impl DeploymentProfile {
                         "deployment.account is required".into(),
                     ));
                 }
+                if dep.facility.trim().is_empty() {
+                    return Err(ProfileValidationError::Message(
+                        "deployment.facility is required".into(),
+                    ));
+                }
                 for (name, path) in [
                     ("deployment.home_dir", dep.home_dir.as_str()),
                     ("deployment.log_dir", dep.log_dir.as_str()),
@@ -308,6 +384,7 @@ impl DeploymentProfile {
                 if let Some(nodes) = dep.manager_topology.nodes {
                     validate_positive(nodes, "deployment.manager_topology.nodes")?;
                 }
+                dep.runtime_contract.validate()?;
             }
         }
         Ok(())
@@ -350,6 +427,167 @@ fn validate_optional_text(value: Option<&str>, name: &str) -> Result<(), Profile
     Ok(())
 }
 
+fn validate_slurm_runtime_contract(
+    contract: &SlurmRuntimeContractConfig,
+) -> Result<(), ProfileValidationError> {
+    validate_relative_subdirectory(
+        &contract.output_subdirectory,
+        "deployment.runtime_contract.output_subdirectory",
+    )?;
+    validate_relative_subdirectory(
+        &contract.shared_staging_subdirectory,
+        "deployment.runtime_contract.shared_staging_subdirectory",
+    )?;
+    if contract.output_subdirectory == contract.shared_staging_subdirectory {
+        return Err(ProfileValidationError::Message(
+            "deployment.runtime_contract output and shared staging subdirectories must differ"
+                .into(),
+        ));
+    }
+
+    validate_unique_values(
+        &contract.required_commands,
+        "deployment.runtime_contract.required_commands",
+        |value| {
+            !value.is_empty()
+                && value.len() <= 255
+                && !value.chars().any(char::is_control)
+                && !value.chars().any(char::is_whitespace)
+        },
+    )?;
+    validate_unique_values(
+        &contract.required_python_modules,
+        "deployment.runtime_contract.required_python_modules",
+        valid_python_module,
+    )?;
+
+    let mut environment_names = HashSet::new();
+    for requirement in &contract.required_environment {
+        validate_environment_name(
+            &requirement.name,
+            "deployment.runtime_contract.required_environment.name",
+        )?;
+        if !environment_names.insert(requirement.name.as_str()) {
+            return Err(ProfileValidationError::Message(format!(
+                "deployment.runtime_contract.required_environment contains duplicate variable '{}'",
+                requirement.name
+            )));
+        }
+    }
+    for (value, name) in [
+        (
+            contract.output_environment_variable.as_deref(),
+            "deployment.runtime_contract.output_environment_variable",
+        ),
+        (
+            contract.shared_staging_environment_variable.as_deref(),
+            "deployment.runtime_contract.shared_staging_environment_variable",
+        ),
+    ] {
+        if let Some(value) = value {
+            validate_environment_name(value, name)?;
+            if environment_names.contains(value) {
+                return Err(ProfileValidationError::Message(format!(
+                    "{name} must not duplicate a required environment variable"
+                )));
+            }
+        }
+    }
+    if contract.output_environment_variable == contract.shared_staging_environment_variable
+        && contract.output_environment_variable.is_some()
+    {
+        return Err(ProfileValidationError::Message(
+            "deployment.runtime_contract output and shared staging environment variables must differ"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_relative_subdirectory(
+    value: &str,
+    name: &str,
+) -> Result<(), ProfileValidationError> {
+    let path = Path::new(value);
+    if value.trim().is_empty()
+        || value != value.trim()
+        || value.chars().any(char::is_control)
+        || value.contains([',', ':'])
+        || path.is_absolute()
+        || path.components().any(|component| {
+            !matches!(component, Component::Normal(_))
+                || matches!(component, Component::Normal(part) if part.is_empty())
+        })
+    {
+        return Err(ProfileValidationError::Message(format!(
+            "{name} must be a non-empty relative path without traversal components"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_unique_values<F>(
+    values: &[String],
+    name: &str,
+    valid: F,
+) -> Result<(), ProfileValidationError>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut seen = HashSet::new();
+    for value in values {
+        if !valid(value) {
+            return Err(ProfileValidationError::Message(format!(
+                "{name} contains invalid value '{value}'"
+            )));
+        }
+        if !seen.insert(value.as_str()) {
+            return Err(ProfileValidationError::Message(format!(
+                "{name} contains duplicate value '{value}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_python_module(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+                && part
+                    .chars()
+                    .all(|character| character == '_' || character.is_ascii_alphanumeric())
+        })
+}
+
+fn validate_environment_name(value: &str, name: &str) -> Result<(), ProfileValidationError> {
+    if value.is_empty()
+        || value.len() > 255
+        || !value
+            .chars()
+            .next()
+            .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        || !value
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return Err(ProfileValidationError::Message(format!(
+            "{name} must be a POSIX environment variable name"
+        )));
+    }
+    if RESERVED_SLURM_RUNTIME_ENVIRONMENT.contains(&value) {
+        return Err(ProfileValidationError::Message(format!(
+            "{name} uses reserved Core variable '{value}'"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_port(v: Option<i32>, name: &str) -> Result<(), ProfileValidationError> {
     if let Some(port) = v {
         if !(1..=65535).contains(&port) {
@@ -376,9 +614,6 @@ fn ssh_port() -> i32 {
 }
 fn exec_prefix() -> String {
     "srun -l".into()
-}
-fn facility() -> String {
-    "setonix".into()
 }
 fn job_duration() -> i32 {
     30
@@ -436,10 +671,15 @@ mod tests {
             "deployment": {
                 "kind": "slurm_remote",
                 "login_node": "setonix.example.org",
+                "facility": "setonix",
                 "account": "project",
                 "home_dir": "/scratch/project",
                 "log_dir": "/scratch/project/logs",
-                "dlg_root": "/scratch/project/dlg"
+                "dlg_root": "/scratch/project/dlg",
+                "runtime_contract": {
+                    "output_subdirectory": "outputs",
+                    "shared_staging_subdirectory": "shared_staging"
+                }
             }
         }))
         .unwrap();
@@ -458,11 +698,16 @@ mod tests {
             "deployment": {
                 "kind": "slurm_remote",
                 "login_node": "setonix.example.org",
+                "facility": "setonix",
                 "ssh_credential": "../etc",
                 "account": "project",
                 "home_dir": "/scratch/project",
                 "log_dir": "/scratch/project/logs",
-                "dlg_root": "/scratch/project/dlg"
+                "dlg_root": "/scratch/project/dlg",
+                "runtime_contract": {
+                    "output_subdirectory": "outputs",
+                    "shared_staging_subdirectory": "shared_staging"
+                }
             }
         }))
         .unwrap();
@@ -481,10 +726,15 @@ mod tests {
             "deployment": {
                 "kind": "slurm_remote",
                 "login_node": "setonix.example.org",
+                "facility": "setonix",
                 "account": "project",
                 "home_dir": "/scratch/project",
                 "log_dir": "/scratch/project/logs",
-                "dlg_root": "////"
+                "dlg_root": "////",
+                "runtime_contract": {
+                    "output_subdirectory": "outputs",
+                    "shared_staging_subdirectory": "shared_staging"
+                }
             }
         }))
         .unwrap();
@@ -504,5 +754,81 @@ mod tests {
         }))
         .unwrap_err();
         assert!(error.to_string().contains("unknown field `typo`"));
+    }
+
+    #[test]
+    fn slurm_profile_requires_an_explicit_runtime_contract() {
+        let error = serde_json::from_value::<DeploymentProfile>(json!({
+            "name": "generic-slurm",
+            "translation": {"num_par": 1},
+            "deployment": {
+                "kind": "slurm_remote",
+                "login_node": "login.example.org",
+                "facility": "generic",
+                "account": "project",
+                "home_dir": "/scratch/project",
+                "log_dir": "/scratch/project/logs",
+                "dlg_root": "/scratch/project/dlg"
+            }
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("runtime_contract"));
+    }
+
+    #[test]
+    fn generic_slurm_runtime_contract_has_no_project_requirements() {
+        let profile: DeploymentProfile = serde_json::from_value(json!({
+            "name": "generic-slurm",
+            "translation": {"num_par": 1},
+            "deployment": {
+                "kind": "slurm_remote",
+                "login_node": "login.example.org",
+                "facility": "generic",
+                "account": "project",
+                "home_dir": "/scratch/project",
+                "log_dir": "/scratch/project/logs",
+                "dlg_root": "/scratch/project/dlg",
+                "runtime_contract": {
+                    "output_subdirectory": "science-products",
+                    "shared_staging_subdirectory": "archive-cache"
+                }
+            }
+        }))
+        .unwrap();
+        profile.validate().unwrap();
+        let DeploymentConfig::SlurmRemote(deployment) = profile.deployment else {
+            panic!("expected Slurm profile");
+        };
+        assert!(deployment.runtime_contract.required_commands.is_empty());
+        assert!(deployment
+            .runtime_contract
+            .required_python_modules
+            .is_empty());
+        assert!(deployment
+            .runtime_contract
+            .required_environment
+            .is_empty());
+    }
+
+    #[test]
+    fn runtime_contract_rejects_unsafe_names_and_paths() {
+        let mut contract = SlurmRuntimeContractConfig::default();
+        contract.output_subdirectory = "../outside".into();
+        assert!(contract.validate().is_err());
+
+        let mut contract = SlurmRuntimeContractConfig::default();
+        contract.required_python_modules = vec!["science; os.system('bad')".into()];
+        assert!(contract.validate().is_err());
+
+        let mut contract = SlurmRuntimeContractConfig::default();
+        contract.required_environment = vec![SlurmRuntimeEnvironmentRequirement {
+            name: "NOT-A-VARIABLE".into(),
+            kind: SlurmRuntimeEnvironmentKind::NonEmpty,
+        }];
+        assert!(contract.validate().is_err());
+
+        let mut contract = SlurmRuntimeContractConfig::default();
+        contract.output_environment_variable = Some("BEAMPIPE_SLURM_ACCOUNT".into());
+        assert!(contract.validate().is_err());
     }
 }
