@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use beampipe_config::Settings;
 use beampipe_db::repo;
 use beampipe_profiles::{DeploymentConfig, DeploymentProfile};
-use beampipe_project::ProjectConfig;
+use beampipe_project::{ProjectConfig, StagingProvider};
 use crossterm::style::Stylize;
 use sqlx::PgPool;
 use std::io::{self, IsTerminal, Write};
@@ -18,7 +18,7 @@ use crate::{
     materialize, runtime,
 };
 
-const WALLABY_STAGING_CAPABILITY: &str = "staging:casda_uws";
+const CASDA_STAGING_CAPABILITY: &str = "staging:casda_uws";
 const DEFAULT_WORKER_CAPABILITIES: &str =
     "discovery:tap,manifest:generic,translation:daliuge,verification:output_inventory";
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
@@ -65,6 +65,13 @@ pub struct SetupOptions {
     pub start: bool,
     /// Write `BEAMPIPE_USE_REAL_BACKENDS=true` during setup.
     pub use_real_backends: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedProjectConfig {
+    path: PathBuf,
+    config: ProjectConfig,
+    spec_sha256: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -236,6 +243,24 @@ fn add_capability(configured: &str, capability: &str) -> String {
     capabilities.join(",")
 }
 
+fn with_project_staging_capabilities(
+    configured: &str,
+    project_config: Option<&ProjectConfig>,
+) -> String {
+    let Some(project_config) = project_config else {
+        return configured.to_string();
+    };
+    let required = match &project_config.staging.provider {
+        StagingProvider::None => &[][..],
+        StagingProvider::CasdaUws => &[CASDA_STAGING_CAPABILITY][..],
+    };
+    required
+        .iter()
+        .fold(configured.to_string(), |capabilities, capability| {
+            add_capability(&capabilities, capability)
+        })
+}
+
 fn parse_env_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -308,6 +333,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             "Preserved operator-modified bundle files. Review them before relying on new release defaults."
         );
     }
+    let selected_project = load_selected_project_config(&root, &opts)?;
     let compose_exists = compose_file_exists(&root);
     let tentative_docker = !matches!(decide_runtime(&opts)?, Some(RuntimeKind::Host));
     let total_steps = setup_step_total(&opts, tentative_docker);
@@ -463,18 +489,20 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         .ok()
         .or_else(|| env_file_value(&env_path, "BEAMPIPE_BACKEND_CAPABILITIES"))
         .unwrap_or_default();
-    if opts.wallaby_sample {
-        backend_capabilities = add_capability(&backend_capabilities, WALLABY_STAGING_CAPABILITY);
-    }
+    backend_capabilities = with_project_staging_capabilities(
+        &backend_capabilities,
+        selected_project.as_ref().map(|selected| &selected.config),
+    );
     let mut worker_capabilities = std::env::var("BEAMPIPE_WORKER_CAPABILITIES")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| env_file_value(&env_path, "BEAMPIPE_WORKER_CAPABILITIES"))
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_WORKER_CAPABILITIES.to_string());
-    if opts.wallaby_sample {
-        worker_capabilities = add_capability(&worker_capabilities, WALLABY_STAGING_CAPABILITY);
-    }
+    worker_capabilities = with_project_staging_capabilities(
+        &worker_capabilities,
+        selected_project.as_ref().map(|selected| &selected.config),
+    );
     let tm_url = env_override(opts.tm_url.as_deref(), "BEAMPIPE_TM_URL", DEFAULT_TM_URL);
     let worker_pool = env_override(
         opts.worker_pool.as_deref(),
@@ -703,33 +731,18 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             admin_ready = true;
         }
 
-        let project_path = project_config_path(&root, &opts);
-
-        if let Some(project_path) = project_path.as_deref() {
-            if !project_path.exists() {
-                bail!(
-                    "selected project config was not found at {}",
-                    project_path.display()
-                );
-            }
-            let bytes = std::fs::read(&project_path)
-                .with_context(|| format!("read {}", project_path.display()))?;
-            let config = ProjectConfig::from_slice(&bytes)?;
-            let report = config.validate_report();
-            if !report.valid {
-                bail!("project config invalid: {:?}", report.errors);
-            }
+        if let Some(selected) = selected_project.as_ref() {
             println!(
                 "Validated {} (project_id={})",
-                project_path.display(),
-                config.metadata.id
+                selected.path.display(),
+                selected.config.metadata.id
             );
 
             if !opts.skip_upload
                 && (opts.yes || prompt_yes_no("Upload project config to database?", true)?)
             {
-                upload_project_config(pool, &config, &report.spec_sha256).await?;
-                println!("Uploaded project config '{}'.", config.metadata.id);
+                upload_project_config(pool, &selected.config, &selected.spec_sha256).await?;
+                println!("Uploaded project config '{}'.", selected.config.metadata.id);
             }
         } else {
             println!("No project selected; skipped project validation and upload.");
@@ -751,11 +764,16 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         if !report.ok {
             bail!("setup completed with doctor failures; fix checks above");
         }
+    } else if let Some(selected) = selected_project.as_ref() {
+        println!(
+            "Validated {} (project_id={}). Upload after Postgres is up.",
+            selected.path.display(),
+            selected.config.metadata.id
+        );
     } else {
-        maybe_validate_project_config(&root, &opts)?;
+        println!("No project selected; skipped project validation and upload.");
     }
 
-    let project_path = project_config_path(&root, &opts);
     let commands = next_steps_lines(&SetupNextSteps {
         runtime_docker: prepare_docker,
         compose_postgres: postgres == PostgresKind::Compose,
@@ -764,10 +782,9 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         admin_ready,
         core_home: Some(root.clone()),
         dash_dir: dash_dir.clone(),
-        project_file: project_path
-            .as_deref()
-            .filter(|path| path.exists())
-            .map(|path| display_repo_path(&root, path)),
+        project_file: selected_project
+            .as_ref()
+            .map(|selected| display_repo_path(&root, &selected.path)),
         profile_file: profile_path
             .as_deref()
             .filter(|path| path.exists())
@@ -2131,10 +2148,12 @@ fn is_retryable_admin_error(error: &anyhow::Error) -> bool {
         || text.contains("unique constraint")
 }
 
-fn maybe_validate_project_config(root: &Path, opts: &SetupOptions) -> Result<()> {
+fn load_selected_project_config(
+    root: &Path,
+    opts: &SetupOptions,
+) -> Result<Option<SelectedProjectConfig>> {
     let Some(project_path) = project_config_path(root, opts) else {
-        println!("No project selected; skipped project validation and upload.");
-        return Ok(());
+        return Ok(None);
     };
     if !project_path.exists() {
         bail!(
@@ -2149,12 +2168,11 @@ fn maybe_validate_project_config(root: &Path, opts: &SetupOptions) -> Result<()>
     if !report.valid {
         bail!("project config invalid: {:?}", report.errors);
     }
-    println!(
-        "Validated {} (project_id={}). Upload after Postgres is up.",
-        project_path.display(),
-        config.metadata.id
-    );
-    Ok(())
+    Ok(Some(SelectedProjectConfig {
+        path: project_path,
+        config,
+        spec_sha256: report.spec_sha256,
+    }))
 }
 
 fn project_config_path(root: &Path, opts: &SetupOptions) -> Option<PathBuf> {
@@ -3120,6 +3138,24 @@ fn print_setup_summary(
 mod tests {
     use super::*;
 
+    fn write_setup_project(path: &Path, project_id: &str, staging_provider: &str) {
+        let yaml = format!(
+            r#"apiVersion: beampipe.dev/v2
+kind: ProjectConfig
+metadata:
+  id: {project_id}
+adapters:
+  required: [catalog]
+  endpoints:
+    catalog:
+      url: https://catalog.example.invalid/tap
+staging:
+  provider: {staging_provider}
+"#
+        );
+        std::fs::write(path, yaml).unwrap();
+    }
+
     fn runtime_items() -> [ChoiceItem; 2] {
         runtime_choices()
     }
@@ -3203,6 +3239,88 @@ mod tests {
                 "deployment:slurm_remote"
             ),
             "deployment:slurm_remote,staging:casda_uws"
+        );
+    }
+
+    #[test]
+    fn custom_casda_project_adds_staging_capability_to_backend_and_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let project_path = root.path().join("custom-casda.yaml");
+        write_setup_project(&project_path, "custom_archive", "casda_uws");
+        let opts = SetupOptions {
+            project_config: Some(project_path.clone()),
+            ..Default::default()
+        };
+        let selected = load_selected_project_config(root.path(), &opts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.path, project_path);
+        assert_eq!(selected.config.metadata.id, "custom_archive");
+        assert_eq!(
+            with_project_staging_capabilities(
+                "custom:backend",
+                Some(&selected.config),
+            ),
+            "custom:backend,staging:casda_uws"
+        );
+        assert_eq!(
+            with_project_staging_capabilities(
+                "custom:worker,staging:casda_uws",
+                Some(&selected.config),
+            ),
+            "custom:worker,staging:casda_uws"
+        );
+    }
+
+    #[test]
+    fn custom_no_staging_project_preserves_capabilities_without_provider_addition() {
+        let root = tempfile::tempdir().unwrap();
+        let project_path = root.path().join("custom-none.yaml");
+        write_setup_project(&project_path, "custom_archive", "none");
+        let opts = SetupOptions {
+            project_config: Some(project_path),
+            ..Default::default()
+        };
+        let selected = load_selected_project_config(root.path(), &opts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            with_project_staging_capabilities(
+                "custom:backend",
+                Some(&selected.config),
+            ),
+            "custom:backend"
+        );
+        assert_eq!(
+            with_project_staging_capabilities("custom:worker", Some(&selected.config)),
+            "custom:worker"
+        );
+    }
+
+    #[test]
+    fn sample_staging_capability_comes_from_validated_sample_config() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        write_setup_project(
+            &config_dir.join("wallaby_hires.v2.yaml"),
+            "sample_project",
+            "casda_uws",
+        );
+        let opts = SetupOptions {
+            wallaby_sample: true,
+            ..Default::default()
+        };
+        let selected = load_selected_project_config(root.path(), &opts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.config.metadata.id, "sample_project");
+        assert_eq!(
+            with_project_staging_capabilities("", Some(&selected.config)),
+            "staging:casda_uws"
         );
     }
 

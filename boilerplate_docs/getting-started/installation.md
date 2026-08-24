@@ -55,7 +55,7 @@ Supply any project during setup with `--project-config PATH`. The bundled WALLAB
 beampipe setup --yes --runtime docker --postgres compose --sample wallaby-hires
 ```
 
-That sample materializes its project configs, graphs, and REST/Slurm profiles and declares `staging:casda_uws`. Selecting a Slurm profile adds `deployment:slurm_remote`; choosing REST adds `deployment:daliuge_rest`. Core requires SSH or CASDA credentials only when the corresponding capability is declared and real backends are enabled. Other projects should set `BEAMPIPE_BACKEND_CAPABILITIES` to the capability/provider pairs they actually use.
+That sample materializes its project configs, graphs, and REST/Slurm profiles and declares `staging:casda_uws`. Setup validates whichever project was selected with `--project-config` or `--sample`, then adds the capability required by its explicit staging provider to both backend and worker routing. `casda_uws` adds `staging:casda_uws`; `none` adds nothing, and existing capability settings are preserved without duplicates. Selecting a Slurm profile similarly adds `deployment:slurm_remote`; choosing REST adds `deployment:daliuge_rest`. Core requires SSH or CASDA credentials only when the corresponding capability is declared and real backends are enabled. Projects added after setup should explicitly configure any provider capability they require.
 
 Manage it from any directory:
 
