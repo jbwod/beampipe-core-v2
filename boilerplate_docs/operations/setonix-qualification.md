@@ -115,9 +115,9 @@ The production qualification artifacts are:
 
 | Artifact | Expected evidence |
 |---|---|
-| WALLABY graph | SHA-256 `56faf68f4e22bab5a5976c081f54ad8c2dd4c17c71d02c9b6843c531d2f9a47b` |
-| Wallaby package | version `0.1.9` |
-| Python wheel | SHA-256 `dc2a336b21c8e0dadbb1386fbc4fdb51b603d2144d5696b968c02a42a3175940` |
+| WALLABY graph | SHA-256 `b53e6a52d847c9c2957c07ab3b5cbcb34ffaf9bc9f4da7211f87171c2036c7ff` |
+| Wallaby package | version `0.1.10` |
+| Python wheel | SHA-256 `1d360050535d5a8956f65cba774d29269e0effa18c4a0bf11f2c0291e0efb2a5` |
 
 Installing the package into a local `/daliuge` runtime does not prove that the
 Setonix login environment and compute-node environment contain the same build.
@@ -144,7 +144,7 @@ command -v singularity
 test -f "$BEAMPIPE_ASKAPSOFT_SIF" && test -r "$BEAMPIPE_ASKAPSOFT_SIF"
 ```
 
-Stop if Wallaby is not `0.1.9`, imports resolve from an unexpected environment,
+Stop if Wallaby is not `0.1.10`, imports resolve from an unexpected environment,
 the SIF differs, or the dedicated DLG root is not writable. Transferring or
 installing the wheel is a separate remote-mutation approval. A compute-node
 import or container smoke test consumes an allocation and is not part of this
@@ -216,10 +216,18 @@ limit**. Use at least 120 minutes for the one-source qualification unless a
 measured site-specific bound justifies more. A warm cache is not evidence that
 the cold-cache limit is sufficient.
 
-Wallaby 0.1.9 publishes a newly validated extracted MeasurementSet by atomic
+Wallaby 0.1.10 publishes a newly validated extracted MeasurementSet by atomic
 same-filesystem rename. Older builds copied the full extracted tree a second
 time, doubled write I/O, exposed a partially populated beam directory, and can
 consume most of a 50-minute outer allocation before imaging starts.
+
+The two runtime roots have deliberately different lifetimes. Core exports
+`WALLABY_HIRES_CACHE_ROOT=<DLG_ROOT>/wallaby_staging_data` for reusable,
+validated CASDA archives and extracted inputs. It exports
+`WALLABY_HIRES_STAGING_ROOT=<SESSION_DIR>/wallaby_outputs` for that execution's
+imager, continuum-subtraction, linmos, mosaic, and inventory products. Wallaby
+fails closed if the roots resolve to the same directory. A warm run may reuse
+the first root, but it must never read products from an earlier execution.
 
 For one SBID, CASDA staging normally creates one visibility UWS job and one
 calibration-evaluation UWS job. Record the exact selected filenames, byte
@@ -282,7 +290,7 @@ state, source (`squeue` or `sacct`), reason, and timestamp. Each Wallaby child i
 submitted held, records its exact ID in a mode-0600 lifecycle directory, and is
 then released. Capture every `BEAMPIPE_CHILD_JOB_ID`. Core requests an advance
 TERM notification before the outer wall-time, and the normal supervisor trap
-cancels its recorded exact child. Wallaby 0.1.9 also embeds the validated outer
+cancels its recorded exact child. Wallaby 0.1.10 also embeds the validated outer
 job ID in every child script; a child terminates its own `srun` if that parent
 disappears. `SIGKILL`, node loss, or an older Wallaby build can still orphan a
 child; never cancel by username, wildcard, or job-name prefix.
@@ -367,7 +375,9 @@ set the aggregate execution to succeeded.
 Before cleanup, prove that the outer ID and every recorded child ID are terminal
 or absent, retain sanitized receipts/logs/hashes/inventory/provenance, and verify
 the durable outputs. Remove only the ledger-recorded session directory and
-UUID-named staging files beneath the dedicated DLG root.
+UUID-named session and output files beneath the dedicated DLG root. Retain the
+shared `wallaby_staging_data` cache unless a separately approved, exact-path
+cache-retention operation says otherwise.
 
 Never clean `/`, the DLG root itself, a username, an unresolved variable, or a
 glob. Restore the original project configuration, disable real backends, keep
