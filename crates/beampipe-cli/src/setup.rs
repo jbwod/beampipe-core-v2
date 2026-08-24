@@ -3258,10 +3258,7 @@ staging:
         assert_eq!(selected.path, project_path);
         assert_eq!(selected.config.metadata.id, "custom_archive");
         assert_eq!(
-            with_project_staging_capabilities(
-                "custom:backend",
-                Some(&selected.config),
-            ),
+            with_project_staging_capabilities("custom:backend", Some(&selected.config),),
             "custom:backend,staging:casda_uws"
         );
         assert_eq!(
@@ -3287,10 +3284,7 @@ staging:
             .unwrap();
 
         assert_eq!(
-            with_project_staging_capabilities(
-                "custom:backend",
-                Some(&selected.config),
-            ),
+            with_project_staging_capabilities("custom:backend", Some(&selected.config),),
             "custom:backend"
         );
         assert_eq!(
