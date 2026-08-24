@@ -3839,20 +3839,39 @@ fn receipt_nonempty<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, 
         .ok_or_else(|| sqlx::Error::Protocol(format!("submission receipt requires {field}")))
 }
 
-fn execution_staging_root_from_session_dir(session_dir: &str) -> Option<String> {
-    let session_dir = std::path::Path::new(session_dir);
-    if !session_dir.is_absolute() {
+fn normalized_absolute_receipt_path(raw_path: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Component, Path, PathBuf};
+
+    if raw_path.chars().any(char::is_control) {
         return None;
     }
+    let path = Path::new(raw_path);
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+fn staging_root_is_scoped_to_session(session_dir: &str, staging_root: &str) -> bool {
+    let Some(session_dir) = normalized_absolute_receipt_path(session_dir) else {
+        return false;
+    };
+    let Some(staging_root) = normalized_absolute_receipt_path(staging_root) else {
+        return false;
+    };
     session_dir
         .parent()
-        .filter(|path| path != &std::path::Path::new("/"))?;
-    Some(
-        session_dir
-            .join("wallaby_outputs")
-            .to_string_lossy()
-            .into_owned(),
-    )
+        .is_some_and(|parent| parent != std::path::Path::new("/"))
+        && staging_root != session_dir
+        && staging_root.starts_with(session_dir)
 }
 
 fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sqlx::Error> {
@@ -3873,17 +3892,11 @@ fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sql
             let session_dir =
                 receipt_nonempty(input.remote_session_dir.as_deref(), "remote_session_dir")?;
             let staging_root = receipt_nonempty(input.staging_root.as_deref(), "staging_root")?;
-            let expected_staging_root = execution_staging_root_from_session_dir(session_dir)
-                .ok_or_else(|| {
-                    sqlx::Error::Protocol(
-                        "submission receipt session_dir must identify a workspace beneath DLG_ROOT"
-                            .into(),
-                    )
-                })?;
-            if staging_root != expected_staging_root {
-                return Err(sqlx::Error::Protocol(format!(
-                    "submission receipt staging_root must be the run-scoped output root '{expected_staging_root}'"
-                )));
+            if !staging_root_is_scoped_to_session(session_dir, staging_root) {
+                return Err(sqlx::Error::Protocol(
+                    "submission receipt staging_root must be a normalized, run-scoped output directory beneath remote_session_dir"
+                        .into(),
+                ));
             }
             if input.next_status != ExecutionStatus::AwaitingScheduler {
                 return Err(sqlx::Error::Protocol(
@@ -7589,7 +7602,7 @@ pub async fn list_alert_deliveries(
 #[cfg(test)]
 mod tests {
     use super::{
-        deployment_profile_spec_sha256, execution_staging_root_from_session_dir,
+        deployment_profile_spec_sha256, staging_root_is_scoped_to_session,
         validate_slurm_abandonment_evidence, SlurmAbandonmentEvidenceExpectation,
         SlurmLookupEvidenceAttempt,
     };
@@ -7599,18 +7612,26 @@ mod tests {
 
     #[test]
     fn staging_receipt_path_is_scoped_to_the_session() {
-        assert_eq!(
-            execution_staging_root_from_session_dir("/scratch/project/dlg/workspace/execution-a"),
-            Some("/scratch/project/dlg/workspace/execution-a/wallaby_outputs".into())
-        );
-        assert_eq!(
-            execution_staging_root_from_session_dir("relative/execution-a"),
-            None
-        );
-        assert_eq!(
-            execution_staging_root_from_session_dir("/execution-a"),
-            None
-        );
+        let session = "/scratch/project/dlg/workspace/execution-a";
+        assert!(staging_root_is_scoped_to_session(
+            session,
+            "/scratch/project/dlg/workspace/execution-a/science-products"
+        ));
+        for invalid in [
+            session,
+            "/scratch/project/dlg/workspace/execution-b/science-products",
+            "/scratch/project/dlg/workspace/execution-a/../outside",
+            "relative/science-products",
+        ] {
+            assert!(
+                !staging_root_is_scoped_to_session(session, invalid),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(!staging_root_is_scoped_to_session(
+            "/execution-a",
+            "/execution-a/science-products"
+        ));
     }
 
     #[test]
