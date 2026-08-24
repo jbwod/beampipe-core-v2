@@ -2434,11 +2434,7 @@ fn next_action_choices(wallaby_sample: bool) -> Vec<ChoiceItem> {
     choices
 }
 
-fn next_action_recipe_lines(
-    root: &Path,
-    live_already: bool,
-    wallaby_sample: bool,
-) -> Vec<String> {
+fn next_action_recipe_lines(root: &Path, live_already: bool, wallaby_sample: bool) -> Vec<String> {
     let home = root.display();
     let mut lines = vec![
         String::new(),

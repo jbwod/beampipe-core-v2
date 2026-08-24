@@ -70,8 +70,7 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
         }
     }
 
-    if settings.use_real_backends
-        && backend_capability_enabled(settings, "deployment:slurm_remote")
+    if settings.use_real_backends && backend_capability_enabled(settings, "deployment:slurm_remote")
     {
         let slots = list_credential_slots();
         if has_global_ssh_key_config() {

@@ -176,13 +176,7 @@ where
 {
     let mut lines = vec![env_prelude_with(deployment, read_environment)?];
     let mut commands = vec![
-        "sbatch",
-        "squeue",
-        "sacct",
-        "scancel",
-        "scontrol",
-        "srun",
-        "python3",
+        "sbatch", "squeue", "sacct", "scancel", "scontrol", "srun", "python3",
     ];
     for command in &deployment.runtime_contract.required_commands {
         if !commands.contains(&command.as_str()) {
@@ -599,11 +593,8 @@ pub async fn submit_slurm_session(
         .run_command(&format!("bash -lc {}", shell_quote(&inner)))
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
-    let (session_dir, staging_root, cache_root) = derive_session_paths(
-        &jobsub_path,
-        &dlg_root,
-        &deployment.runtime_contract,
-    )?;
+    let (session_dir, staging_root, cache_root) =
+        derive_session_paths(&jobsub_path, &dlg_root, &deployment.runtime_contract)?;
     let python_shim_dir = format!("{session_dir}/.beampipe-python");
     session
         .run_command(&format!("mkdir -p -- {}", shell_quote(&python_shim_dir)))

@@ -504,10 +504,7 @@ fn validate_slurm_runtime_contract(
     Ok(())
 }
 
-fn validate_relative_subdirectory(
-    value: &str,
-    name: &str,
-) -> Result<(), ProfileValidationError> {
+fn validate_relative_subdirectory(value: &str, name: &str) -> Result<(), ProfileValidationError> {
     let path = Path::new(value);
     if value.trim().is_empty()
         || value != value.trim()
@@ -804,10 +801,7 @@ mod tests {
             .runtime_contract
             .required_python_modules
             .is_empty());
-        assert!(deployment
-            .runtime_contract
-            .required_environment
-            .is_empty());
+        assert!(deployment.runtime_contract.required_environment.is_empty());
     }
 
     #[test]
