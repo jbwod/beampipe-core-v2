@@ -395,7 +395,7 @@ pub async fn run_doctor(
             "security",
             settings.beampipe_env.eq_ignore_ascii_case("production"),
             security_issues.join("; "),
-            "correct the reported secret, TLS, and SSH verification settings",
+            "correct the reported core policy or enabled-backend credential settings",
         )
     });
 
@@ -481,29 +481,35 @@ async fn check_tap(settings: &Settings, checks: &mut Vec<DoctorCheck>) {
         timeout,
     )
     .await;
+    let mut configured = 0;
     for (name, endpoint) in [("casda", tap.casda), ("vizier", tap.vizier)] {
         if !endpoint.configured {
-            checks.push(warning(
-                &format!("tap.{name}_not_configured"),
-                "archive_adapter",
-                format!("{name} TAP endpoint is not configured"),
-                "configure the endpoint when this archive adapter is required",
-            ));
-        } else if endpoint.reachable {
+            continue;
+        }
+        configured += 1;
+        if endpoint.reachable {
             checks.push(success(
                 &format!("tap.{name}_reachable"),
                 "archive_adapter",
-                format!("{name} TAP endpoint is reachable"),
+                format!("configured TAP endpoint '{name}' is reachable"),
             ));
         } else {
             checks.push(failure(
                 &format!("tap.{name}_unreachable"),
                 "archive_adapter",
                 settings.use_real_backends,
-                format!("{name} TAP health probe failed"),
-                "verify the TAP URL, credentials, VPN, and network path",
+                format!("configured TAP endpoint '{name}' health probe failed"),
+                "verify this adapter's URL, credentials, VPN, and network path",
             ));
         }
+    }
+    if configured == 0 {
+        checks.push(warning(
+            "tap.none_configured",
+            "archive_adapter",
+            "no archive TAP endpoint is configured",
+            "configure only the archive endpoints required by installed projects",
+        ));
     }
 }
 
@@ -620,7 +626,7 @@ async fn check_projects(pool: &PgPool, settings: &Settings, checks: &mut Vec<Doc
             "projects.none",
             "project_config",
             "no active project configuration is installed",
-            "run `beampipe project add -f config/wallaby_hires.v2.yaml`",
+            "run `beampipe project add -f PROJECT_CONFIG`",
         ));
         return;
     }

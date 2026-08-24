@@ -56,6 +56,12 @@ pub struct Settings {
     pub provenance_retention_days: i32,
     pub migrate_on_serve: bool,
     pub use_real_backends: bool,
+    /// Enabled backend capabilities in `capability:provider` form.
+    ///
+    /// Core defaults to no provider-specific capabilities. Project/operator
+    /// bundles opt in when they require provider credentials, for example
+    /// `deployment:slurm_remote` or `staging:casda`.
+    pub backend_capabilities: Vec<String>,
     pub casda_tap_url: Option<String>,
     pub vizier_tap_url: Option<String>,
     pub tm_url: Option<String>,
@@ -417,6 +423,12 @@ impl Settings {
                 file.integrations.use_real_backends,
                 false,
             )?,
+            backend_capabilities: resolver.string_list(
+                "backend_capabilities",
+                "BEAMPIPE_BACKEND_CAPABILITIES",
+                file.integrations.backend_capabilities.clone(),
+                Vec::new(),
+            ),
             casda_tap_url: resolver.optional_string(
                 "casda_tap_url",
                 "BEAMPIPE_CASDA_TAP_URL",
@@ -585,6 +597,7 @@ config_section!(MaintenanceFile {
 });
 config_section!(IntegrationsFile {
     use_real_backends: bool,
+    backend_capabilities: Vec<String>,
     casda_tap_url: String,
     vizier_tap_url: String,
     tm_url: String,
@@ -900,6 +913,7 @@ fn default_worker_capabilities() -> Vec<String> {
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
+    validate_backend_capabilities(&settings.backend_capabilities)?;
     if settings.worker_lock_seconds <= 0 {
         return Err(SettingsError::Invalid {
             name: "BEAMPIPE_WORKER_LOCK_SECONDS",
@@ -945,6 +959,21 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
         settings.rate_limit_period_seconds,
         &settings.trusted_proxy_cidrs,
     )?;
+    Ok(())
+}
+
+fn validate_backend_capabilities(capabilities: &[String]) -> Result<(), SettingsError> {
+    for capability in capabilities {
+        let valid = capability
+            .split_once(':')
+            .is_some_and(|(kind, provider)| !kind.trim().is_empty() && !provider.trim().is_empty());
+        if !valid {
+            return Err(SettingsError::Invalid {
+                name: "BEAMPIPE_BACKEND_CAPABILITIES",
+                value: capability.clone(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1031,6 +1060,17 @@ mod tests {
             2
         );
         assert!(parse_labels("BEAMPIPE_WORKER_LABELS", "site").is_err());
+    }
+
+    #[test]
+    fn backend_capabilities_use_capability_provider_pairs() {
+        assert!(validate_backend_capabilities(&[
+            "deployment:slurm_remote".into(),
+            "staging:casda".into(),
+        ])
+        .is_ok());
+        assert!(validate_backend_capabilities(&["slurm_remote".into()]).is_err());
+        assert!(validate_backend_capabilities(&["staging:".into()]).is_err());
     }
 
     #[test]

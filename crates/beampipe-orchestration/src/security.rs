@@ -1,4 +1,4 @@
-//! Startup security checks (JWT, Slurm SSH, CASDA, database URL).
+//! Startup security checks (core policy plus declared backend capabilities).
 
 use crate::slurm_credentials::{
     beampipe_env, has_global_ssh_key_config, is_production_env, list_credential_slots,
@@ -15,6 +15,13 @@ fn security_strict_enabled(settings: &Settings) -> bool {
         return v;
     }
     beampipe_security::is_production_env_name(&settings.beampipe_env)
+}
+
+fn backend_capability_enabled(settings: &Settings, capability: &str) -> bool {
+    settings
+        .backend_capabilities
+        .iter()
+        .any(|configured| configured == capability)
 }
 
 /// Collect security issues (always runs all checks; used by `beampipe security check`).
@@ -63,7 +70,9 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
         }
     }
 
-    if settings.use_real_backends {
+    if settings.use_real_backends
+        && backend_capability_enabled(settings, "deployment:slurm_remote")
+    {
         let slots = list_credential_slots();
         if has_global_ssh_key_config() {
             push_slurm_credential_issues(&mut errors, None);
@@ -77,14 +86,16 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
                 Err(e) => errors.push(format!("Slurm SSH credentials: {e}")),
             }
         }
+    }
 
+    if settings.use_real_backends && backend_capability_enabled(settings, "staging:casda") {
         let casda_user = std::env::var("CASDA_USERNAME")
             .ok()
             .filter(|s| !s.is_empty());
         let casda_pass_ok = casda_password_from_env().is_some();
         if casda_user.is_none() || !casda_pass_ok {
             errors.push(
-                "CASDA_USERNAME and CASDA_PASSWORD or CASDA_PASSWORD_FILE are required when BEAMPIPE_USE_REAL_BACKENDS=true (staging)"
+                "CASDA_USERNAME and CASDA_PASSWORD or CASDA_PASSWORD_FILE are required when backend capability staging:casda is enabled"
                     .into(),
             );
         }
@@ -161,6 +172,30 @@ pub fn validate_security(settings: &Settings) -> Result<(), Vec<String>> {
 mod tests {
     use super::*;
 
+    fn production_settings() -> Settings {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("beampipe.yaml");
+        std::fs::write(
+            &path,
+            r#"apiVersion: beampipe.dev/config/v1
+kind: BeampipeConfig
+environment: production
+database:
+  url: postgres://beampipe:strong-password@database/beampipe
+auth:
+  jwt_secret: 0123456789abcdef0123456789abcdef
+api:
+  cors_allow_origins: https://beampipe.example
+redis:
+  url: redis://redis:6379
+integrations:
+  use_real_backends: true
+"#,
+        )
+        .unwrap();
+        Settings::load_from_path(Some(&path)).unwrap().settings
+    }
+
     #[test]
     fn resolved_production_settings_require_redis_even_without_optional_flag() {
         let directory = tempfile::tempdir().unwrap();
@@ -187,5 +222,27 @@ api:
         assert!(collect_security_issues(&settings)
             .iter()
             .any(|issue| issue.contains("BEAMPIPE_REDIS_URL is required in production")));
+    }
+
+    #[test]
+    fn real_backends_do_not_imply_unrelated_provider_credentials() {
+        let mut settings = production_settings();
+        settings.backend_capabilities.clear();
+        let issues = collect_security_issues(&settings);
+
+        assert!(!issues.iter().any(|issue| issue.contains("Slurm SSH")));
+        assert!(!issues.iter().any(|issue| issue.contains("CASDA_")));
+    }
+
+    #[test]
+    fn backend_capabilities_are_explicit() {
+        let mut settings = production_settings();
+        settings.backend_capabilities = vec!["staging:casda".into()];
+
+        assert!(backend_capability_enabled(&settings, "staging:casda"));
+        assert!(!backend_capability_enabled(
+            &settings,
+            "deployment:slurm_remote"
+        ));
     }
 }
