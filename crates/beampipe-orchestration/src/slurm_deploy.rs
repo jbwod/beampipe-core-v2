@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
 const WALLABY_STAGING_ROOT_ENV: &str = "WALLABY_HIRES_STAGING_ROOT";
+const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
 
 pub struct SlurmSubmitParams {
     pub execution_id: String,
@@ -212,6 +213,11 @@ where
         exported.push("BEAMPIPE_ASKAPSOFT_SIF");
     }
     let resources = SchedulerResourceRequest::from_slurm_profile(deployment);
+    let termination_notice_seconds = resources
+        .wall_time_minutes
+        .saturating_mul(60)
+        .saturating_sub(1)
+        .clamp(1, OUTER_TERMINATION_NOTICE_SECONDS);
     let mut argv = vec![
         "sbatch".to_string(),
         format!("--export={}", exported.join(",")),
@@ -224,6 +230,7 @@ where
             resources.wall_time_minutes / 60,
             resources.wall_time_minutes % 60
         ),
+        format!("--signal=TERM@{termination_notice_seconds}"),
     ];
     for (flag, value) in [
         ("partition", resources.partition.as_deref()),
@@ -819,6 +826,7 @@ mod tests {
             "--cpus-per-task=4",
             "--mem=12G",
             "--time=00:50:00",
+            "--signal=TERM@120",
             "--constraint=cpu",
             "--qos=normal",
             "/dlg/job sub.sh",
@@ -832,6 +840,23 @@ mod tests {
             command.find("export BEAMPIPE_ASKAPSOFT_SIF").unwrap()
                 < command.find("sbatch").unwrap()
         );
+    }
+
+    #[test]
+    fn short_outer_jobs_receive_a_bounded_termination_notice() {
+        let mut dep = deployment();
+        dep.resources.wall_time_minutes = Some(1);
+        let command = sbatch_command_with(
+            &dep,
+            "session-id",
+            "/dlg/jobsub.sh",
+            "/dlg/wallaby_staging_data",
+            |_| None,
+        )
+        .unwrap();
+
+        assert!(command.contains("--time=00:01:00"));
+        assert!(command.contains("--signal=TERM@59"));
     }
 
     fn deployment() -> SlurmRemoteDeploymentConfig {
