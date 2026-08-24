@@ -19,6 +19,8 @@ use crate::{
 };
 
 const DEFAULT_CASDA_TAP_URL: &str = "https://casda.csiro.au/casda_vo_tools/tap/sync";
+const DEFAULT_VIZIER_TAP_URL: &str = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync";
+const WALLABY_BACKEND_CAPABILITIES: &str = "deployment:slurm_remote,staging:casda";
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
 const DEFAULT_WORKER_POOL: &str = "default";
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/beampipe";
@@ -34,6 +36,7 @@ pub struct SetupOptions {
     pub admin_password_file: Option<PathBuf>,
     pub admin_email: Option<String>,
     pub project_config: Option<PathBuf>,
+    pub wallaby_sample: bool,
     pub profile_config: Option<PathBuf>,
     pub ssh_slot: Option<String>,
     pub ssh_private_key: Option<PathBuf>,
@@ -281,7 +284,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     std::env::set_current_dir(&root).with_context(|| format!("chdir {}", root.display()))?;
     let env_path = existing_context.environment_file.clone();
 
-    let materialized = materialize::materialize(&root, false)?;
+    let materialized = materialize::materialize(&root, false, opts.wallaby_sample)?;
     for path in &materialized.created {
         println!("Created {}", path.display());
     }
@@ -447,7 +450,29 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     let casda_tap_url = env_override(
         opts.casda_tap_url.as_deref(),
         "BEAMPIPE_CASDA_TAP_URL",
-        DEFAULT_CASDA_TAP_URL,
+        if opts.wallaby_sample {
+            DEFAULT_CASDA_TAP_URL
+        } else {
+            ""
+        },
+    );
+    let backend_capabilities = env_override(
+        None,
+        "BEAMPIPE_BACKEND_CAPABILITIES",
+        if opts.wallaby_sample {
+            WALLABY_BACKEND_CAPABILITIES
+        } else {
+            ""
+        },
+    );
+    let vizier_tap_url = env_override(
+        None,
+        "BEAMPIPE_VIZIER_TAP_URL",
+        if opts.wallaby_sample {
+            DEFAULT_VIZIER_TAP_URL
+        } else {
+            ""
+        },
     );
     let tm_url = env_override(opts.tm_url.as_deref(), "BEAMPIPE_TM_URL", DEFAULT_TM_URL);
     let worker_pool = env_override(
@@ -486,6 +511,12 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         &grafana_admin_password,
     )?;
     update_env_file(&env_path, "BEAMPIPE_CASDA_TAP_URL", &casda_tap_url)?;
+    update_env_file(
+        &env_path,
+        "BEAMPIPE_BACKEND_CAPABILITIES",
+        &backend_capabilities,
+    )?;
+    update_env_file(&env_path, "BEAMPIPE_VIZIER_TAP_URL", &vizier_tap_url)?;
     update_env_file(&env_path, "BEAMPIPE_TM_URL", &tm_url)?;
     update_env_file(&env_path, "BEAMPIPE_WORKER_POOL", &worker_pool)?;
     update_env_file(&env_path, "BEAMPIPE_USE_REAL_BACKENDS", &use_real_backends)?;
@@ -525,6 +556,8 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     std::env::set_var("BEAMPIPE_JWT_SECRET", &jwt_secret);
     std::env::set_var("BEAMPIPE_GRAFANA_ADMIN_PASSWORD", &grafana_admin_password);
     std::env::set_var("BEAMPIPE_CASDA_TAP_URL", &casda_tap_url);
+    std::env::set_var("BEAMPIPE_BACKEND_CAPABILITIES", &backend_capabilities);
+    std::env::set_var("BEAMPIPE_VIZIER_TAP_URL", &vizier_tap_url);
     std::env::set_var("BEAMPIPE_TM_URL", &tm_url);
     std::env::set_var("BEAMPIPE_WORKER_POOL", &worker_pool);
     std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", &use_real_backends);
@@ -646,7 +679,13 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
 
         let project_path = project_config_path(&root, &opts);
 
-        if project_path.exists() {
+        if let Some(project_path) = project_path.as_deref() {
+            if !project_path.exists() {
+                bail!(
+                    "selected project config was not found at {}",
+                    project_path.display()
+                );
+            }
             let bytes = std::fs::read(&project_path)
                 .with_context(|| format!("read {}", project_path.display()))?;
             let config = ProjectConfig::from_slice(&bytes)?;
@@ -667,10 +706,7 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
                 println!("Uploaded project config '{}'.", config.metadata.id);
             }
         } else {
-            println!(
-                "Project config not found at {}; skipped validate/upload.",
-                project_path.display()
-            );
+            println!("No project selected; skipped project validation and upload.");
         }
 
         if let Some(profile) = prepared_profile.as_ref() {
@@ -703,8 +739,9 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         core_home: Some(root.clone()),
         dash_dir: dash_dir.clone(),
         project_file: project_path
-            .exists()
-            .then(|| display_repo_path(&root, &project_path)),
+            .as_deref()
+            .filter(|path| path.exists())
+            .map(|path| display_repo_path(&root, path)),
         profile_file: profile_path
             .as_deref()
             .filter(|path| path.exists())
@@ -2069,13 +2106,15 @@ fn is_retryable_admin_error(error: &anyhow::Error) -> bool {
 }
 
 fn maybe_validate_project_config(root: &Path, opts: &SetupOptions) -> Result<()> {
-    let project_path = project_config_path(root, opts);
+    let Some(project_path) = project_config_path(root, opts) else {
+        println!("No project selected; skipped project validation and upload.");
+        return Ok(());
+    };
     if !project_path.exists() {
-        println!(
-            "Project config not found at {}; skipped validate/upload.",
+        bail!(
+            "selected project config was not found at {}",
             project_path.display()
         );
-        return Ok(());
     }
     let bytes =
         std::fs::read(&project_path).with_context(|| format!("read {}", project_path.display()))?;
@@ -2092,10 +2131,11 @@ fn maybe_validate_project_config(root: &Path, opts: &SetupOptions) -> Result<()>
     Ok(())
 }
 
-fn project_config_path(root: &Path, opts: &SetupOptions) -> PathBuf {
+fn project_config_path(root: &Path, opts: &SetupOptions) -> Option<PathBuf> {
     match opts.project_config.as_ref() {
-        Some(path) => resolve_explicit_path(path),
-        None => root.join("config/wallaby_hires.v2.yaml"),
+        Some(path) => Some(resolve_explicit_path(path)),
+        None if opts.wallaby_sample => Some(root.join("config/wallaby_hires.v2.yaml")),
+        None => None,
     }
 }
 
@@ -2155,8 +2195,13 @@ fn prompt_profile_file(
     root: &Path,
     runtime: RuntimeKind,
 ) -> Result<Option<(PathBuf, DeploymentProfile)>> {
-    let default = root.join("config/deployment_profile.dlg-dim.json");
-    let default_display = default.display().to_string();
+    let default_display = if opts.wallaby_sample {
+        root.join("config/deployment_profile.dlg-dim.json")
+            .display()
+            .to_string()
+    } else {
+        "skip".to_string()
+    };
     loop {
         let raw = prompt_default("Deployment profile file (or skip)", &default_display)?;
         if raw.trim().eq_ignore_ascii_case("skip") {
@@ -2321,8 +2366,8 @@ fn display_repo_path(root: &Path, path: &Path) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
-fn next_action_choices() -> [ChoiceItem; 6] {
-    [
+fn next_action_choices(wallaby_sample: bool) -> Vec<ChoiceItem> {
+    let mut choices = vec![
         ChoiceItem {
             key: "live",
             label: "Enable live backends",
@@ -2333,16 +2378,22 @@ fn next_action_choices() -> [ChoiceItem; 6] {
             label: "Add a deployment profile",
             hint: "REST DIM or Slurm JSON from the install config dir",
         },
-        ChoiceItem {
-            key: "slurm",
-            label: "Set up Slurm SSH credentials",
-            hint: "generate or import a managed key slot",
-        },
-        ChoiceItem {
-            key: "casda",
-            label: "Set CASDA credentials",
-            hint: "username and password for staging downloads",
-        },
+    ];
+    if wallaby_sample {
+        choices.extend([
+            ChoiceItem {
+                key: "slurm",
+                label: "Set up Slurm SSH credentials",
+                hint: "generate or import a managed key slot",
+            },
+            ChoiceItem {
+                key: "casda",
+                label: "Set CASDA credentials",
+                hint: "username and password for staging downloads",
+            },
+        ]);
+    }
+    choices.extend([
         ChoiceItem {
             key: "doctor",
             label: "Run doctor for a profile",
@@ -2353,13 +2404,16 @@ fn next_action_choices() -> [ChoiceItem; 6] {
             label: "Done",
             hint: "finish setup",
         },
-    ]
+    ]);
+    choices
 }
 
-fn next_action_recipe_lines(root: &Path, live_already: bool) -> Vec<String> {
+fn next_action_recipe_lines(
+    root: &Path,
+    live_already: bool,
+    wallaby_sample: bool,
+) -> Vec<String> {
     let home = root.display();
-    let dlg = root.join("config/deployment_profile.dlg-dim.json");
-    let slurm = root.join("config/deployment_profile.slurm-remote.json");
     let mut lines = vec![
         String::new(),
         "Next actions".into(),
@@ -2374,23 +2428,30 @@ fn next_action_recipe_lines(root: &Path, live_already: bool) -> Vec<String> {
         ));
         lines.push("    beampipe restart".into());
     }
-    lines.push(format!("  beampipe profile add -f {}", dlg.display()));
-    lines.push("  beampipe doctor --profile dlg-dim".into());
-    lines.push("  beampipe slurm credentials init --slot hpc --host LOGIN_NODE".into());
-    lines.push(format!(
-        "  beampipe profile add -f {} --ssh-slot hpc",
-        slurm.display()
-    ));
-    lines.push("  beampipe doctor --profile slurm-remote".into());
-    lines.push(format!(
-        "  set CASDA_USERNAME in {home}/.env (Docker: CASDA_PASSWORD; host: CASDA_PASSWORD_FILE={home}/credentials/casda/password)"
-    ));
-    lines.push("  beampipe restart".into());
+    lines.push("  Add a project: beampipe project add -f PROJECT_CONFIG".into());
+    lines.push("  Add a deployment profile: beampipe profile add -f PROFILE_CONFIG".into());
+    lines.push("  Verify it: beampipe doctor --profile PROFILE_NAME".into());
+    if wallaby_sample {
+        let dlg = root.join("config/deployment_profile.dlg-dim.json");
+        let slurm = root.join("config/deployment_profile.slurm-remote.json");
+        lines.push("  WALLABY HiRes sample:".into());
+        lines.push(format!("    beampipe profile add -f {}", dlg.display()));
+        lines.push("    beampipe doctor --profile dlg-dim".into());
+        lines.push("    beampipe slurm credentials init --slot hpc --host LOGIN_NODE".into());
+        lines.push(format!(
+            "    beampipe profile add -f {} --ssh-slot hpc",
+            slurm.display()
+        ));
+        lines.push(format!(
+            "    set CASDA_USERNAME in {home}/.env (Docker: CASDA_PASSWORD; host: CASDA_PASSWORD_FILE={home}/credentials/casda/password)"
+        ));
+        lines.push("    beampipe restart".into());
+    }
     lines
 }
 
-fn print_next_action_recipe(root: &Path, live_already: bool) {
-    for line in next_action_recipe_lines(root, live_already) {
+fn print_next_action_recipe(root: &Path, live_already: bool, wallaby_sample: bool) {
+    for line in next_action_recipe_lines(root, live_already, wallaby_sample) {
         println!("{line}");
     }
 }
@@ -2412,7 +2473,11 @@ struct NextActions<'a> {
 
 async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
     if !next_actions_should_prompt(ctx.opts) {
-        print_next_action_recipe(ctx.root, ctx.use_real_backends.as_str() == "true");
+        print_next_action_recipe(
+            ctx.root,
+            ctx.use_real_backends.as_str() == "true",
+            ctx.opts.wallaby_sample,
+        );
         return Ok(());
     }
 
@@ -2429,11 +2494,12 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
     ));
     print_hint("Enable live backends only after `beampipe doctor --profile NAME` passes.");
 
-    let items = next_action_choices();
+    let items = next_action_choices(ctx.opts.wallaby_sample);
     loop {
-        let choice = prompt_choice("Next action", &items, 5)?;
-        match choice {
-            0 => {
+        let default_index = items.len() - 1;
+        let choice = prompt_choice("Next action", &items, default_index)?;
+        match items[choice].key {
+            "live" => {
                 if let Err(error) = enable_live_backends(
                     ctx.root,
                     ctx.env_path,
@@ -2445,7 +2511,7 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
                     print_hint(&error.to_string());
                 }
             }
-            1 => match prompt_profile_file(ctx.opts, ctx.root, ctx.runtime) {
+            "profile" => match prompt_profile_file(ctx.opts, ctx.root, ctx.runtime) {
                 Ok(Some((_, profile))) => {
                     if let Err(error) = install_prepared_profile(ctx.pool, &profile).await {
                         print_hint(&error.to_string());
@@ -2455,7 +2521,7 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
                 Ok(None) => {}
                 Err(error) => print_hint(&error.to_string()),
             },
-            2 => {
+            "slurm" => {
                 if let Err(error) = next_action_slurm_credentials(
                     ctx.opts,
                     ctx.runtime,
@@ -2470,14 +2536,14 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
                     }
                 }
             }
-            3 => {
+            "casda" => {
                 if let Err(error) =
                     next_action_casda_credentials(ctx.root, ctx.env_path, ctx.runtime, ctx.started)
                 {
                     print_hint(&error.to_string());
                 }
             }
-            4 => {
+            "doctor" => {
                 if let Err(error) =
                     next_action_doctor_profile(ctx.root, ctx.pool, ctx.prepared_profile.as_ref())
                         .await
@@ -3056,7 +3122,7 @@ mod tests {
         assert_eq!(parse_choice("compose", &postgres, 1), Some(0));
         assert_eq!(parse_choice("existing", &postgres, 0), Some(1));
 
-        let next = next_action_choices();
+        let next = next_action_choices(true);
         assert_eq!(parse_choice("", &next, 5), Some(5));
         assert_eq!(parse_choice("done", &next, 0), Some(5));
         assert_eq!(parse_choice("live", &next, 5), Some(0));
@@ -3091,20 +3157,22 @@ mod tests {
     }
 
     #[test]
-    fn next_action_recipe_mentions_live_backends_and_slurm() {
+    fn next_action_recipe_is_neutral_unless_wallaby_is_selected() {
         let root = Path::new("/home/op/beampipe");
-        let mock = next_action_recipe_lines(root, false).join("\n");
+        let mock = next_action_recipe_lines(root, false, false).join("\n");
         assert!(mock.contains("BEAMPIPE_USE_REAL_BACKENDS=true"));
-        assert!(mock.contains("beampipe restart"));
-        assert!(mock.contains("deployment_profile.dlg-dim.json"));
-        assert!(mock.contains("beampipe doctor --profile dlg-dim"));
-        assert!(mock.contains("beampipe slurm credentials init"));
-        assert!(mock.contains("deployment_profile.slurm-remote.json"));
-        assert!(mock.contains("CASDA_USERNAME"));
-        assert!(mock.contains("CASDA_PASSWORD_FILE"));
+        assert!(mock.contains("PROJECT_CONFIG"));
+        assert!(mock.contains("PROFILE_CONFIG"));
+        assert!(!mock.contains("wallaby"));
+        assert!(!mock.contains("CASDA"));
         assert!(!mock.contains("Live backends are on"));
 
-        let live = next_action_recipe_lines(root, true).join("\n");
+        let wallaby = next_action_recipe_lines(root, false, true).join("\n");
+        assert!(wallaby.contains("deployment_profile.dlg-dim.json"));
+        assert!(wallaby.contains("beampipe slurm credentials init"));
+        assert!(wallaby.contains("CASDA_USERNAME"));
+
+        let live = next_action_recipe_lines(root, true, false).join("\n");
         assert!(live.contains("Live backends are on"));
         assert!(!live.contains("set BEAMPIPE_USE_REAL_BACKENDS=true"));
     }
@@ -3400,11 +3468,23 @@ mod tests {
     }
 
     #[test]
-    fn project_config_path_defaults_to_installation_home() {
+    fn project_config_is_not_implicitly_selected() {
         let root = Path::new("/home/op/beampipe");
+        assert_eq!(project_config_path(root, &SetupOptions::default()), None);
+    }
+
+    #[test]
+    fn wallaby_sample_selects_its_materialized_project() {
+        let root = Path::new("/home/op/beampipe");
+        let opts = SetupOptions {
+            wallaby_sample: true,
+            ..SetupOptions::default()
+        };
         assert_eq!(
-            project_config_path(root, &SetupOptions::default()),
-            PathBuf::from("/home/op/beampipe/config/wallaby_hires.v2.yaml")
+            project_config_path(root, &opts),
+            Some(PathBuf::from(
+                "/home/op/beampipe/config/wallaby_hires.v2.yaml"
+            ))
         );
     }
 

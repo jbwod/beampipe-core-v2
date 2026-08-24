@@ -37,6 +37,9 @@ enum CliCommand {
         force: bool,
         #[arg(long)]
         production: bool,
+        /// Materialize an optional first-party project sample.
+        #[arg(long, value_parser = ["wallaby-hires"])]
+        sample: Option<String>,
     },
     /// Start the configured installation runtime.
     Start {
@@ -112,6 +115,9 @@ enum CliCommand {
         admin_email: Option<String>,
         #[arg(long)]
         project_config: Option<PathBuf>,
+        /// Materialize and upload an optional first-party project sample.
+        #[arg(long, value_parser = ["wallaby-hires"], conflicts_with = "project_config")]
+        sample: Option<String>,
         /// Install a REST or Slurm deployment profile during setup.
         #[arg(long)]
         profile_config: Option<PathBuf>,
@@ -263,7 +269,7 @@ enum CliCommand {
         #[command(subcommand)]
         command: SlurmCommand,
     },
-    /// Validate JWT, Slurm SSH, CASDA, and database security settings.
+    /// Validate core security policy and credentials for enabled backends.
     Security {
         #[command(subcommand)]
         command: SecurityCommand,
@@ -696,11 +702,13 @@ async fn main() -> anyhow::Result<()> {
             directory,
             force,
             production,
+            sample,
         } => {
             let report = init::run(init::InitOptions {
                 directory,
                 force,
                 production,
+                wallaby_sample: sample.as_deref() == Some("wallaby-hires"),
             })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -855,6 +863,7 @@ async fn main() -> anyhow::Result<()> {
             admin_password_file,
             admin_email,
             project_config,
+            sample,
             profile_config,
             ssh_slot,
             ssh_private_key,
@@ -897,6 +906,7 @@ async fn main() -> anyhow::Result<()> {
                     admin_password_file,
                     admin_email,
                     project_config,
+                    wallaby_sample: sample.as_deref() == Some("wallaby-hires"),
                     profile_config,
                     ssh_slot,
                     ssh_private_key,
@@ -1326,6 +1336,7 @@ async fn slurm_ping(
         manager_topology: Default::default(),
         container_runtime: None,
         environment_setup: None,
+        runtime_contract: Default::default(),
     };
     let target = beampipe_orchestration::SlurmTarget::from_deployment(&deployment, &remote_user);
     let mut session = beampipe_orchestration::SlurmSshSession::connect(&target).await?;

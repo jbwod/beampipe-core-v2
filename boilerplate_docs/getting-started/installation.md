@@ -7,8 +7,8 @@ $BEAMPIPE_HOME/                  default: ~/beampipe
 |-- installation.json           runtime and bundle identity, no secrets
 |-- .env                        private runtime configuration, mode 0600
 |-- docker-compose.yml          version-managed operator bundle
-|-- config/                     project and profile examples
-|-- credentials/casda/password  CASDA staging password, mode 0600
+|-- config/                     project/profile files selected by the operator
+|-- credentials/                provider credentials, when configured
 `-- credentials/ssh/<slot>/     managed SSH credential copies
 ```
 
@@ -22,7 +22,7 @@ Use this path for a workstation or a single-host service. It downloads the relea
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, creates the first administrator, and uploads the reference project.
+Choose Docker in the wizard. Setup creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, and creates the first administrator. No scientific project or provider integration is enabled implicitly.
 
 ### Fresh database and migration ownership
 
@@ -47,7 +47,15 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
       --api-port 18080 --postgres-port 5432 --metrics-port 9090
 ```
 
-`--yes` skips the Next actions prompt and prints the recipe instead: add a REST or Slurm profile, run `beampipe doctor --profile NAME`, set CASDA credentials for staging, then set `BEAMPIPE_USE_REAL_BACKENDS=true` in the install `.env` and `beampipe restart`. Pass `--use-real-backends` only after that profile doctor is known to pass. Interactive setup offers those steps after the stack is up (live backends, profile file, Slurm SSH credentials, CASDA credentials, profile doctor).
+`--yes` skips the Next actions prompt and prints a neutral recipe: add a project config and deployment profile, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` in the install `.env` and restart. Pass `--use-real-backends` only after that profile doctor is known to pass.
+
+Supply any project during setup with `--project-config PATH`. The bundled WALLABY HiRes example is opt-in:
+
+```bash
+beampipe setup --yes --runtime docker --postgres compose --sample wallaby-hires
+```
+
+That sample materializes its project configs, graphs, REST/Slurm profiles and declares `deployment:slurm_remote,staging:casda` as enabled backend capabilities. Core requires SSH or CASDA credentials only when the corresponding capability is declared and real backends are enabled. Other projects should set `BEAMPIPE_BACKEND_CAPABILITIES` to the capability/provider pairs they actually use.
 
 Manage it from any directory:
 

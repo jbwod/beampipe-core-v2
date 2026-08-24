@@ -193,7 +193,7 @@ curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 
 ## Next boundary
 
-Interactive setup already offers these as Next actions. To submit real work later, install a validated `rest_remote` or `slurm_remote` profile, set CASDA credentials for staging, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Follow [Deployment profiles and SSH](../architecture/deployment-profiles.md); do not reuse a mock profile for live submission.
+To submit real work later, install a validated `rest_remote` or `slurm_remote` profile, configure only the credentials required by the project's declared backend capabilities, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. The WALLABY sample declares CASDA staging and Slurm deployment explicitly. Follow [Deployment profiles and SSH](../architecture/deployment-profiles.md); do not reuse a mock profile for live submission.
 
 For a reproducible live submission without CASDA downloads, continue with
 [Local DALiuGE end to end](local-daliuge.md). It uses the explicit no-download

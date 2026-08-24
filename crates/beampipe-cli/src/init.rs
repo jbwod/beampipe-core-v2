@@ -8,6 +8,7 @@ pub struct InitOptions {
     pub directory: PathBuf,
     pub force: bool,
     pub production: bool,
+    pub wallaby_sample: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -43,6 +44,11 @@ pub fn run(options: InitOptions) -> Result<InitReport> {
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("create {}", config_dir.display()))?;
 
+    let setup_sample = if options.wallaby_sample {
+        " --sample wallaby-hires"
+    } else {
+        ""
+    };
     let mut report = InitReport {
         directory: root.clone(),
         created: Vec::new(),
@@ -50,14 +56,14 @@ pub fn run(options: InitOptions) -> Result<InitReport> {
         next_steps: vec![
             "review beampipe.yaml and .env.example".into(),
             format!(
-                "run `beampipe setup --directory {}` to start Postgres and the stack",
-                root.display()
+                "run `beampipe setup --directory {}{setup_sample}` to start Postgres and the stack",
+                root.display(),
             ),
             "or `beampipe setup --no-start` to print a recipe only".into(),
         ],
     };
 
-    let materialized = materialize::materialize(&root, options.force)?;
+    let materialized = materialize::materialize(&root, options.force, options.wallaby_sample)?;
     report.created.extend(materialized.created);
     report.replaced.extend(materialized.replaced);
     if options.production {
@@ -152,6 +158,7 @@ worker:
     - output-verification
 integrations:
   use_real_backends: false
+  backend_capabilities: []
   casda_tap_url: null
   vizier_tap_url: null
   tm_url: http://localhost:9000
@@ -192,6 +199,7 @@ worker:
     - output-verification
 integrations:
   use_real_backends: true
+  backend_capabilities: []
   casda_tap_url: null
   vizier_tap_url: null
   tm_url: null
@@ -219,13 +227,11 @@ fn production_env() -> &'static str {
 DATABASE_URL=<secret-reference-or-runtime-value>
 BEAMPIPE_JWT_SECRET=<secret-reference-or-runtime-value>
 BEAMPIPE_CONFIG=beampipe.yaml
-BEAMPIPE_CASDA_TAP_URL=<casda-tap-url>
+BEAMPIPE_BACKEND_CAPABILITIES=
 BEAMPIPE_TM_URL=<daliuge-translator-url>
 BEAMPIPE_DIM_URL=<daliuge-manager-url>
 BEAMPIPE_REDIS_URL=<redis-url>
 BEAMPIPE_REQUIRE_RATE_LIMITER=true
-SLURM_SSH_PRIVATE_KEY_PATH=<runtime-mounted-private-key>
-SLURM_SSH_KNOWN_HOSTS=<runtime-mounted-known-hosts>
 "#
 }
 
@@ -241,6 +247,7 @@ mod tests {
             directory: dir.path().into(),
             force: false,
             production: false,
+            wallaby_sample: false,
         })
         .unwrap_err();
         assert!(error.to_string().contains("--force"));
@@ -266,6 +273,7 @@ mod tests {
             directory: dir.path().into(),
             force: false,
             production: false,
+            wallaby_sample: false,
         })
         .unwrap();
         assert!(report
@@ -274,6 +282,24 @@ mod tests {
             .any(|path| path.ends_with("docker-compose.yml")));
         let compose = std::fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
         assert!(!compose.contains("build:"));
+        assert!(!dir.path().join("config/wallaby_hires.v2.yaml").exists());
+    }
+
+    #[test]
+    fn init_materializes_wallaby_only_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = run(InitOptions {
+            directory: dir.path().into(),
+            force: false,
+            production: false,
+            wallaby_sample: true,
+        })
+        .unwrap();
+
         assert!(dir.path().join("config/wallaby_hires.v2.yaml").exists());
+        assert!(report
+            .next_steps
+            .iter()
+            .any(|step| step.contains("--sample wallaby-hires")));
     }
 }

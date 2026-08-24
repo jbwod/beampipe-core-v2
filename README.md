@@ -129,10 +129,17 @@ beampipe project add -f config/wallaby_hires.v2.yaml
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh
 ```
 
-That installs `beampipe` to `~/.local/bin`, writes `~/beampipe`, and starts Postgres plus the stack. Interactive setup asks Docker (default) or host, then prompts Next actions (live backends, a deployment profile, Slurm SSH credentials, CASDA credentials). Non-interactive:
+That installs `beampipe` to `~/.local/bin`, writes a project-neutral operator bundle to `~/beampipe`, and starts Postgres plus the stack. Interactive setup asks Docker (default) or host, then prompts for generic project and deployment-profile next steps. Non-interactive:
 
 ```bash
 curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh | sh -s -- --yes --runtime docker
+```
+
+No project is installed implicitly. Supply your own config with `--project-config PATH`, or explicitly install the first-party WALLABY HiRes sample:
+
+```bash
+curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/install.sh \
+  | sh -s -- --yes --runtime docker --sample wallaby-hires
 ```
 
 The API is at `http://127.0.0.1:18080/api/v2`. Files live in `~/beampipe`. You do not need to clone this repository.

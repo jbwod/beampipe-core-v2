@@ -46,7 +46,11 @@ struct BundleManifest {
     files: BTreeMap<String, String>,
 }
 
-pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
+pub fn materialize(
+    root: &Path,
+    force: bool,
+    include_wallaby_sample: bool,
+) -> Result<MaterializeReport> {
     let mut report = MaterializeReport {
         bundle_current: true,
         ..MaterializeReport::default()
@@ -62,19 +66,6 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
     for (relative, contents) in [
         ("docker-compose.yml", OPERATOR_COMPOSE),
         (".env.example", OPERATOR_ENV_EXAMPLE),
-        ("config/wallaby_hires.v2.yaml", SAMPLE_PROJECT),
-        (
-            "config/wallaby_hires_nodownloads.v2.yaml",
-            SAMPLE_NODOWNLOADS_PROJECT,
-        ),
-        (
-            "config/deployment_profile.dlg-dim.json",
-            SAMPLE_REST_PROFILE,
-        ),
-        (
-            "config/deployment_profile.slurm-remote.json",
-            SAMPLE_SLURM_PROFILE,
-        ),
         ("observability/prometheus.yml", PROMETHEUS_CONFIG),
         ("observability/alerts.yml", PROMETHEUS_ALERTS),
         ("observability/alertmanager.yml", ALERTMANAGER_CONFIG),
@@ -90,6 +81,7 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
             "observability/grafana/dashboards/beampipe-overview.json",
             GRAFANA_OVERVIEW_DASHBOARD,
         ),
+        ("config/.gitkeep", ""),
         ("credentials/ssh/.gitkeep", ""),
     ] {
         materialize_file(
@@ -102,25 +94,40 @@ pub fn materialize(root: &Path, force: bool) -> Result<MaterializeReport> {
             &mut report,
         )?;
     }
-    for (relative, contents) in [
-        (
-            "config/graphs/wallaby-hires_deploy-setonix-beampipe.graph",
-            SAMPLE_DEPLOY_GRAPH,
-        ),
-        (
-            "config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph",
-            SAMPLE_NODOWNLOADS_GRAPH,
-        ),
-    ] {
-        materialize_file(
-            root,
-            relative,
-            contents,
-            force,
-            previous.as_ref(),
-            &mut next,
-            &mut report,
-        )?;
+    if include_wallaby_sample {
+        for (relative, contents) in [
+            ("config/wallaby_hires.v2.yaml", SAMPLE_PROJECT.as_bytes()),
+            (
+                "config/wallaby_hires_nodownloads.v2.yaml",
+                SAMPLE_NODOWNLOADS_PROJECT.as_bytes(),
+            ),
+            (
+                "config/deployment_profile.dlg-dim.json",
+                SAMPLE_REST_PROFILE.as_bytes(),
+            ),
+            (
+                "config/deployment_profile.slurm-remote.json",
+                SAMPLE_SLURM_PROFILE.as_bytes(),
+            ),
+            (
+                "config/graphs/wallaby-hires_deploy-setonix-beampipe.graph",
+                SAMPLE_DEPLOY_GRAPH,
+            ),
+            (
+                "config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph",
+                SAMPLE_NODOWNLOADS_GRAPH,
+            ),
+        ] {
+            materialize_file(
+                root,
+                relative,
+                contents,
+                force,
+                previous.as_ref(),
+                &mut next,
+                &mut report,
+            )?;
+        }
     }
     write_manifest(root, &next)?;
     Ok(report)
@@ -209,7 +216,7 @@ mod tests {
     #[test]
     fn materialize_writes_pull_only_compose_and_preserves_operator_edits() {
         let dir = tempfile::tempdir().unwrap();
-        let report = materialize(dir.path(), false).unwrap();
+        let report = materialize(dir.path(), false, false).unwrap();
         assert!(report.bundle_current);
         assert!(report
             .created
@@ -220,6 +227,23 @@ mod tests {
         let compose = fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
         assert!(!compose.contains("build:"));
         assert!(compose.contains("ghcr.io/jbwod/beampipe-core-v2"));
+
+        assert!(!dir.path().join("config/wallaby_hires.v2.yaml").exists());
+        assert!(dir.path().join("config/.gitkeep").is_file());
+
+        fs::write(dir.path().join("docker-compose.yml"), "operator-owned\n").unwrap();
+        let second = materialize(dir.path(), false, false).unwrap();
+        assert!(!second.bundle_current);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap(),
+            "operator-owned\n"
+        );
+    }
+
+    #[test]
+    fn wallaby_sample_is_explicit_and_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize(dir.path(), false, true).unwrap();
 
         let project = fs::read(dir.path().join("config/wallaby_hires.v2.yaml")).unwrap();
         let config = ProjectConfig::from_slice(&project).unwrap();
@@ -233,14 +257,6 @@ mod tests {
                 .unwrap()
             ),
             "12da7342c03378fd5d214d54c7c0c4ff32974910c00c8abd4263d5b2ae866eb6"
-        );
-
-        fs::write(dir.path().join("docker-compose.yml"), "operator-owned\n").unwrap();
-        let second = materialize(dir.path(), false).unwrap();
-        assert!(!second.bundle_current);
-        assert_eq!(
-            fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap(),
-            "operator-owned\n"
         );
     }
 
@@ -341,7 +357,7 @@ mod tests {
     #[test]
     fn materialize_updates_an_unmodified_managed_file() {
         let dir = tempfile::tempdir().unwrap();
-        materialize(dir.path(), false).unwrap();
+        materialize(dir.path(), false, false).unwrap();
         let mut manifest = read_manifest(dir.path()).unwrap();
         manifest.files.insert(
             "docker-compose.yml".into(),
@@ -354,7 +370,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = materialize(dir.path(), false).unwrap();
+        let report = materialize(dir.path(), false, false).unwrap();
         assert!(report.bundle_current);
         assert!(report
             .replaced
