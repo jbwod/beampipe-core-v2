@@ -249,7 +249,7 @@ pub struct JobRow {
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub pool: String,
-    pub required_capability: Option<String>,
+    pub required_capabilities: Vec<String>,
     pub required_labels: Value,
     pub priority: i32,
     pub idempotency_key: Option<String>,

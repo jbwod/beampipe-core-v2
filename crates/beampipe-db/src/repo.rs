@@ -22,7 +22,7 @@ use beampipe_domain::{
 };
 use beampipe_project::{
     is_supported_output_inventory_schema, output_inventory_media_type, ProjectConfig,
-    SignatureConfig,
+    SignatureConfig, StagingProvider,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -533,6 +533,68 @@ pub async fn queue_depth_by_kind(pool: &PgPool) -> Result<Vec<(String, i64)>, sq
     .await
 }
 
+/// Bounded diagnostic view of runnable jobs for which no live worker satisfies
+/// the pool, all-of capability, and label contract.
+pub async fn list_unroutable_queued_jobs(
+    pool: &PgPool,
+    worker_stale_after_seconds: i64,
+    limit: i64,
+) -> Result<Vec<JobRow>, sqlx::Error> {
+    sqlx::query_as::<_, JobRow>(
+        r#"
+        SELECT j.*
+        FROM jobs j
+        WHERE j.status = 'queued'
+          AND j.next_run_at <= now()
+          AND NOT EXISTS (
+              SELECT 1
+              FROM worker_instances w
+              WHERE w.status = 'active'
+                AND w.pool = j.pool
+                AND w.last_heartbeat_at >=
+                    now() - ($1::TEXT || ' seconds')::INTERVAL
+                AND w.capabilities @> j.required_capabilities
+                AND w.labels @> j.required_labels
+          )
+        ORDER BY j.priority DESC, j.next_run_at, j.created_at
+        LIMIT $2
+        "#,
+    )
+    .bind(worker_stale_after_seconds.max(1))
+    .bind(limit.clamp(1, 500))
+    .fetch_all(pool)
+    .await
+}
+
+/// Exact count paired with [`list_unroutable_queued_jobs`] for gauges and
+/// operator summaries that must not be truncated by a detail-page bound.
+pub async fn count_unroutable_queued_jobs(
+    pool: &PgPool,
+    worker_stale_after_seconds: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM jobs j
+        WHERE j.status = 'queued'
+          AND j.next_run_at <= now()
+          AND NOT EXISTS (
+              SELECT 1
+              FROM worker_instances w
+              WHERE w.status = 'active'
+                AND w.pool = j.pool
+                AND w.last_heartbeat_at >=
+                    now() - ($1::TEXT || ' seconds')::INTERVAL
+                AND w.capabilities @> j.required_capabilities
+                AND w.labels @> j.required_labels
+          )
+        "#,
+    )
+    .bind(worker_stale_after_seconds.max(1))
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn oldest_queued_job_age_by_kind(
     pool: &PgPool,
 ) -> Result<Vec<(String, i64)>, sqlx::Error> {
@@ -1037,17 +1099,73 @@ pub async fn execution_source_readiness_errors(
     Ok(errors)
 }
 
-/// Worker capability required by the backend pinned into an execution.
-pub fn execution_required_capability(execution: &ExecutionRow) -> &'static str {
+/// Deployment capability required by the backend pinned into an execution.
+///
+/// Execute work must never guess a backend: an absent or unsupported pinned
+/// deployment profile is an admission error.
+pub fn execution_deployment_capability(
+    execution: &ExecutionRow,
+) -> Result<&'static str, sqlx::Error> {
     match execution
         .deployment_profile_snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.pointer("/deployment/kind"))
         .and_then(Value::as_str)
     {
-        Some("slurm_remote") => "slurm-remote",
-        _ => "daliuge-deployment",
+        Some("rest_remote") => Ok("deployment:daliuge_rest"),
+        Some("slurm_remote") => Ok("deployment:slurm_remote"),
+        Some(kind) => Err(sqlx::Error::Protocol(format!(
+            "unsupported pinned deployment kind '{kind}'"
+        ))),
+        None => Err(sqlx::Error::Protocol(
+            "execute jobs require a pinned deployment profile".into(),
+        )),
     }
+}
+
+fn execution_capabilities_from_project(
+    execution: &ExecutionRow,
+    project_config: Option<&ProjectConfig>,
+    do_stage: bool,
+    do_submit: bool,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut required = vec!["manifest:generic".into(), "translation:daliuge".into()];
+    if do_submit {
+        required.push(execution_deployment_capability(execution)?.to_string());
+    }
+    if do_stage {
+        let config = project_config.ok_or_else(|| {
+            sqlx::Error::Protocol(
+                "staged execute jobs require a pinned project configuration".into(),
+            )
+        })?;
+        if config.staging.provider == StagingProvider::CasdaUws {
+            required.push("staging:casda_uws".into());
+        }
+    }
+    normalize_required_capabilities(&mut required)?;
+    Ok(required)
+}
+
+/// Complete all-of capability contract for an execute job.
+pub async fn execution_required_capabilities(
+    pool: &PgPool,
+    execution: &ExecutionRow,
+    do_stage: bool,
+    do_submit: bool,
+) -> Result<Vec<String>, sqlx::Error> {
+    let project_config = match execution.project_config_id {
+        Some(id) => {
+            let row = get_project_config_by_uuid(pool, id)
+                .await?
+                .ok_or_else(|| sqlx::Error::Protocol("pinned project config does not exist".into()))?;
+            Some(serde_json::from_value::<ProjectConfig>(row.spec).map_err(|error| {
+                sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
+            })?)
+        }
+        None => None,
+    };
+    execution_capabilities_from_project(execution, project_config.as_ref(), do_stage, do_submit)
 }
 
 fn signature_options_from_config(config: Option<&SignatureConfig>) -> SignatureOptions {
@@ -1676,7 +1794,7 @@ async fn create_execution_internal(
             "deployment": profile.deployment,
         })
     });
-    let output_config = match project_config_id {
+    let resolved_project_config = match project_config_id {
         Some(config_id) => {
             let row = get_project_config_by_uuid(pool, config_id)
                 .await?
@@ -1684,10 +1802,14 @@ async fn create_execution_internal(
             let config: ProjectConfig = serde_json::from_value(row.spec).map_err(|error| {
                 sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
             })?;
-            config.output_verification
+            Some(config)
         }
-        None => beampipe_project::OutputVerificationConfig::default(),
+        None => None,
     };
+    let output_config = resolved_project_config
+        .as_ref()
+        .map(|config| config.output_verification.clone())
+        .unwrap_or_default();
     if !is_supported_output_inventory_schema(&output_config.inventory_schema) {
         return Err(sqlx::Error::Protocol(format!(
             "unsupported output inventory schema '{}'",
@@ -1866,12 +1988,25 @@ async fn create_execution_internal(
             ));
         };
         payload.insert("execution_id".into(), Value::String(id.to_string()));
-        let required_capability = execution_required_capability(&row);
+        let do_stage = job_payload
+            .get("do_stage")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let do_submit = job_payload
+            .get("do_submit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let required_capabilities = execution_capabilities_from_project(
+            &row,
+            resolved_project_config.as_ref(),
+            do_stage,
+            do_submit,
+        )?;
         let job = sqlx::query_as::<_, JobRow>(
             r#"
             INSERT INTO jobs (
                 uuid, kind, payload, execution_id, idempotency_key, next_run_at,
-                pool, required_capability
+                pool, required_capabilities
             )
             VALUES ($1, 'execute', $2, $3, $4, now(), $5, $6)
             RETURNING *
@@ -1882,7 +2017,7 @@ async fn create_execution_internal(
         .bind(id)
         .bind(format!("execute:{id}"))
         .bind(enqueue.worker_pool)
-        .bind(required_capability)
+        .bind(&required_capabilities)
         .fetch_one(&mut *tx)
         .await?;
         insert_provenance_event(
@@ -1893,7 +2028,7 @@ async fn create_execution_internal(
             Some(id),
             Some("system:execution_scheduler"),
             correlation_id,
-            &json!({"job_id": job.uuid, "required_capability": required_capability}),
+            &json!({"job_id": job.uuid, "required_capabilities": required_capabilities}),
         )
         .await?;
         Some(job)
@@ -2039,7 +2174,6 @@ pub async fn retry_execution(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(RetryExecutionError::NotFound)?;
-    let required_capability = execution_required_capability(&execution);
     let plan = plan_execution_retry(ExecutionRetryContext {
         status: execution.status_enum().unwrap_or(ExecutionStatus::Pending),
         phase: execution.phase_enum(),
@@ -2069,6 +2203,33 @@ pub async fn retry_execution(
         code: rejection.code,
         message: rejection.message,
     })?;
+    let project_config = match execution.project_config_id {
+        Some(config_id) => {
+            let spec: Option<Value> = sqlx::query_scalar(
+                "SELECT spec FROM project_configs WHERE uuid = $1",
+            )
+            .bind(config_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let spec = spec.ok_or_else(|| {
+                RetryExecutionError::Database(sqlx::Error::Protocol(
+                    "pinned project config does not exist".into(),
+                ))
+            })?;
+            Some(serde_json::from_value::<ProjectConfig>(spec).map_err(|error| {
+                RetryExecutionError::Database(sqlx::Error::Protocol(format!(
+                    "pinned project config is invalid: {error}"
+                )))
+            })?)
+        }
+        None => None,
+    };
+    let required_capabilities = execution_capabilities_from_project(
+        &execution,
+        project_config.as_ref(),
+        plan.do_stage,
+        plan.do_submit,
+    )?;
     let active_jobs: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM jobs WHERE execution_id = $1 AND kind = 'execute' AND status IN ('queued', 'running')",
     )
@@ -2196,7 +2357,7 @@ pub async fn retry_execution(
         r#"
         INSERT INTO jobs (
             uuid, kind, payload, execution_id, idempotency_key, next_run_at,
-            pool, required_capability, required_labels, priority
+            pool, required_capabilities, required_labels, priority
         )
         VALUES ($1, 'execute', $2, $3, $4, now(), $5, $6, $7, $8)
         RETURNING *
@@ -2207,7 +2368,7 @@ pub async fn retry_execution(
     .bind(id)
     .bind(format!("execute:{id}:retry:{retry_count}"))
     .bind(worker_pool)
-    .bind(required_capability)
+    .bind(&required_capabilities)
     .bind(required_labels)
     .bind(priority)
     .fetch_one(&mut *tx)
@@ -4327,9 +4488,12 @@ pub async fn record_submission_receipt(
             r#"
             INSERT INTO jobs (
                 uuid, kind, payload, execution_id, idempotency_key, next_run_at,
-                pool, required_capability, required_labels, priority
+                pool, required_capabilities, required_labels, priority
             )
-            VALUES ($1, 'dim_poll', $2, $3, $4, now(), $5, 'daliuge-deployment', '{}'::jsonb, 0)
+            VALUES (
+                $1, 'dim_poll', $2, $3, $4, now(), $5,
+                ARRAY['deployment:daliuge_rest']::TEXT[], '{}'::jsonb, 0
+            )
             ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
             "#,
         )
@@ -5335,7 +5499,8 @@ pub struct JobEnqueueOptions {
     pub next_run_at: Option<DateTime<Utc>>,
     pub max_attempts: Option<i32>,
     pub pool: Option<String>,
-    pub required_capability: Option<String>,
+    /// All capabilities a worker must advertise to claim this job.
+    pub required_capabilities: Vec<String>,
     pub required_labels: BTreeMap<String, String>,
     pub priority: Option<i32>,
 }
@@ -5367,10 +5532,15 @@ pub async fn enqueue_job_with_options(
     opts: JobEnqueueOptions,
 ) -> Result<JobRow, sqlx::Error> {
     let next_run_at = opts.next_run_at.unwrap_or_else(Utc::now);
-    let required_capability = opts
-        .required_capability
-        .as_deref()
-        .or_else(|| job_kind_capability(kind));
+    let mut required_capabilities = if opts.required_capabilities.is_empty() {
+        job_kind_capabilities(kind)
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    } else {
+        opts.required_capabilities.clone()
+    };
+    normalize_required_capabilities(&mut required_capabilities)?;
     let required_labels = serde_json::to_value(&opts.required_labels)
         .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     let mut tx = pool.begin().await?;
@@ -5378,9 +5548,9 @@ pub async fn enqueue_job_with_options(
         let execution_id = opts
             .execution_id
             .ok_or_else(|| sqlx::Error::Protocol("execute jobs require an execution_id".into()))?;
-        let execution: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+        let execution: Option<ExecutionRow> = sqlx::query_as(
             r#"
-            SELECT status, submission_abandoned_at
+            SELECT *
             FROM batch_execution_record
             WHERE uuid = $1
             FOR UPDATE
@@ -5389,15 +5559,15 @@ pub async fn enqueue_job_with_options(
         .bind(execution_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((status, submission_abandoned_at)) = execution else {
+        let Some(execution) = execution else {
             tx.rollback().await?;
             return Err(sqlx::Error::Protocol(format!(
                 "execution {execution_id} does not exist"
             )));
         };
-        if submission_abandoned_at.is_some()
+        if execution.submission_abandoned_at.is_some()
             || matches!(
-                status.as_str(),
+                execution.status.as_str(),
                 "completed" | "failed" | "cancelled" | "not_submitted"
             )
         {
@@ -5406,13 +5576,50 @@ pub async fn enqueue_job_with_options(
                 "cannot enqueue execute work for terminal or operator-abandoned execution {execution_id}"
             )));
         }
+        let project_config = match execution.project_config_id {
+            Some(config_id) => {
+                let spec: Option<Value> =
+                    sqlx::query_scalar("SELECT spec FROM project_configs WHERE uuid = $1")
+                        .bind(config_id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                let spec = spec.ok_or_else(|| {
+                    sqlx::Error::Protocol("pinned project config does not exist".into())
+                })?;
+                Some(serde_json::from_value::<ProjectConfig>(spec).map_err(|error| {
+                    sqlx::Error::Protocol(format!("pinned project config is invalid: {error}"))
+                })?)
+            }
+            None => None,
+        };
+        let do_stage = payload
+            .get("do_stage")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let do_submit = payload
+            .get("do_submit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let derived = execution_capabilities_from_project(
+            &execution,
+            project_config.as_ref(),
+            do_stage,
+            do_submit,
+        )?;
+        if !opts.required_capabilities.is_empty() && required_capabilities != derived {
+            tx.rollback().await?;
+            return Err(sqlx::Error::Protocol(format!(
+                "execute capability requirements must match the pinned execution contract: expected {derived:?}"
+            )));
+        }
+        required_capabilities = derived;
     }
     let job = if let Some(max_attempts) = opts.max_attempts {
         sqlx::query_as::<_, JobRow>(
             r#"
             INSERT INTO jobs (
                 uuid, kind, payload, execution_id, idempotency_key, next_run_at,
-                max_attempts, pool, required_capability, required_labels, priority
+                max_attempts, pool, required_capabilities, required_labels, priority
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
@@ -5428,7 +5635,7 @@ pub async fn enqueue_job_with_options(
         .bind(next_run_at)
         .bind(max_attempts)
         .bind(opts.pool.as_deref().unwrap_or("default"))
-        .bind(required_capability)
+        .bind(&required_capabilities)
         .bind(&required_labels)
         .bind(opts.priority.unwrap_or(0))
         .fetch_one(&mut *tx)
@@ -5438,7 +5645,7 @@ pub async fn enqueue_job_with_options(
             r#"
             INSERT INTO jobs (
                 uuid, kind, payload, execution_id, idempotency_key, next_run_at,
-                pool, required_capability, required_labels, priority
+                pool, required_capabilities, required_labels, priority
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
@@ -5453,7 +5660,7 @@ pub async fn enqueue_job_with_options(
         .bind(opts.idempotency_key.as_deref())
         .bind(next_run_at)
         .bind(opts.pool.as_deref().unwrap_or("default"))
-        .bind(required_capability)
+        .bind(&required_capabilities)
         .bind(&required_labels)
         .bind(opts.priority.unwrap_or(0))
         .fetch_one(&mut *tx)
@@ -5463,14 +5670,28 @@ pub async fn enqueue_job_with_options(
     Ok(job)
 }
 
-fn job_kind_capability(kind: &str) -> Option<&'static str> {
+fn job_kind_capabilities(kind: &str) -> &'static [&'static str] {
     match kind {
-        "scheduler_tick" | "discover_batch" => Some("discovery"),
-        "execution_scheduler_tick" => Some("manifest-generation"),
-        "execute" | "dim_poll" | "dim_poll_tick" => Some("daliuge-deployment"),
-        "slurm_poll_tick" => Some("slurm-remote"),
-        _ => None,
+        "scheduler_tick" | "discover_batch" => &["discovery:tap"],
+        "execution_scheduler_tick" => &["manifest:generic"],
+        "dim_poll" | "dim_poll_tick" => &["deployment:daliuge_rest"],
+        "slurm_poll_tick" => &["deployment:slurm_remote"],
+        _ => &[],
     }
+}
+
+fn normalize_required_capabilities(capabilities: &mut Vec<String>) -> Result<(), sqlx::Error> {
+    for capability in capabilities.iter_mut() {
+        *capability = capability.trim().to_string();
+        if capability.is_empty() {
+            return Err(sqlx::Error::Protocol(
+                "required capabilities cannot contain blank values".into(),
+            ));
+        }
+    }
+    capabilities.sort();
+    capabilities.dedup();
+    Ok(())
 }
 
 pub async fn enqueue_job_deferred(
@@ -5608,8 +5829,10 @@ pub async fn mark_sources_and_enqueue_discovery_tick(
     }
     let job = sqlx::query_as::<_, JobRow>(
         r#"
-        INSERT INTO jobs (uuid, kind, payload, idempotency_key, next_run_at)
-        VALUES ($1, $2, $3, $4, now())
+        INSERT INTO jobs (
+            uuid, kind, payload, idempotency_key, next_run_at, required_capabilities
+        )
+        VALUES ($1, $2, $3, $4, now(), ARRAY['discovery:tap']::TEXT[])
         ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
         DO UPDATE SET
             status = CASE
@@ -5702,17 +5925,22 @@ pub async fn enqueue_recurring_job_with_options(
     idempotency_key: &str,
     opts: JobEnqueueOptions,
 ) -> Result<JobRow, sqlx::Error> {
-    let required_capability = opts
-        .required_capability
-        .as_deref()
-        .or_else(|| job_kind_capability(kind));
+    let mut required_capabilities = if opts.required_capabilities.is_empty() {
+        job_kind_capabilities(kind)
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    } else {
+        opts.required_capabilities.clone()
+    };
+    normalize_required_capabilities(&mut required_capabilities)?;
     let required_labels = serde_json::to_value(&opts.required_labels)
         .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     sqlx::query_as::<_, JobRow>(
         r#"
         INSERT INTO jobs (
             uuid, kind, payload, idempotency_key, next_run_at, pool,
-            required_capability, required_labels, priority
+            required_capabilities, required_labels, priority
         )
         VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8)
         ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
@@ -5723,7 +5951,7 @@ pub async fn enqueue_recurring_job_with_options(
             END,
             payload = EXCLUDED.payload,
             pool = EXCLUDED.pool,
-            required_capability = EXCLUDED.required_capability,
+            required_capabilities = EXCLUDED.required_capabilities,
             required_labels = EXCLUDED.required_labels,
             priority = EXCLUDED.priority,
             next_run_at = CASE
@@ -5779,7 +6007,7 @@ pub async fn enqueue_recurring_job_with_options(
     .bind(payload)
     .bind(idempotency_key)
     .bind(opts.pool.as_deref().unwrap_or("default"))
-    .bind(required_capability)
+    .bind(&required_capabilities)
     .bind(required_labels)
     .bind(opts.priority.unwrap_or(0))
     .fetch_one(pool)
@@ -6544,7 +6772,7 @@ pub async fn claim_next_job_for_worker(
         SELECT uuid, status, lease_owner, lease_token
         FROM jobs
         WHERE pool = $1
-          AND (required_capability IS NULL OR required_capability = ANY($2::TEXT[]))
+          AND $2::TEXT[] @> required_capabilities
           AND $3::JSONB @> required_labels
           AND (
               (
@@ -6569,7 +6797,7 @@ pub async fn claim_next_job_for_worker(
         "#,
     )
     .bind(worker_pool)
-    .bind(capabilities)
+    .bind(&capabilities)
     .bind(worker_labels)
     .fetch_optional(&mut *tx)
     .await?;

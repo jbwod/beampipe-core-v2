@@ -13,9 +13,51 @@ use uuid::Uuid;
 
 async fn test_pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = connect(&url).await.ok()?;
-    migrate(&pool).await.ok()?;
+    let pool = connect(&url)
+        .await
+        .unwrap_or_else(|error| panic!("DATABASE_URL is set but connection failed: {error}"));
+    migrate(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("DATABASE_URL is set but migrations failed: {error}"));
     Some(pool)
+}
+
+async fn install_routing_contract(
+    pool: &sqlx::PgPool,
+    module: &str,
+    deployment_kind: &str,
+    staging_provider: &str,
+) -> (
+    beampipe_db::models::DeploymentProfileRow,
+    beampipe_db::models::ProjectConfigRow,
+) {
+    let profile = repo::create_deployment_profile(
+        pool,
+        &format!("routing-{}", Uuid::now_v7().simple()),
+        None,
+        Some(module),
+        false,
+        None,
+        json!({"kind": "daliuge"}),
+        json!({"kind": deployment_kind}),
+    )
+    .await
+    .unwrap();
+    let spec = json!({
+        "apiVersion": "beampipe.dev/v2",
+        "kind": "ProjectConfig",
+        "metadata": {"id": module},
+        "staging": {"provider": staging_provider}
+    });
+    let config = repo::insert_project_config(
+        pool,
+        module,
+        spec,
+        &format!("{:064x}", Uuid::now_v7().as_u128()),
+    )
+    .await
+    .unwrap();
+    (profile, config)
 }
 
 #[tokio::test]
@@ -344,13 +386,15 @@ async fn automated_execution_and_execute_job_commit_together() {
         return;
     };
     let module = format!("auto_atomic_{}", Uuid::now_v7().simple());
+    let (profile, config) =
+        install_routing_contract(&pool, &module, "rest_remote", "none").await;
     let (execution, job) = repo::create_automated_execution_and_enqueue(
         &pool,
         &module,
         json!([{"source_identifier": "source-1"}]),
         "local",
-        None,
-        None,
+        Some(profile.uuid),
+        Some(config.uuid),
         Some("scheduler:test"),
         repo::AutomatedExecutionEnqueue {
             scheduler_manifest: json!({"scheduler": {"policy_decision": "admitted"}}),
@@ -371,8 +415,12 @@ async fn automated_execution_and_execute_job_commit_together() {
     assert_eq!(job.payload["traceparent"], "test");
     assert_eq!(job.pool, "automation");
     assert_eq!(
-        job.required_capability.as_deref(),
-        Some("daliuge-deployment")
+        job.required_capabilities,
+        [
+            "deployment:daliuge_rest",
+            "manifest:generic",
+            "translation:daliuge"
+        ]
     );
 }
 
@@ -383,13 +431,15 @@ async fn automated_execution_rolls_back_when_enqueue_fails() {
         return;
     };
     let module = format!("auto_rollback_{}", Uuid::now_v7().simple());
+    let (profile, config) =
+        install_routing_contract(&pool, &module, "rest_remote", "none").await;
     let error = repo::create_automated_execution_and_enqueue(
         &pool,
         &module,
         json!([{"source_identifier": "source-1"}]),
         "local",
-        None,
-        None,
+        Some(profile.uuid),
+        Some(config.uuid),
         Some("scheduler:test"),
         repo::AutomatedExecutionEnqueue {
             scheduler_manifest: json!({"scheduler": {"policy_decision": "admitted"}}),
@@ -857,7 +907,7 @@ async fn cancellation_updates_ledger_and_provenance_atomically() {
     let execute_job = repo::enqueue_job(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid}),
+        json!({"execution_id": execution.uuid, "do_stage": false, "do_submit": false}),
         Some(execution.uuid),
         Some(&format!("execute:cancel:{}", execution.uuid)),
     )
@@ -1073,7 +1123,7 @@ async fn confirmed_exact_slurm_cancellation_wins_over_a_stale_running_patch() {
     let execute_job = repo::enqueue_job(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid}),
+        json!({"execution_id": execution.uuid, "do_stage": false, "do_submit": false}),
         Some(execution.uuid),
         Some(&format!("execute:cancel-exact:{}", execution.uuid)),
     )
@@ -1579,7 +1629,7 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
     let queued_job = repo::enqueue_job_with_options(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid, "fence": "queued"}),
+        json!({"execution_id": execution.uuid, "fence": "queued", "do_stage": false, "do_submit": false}),
         repo::JobEnqueueOptions {
             execution_id: Some(execution.uuid),
             idempotency_key: Some(format!("abandon-fence-queued:{}", execution.uuid)),
@@ -1591,7 +1641,7 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
     let expired_job = repo::enqueue_job_with_options(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid, "fence": "expired-running"}),
+        json!({"execution_id": execution.uuid, "fence": "expired-running", "do_stage": false, "do_submit": false}),
         repo::JobEnqueueOptions {
             execution_id: Some(execution.uuid),
             idempotency_key: Some(format!("abandon-fence-expired:{}", execution.uuid)),
@@ -1712,7 +1762,7 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
     let enqueue_after_abandonment = repo::enqueue_job_with_options(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid, "fence": "after-abandonment"}),
+        json!({"execution_id": execution.uuid, "fence": "after-abandonment", "do_stage": false, "do_submit": false}),
         repo::JobEnqueueOptions {
             execution_id: Some(execution.uuid),
             idempotency_key: Some(format!("abandon-fence-late:{}", execution.uuid)),
@@ -1823,7 +1873,7 @@ async fn evidenced_early_abandonment_only_bypasses_the_default_quiet_grace() {
     let execute_job = repo::enqueue_job_with_options(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid, "fence": "early-override"}),
+        json!({"execution_id": execution.uuid, "fence": "early-override", "do_stage": false, "do_submit": false}),
         repo::JobEnqueueOptions {
             execution_id: Some(execution.uuid),
             idempotency_key: Some(format!("early-abandon-fence:{}", execution.uuid)),
@@ -1905,7 +1955,11 @@ async fn abandonment_rejects_an_active_execute_lease() {
     let worker = Uuid::now_v7();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(worker, &queue, &["daliuge-deployment"]),
+        &worker_registration(
+            worker,
+            &queue,
+            &["manifest:generic", "translation:daliuge"],
+        ),
     )
     .await
     .unwrap();
@@ -1919,7 +1973,7 @@ async fn abandonment_rejects_an_active_execute_lease() {
     repo::enqueue_job_with_options(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid}),
+        json!({"execution_id": execution.uuid, "do_stage": false, "do_submit": false}),
         repo::JobEnqueueOptions {
             execution_id: Some(execution.uuid),
             idempotency_key: Some(format!("abandon-active:{}", execution.uuid)),
@@ -1929,7 +1983,13 @@ async fn abandonment_rejects_an_active_execute_lease() {
     )
     .await
     .unwrap();
-    repo::claim_next_job_for_worker(&pool, worker, &queue, &["daliuge-deployment".into()], 60)
+    repo::claim_next_job_for_worker(
+        &pool,
+        worker,
+        &queue,
+        &["manifest:generic".into(), "translation:daliuge".into()],
+        60,
+    )
         .await
         .unwrap()
         .unwrap();
@@ -2834,7 +2894,15 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
     let slurm_worker = Uuid::now_v7();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(slurm_worker, &slurm_queue, &["daliuge-deployment"]),
+        &worker_registration(
+            slurm_worker,
+            &slurm_queue,
+            &[
+                "deployment:daliuge_rest",
+                "manifest:generic",
+                "translation:daliuge",
+            ],
+        ),
     )
     .await
     .unwrap();
@@ -2864,7 +2932,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
     let slurm_execute = repo::enqueue_job_with_options(
         &pool,
         "execute",
-        json!({"execution_id": slurm_execution.uuid}),
+        json!({"execution_id": slurm_execution.uuid, "do_stage": false, "do_submit": false}),
         repo::JobEnqueueOptions {
             execution_id: Some(slurm_execution.uuid),
             idempotency_key: Some(format!("selector:slurm:{}", slurm_execution.uuid)),
@@ -2878,7 +2946,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         &pool,
         slurm_worker,
         &slurm_queue,
-        &["daliuge-deployment".into()],
+        &["manifest:generic".into(), "translation:daliuge".into()],
         60,
     )
     .await
@@ -2934,7 +3002,15 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
     let rest_worker = Uuid::now_v7();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(rest_worker, &rest_queue, &["daliuge-deployment"]),
+        &worker_registration(
+            rest_worker,
+            &rest_queue,
+            &[
+                "deployment:daliuge_rest",
+                "manifest:generic",
+                "translation:daliuge",
+            ],
+        ),
     )
     .await
     .unwrap();
@@ -2964,7 +3040,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
     let rest_execute = repo::enqueue_job_with_options(
         &pool,
         "execute",
-        json!({"execution_id": rest_execution.uuid}),
+        json!({"execution_id": rest_execution.uuid, "do_stage": false, "do_submit": false}),
         repo::JobEnqueueOptions {
             execution_id: Some(rest_execution.uuid),
             idempotency_key: Some(format!("selector:rest:{}", rest_execution.uuid)),
@@ -2978,7 +3054,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         &pool,
         rest_worker,
         &rest_queue,
-        &["daliuge-deployment".into()],
+        &["manifest:generic".into(), "translation:daliuge".into()],
         60,
     )
     .await
@@ -3020,7 +3096,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         &pool,
         rest_worker,
         &rest_queue,
-        &["daliuge-deployment".into()],
+        &["deployment:daliuge_rest".into()],
         60,
     )
     .await
@@ -3083,10 +3159,10 @@ async fn active_job_lease_cannot_be_stolen() {
     let queue = format!("lease_active_{}", Uuid::now_v7());
     let first = Uuid::now_v7();
     let second = Uuid::now_v7();
-    repo::register_worker_instance(&pool, &worker_registration(first, &queue, &["discovery"]))
+    repo::register_worker_instance(&pool, &worker_registration(first, &queue, &["discovery:tap"]))
         .await
         .unwrap();
-    repo::register_worker_instance(&pool, &worker_registration(second, &queue, &["discovery"]))
+    repo::register_worker_instance(&pool, &worker_registration(second, &queue, &["discovery:tap"]))
         .await
         .unwrap();
     let job = repo::enqueue_job_with_options(
@@ -3096,17 +3172,17 @@ async fn active_job_lease_cannot_be_stolen() {
         repo::JobEnqueueOptions {
             idempotency_key: Some(format!("lease-active:{}", Uuid::now_v7())),
             pool: Some(queue.clone()),
-            required_capability: Some("discovery".into()),
+            required_capabilities: vec!["discovery:tap".into()],
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    let claimed = repo::claim_next_job_for_worker(&pool, first, &queue, &["discovery".into()], 60)
+    let claimed = repo::claim_next_job_for_worker(&pool, first, &queue, &["discovery:tap".into()], 60)
         .await
         .unwrap()
         .expect("first worker claims job");
-    let stolen = repo::claim_next_job_for_worker(&pool, second, &queue, &["discovery".into()], 60)
+    let stolen = repo::claim_next_job_for_worker(&pool, second, &queue, &["discovery:tap".into()], 60)
         .await
         .unwrap();
     assert!(stolen.is_none());
@@ -3129,7 +3205,7 @@ async fn expired_job_lease_is_recovered_with_new_fence() {
     for worker in [first, second] {
         repo::register_worker_instance(
             &pool,
-            &worker_registration(worker, &queue, &["daliuge-deployment"]),
+            &worker_registration(worker, &queue, &["deployment:daliuge_rest"]),
         )
         .await
         .unwrap();
@@ -3141,14 +3217,14 @@ async fn expired_job_lease_is_recovered_with_new_fence() {
         repo::JobEnqueueOptions {
             idempotency_key: Some(format!("lease-recovery:{}", Uuid::now_v7())),
             pool: Some(queue.clone()),
-            required_capability: Some("daliuge-deployment".into()),
+            required_capabilities: vec!["deployment:daliuge_rest".into()],
             ..Default::default()
         },
     )
     .await
     .unwrap();
     let original =
-        repo::claim_next_job_for_worker(&pool, first, &queue, &["daliuge-deployment".into()], 60)
+        repo::claim_next_job_for_worker(&pool, first, &queue, &["deployment:daliuge_rest".into()], 60)
             .await
             .unwrap()
             .unwrap();
@@ -3160,7 +3236,7 @@ async fn expired_job_lease_is_recovered_with_new_fence() {
     .await
     .unwrap();
     let recovered =
-        repo::claim_next_job_for_worker(&pool, second, &queue, &["daliuge-deployment".into()], 60)
+        repo::claim_next_job_for_worker(&pool, second, &queue, &["deployment:daliuge_rest".into()], 60)
             .await
             .unwrap()
             .expect("expired lease should be recovered");
@@ -3183,23 +3259,50 @@ async fn expired_job_lease_is_recovered_with_new_fence() {
 }
 
 #[tokio::test]
-async fn claim_requires_advertised_capability() {
+async fn claim_requires_every_capability_and_separates_deployment_backends() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
         return;
     };
     let queue = format!("lease_capability_{}", Uuid::now_v7());
-    let discovery_worker = Uuid::now_v7();
+    let rest_only_worker = Uuid::now_v7();
+    let partial_slurm_worker = Uuid::now_v7();
     let slurm_worker = Uuid::now_v7();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(discovery_worker, &queue, &["discovery"]),
+        &worker_registration(
+            rest_only_worker,
+            &queue,
+            &[
+                "deployment:daliuge_rest",
+                "manifest:generic",
+                "translation:daliuge",
+            ],
+        ),
     )
     .await
     .unwrap();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(slurm_worker, &queue, &["slurm-remote"]),
+        &worker_registration(
+            partial_slurm_worker,
+            &queue,
+            &["deployment:slurm_remote", "manifest:generic"],
+        ),
+    )
+    .await
+    .unwrap();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(
+            slurm_worker,
+            &queue,
+            &[
+                "deployment:slurm_remote",
+                "manifest:generic",
+                "translation:daliuge",
+            ],
+        ),
     )
     .await
     .unwrap();
@@ -3210,22 +3313,28 @@ async fn claim_requires_advertised_capability() {
         repo::JobEnqueueOptions {
             idempotency_key: Some(format!("capability:{}", Uuid::now_v7())),
             pool: Some(queue.clone()),
-            required_capability: Some("slurm-remote".into()),
+            required_capabilities: vec![
+                "translation:daliuge".into(),
+                "deployment:slurm_remote".into(),
+                "manifest:generic".into(),
+            ],
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    let ineligible =
-        repo::claim_next_job_for_worker(&pool, discovery_worker, &queue, &["discovery".into()], 60)
-            .await
-            .unwrap();
-    assert!(ineligible.is_none());
-    let eligible =
-        repo::claim_next_job_for_worker(&pool, slurm_worker, &queue, &["slurm-remote".into()], 60)
-            .await
-            .unwrap()
-            .unwrap();
+    assert!(repo::claim_next_job_for_worker(&pool, rest_only_worker, &queue, &[], 60)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repo::claim_next_job_for_worker(&pool, partial_slurm_worker, &queue, &[], 60)
+        .await
+        .unwrap()
+        .is_none());
+    let eligible = repo::claim_next_job_for_worker(&pool, slurm_worker, &queue, &[], 60)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(eligible.uuid, job.uuid);
     assert!(repo::complete_job_with_lease(
         &pool,
@@ -3238,6 +3347,217 @@ async fn claim_requires_advertised_capability() {
 }
 
 #[tokio::test]
+async fn execute_capabilities_follow_pinned_profile_and_staging_flags() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let module = format!("execute_routing_{}", Uuid::now_v7().simple());
+    let (profile, config) =
+        install_routing_contract(&pool, &module, "slurm_remote", "casda_uws").await;
+
+    let execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([]),
+        "archive",
+        Some(profile.uuid),
+        Some(config.uuid),
+        None,
+    )
+    .await
+    .unwrap();
+    let queue = format!("execute_routing_{}", Uuid::now_v7().simple());
+    let job = repo::enqueue_job_with_options(
+        &pool,
+        "execute",
+        json!({"execution_id": execution.uuid, "do_stage": true, "do_submit": true}),
+        repo::JobEnqueueOptions {
+            execution_id: Some(execution.uuid),
+            idempotency_key: Some(format!("routing:full:{}", execution.uuid)),
+            pool: Some(queue.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        job.required_capabilities,
+        [
+            "deployment:slurm_remote",
+            "manifest:generic",
+            "staging:casda_uws",
+            "translation:daliuge",
+        ]
+    );
+
+    let rest_worker = Uuid::now_v7();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(
+            rest_worker,
+            &queue,
+            &[
+                "deployment:daliuge_rest",
+                "manifest:generic",
+                "staging:casda_uws",
+                "translation:daliuge",
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(repo::claim_next_job_for_worker(&pool, rest_worker, &queue, &[], 60)
+        .await
+        .unwrap()
+        .is_none());
+
+    let slurm_worker = Uuid::now_v7();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(
+            slurm_worker,
+            &queue,
+            &[
+                "deployment:slurm_remote",
+                "manifest:generic",
+                "staging:casda_uws",
+                "translation:daliuge",
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    let claimed = repo::claim_next_job_for_worker(&pool, slurm_worker, &queue, &[], 60)
+        .await
+        .unwrap()
+        .expect("worker satisfying the complete pinned contract must claim");
+    assert_eq!(claimed.uuid, job.uuid);
+
+    let stage_only_execution = repo::create_execution(
+        &pool,
+        &module,
+        json!([]),
+        "archive",
+        Some(profile.uuid),
+        Some(config.uuid),
+        None,
+    )
+    .await
+    .unwrap();
+    let stage_only = repo::enqueue_job(
+        &pool,
+        "execute",
+        json!({
+            "execution_id": stage_only_execution.uuid,
+            "do_stage": true,
+            "do_submit": false
+        }),
+        Some(stage_only_execution.uuid),
+        Some(&format!("routing:stage-only:{}", stage_only_execution.uuid)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stage_only.required_capabilities,
+        [
+            "manifest:generic",
+            "staging:casda_uws",
+            "translation:daliuge"
+        ]
+    );
+
+    let prepare_only_execution = repo::create_execution(
+        &pool,
+        &format!("prepare_only_{}", Uuid::now_v7().simple()),
+        json!([]),
+        "archive",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let prepare_only = repo::enqueue_job(
+        &pool,
+        "execute",
+        json!({
+            "execution_id": prepare_only_execution.uuid,
+            "do_stage": false,
+            "do_submit": false
+        }),
+        Some(prepare_only_execution.uuid),
+        Some(&format!("routing:prepare-only:{}", prepare_only_execution.uuid)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        prepare_only.required_capabilities,
+        ["manifest:generic", "translation:daliuge"]
+    );
+}
+
+#[tokio::test]
+async fn unroutable_job_diagnostic_is_bounded_and_live_worker_aware() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let queue = format!("unroutable_{}", Uuid::now_v7().simple());
+    let rest_worker = Uuid::now_v7();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(rest_worker, &queue, &["deployment:daliuge_rest"]),
+    )
+    .await
+    .unwrap();
+    let baseline = repo::count_unroutable_queued_jobs(&pool, 60)
+        .await
+        .unwrap();
+    let job = repo::enqueue_job_with_options(
+        &pool,
+        "diagnostic_test",
+        json!({}),
+        repo::JobEnqueueOptions {
+            pool: Some(queue.clone()),
+            idempotency_key: Some(format!("unroutable:{}", Uuid::now_v7())),
+            required_capabilities: vec!["deployment:slurm_remote".into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        repo::count_unroutable_queued_jobs(&pool, 60)
+            .await
+            .unwrap()
+            >= baseline + 1
+    );
+    let bounded = repo::list_unroutable_queued_jobs(&pool, 60, 1)
+        .await
+        .unwrap();
+    assert!(bounded.len() <= 1);
+    assert!(repo::list_unroutable_queued_jobs(&pool, 60, 500)
+        .await
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.uuid == job.uuid));
+
+    let slurm_worker = Uuid::now_v7();
+    repo::register_worker_instance(
+        &pool,
+        &worker_registration(slurm_worker, &queue, &["deployment:slurm_remote"]),
+    )
+    .await
+    .unwrap();
+    assert!(!repo::list_unroutable_queued_jobs(&pool, 60, 500)
+        .await
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.uuid == job.uuid));
+}
+
+#[tokio::test]
 async fn claim_requires_all_worker_labels() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
@@ -3246,9 +3566,9 @@ async fn claim_requires_all_worker_labels() {
     let queue = format!("lease_labels_{}", Uuid::now_v7());
     let ineligible = Uuid::now_v7();
     let eligible = Uuid::now_v7();
-    let mut wrong_site = worker_registration(ineligible, &queue, &["slurm-remote"]);
+    let mut wrong_site = worker_registration(ineligible, &queue, &["deployment:slurm_remote"]);
     wrong_site.labels = json!({"site": "local", "scheduler": "slurm"});
-    let mut right_site = worker_registration(eligible, &queue, &["slurm-remote"]);
+    let mut right_site = worker_registration(eligible, &queue, &["deployment:slurm_remote"]);
     right_site.labels = json!({"site": "pawsey", "scheduler": "slurm"});
     repo::register_worker_instance(&pool, &wrong_site)
         .await
@@ -3264,7 +3584,7 @@ async fn claim_requires_all_worker_labels() {
         repo::JobEnqueueOptions {
             idempotency_key: Some(format!("labels:{}", Uuid::now_v7())),
             pool: Some(queue.clone()),
-            required_capability: Some("slurm-remote".into()),
+            required_capabilities: vec!["deployment:slurm_remote".into()],
             required_labels: BTreeMap::from([("site".into(), "pawsey".into())]),
             ..Default::default()
         },
@@ -3276,14 +3596,14 @@ async fn claim_requires_all_worker_labels() {
         &pool,
         ineligible,
         &queue,
-        &["slurm-remote".into()],
+        &["deployment:slurm_remote".into()],
         60,
     )
     .await
     .unwrap()
     .is_none());
     let claimed =
-        repo::claim_next_job_for_worker(&pool, eligible, &queue, &["slurm-remote".into()], 60)
+        repo::claim_next_job_for_worker(&pool, eligible, &queue, &["deployment:slurm_remote".into()], 60)
             .await
             .unwrap()
             .expect("matching worker should claim job");
@@ -3300,7 +3620,7 @@ async fn worker_concurrency_is_enforced_by_the_claim_transaction() {
     let worker = Uuid::now_v7();
     repo::register_worker_instance(
         &pool,
-        &worker_registration(worker, &queue, &["manifest-generation"]),
+        &worker_registration(worker, &queue, &["manifest:generic"]),
     )
     .await
     .unwrap();
@@ -3312,7 +3632,7 @@ async fn worker_concurrency_is_enforced_by_the_claim_transaction() {
             repo::JobEnqueueOptions {
                 idempotency_key: Some(format!("capacity:{suffix}:{}", Uuid::now_v7())),
                 pool: Some(queue.clone()),
-                required_capability: Some("manifest-generation".into()),
+                required_capabilities: vec!["manifest:generic".into()],
                 ..Default::default()
             },
         )
@@ -3323,7 +3643,7 @@ async fn worker_concurrency_is_enforced_by_the_claim_transaction() {
         &pool,
         worker,
         &queue,
-        &["manifest-generation".into()],
+        &["manifest:generic".into()],
         60,
     )
     .await
@@ -3333,7 +3653,7 @@ async fn worker_concurrency_is_enforced_by_the_claim_transaction() {
         &pool,
         worker,
         &queue,
-        &["manifest-generation".into()],
+        &["manifest:generic".into()],
         60,
     )
     .await
@@ -3378,7 +3698,7 @@ async fn failed_pre_submission_execution_retries_atomically_from_submit() {
     let original = repo::enqueue_job(
         &pool,
         "execute",
-        json!({"execution_id": execution.uuid}),
+        json!({"execution_id": execution.uuid, "do_stage": false, "do_submit": true}),
         Some(execution.uuid),
         Some(&format!("execute:{}", execution.uuid)),
     )
@@ -3421,8 +3741,12 @@ async fn failed_pre_submission_execution_retries_atomically_from_submit() {
     assert_eq!(retried.job.status, "queued");
     assert_eq!(retried.job.pool, original.pool);
     assert_eq!(
-        retried.job.required_capability.as_deref(),
-        Some("slurm-remote")
+        retried.job.required_capabilities,
+        [
+            "deployment:slurm_remote",
+            "manifest:generic",
+            "translation:daliuge"
+        ]
     );
     assert_eq!(retried.job.payload["do_stage"], false);
     assert_eq!(retried.job.payload["do_submit"], true);
