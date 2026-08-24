@@ -387,7 +387,8 @@ mod tests {
         let slow_server = tokio::spawn(async move {
             let (mut socket, _) = slow_listener.accept().await.unwrap();
             let mut request = vec![0_u8; 8192];
-            socket.read(&mut request).await.unwrap();
+            let read = socket.read(&mut request).await.unwrap();
+            assert!(read > 0, "health probe sent an empty request");
             started_tx.send(()).unwrap();
             release_rx.await.unwrap();
             socket
