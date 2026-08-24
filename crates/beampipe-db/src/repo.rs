@@ -3820,21 +3820,20 @@ fn receipt_nonempty<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, 
         .ok_or_else(|| sqlx::Error::Protocol(format!("submission receipt requires {field}")))
 }
 
-fn shared_staging_root_from_session_dir(session_dir: &str) -> Option<String> {
+fn execution_staging_root_from_session_dir(session_dir: &str) -> Option<String> {
     let session_dir = std::path::Path::new(session_dir);
     if !session_dir.is_absolute() {
         return None;
     }
     session_dir
         .parent()
-        .and_then(std::path::Path::parent)
-        .filter(|path| path != &std::path::Path::new("/"))
-        .map(|dlg_root| {
-            dlg_root
-                .join("wallaby_staging_data")
-                .to_string_lossy()
-                .into_owned()
-        })
+        .filter(|path| path != &std::path::Path::new("/"))?;
+    Some(
+        session_dir
+            .join("wallaby_outputs")
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sqlx::Error> {
@@ -3855,7 +3854,7 @@ fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sql
             let session_dir =
                 receipt_nonempty(input.remote_session_dir.as_deref(), "remote_session_dir")?;
             let staging_root = receipt_nonempty(input.staging_root.as_deref(), "staging_root")?;
-            let expected_staging_root = shared_staging_root_from_session_dir(session_dir)
+            let expected_staging_root = execution_staging_root_from_session_dir(session_dir)
                 .ok_or_else(|| {
                     sqlx::Error::Protocol(
                         "submission receipt session_dir must identify a workspace beneath DLG_ROOT"
@@ -3864,7 +3863,7 @@ fn validate_submission_receipt(input: &SubmissionReceiptInput) -> Result<(), sql
                 })?;
             if staging_root != expected_staging_root {
                 return Err(sqlx::Error::Protocol(format!(
-                    "submission receipt staging_root must be the shared DLG cache '{expected_staging_root}'"
+                    "submission receipt staging_root must be the run-scoped output root '{expected_staging_root}'"
                 )));
             }
             if input.next_status != ExecutionStatus::AwaitingScheduler {
@@ -7558,7 +7557,7 @@ pub async fn list_alert_deliveries(
 #[cfg(test)]
 mod tests {
     use super::{
-        deployment_profile_spec_sha256, shared_staging_root_from_session_dir,
+        deployment_profile_spec_sha256, execution_staging_root_from_session_dir,
         validate_slurm_abandonment_evidence, SlurmAbandonmentEvidenceExpectation,
         SlurmLookupEvidenceAttempt,
     };
@@ -7567,16 +7566,19 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn shared_staging_receipt_path_is_beside_workspace() {
+    fn staging_receipt_path_is_scoped_to_the_session() {
         assert_eq!(
-            shared_staging_root_from_session_dir("/scratch/project/dlg/workspace/execution-a"),
-            Some("/scratch/project/dlg/wallaby_staging_data".into())
+            execution_staging_root_from_session_dir("/scratch/project/dlg/workspace/execution-a"),
+            Some("/scratch/project/dlg/workspace/execution-a/wallaby_outputs".into())
         );
         assert_eq!(
-            shared_staging_root_from_session_dir("relative/execution-a"),
+            execution_staging_root_from_session_dir("relative/execution-a"),
             None
         );
-        assert_eq!(shared_staging_root_from_session_dir("/execution-a"), None);
+        assert_eq!(
+            execution_staging_root_from_session_dir("/execution-a"),
+            None
+        );
     }
 
     #[test]

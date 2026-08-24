@@ -1162,7 +1162,7 @@ async fn confirmed_exact_slurm_cancellation_wins_over_a_stale_running_patch() {
             scheduler_job_id: Some("4242".into()),
             daliuge_session_id: Some("BeampipeExecution-cancel-exact".into()),
             remote_session_dir: Some(session_dir.into()),
-            staging_root: Some("/remote/wallaby_staging_data".into()),
+            staging_root: Some(format!("{session_dir}/wallaby_outputs")),
             workflow_manifest: json!({"late_receipt": true}),
             physical_graph: json!([{"oid": "drop-after-cancel"}]),
             next_status: ExecutionStatus::AwaitingScheduler,
@@ -1717,7 +1717,7 @@ async fn unresolved_slurm_abandonment_is_atomic_and_late_receipt_never_reopens()
         scheduler_job_id: Some("4242".into()),
         daliuge_session_id: Some(session_id),
         remote_session_dir: Some(session_dir.clone()),
-        staging_root: Some("/remote/wallaby_staging_data".into()),
+        staging_root: Some(format!("{session_dir}/wallaby_outputs")),
         workflow_manifest: json!({"late_after_abandonment": true}),
         physical_graph: json!([{"oid": "late-drop"}]),
         next_status: ExecutionStatus::AwaitingScheduler,
@@ -1990,7 +1990,7 @@ async fn submission_receipt_winning_the_row_lock_prevents_abandonment() {
             scheduler_job_id: Some("5252".into()),
             daliuge_session_id: Some(session_id.clone()),
             remote_session_dir: Some(session_dir.clone()),
-            staging_root: Some("/remote/wallaby_staging_data".into()),
+            staging_root: Some(format!("{session_dir}/wallaby_outputs")),
             workflow_manifest: json!({"receipt_first": true}),
             physical_graph: json!([{"oid": "receipt-first-drop"}]),
             next_status: ExecutionStatus::AwaitingScheduler,
@@ -2075,7 +2075,7 @@ async fn slurm_submission_receipt_is_atomic_idempotent_and_conflict_safe() {
     let execution =
         prepare_submission_receipt_execution(&pool, &module, "slurm", &session_id).await;
     let session_dir = format!("/remote/sessions/{session_id}");
-    let staging_root = "/remote/wallaby_staging_data".to_string();
+    let staging_root = format!("{session_dir}/wallaby_outputs");
     let input = repo::SubmissionReceiptInput {
         scheduler_name: "slurm".into(),
         scheduler_job_id: Some("4242".into()),
@@ -2289,7 +2289,7 @@ async fn recovered_exact_slurm_id_stays_uncertain_until_the_receipt_commits() {
             scheduler_job_id: Some("4242".into()),
             daliuge_session_id: Some(session_id),
             remote_session_dir: Some(session_dir.clone()),
-            staging_root: Some("/remote/wallaby_staging_data".into()),
+            staging_root: Some(format!("{session_dir}/wallaby_outputs")),
             workflow_manifest: json!({
                 "sources": [],
                 "beampipe_run_record": {"slurm": {"job_id": "4242"}},

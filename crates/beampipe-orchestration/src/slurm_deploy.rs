@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
 const WALLABY_STAGING_ROOT_ENV: &str = "WALLABY_HIRES_STAGING_ROOT";
+const WALLABY_CACHE_ROOT_ENV: &str = "WALLABY_HIRES_CACHE_ROOT";
 const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
 
 pub struct SlurmSubmitParams {
@@ -197,6 +198,7 @@ fn sbatch_command_with<F>(
     session_id: &str,
     jobsub_path: &str,
     staging_root: &str,
+    cache_root: &str,
     read_environment: F,
 ) -> Result<String, OrchestrationError>
 where
@@ -204,7 +206,13 @@ where
 {
     let staging_root = normalized_remote_absolute_path(staging_root, "Wallaby staging root")?;
     let staging_root = staging_root.to_string_lossy();
-    let mut exported = vec![SLURM_ACCOUNT_ENV, WALLABY_STAGING_ROOT_ENV];
+    let cache_root = normalized_remote_absolute_path(cache_root, "Wallaby cache root")?;
+    let cache_root = cache_root.to_string_lossy();
+    let mut exported = vec![
+        SLURM_ACCOUNT_ENV,
+        WALLABY_STAGING_ROOT_ENV,
+        WALLABY_CACHE_ROOT_ENV,
+    ];
     if deployment
         .environment_setup
         .as_deref()
@@ -250,10 +258,12 @@ where
     }
     argv.push(jobsub_path.to_string());
     let inner = format!(
-        "{}\numask 077\nmkdir -p -- {}\nexport {WALLABY_STAGING_ROOT_ENV}={}\n{}",
+        "{}\numask 077\nmkdir -p -- {} {}\nexport {WALLABY_STAGING_ROOT_ENV}={}\nexport {WALLABY_CACHE_ROOT_ENV}={}\n{}",
         env_prelude_with(deployment, read_environment)?,
         shell_quote(&staging_root),
+        shell_quote(&cache_root),
         shell_quote(&staging_root),
+        shell_quote(&cache_root),
         argv.iter()
             .map(|argument| shell_quote(argument))
             .collect::<Vec<_>>()
@@ -267,10 +277,16 @@ fn sbatch_command(
     session_id: &str,
     jobsub_path: &str,
     staging_root: &str,
+    cache_root: &str,
 ) -> Result<String, OrchestrationError> {
-    sbatch_command_with(deployment, session_id, jobsub_path, staging_root, |name| {
-        std::env::var(name).ok()
-    })
+    sbatch_command_with(
+        deployment,
+        session_id,
+        jobsub_path,
+        staging_root,
+        cache_root,
+        |name| std::env::var(name).ok(),
+    )
 }
 
 pub fn create_dlg_job_argv(
@@ -401,7 +417,7 @@ fn normalized_remote_absolute_path(
 fn derive_session_paths(
     jobsub_path: &str,
     dlg_root: &str,
-) -> Result<(String, String), OrchestrationError> {
+) -> Result<(String, String, String), OrchestrationError> {
     let jobsub_path = normalized_remote_absolute_path(jobsub_path, "job submission script path")?;
     let dlg_root = normalized_remote_absolute_path(dlg_root, "DLG_ROOT")?;
     if dlg_root == Path::new("/") {
@@ -423,10 +439,12 @@ fn derive_session_paths(
                     .into(),
             )
         })?;
-    let staging_root = dlg_root.join("wallaby_staging_data");
+    let staging_root = session_dir.join("wallaby_outputs");
+    let cache_root = dlg_root.join("wallaby_staging_data");
     Ok((
         session_dir.to_string_lossy().into_owned(),
         staging_root.to_string_lossy().into_owned(),
+        cache_root.to_string_lossy().into_owned(),
     ))
 }
 
@@ -511,8 +529,14 @@ pub async fn submit_slurm_session(
         .run_command(&format!("bash -lc {}", shell_quote(&inner)))
         .await?;
     let jobsub_path = parse_jobsub_path(&create_out)?;
-    let (session_dir, staging_root) = derive_session_paths(&jobsub_path, &dlg_root)?;
-    let sbatch = sbatch_command(&deployment, &session_id, &jobsub_path, &staging_root)?;
+    let (session_dir, staging_root, cache_root) = derive_session_paths(&jobsub_path, &dlg_root)?;
+    let sbatch = sbatch_command(
+        &deployment,
+        &session_id,
+        &jobsub_path,
+        &staging_root,
+        &cache_root,
+    )?;
     let sbatch_out = session.run_submission_command(&sbatch).await?;
     let _ = session.close().await;
 
@@ -639,7 +663,7 @@ mod tests {
 
     #[test]
     fn session_paths_are_absolute_contained_and_space_safe() {
-        let (session_dir, staging_root) = derive_session_paths(
+        let (session_dir, staging_root, cache_root) = derive_session_paths(
             "/scratch/project root/dlg/sessions/execution one/job sub.sh",
             "/scratch/project root/dlg",
         )
@@ -651,8 +675,9 @@ mod tests {
         );
         assert_eq!(
             staging_root,
-            "/scratch/project root/dlg/wallaby_staging_data"
+            "/scratch/project root/dlg/sessions/execution one/wallaby_outputs"
         );
+        assert_eq!(cache_root, "/scratch/project root/dlg/wallaby_staging_data");
     }
 
     #[test]
@@ -675,32 +700,36 @@ mod tests {
     }
 
     #[test]
-    fn outer_sbatch_exports_a_shared_wallaby_cache_beside_session_workspace() {
+    fn outer_sbatch_separates_run_outputs_from_the_shared_cache() {
         let mut dep = deployment();
         dep.dlg_root = "/dlg root".into();
         dep.environment_setup =
             Some("export BEAMPIPE_ASKAPSOFT_SIF=\"$BEAMPIPE_ASKAPSOFT_SIF\"".into());
-        let (_, root_a) =
+        let (_, output_a, cache_a) =
             derive_session_paths("/dlg root/sessions/execution-a/job sub.sh", &dep.dlg_root)
                 .unwrap();
-        let (_, root_b) =
+        let (_, output_b, cache_b) =
             derive_session_paths("/dlg root/sessions/execution-b/job sub.sh", &dep.dlg_root)
                 .unwrap();
-        assert_eq!(root_a, root_b);
+        assert_ne!(output_a, output_b);
+        assert_eq!(cache_a, cache_b);
 
         let command = sbatch_command_with(
             &dep,
             "execution-a",
             "/dlg root/sessions/execution-a/job sub.sh",
-            &root_a,
+            &output_a,
+            &cache_a,
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap.sif".into()),
         )
         .unwrap();
         for expected in [
-            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
+            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,WALLABY_HIRES_CACHE_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
             "export BEAMPIPE_SLURM_ACCOUNT=myacct",
             "export BEAMPIPE_ASKAPSOFT_SIF=/images/askap.sif",
             "export WALLABY_HIRES_STAGING_ROOT=",
+            "export WALLABY_HIRES_CACHE_ROOT=",
+            "/dlg root/sessions/execution-a/wallaby_outputs",
             "/dlg root/wallaby_staging_data",
             "mkdir -p --",
         ] {
@@ -808,6 +837,7 @@ mod tests {
             "session id",
             "/dlg/job sub.sh",
             "/dlg/wallaby_staging_data",
+            "/dlg/shared-cache",
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into()),
         )
         .unwrap();
@@ -816,7 +846,7 @@ mod tests {
         assert!(command.contains("export BEAMPIPE_SLURM_ACCOUNT=myacct"));
         assert!(command.contains("export BEAMPIPE_ASKAPSOFT_SIF="));
         for expected in [
-            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
+            "--export=BEAMPIPE_SLURM_ACCOUNT,WALLABY_HIRES_STAGING_ROOT,WALLABY_HIRES_CACHE_ROOT,BEAMPIPE_ASKAPSOFT_SIF",
             "--parsable",
             "--job-name=session id",
             "--account=myacct",
@@ -851,6 +881,7 @@ mod tests {
             "session-id",
             "/dlg/jobsub.sh",
             "/dlg/wallaby_staging_data",
+            "/dlg/shared-cache",
             |_| None,
         )
         .unwrap();
