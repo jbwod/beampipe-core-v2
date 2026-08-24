@@ -44,7 +44,7 @@ Access and refresh tokens carry `jti` claims. Refresh rotates the refresh token;
 ```bash
 curl -fsS -X POST "$BASE/api/v2/project-configs" \
   -H "$AUTH" -H 'Content-Type: application/x-yaml' \
-  --data-binary @config/wallaby_hires.v2.yaml | jq .
+  --data-binary @config/examples/minimal_survey.v2.yaml | jq .
 
 curl -fsS -X POST "$BASE/api/v2/deployment-profiles" \
   -H "$AUTH" -H 'Content-Type: application/json' \
@@ -67,12 +67,12 @@ Init, import, and `copy-id` remain CLI. Empty credential roots return `{ "slots"
 ```bash
 SOURCE=$(curl -fsS -X POST "$BASE/api/v2/sources" \
   -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1318-21","enabled":true}')
+  -d '{"project_module":"minimal_survey","source_identifier":"source-1","enabled":true}')
 SOURCE_ID=$(jq -r .uuid <<<"$SOURCE")
 
 curl -fsS -X POST "$BASE/api/v2/sources/discover" \
   -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"project_module":"wallaby_hires","source_identifier":"HIPASSJ1318-21"}' | jq .
+  -d '{"project_module":"minimal_survey","source_identifier":"source-1"}' | jq .
 
 curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/status" -H "$AUTH" | jq .
 curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/metadata" -H "$AUTH" | jq .
@@ -81,6 +81,11 @@ curl -fsS "$BASE/api/v2/sources/$SOURCE_ID/events" -H "$AUTH" | jq .
 
 `sources/discover` marks matching enabled sources for rediscovery. The scheduler and workers perform the durable claim/query/persistence path asynchronously.
 
+Metadata is grouped by the neutral `group_key` field. Each
+`metadata_json` payload contains `records`; every prepared record has a
+`record_id`. Those names are stable Core API fields regardless of how a project
+renames collections in its emitted manifest.
+
 ## Prepare and execute
 
 Use the same body for preflight and creation:
@@ -88,10 +93,12 @@ Use the same body for preflight and creation:
 ```bash
 cat > /tmp/execution.json <<'JSON'
 {
-  "project_module": "wallaby_hires",
-  "sources": [{"source_identifier": "HIPASSJ1318-21"}],
-  "archive_name": "casda",
-  "deployment_profile_name": "slurm-remote"
+  "project_module": "minimal_survey",
+  "sources": [
+    {"source_identifier": "source-1", "groups": ["group-1"]}
+  ],
+  "archive_name": "catalog",
+  "deployment_profile_name": "local-rest"
 }
 JSON
 
@@ -121,6 +128,10 @@ different `do_stage`/`do_submit` flags return `409`. `do_submit:false` is a
 preparation-only boundary. Use `do_submit:true` only after the pinned profile
 doctor passes and real backends are deliberately enabled.
 
+`sources[].groups` is optional; omit it to select all ready groups for that
+source. A supplied list is validated against persisted `group_key` values
+during preparation.
+
 Inspect exact state instead of polling only the compact status:
 
 ```bash
@@ -130,6 +141,21 @@ curl -fsS "$BASE/api/v2/executions/$EXEC_ID/observations" -H "$AUTH" | jq .
 curl -fsS "$BASE/api/v2/executions/$EXEC_ID/artifacts" -H "$AUTH" | jq .
 curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 ```
+
+## Clean-break field migration
+
+Core v2 no longer accepts project-specific selection aliases. API clients and
+saved request bodies must use:
+
+| Resource | Field |
+|---|---|
+| Execution source selection | `sources[].groups` |
+| Archive metadata response | `group_key` |
+| Prepared item identity | `record_id` |
+| Stored items within a group | `metadata_json.records` |
+
+Provider terms may still appear as ordinary project data or explicitly renamed
+manifest output fields. They do not change request or persistence schemas.
 
 ## Contract
 

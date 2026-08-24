@@ -8,9 +8,9 @@ Graph preparation combines a generated manifest with a logical DALiuGE graph, ap
 graph_patches:
   - match:
       kind: node_name
-      equals: Scatter/GenericScatterApp/Beam
+      equals: Scatter/GenericScatterApp/Record
     set:
-      num_of_copies: "$count(sbids[].datasets[])"
+      num_of_copies: "$count(groups[].records[])"
 ```
 
 `match.kind` currently supports `node_name`. A missing or ambiguous target is an error. Values can be literals or manifest expressions:
@@ -37,14 +37,17 @@ Pin and record the runtime package version alongside such a patch. Graph configu
 
 Graphs using the `beampipe-ingest` palette can receive the generated manifest through the node's `manifest_path` field. Beampipe validates the node and field, injects read-only configuration, and records the resulting artifact.
 
-Manifest templates may read dataset fields directly or through logical `flags.*` references. Persisted discovery values are resolved consistently in either form.
+Manifest templates may read prepared record fields directly or through logical
+`flags.*` references. Persisted discovery values are resolved consistently in
+either form. Expression paths address the emitted manifest shape, so projects
+that explicitly rename `groups` or `records` must use those emitted names.
 
 ## Preview
 
 ```bash
 beampipe graph prepare \
-  --project wallaby_hires \
-  --source HIPASSJ1313-15
+  --project minimal_survey \
+  --source source-1
 ```
 
 For an existing execution:

@@ -8,11 +8,16 @@ Keep implementation, generated contracts, examples, and operator procedures sync
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
-beampipe project validate -f config/wallaby_hires.v2.yaml
+beampipe project validate -f config/examples/minimal_survey.v2.yaml
+DATABASE_URL=postgres://... cargo test -p beampipe-jobs \
+  tests::neutral_project_runs_offline_end_to_end -- --exact
 make docs-build
 ```
 
 `make docs-build` exports OpenAPI, copies it into the docs tree, and runs MkDocs in strict mode.
+The neutral acceptance test needs PostgreSQL but uses mock catalog and DALiuGE
+adapters; it performs no provider, SSH, or remote-runtime I/O. Validate the
+WALLABY configuration separately when changing that explicit sample.
 
 ## Dashboard checks
 

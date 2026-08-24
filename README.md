@@ -10,12 +10,12 @@
 </p>
 
 
-> `beampipe-core` is a modular orchestration and triggering framework for data-driven radio astronomy workflows. It operates as an external control plane: archive facts come from CASDA and VizieR, durable intent lives in PostgreSQL, and scheduler-aware execution of [DALiuGE](https://daliuge.icrar.org/) graphs runs on REST DIM or Slurm.
+> `beampipe-core` is a modular orchestration and triggering framework for data-driven workflows. It operates as an external control plane: project adapters supply catalog facts, durable intent lives in PostgreSQL, and scheduler-aware execution of [DALiuGE](https://daliuge.icrar.org/) graphs runs on REST DIM or Slurm.
 
 
 ## `What it does`
 
-> - **`Archive-driven triggering`**: discovers newly deposited datasets through project-defined TAP queries (not hardcoded SQL) and triggers processing when metadata is complete.
+> - **`Archive-driven triggering`**: discovers new records through project-defined TAP endpoints and queries, then triggers processing when configured metadata is complete.
 
 > - **`Idempotent execution ledger`**: records each run in PostgreSQL so retries are safe, duplicates are skipped, and incomplete work can be reconciled.
 
@@ -26,7 +26,7 @@
 
 ## `Core Module Features`
 
-> - **`Source registry`**: register and manage astronomical sources by common-ID over the API, including bulk registration.
+> - **`Source registry`**: register and manage project source identifiers over the API, including bulk registration.
 
 > - **`Run ledger enforcement`**: validates executions against registered, enabled, discovery-complete sources before any external I/O.
 
@@ -54,7 +54,7 @@
 
 ## `Modular Orchestration by design`
 
-> - **`Project-scoped automation`**: survey-agnostic YAML policy drives discovery and execution before work is enqueued. The reference config is [`wallaby_hires.v2.yaml`](config/wallaby_hires.v2.yaml) for [`wallaby-hires`](https://github.com/ICRAR/wallaby-hires), integrating CASDA ingestion with HPC compute on [Pawsey Setonix](https://pawsey.org.au/systems/setonix/).
+> - **`Project-scoped automation`**: project-neutral YAML policy drives discovery and execution before work is enqueued. Start with [`minimal_survey.v2.yaml`](config/examples/minimal_survey.v2.yaml). [`wallaby_hires.v2.yaml`](config/wallaby_hires.v2.yaml) is an explicit first-party provider sample integrating CASDA ingestion with [`wallaby-hires`](https://github.com/ICRAR/wallaby-hires) on [Pawsey Setonix](https://pawsey.org.au/systems/setonix/).
 
 > - **`Shaping and admission`**: global and per-project guards (rate budgets, queue depth, in-flight discovery batches / execution runs) keep automation within configured capacity.
 
@@ -75,7 +75,7 @@
     <td>
       <pre><code>{
   "name": "dlg-dim",
-  "project_module": "wallaby_hires",
+  "project_module": "minimal_survey",
   "is_default": true,
   "translation": {
     "algo": "metis",
@@ -98,7 +98,7 @@
 
 ### `Adding a project`
 
-Project config is immutable survey policy: source identity, TAP queries, metadata preparation, manifests, graph patches, and automation. No project query is hardcoded in the Rust worker.
+Project config is immutable workflow policy: source identity, named TAP endpoints and queries, metadata preparation, staging provider, manifests, graph patches, output verification, and automation. No project query is hardcoded in the Rust worker.
 
 ```yaml
 apiVersion: beampipe.dev/v2
@@ -107,17 +107,19 @@ metadata: {}
 definitions: {}
 source_identity: {}
 adapters: {}
+staging: {}
 graph: {}
 discovery: {}
 manifest: {}
 graph_patches: []
+output_verification: {}
 automation: {}
 extension: {}
 ```
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v2.yaml
-beampipe project add -f config/wallaby_hires.v2.yaml
+beampipe project validate -f config/examples/minimal_survey.v2.yaml
+beampipe project add -f config/examples/minimal_survey.v2.yaml
 ```
 
 `validate` returns structured diagnostics and a canonical SHA-256. `add` stores a new immutable revision and activates it. Existing executions keep their pinned revision.
@@ -144,7 +146,7 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 The API is at `http://127.0.0.1:18080/api/v2`. Files live in `~/beampipe`. You do not need to clone this repository.
 
-Install a deployment profile with `beampipe profile add`, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Continue with the [quick start](https://beampipe.jackblackwood.com/getting-started/) and [first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/).
+Install a deployment profile with `beampipe profile add`, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Continue with the [quick start](https://beampipe.jackblackwood.com/getting-started/) and [project-neutral acceptance](https://beampipe.jackblackwood.com/getting-started/neutral-project/). The [WALLABY first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) applies after explicitly installing that sample.
 
 
 ## `Runtime`
@@ -174,8 +176,9 @@ Install a deployment profile with `beampipe profile add`, run `beampipe doctor -
 | Task | Page |
 |---|---|
 | Install and reach a healthy system | [Quick start](https://beampipe.jackblackwood.com/getting-started/) |
-| Run one discovery and graph preparation | [First workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) |
-| Qualify real local DALiuGE execution | [Local DALiuGE end to end](https://beampipe.jackblackwood.com/getting-started/local-daliuge/) |
+| Prove the project-neutral Core contract offline | [Project-neutral acceptance](https://beampipe.jackblackwood.com/getting-started/neutral-project/) |
+| Run WALLABY discovery and graph preparation | [WALLABY first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) |
+| Qualify WALLABY with real local DALiuGE | [WALLABY local DALiuGE](https://beampipe.jackblackwood.com/getting-started/local-daliuge/) |
 | Install and operate the web console | [Dashboard setup](https://beampipe.jackblackwood.com/getting-started/dashboard/) |
 | Author project-defined TAP and graph policy | [Project YAML](https://beampipe.jackblackwood.com/project-configs/) |
 | Integrate over HTTP | [API workflow](https://beampipe.jackblackwood.com/api/) |
@@ -187,7 +190,8 @@ Install a deployment profile with `beampipe profile add`, run `beampipe doctor -
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
-beampipe project validate -f config/wallaby_hires.v2.yaml
+beampipe project validate -f config/examples/minimal_survey.v2.yaml
+cargo test -p beampipe-jobs tests::neutral_project_runs_offline_end_to_end -- --exact
 make docs-build
 ```
 

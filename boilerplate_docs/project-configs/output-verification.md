@@ -1,7 +1,7 @@
 # Output verification and publication
 
-Production graphs can hold an execution open until their science products have
-been verified and durably published:
+The Core output contract is project-neutral. Production graphs can hold an
+execution open until their products have been verified and durably published:
 
 ```yaml
 output_verification:
@@ -13,6 +13,10 @@ This policy is copied into the execution ledger when the execution is created.
 Changing or activating a later project revision cannot weaken an in-flight
 execution. The no-download test graph sets `required: false` explicitly because
 it intentionally produces no downloadable products.
+
+`beampipe-output-inventory/v1` is the generic v1 schema. Product paths and
+optional pattern rules are project data; Core does not require a survey name,
+archive identifier, file suffix, or scientific product class.
 
 When required, successful DALiuGE/scheduler completion leaves the execution in
 `running` with `output_state: pending`. It cannot reach terminal success until a

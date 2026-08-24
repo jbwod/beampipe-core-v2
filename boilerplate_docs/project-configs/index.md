@@ -1,20 +1,60 @@
 # Project YAML
 
-Project config is immutable, dynamically loaded survey policy. It defines source identity, TAP queries, metadata preparation, manifests, graph preparation, and scheduler automation. No project query is hardcoded in the Rust worker.
+Project configuration is immutable, dynamically loaded workflow policy. It
+defines source identity, named TAP endpoints, discovery queries, metadata
+preparation, staging, manifests, graph preparation, output verification, and
+automation. Core does not assign scientific meaning to a project identifier,
+endpoint name, group, or record.
 
-## Start from an example
+## Start with the neutral example
 
-- `config/wallaby_hires.v2.yaml`: production-shaped WALLABY discovery and Slurm automation.
-- `config/examples/minimal_survey.v2.yaml`: smallest single-archive example.
+The smallest complete example is
+`config/examples/minimal_survey.v2.yaml`. Its matching graph is
+`config/examples/neutral_demo.graph`.
 
 ```bash
-beampipe project validate -f config/wallaby_hires.v2.yaml
-beampipe project explain -f config/wallaby_hires.v2.yaml
-beampipe project render -f config/wallaby_hires.v2.yaml
-beampipe project add -f config/wallaby_hires.v2.yaml
+beampipe project validate -f config/examples/minimal_survey.v2.yaml
+beampipe project explain -f config/examples/minimal_survey.v2.yaml
+beampipe project render -f config/examples/minimal_survey.v2.yaml
+beampipe project add -f config/examples/minimal_survey.v2.yaml
 ```
 
-`validate` returns structured diagnostics and a canonical SHA-256. `add` stores a new immutable revision and activates it. Existing executions retain their pinned revision.
+The example endpoint uses the reserved `.invalid` domain deliberately. Use it
+for validation and the offline acceptance test, or replace it with a real TAP
+endpoint before live discovery. `validate` returns structured diagnostics and
+a canonical SHA-256. `add` stores and activates a new immutable revision;
+existing executions keep their pinned revision.
+
+The WALLABY HiRes bundle is an explicit provider example, not a Core default:
+
+```bash
+beampipe setup --yes --runtime docker --sample wallaby-hires
+```
+
+## Core identity contract
+
+The neutral hierarchy is:
+
+```text
+project_module -> source_identifier -> group_key -> record_id
+```
+
+| Name | Meaning |
+|---|---|
+| `project_module` | Stable project ID from `metadata.id` |
+| `source_identifier` | Stable unit scheduled for discovery and execution |
+| `group_key` | Project-defined grouping key within one source |
+| `record_id` | Stable identity of one prepared archive/catalog record |
+
+`group_key` and `record_id` are the required prepared names. API execution
+selections use `groups`; persisted archive metadata responses expose
+`group_key`, and each stored group payload contains `records`.
+
+This is a clean-break contract. Older project-specific names such as `sbid`,
+`sbids`, `dataset`, and `datasets` are not API aliases. A project may still
+emit those words inside its own manifest by setting
+`groups_output_field`, `group_key_output_field`, and
+`records_output_field` explicitly, as the WALLABY sample does.
 
 ## Document shape
 
@@ -25,6 +65,7 @@ metadata: {}
 definitions: {}
 source_identity: {}
 adapters: {}
+staging: {}
 graph: {}
 discovery: {}
 manifest: {}
@@ -36,126 +77,179 @@ extension: {}
 
 | Section | Owns |
 |---|---|
-| `metadata` | stable project ID and description |
-| `definitions`, `source_identity` | named transforms and query variables |
-| `adapters` | required TAP adapters, endpoints, retry/timeout policy |
-| `discovery` | project-specific ADQL, enrichments, mappings, flags, signature |
-| `manifest` | source/SBID/dataset grouping and output templates |
-| `graph`, `graph_patches` | logical graph source and deterministic mutations |
-| `output_verification` | pinned durable-product inventory policy |
-| `automation` | discovery cadence and execution admission limits |
-| `extension` | optional pinned WASM hooks |
+| `metadata` | Stable project ID and description |
+| `definitions`, `source_identity` | Named transforms and query variables |
+| `adapters` | Named TAP endpoints, transport mode, retry, and timeout policy |
+| `staging` | Explicit input-staging provider |
+| `discovery` | Queries, iteration, result policies, mappings, flags, and signature |
+| `manifest` | Source/group/record grouping and project-shaped output templates |
+| `graph`, `graph_patches` | Logical graph source and deterministic mutations |
+| `output_verification` | Generic durable-product inventory policy |
+| `automation` | Discovery cadence and execution admission limits |
+| `extension` | Optional pinned WASM hooks |
 
-## Dynamic TAP queries
+## Arbitrary adapters and endpoints
 
-Queries and enrichments live in YAML and are rendered from source identity plus prior results:
+Adapter names are project-owned. Every query names an adapter, and the same
+name selects its endpoint:
 
 ```yaml
-source_identity:
-  canonical: source_identifier
-  template_vars:
-    source_identifier:
-      from: canonical
-    source_name:
-      transform: hipass_source_name
-
 adapters:
-  required: [casda, vizier]
+  required: [catalog, context]
+  endpoints:
+    catalog:
+      url: https://catalog.example.org/tap
+      mode: sync_post
+    context:
+      url: https://context.example.org/tap
+      mode: async_job
   tap:
-    timeout_seconds: 90
-    retries: 2
+    timeout_seconds: 60
+    retries: 1
     fail_open: false
-
-discovery:
-  queries:
-    - name: visibility
-      adapter: casda
-      template: |
-        SELECT o.* FROM ivoa.obscore o
-        WHERE o.filename LIKE '{source_identifier}%'
-    - name: ra_dec_vsys
-      adapter: vizier
-      template: |
-        SELECT HIPASS, RAJ2000, DEJ2000, RVmom
-        FROM "VIII/73/hicat" WHERE HIPASS = '{source_name}'
-  enrichments:
-    - name: sbid_to_eval_file
-      adapter: casda
-      template: |
-        SELECT * FROM casda.observation_evaluation_file
-        WHERE sbid = '{sbid}'
-        AND format = 'calibration'
-        AND filename LIKE 'calibration-metadata-processing-logs-SB{sbid}_%.tar'
 ```
 
-For each SBID, discovery considers only calibration metadata archives with the
-expected tar naming contract. When CASDA returns multiple valid archives, the
-largest is selected and equal sizes are resolved by the lexically latest filename.
-Missing calibration archives and duplicate winning rows fail closed; unrelated
-diagnostic and validation-report products are never used as fallbacks.
+Endpoint `mode` is `sync_get`, `sync_post`, or `async_job`. Credentials remain
+runtime secrets; they do not belong in project YAML. The names `catalog` and
+`context` have no built-in behavior, and neither do provider-specific names
+used by sample projects.
 
-Project-level `casda_tap_url` and `vizier_tap_url` can override runtime defaults. Keep credentials outside YAML.
+## Query order, iteration, and results
 
-## Metadata and signatures
+The first `discovery.queries` entry is the primary record query. Its row set
+feeds `prepare_metadata`; an empty row set means that discovery found no
+metadata. Later queries run in declaration order and apply the configured
+result policy. Enrichments use the same query type and can iterate over distinct
+values prepared from the primary rows:
 
-`prepare_metadata` is nested under `discovery`:
+```yaml
+discovery:
+  queries:
+    - name: records
+      adapter: catalog
+      template: |
+        SELECT object_id, collection_id, access_url
+        FROM project_records
+        WHERE source_id = '{source_identifier}'
+    - name: source_context
+      adapter: context
+      template: |
+        SELECT label FROM source_context
+        WHERE source_id = '{source_identifier}'
+      result: first
+  enrichments:
+    - name: collection_context
+      adapter: context
+      for_each:
+        field: group_key
+        variable: collection
+      template: |
+        SELECT label FROM collection_context
+        WHERE collection_id = '{collection}'
+      result: exactly_one
+      required: true
+```
+
+`for_each.field` names a target in `prepare_metadata.field_map`. Beampipe
+derives its distinct values from primary rows and runs the query once per
+value. `variable` defaults to the field name when omitted.
+
+| `result` | Stored query result |
+|---|---|
+| `many` | All returned rows; this is the default. Empty is allowed only when the query is optional. |
+| `first` | The first returned row. Empty becomes `null` only when the query is optional. |
+| `exactly_one` | The sole row; any other successful row count is always an error. |
+
+`required: true` makes query or adapter failure fatal and requires at least one
+row for `many` or `first`. A failed optional query produces its empty result
+shape instead. Keep `fail_open: false` for admission facts unless the project
+has an explicit safe degraded mode.
+
+## Prepare and persist metadata
+
+Map provider fields into the neutral record contract:
 
 ```yaml
 discovery:
   prepare_metadata:
     field_map:
-      dataset_id:
-        from: filename
-      visibility_filename:
-        from: filename
-      sbid:
-        from: obs_id
-        transform: normalized_sbid
-    discovery_flags:
-      ra_dec_vsys_complete:
-        from: enrichments.ra_dec_vsys
-        transform: has_rows
+      source_identifier:
+        from: source_identifier
+      group_key:
+        from: collection_id
+      record_id:
+        from: object_id
+    required_fields:
+      - access_url
     signature:
-      exclude_fields: [access_url, filesize, t_max, t_min]
+      exclude_fields: [last_modified]
       include_discovery_flags: true
 ```
 
-Every prepared dataset needs `sbid` and either `dataset_id` or `visibility_filename`. Invalid rows fail the whole persistence transaction. Exclude volatile fields only when their changes should not trigger another workflow.
+Every prepared row needs a non-empty `group_key` and `record_id`, plus every
+configured `required_fields` entry. Invalid rows fail persistence rather than
+creating partial group state. Exclude a volatile field from the discovery
+signature only when changing it must not trigger another workflow.
 
-## Manifest and graph
+## Select a staging provider
+
+Staging behavior is selected only by `staging.provider`:
+
+```yaml
+staging:
+  provider: none
+```
+
+`none` is the project-neutral pass-through provider. `casda_uws` is the
+currently bundled CASDA-specific provider and must be selected explicitly by a
+project that uses that protocol. Core does not infer a staging provider from
+an adapter name, `archive_name`, or manifest field.
+
+## Shape the manifest
+
+Defaults preserve the neutral words `groups`, `group_key`, and `records`:
 
 ```yaml
 manifest:
-  group_by: [source_identifier, sbid]
+  group_by:
+    - source_identifier
   source_template:
     source_identifier: "{source_identifier}"
-    ra_string: "{flags.ra_string}"
-    dec_string: "{flags.dec_string}"
-    vsys: "{flags.vsys}"
-
-graph:
-  url: https://example.org/releases/wallaby-v1.graph
-  sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-
-graph_patches:
-  - match:
-      kind: node_name
-      equals: Scatter/GenericScatterApp/Beam
-    set:
-      num_of_copies: "$count(sbids[].datasets[])"
+  record_template:
+    record_id: "{record_id}"
+    access_url: "{access_url}"
 ```
 
-Manifest templates resolve both logical `flags.*` values and the flat persisted fields produced by discovery. Every graph source requires its expected SHA-256. Fetches time out after 30 seconds, reject content over 16 MiB, and verify the digest before parsing JSON. Use an immutable URL as well as the digest so configuration provenance remains human-auditable.
+Manifest templates can read prepared record fields and logical `flags.*`
+values. A project that must satisfy an existing graph contract may rename only
+the emitted manifest fields:
 
-The bundled WALLABY examples use graph files vendored from
-`wallaby-hires-beampipe` commit
-`6cc5c4cdc49c39a843b81ab14543d1c9c71b015f`. Setup materializes both the
-qualified Setonix graph and the no-download E2E graph under `config/graphs`;
-Compose mounts that directory read-only into API, scheduler, and worker roles.
-Relative graph paths resolve from `BEAMPIPE_HOME` for native installations and
-from the process working directory when no installation is selected. The
-configured SHA-256 remains authoritative and prevents a modified local file
-from executing.
+```yaml
+manifest:
+  groups_output_field: batches
+  group_key_output_field: batch_id
+  records_output_field: inputs
+```
+
+These names do not change Core's database or API contract.
+
+## Pin the graph and output contract
+
+```yaml
+graph:
+  path: config/examples/neutral_demo.graph
+  sha256: f1feee266fcdbdc7006e090533b94ec3d8bee14d91b11b7b9dcb22bcc8ef21c3
+
+output_verification:
+  required: true
+  inventory_schema: beampipe-output-inventory/v1
+```
+
+A graph may use an immutable URL instead of a path. Every source is bounded,
+hashed, and checked against the configured SHA-256 before parsing. Successful
+backend completion does not satisfy required output verification; a trusted
+publisher must submit the generic inventory described in
+[Output verification](output-verification.md).
 
 ## Automation
 
@@ -164,21 +258,20 @@ automation:
   discovery:
     enabled: true
     batch_size: 10
+    tick_discovery_batch_limit: 10
+    concurrent_discovery_batch_limit: 4
     stale_after_hours: 24
-  execution:
-    enabled: true
-    archive_name: casda
-    max_sources_per_execution: 1
-    tick_execution_run_limit: 1
-    concurrent_execution_run_limit: 1
-    deployment_profile_name: setonix
 ```
 
-Project limits express survey policy. Environment `BEAMPIPE_SHAPING_*` settings and profile concurrency are additional safety ceilings. Make sure the named profile exists before enabling execution automation.
+Project limits express workflow policy. Environment `BEAMPIPE_SHAPING_*`
+settings and deployment-profile concurrency are additional safety ceilings.
+Configure execution automation only after its named deployment profile exists
+and has passed its doctor checks.
 
 ## Optional WASM
 
-Use WASM only when transforms, templates, and graph patches are insufficient. Supported hooks are `prepare_metadata`, `manifest`, and `graph_patches`.
+Use WASM only when transforms, templates, and graph patches are insufficient.
+Supported hooks are `prepare_metadata`, `manifest`, and `graph_patches`.
 
 ```bash
 beampipe wasm upload \
@@ -194,6 +287,8 @@ extension:
   hooks: [prepare_metadata]
 ```
 
-Hooks must be deterministic and secret-free. They are project logic, not an escape hatch for network calls or deployment behavior.
+Hooks must be deterministic and secret-free. They are project logic, not an
+escape hatch for network calls or deployment behavior.
 
-Continue with [Transforms](transforms.md) and [Graph preparation](graph-patches.md).
+Continue with [Transforms](transforms.md), [Graph preparation](graph-patches.md),
+and the [project-neutral acceptance path](../getting-started/neutral-project.md).

@@ -19,7 +19,7 @@ A deployment profile is versioned non-secret infrastructure policy. Every execut
 | `rest_remote` | A DALiuGE Data Island Manager already runs | worker-to-TM, TM-to-DIM, worker-to-DIM connectivity and TLS |
 | `slurm_remote` | DALiuGE should start inside an HPC allocation | SSH trust, account/partition, paths, runtime environment, `sbatch`/`squeue`/`sacct` |
 
-Profiles never contain private keys, passphrases, CASDA passwords, or tokens.
+Profiles never contain private keys, passphrases, provider passwords, or tokens.
 
 ## Create a profile
 
@@ -91,7 +91,7 @@ qualified local topology used `http://dlg-tm.desk` from Core to TM,
 Traefik. Direct Docker service names are also valid when all callers share the
 network. Never substitute `127.0.0.1` without checking which process makes the
 connection; container loopback points back to that container. See the complete
-[local DALiuGE qualification](../getting-started/local-daliuge.md#proven-topology).
+[WALLABY local DALiuGE qualification](../getting-started/local-daliuge.md#proven-topology).
 
 ```bash
 beampipe doctor --profile local-daliuge
@@ -158,6 +158,11 @@ file on the login node. Values come from the Beampipe process and are forwarded
 into the outer allocation, while profiles store names only.
 `BEAMPIPE_SLURM_ACCOUNT` and `PYTHONPATH` are Core-managed and cannot be used as
 contract variable names.
+
+`output_subdirectory` and `shared_staging_subdirectory` are safe names beneath
+`dlg_root`, not arbitrary absolute paths. Their optional environment-variable
+fields expose the resolved locations to project code. This keeps Core neutral
+while making every runtime dependency reviewable and revision-pinned.
 
 `environment_setup` remains available for operator-reviewed shell initialization
 that cannot be expressed by the typed contract. It runs before DALiuGE creates
@@ -299,7 +304,7 @@ Inline PEM, home-directory fallback, and disabled host-key checks are developmen
 
 Before raising concurrency, qualify one run and then a paced batch. Watch login-node SSH/SFTP pressure, remote filesystem growth, TM availability, profile caps, and poll duration. Polling is batched by target through pooled SSH sessions, but submission still stages files per execution.
 
-The local REST path has qualified the pinned WALLABY graph and application
+For the explicit WALLABY sample, the local REST path has qualified its pinned graph and application
 package against the local DALiuGE runtime. That does not qualify Setonix or any
 other Slurm facility. The bundled Slurm profile has passed schema, rendering,
 and command tests only; a live qualification still requires the real account,
