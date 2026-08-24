@@ -19,12 +19,37 @@ use uuid::Uuid;
 #[derive(Debug, Parser)]
 #[command(name = "beampipe", version, about = "Beampipe v2 Rust control plane")]
 struct Cli {
-    /// Select the Beampipe installation. Defaults to BEAMPIPE_HOME, then ~/beampipe.
-    #[arg(long, global = true)]
+    /// Select the installation root for any subcommand. Defaults to BEAMPIPE_HOME, then ~/beampipe.
+    #[arg(long, global = true, help_heading = "Installation")]
     home: Option<PathBuf>,
     #[command(subcommand)]
     command: CliCommand,
 }
+
+const SETUP_AFTER_LONG_HELP: &str = r#"GUIDED SETUP:
+  beampipe setup
+      Walk through runtime, PostgreSQL, dashboard, project, and deployment choices.
+      Setup shows a review and asks before configuring the environment.
+
+AUTOMATIC SETUP:
+  beampipe setup --yes --runtime docker --postgres compose --dashboard
+      Never prompts. Choose --runtime explicitly and pass any values that must not
+      use their automatic defaults.
+
+CONFIGURE WITHOUT STARTING:
+  beampipe setup --yes --runtime host --postgres existing --no-start
+      Writes and validates the installation, then prints the commands to run later.
+
+SECRETS:
+  Omit --jwt-secret to let setup generate a random signing secret. For unattended
+  admin or SSH setup, use --admin-password-file and --ssh-passphrase-file so those
+  secrets do not appear in shell history or process arguments.
+
+INSTALLATION HOME:
+  --home is global and works with setup, start, status, and every other subcommand.
+  Resolution is --home, then BEAMPIPE_HOME, then ~/beampipe. --directory is a setup-
+  only compatibility alias and takes precedence when both are supplied. Reuse
+  --home or set BEAMPIPE_HOME when operating a non-default installation later."#;
 
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
@@ -95,104 +120,192 @@ enum CliCommand {
         #[command(subcommand)]
         command: WasmCommand,
     },
-    /// Interactive first-run setup (use --yes for CI/non-interactive).
+    /// Configure a Beampipe installation with a guided wizard or repeatable flags.
+    ///
+    /// Guided mode requires a terminal, explains each choice, shows the complete plan,
+    /// and asks for confirmation before configuring the environment. Use `--yes` for
+    /// unattended setup; it never prompts and requires an explicit runtime.
+    #[command(after_long_help = SETUP_AFTER_LONG_HELP)]
     Setup {
         #[command(subcommand)]
         command: Option<SetupCommand>,
-        #[arg(long)]
+
+        /// Run unattended with supplied values and safe defaults; requires --runtime.
+        #[arg(long, help_heading = "Setup mode")]
         yes: bool,
-        #[arg(long)]
-        database_url: Option<String>,
-        #[arg(long)]
-        jwt_secret: Option<String>,
-        #[arg(long)]
-        admin_user: Option<String>,
-        #[arg(long)]
-        admin_password: Option<String>,
-        #[arg(long, conflicts_with = "admin_password")]
-        admin_password_file: Option<PathBuf>,
-        #[arg(long)]
-        admin_email: Option<String>,
-        #[arg(long)]
-        project_config: Option<PathBuf>,
-        /// Materialize and upload an optional first-party project sample.
-        #[arg(long, value_parser = ["wallaby-hires"], conflicts_with = "project_config")]
-        sample: Option<String>,
-        /// Install a REST or Slurm deployment profile during setup.
-        #[arg(long)]
-        profile_config: Option<PathBuf>,
-        /// Assign this credential slot to the setup Slurm profile.
-        #[arg(long)]
-        ssh_slot: Option<String>,
-        /// Import this private key into the setup Slurm profile slot.
-        #[arg(long, requires = "profile_config")]
-        ssh_private_key: Option<PathBuf>,
-        #[arg(long, requires = "ssh_private_key")]
-        ssh_public_key: Option<PathBuf>,
-        #[arg(long, requires = "ssh_private_key")]
-        ssh_known_hosts: Option<PathBuf>,
-        #[arg(long, requires = "ssh_private_key")]
-        ssh_passphrase_file: Option<PathBuf>,
-        #[arg(long, requires = "ssh_private_key")]
-        ssh_acl: bool,
-        #[arg(long, requires = "ssh_private_key")]
-        accept_host_key: bool,
-        #[arg(long)]
-        tm_url: Option<String>,
-        #[arg(long)]
-        worker_pool: Option<String>,
-        /// Write BEAMPIPE_USE_REAL_BACKENDS=true (live TM/DIM or Slurm). Interactive setup also offers this as a Next action.
-        #[arg(long)]
-        use_real_backends: bool,
-        #[arg(long)]
-        skip_admin: bool,
-        #[arg(long)]
-        skip_upload: bool,
-        /// How Beampipe will run after setup: docker or host. Required with --yes.
-        #[arg(long, value_parser = ["docker", "host"])]
+
+        /// Runtime mode: Docker Compose services or the Beampipe binary on this host. Required with --yes.
+        #[arg(
+            long,
+            value_parser = ["docker", "host"],
+            help_heading = "Runtime and database"
+        )]
         runtime: Option<String>,
-        /// PostgreSQL source: compose (Compose postgres service) or existing DATABASE_URL.
-        #[arg(long, value_parser = ["compose", "existing"])]
+        /// PostgreSQL source: the managed Compose service or an existing DATABASE_URL.
+        #[arg(
+            long,
+            value_parser = ["compose", "existing"],
+            help_heading = "Runtime and database"
+        )]
         postgres: Option<String>,
-        /// Host port published for the API (default 18080).
-        #[arg(long, value_name = "PORT")]
+        /// Connection URL for existing PostgreSQL. Prefer the DATABASE_URL environment variable when it contains credentials.
+        #[arg(long, help_heading = "Runtime and database")]
+        database_url: Option<String>,
+        /// Host port published for the API (default: 18080).
+        #[arg(long, value_name = "PORT", help_heading = "Runtime and database")]
         api_port: Option<u16>,
-        /// Host port published for Compose PostgreSQL (default 5432).
-        #[arg(long, value_name = "PORT")]
+        /// Host port published for managed Compose PostgreSQL (default: 5432).
+        #[arg(long, value_name = "PORT", help_heading = "Runtime and database")]
         postgres_port: Option<u16>,
-        /// Host port published for API metrics (default 9090).
-        #[arg(long, value_name = "PORT")]
+        /// Host port published for API metrics (default: 9090).
+        #[arg(long, value_name = "PORT", help_heading = "Runtime and database")]
         metrics_port: Option<u16>,
-        /// Alias for --runtime docker.
-        #[arg(long, conflicts_with = "skip_docker")]
+        /// Compatibility alias for --runtime docker.
+        #[arg(
+            long,
+            conflicts_with = "skip_docker",
+            help_heading = "Runtime and database"
+        )]
         docker: bool,
-        /// Alias for --runtime host.
-        #[arg(long)]
+        /// Compatibility alias for --runtime host.
+        #[arg(long, help_heading = "Runtime and database")]
         skip_docker: bool,
-        /// Prepare Beampipe Dash and start it after Core is up (Docker only).
-        #[arg(long, conflicts_with = "skip_dashboard")]
-        dashboard: bool,
-        /// Skip Beampipe Dash preparation.
-        #[arg(long)]
-        skip_dashboard: bool,
-        /// Dash checkout directory (default: sibling ../beampipe-dash).
-        #[arg(long)]
-        dash_dir: Option<PathBuf>,
-        /// Git URL used when cloning a missing Dash checkout.
-        #[arg(long, default_value = "https://github.com/jbwod/beampipe-dash")]
-        dash_repo_url: String,
-        /// Compatibility alias for --home. Defaults to BEAMPIPE_HOME, then ~/beampipe.
-        #[arg(long)]
-        directory: Option<PathBuf>,
-        /// Canonical host directory containing per-profile SSH credential slots.
-        #[arg(long)]
-        credentials_dir: Option<PathBuf>,
-        /// Start Postgres and the stack after writing files (default).
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        /// Start the selected database and runtime after setup (true by default).
+        #[arg(
+            long,
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            help_heading = "Runtime and database"
+        )]
         start: bool,
-        /// Write files and print a recipe without starting anything.
-        #[arg(long = "no-start")]
+        /// Configure and validate files without starting containers or host services.
+        #[arg(long = "no-start", help_heading = "Runtime and database")]
         no_start: bool,
+
+        /// Prepare Beampipe Dash and include it when the Docker stack starts.
+        #[arg(
+            long,
+            conflicts_with = "skip_dashboard",
+            help_heading = "Dashboard"
+        )]
+        dashboard: bool,
+        /// Do not prepare Beampipe Dash or offer it in guided setup.
+        #[arg(long, help_heading = "Dashboard")]
+        skip_dashboard: bool,
+        /// Existing or target Dash checkout directory (default: sibling ../beampipe-dash).
+        #[arg(long, help_heading = "Dashboard")]
+        dash_dir: Option<PathBuf>,
+        /// Git URL used only when the selected Dash checkout is missing.
+        #[arg(
+            long,
+            default_value = "https://github.com/jbwod/beampipe-dash",
+            help_heading = "Dashboard"
+        )]
+        dash_repo_url: String,
+
+        /// Override the JWT signing secret (32+ characters). Omit to generate or reuse a secure secret.
+        #[arg(long, help_heading = "Admin and secrets")]
+        jwt_secret: Option<String>,
+        /// Username for the initial administrator (automatic default: admin).
+        #[arg(long, help_heading = "Admin and secrets")]
+        admin_user: Option<String>,
+        /// Set the initial admin password inline (12+ characters); prefer --admin-password-file.
+        #[arg(long, help_heading = "Admin and secrets")]
+        admin_password: Option<String>,
+        /// Read the initial admin password from a file; preferred for unattended setup.
+        #[arg(
+            long,
+            conflicts_with = "admin_password",
+            help_heading = "Admin and secrets"
+        )]
+        admin_password_file: Option<PathBuf>,
+        /// Email for the initial administrator (automatic default: admin@example.test).
+        #[arg(long, help_heading = "Admin and secrets")]
+        admin_email: Option<String>,
+        /// Skip creation of the initial administrator account.
+        #[arg(long, help_heading = "Admin and secrets")]
+        skip_admin: bool,
+
+        /// Validate and, by default, upload this project configuration.
+        #[arg(long, help_heading = "Project and deployment")]
+        project_config: Option<PathBuf>,
+        /// Materialize and upload an optional first-party project sample instead of --project-config.
+        #[arg(
+            long,
+            value_parser = ["wallaby-hires"],
+            conflicts_with = "project_config",
+            help_heading = "Project and deployment"
+        )]
+        sample: Option<String>,
+        /// Validate and install this REST or Slurm deployment profile.
+        #[arg(long, help_heading = "Project and deployment")]
+        profile_config: Option<PathBuf>,
+        /// Validate the selected project but do not upload it to PostgreSQL.
+        #[arg(long, help_heading = "Project and deployment")]
+        skip_upload: bool,
+
+        /// Assign this managed credential slot to the selected Slurm profile.
+        #[arg(long, help_heading = "Slurm credentials")]
+        ssh_slot: Option<String>,
+        /// Import this private key into the selected Slurm profile's credential slot.
+        #[arg(
+            long,
+            requires = "profile_config",
+            help_heading = "Slurm credentials"
+        )]
+        ssh_private_key: Option<PathBuf>,
+        /// Import the matching public key alongside --ssh-private-key.
+        #[arg(
+            long,
+            requires = "ssh_private_key",
+            help_heading = "Slurm credentials"
+        )]
+        ssh_public_key: Option<PathBuf>,
+        /// Import a reviewed known_hosts file alongside --ssh-private-key.
+        #[arg(
+            long,
+            requires = "ssh_private_key",
+            help_heading = "Slurm credentials"
+        )]
+        ssh_known_hosts: Option<PathBuf>,
+        /// Read the imported private key's passphrase from a file.
+        #[arg(
+            long,
+            requires = "ssh_private_key",
+            help_heading = "Slurm credentials"
+        )]
+        ssh_passphrase_file: Option<PathBuf>,
+        /// Grant container-compatible ACL access to the imported key on supported hosts.
+        #[arg(
+            long,
+            requires = "ssh_private_key",
+            help_heading = "Slurm credentials"
+        )]
+        ssh_acl: bool,
+        /// Accept the login-node host key discovered while importing the SSH key.
+        #[arg(
+            long,
+            requires = "ssh_private_key",
+            help_heading = "Slurm credentials"
+        )]
+        accept_host_key: bool,
+        /// Canonical host directory containing managed per-profile SSH credential slots.
+        #[arg(long, help_heading = "Slurm credentials")]
+        credentials_dir: Option<PathBuf>,
+
+        /// DALiuGE Translator Manager base URL written to the installation environment.
+        #[arg(long, help_heading = "Backend connectivity")]
+        tm_url: Option<String>,
+        /// Worker-pool name written to the installation environment (default: default).
+        #[arg(long, help_heading = "Backend connectivity")]
+        worker_pool: Option<String>,
+        /// Enable live TM/DIM or Slurm requests after setup; disabled by default.
+        #[arg(long, help_heading = "Backend connectivity")]
+        use_real_backends: bool,
+
+        /// Compatibility alias for --home. Defaults to BEAMPIPE_HOME, then ~/beampipe.
+        #[arg(long, help_heading = "Installation paths")]
+        directory: Option<PathBuf>,
     },
     /// Remove a Beampipe installation (Compose stack, volumes, and files).
     Uninstall {
@@ -1377,4 +1490,55 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("event=shutdown_signal_received");
+}
+
+#[cfg(test)]
+mod cli_help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn setup_command() -> clap::Command {
+        Cli::command()
+            .find_subcommand("setup")
+            .expect("setup subcommand")
+            .clone()
+    }
+
+    #[test]
+    fn every_setup_option_has_operator_guidance() {
+        let setup = setup_command();
+        let undocumented: Vec<_> = setup
+            .get_arguments()
+            .filter(|argument| argument.get_id() != "help" && argument.get_help().is_none())
+            .map(|argument| argument.get_id().to_string())
+            .collect();
+
+        assert!(
+            undocumented.is_empty(),
+            "setup options without help: {undocumented:?}"
+        );
+    }
+
+    #[test]
+    fn setup_long_help_explains_the_safe_paths() {
+        let mut setup = setup_command().term_width(120);
+        let help = setup.render_long_help().to_string();
+
+        for expected in [
+            "Setup mode",
+            "Runtime and database",
+            "Admin and secrets",
+            "Project and deployment",
+            "Slurm credentials",
+            "GUIDED SETUP",
+            "AUTOMATIC SETUP",
+            "CONFIGURE WITHOUT STARTING",
+            "--admin-password-file",
+            "--ssh-passphrase-file",
+            "--no-start",
+            "BEAMPIPE_HOME",
+        ] {
+            assert!(help.contains(expected), "setup help omitted {expected:?}\n{help}");
+        }
+    }
 }
