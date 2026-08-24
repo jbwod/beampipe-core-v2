@@ -3546,7 +3546,7 @@ async fn unroutable_job_diagnostic_is_bounded_and_live_worker_aware() {
     )
     .await
     .unwrap();
-    assert!(repo::count_unroutable_queued_jobs(&pool, 60).await.unwrap() >= baseline + 1);
+    assert!(repo::count_unroutable_queued_jobs(&pool, 60).await.unwrap() > baseline);
     let bounded = repo::list_unroutable_queued_jobs(&pool, 60, 1)
         .await
         .unwrap();
