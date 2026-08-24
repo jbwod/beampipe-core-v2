@@ -33,7 +33,8 @@ use beampipe_orchestration::{
 };
 use beampipe_profiles::DeploymentProfile;
 use beampipe_project::{
-    DiagnosticSeverity, ProjectConfig, ValidationDiagnostic, ValidationReport, WasmHost,
+    output_inventory_media_type, DiagnosticSeverity, ProjectConfig, ValidationDiagnostic,
+    ValidationReport, WasmHost,
 };
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
@@ -3158,8 +3159,14 @@ pub struct OutputPublicationAcknowledgement {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionOutputVerificationRequest {
+    /// Must match the schema pinned when the execution was admitted.
+    #[schema(example = "beampipe-output-inventory/v1")]
     pub schema: String,
+    /// Optional project-defined relative patterns summarized by this inventory.
+    #[serde(default)]
     pub patterns: Vec<String>,
+    /// Positive match count for every supplied pattern. Empty when no patterns are supplied.
+    #[serde(default)]
     pub pattern_counts: BTreeMap<String, u64>,
     pub products: Vec<OutputInventoryProduct>,
     pub inventory_sha256: String,
@@ -3266,9 +3273,14 @@ fn validate_output_verification_request(
             request.schema
         )));
     }
-    if request.patterns.is_empty() {
+    if output_inventory_media_type(expected_schema).is_none() {
+        return Err(ApiError::Conflict(format!(
+            "pinned output inventory schema '{expected_schema}' is unsupported"
+        )));
+    }
+    if request.patterns.is_empty() && !request.pattern_counts.is_empty() {
         return Err(ApiError::BadRequest(
-            "patterns must contain at least one Wallaby output pattern".into(),
+            "pattern_counts must be empty when patterns is empty".into(),
         ));
     }
     let unique_patterns: BTreeSet<_> = request.patterns.iter().collect();
@@ -3389,7 +3401,14 @@ fn output_inventory_artifact(
         storage_kind: "remote".into(),
         uri: Some(request.durable_destination_uri.clone()),
         inline_json: Some(report),
-        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        media_type: output_inventory_media_type(&request.schema)
+            .ok_or_else(|| {
+                ApiError::Conflict(format!(
+                    "output inventory schema '{}' is unsupported",
+                    request.schema
+                ))
+            })?
+            .into(),
         sha256: report_sha256,
         size_bytes: Some(
             i64::try_from(report_bytes.len())
@@ -3410,6 +3429,8 @@ fn output_inventory_artifact(
     post,
     path = "/api/v2/executions/{id}/outputs/verify",
     tag = "executions",
+    summary = "Verify a durable Beampipe output inventory",
+    description = "Validates `beampipe-output-inventory/v1`, records its publication acknowledgement, and releases an execution waiting at the output-verification completion gate.",
     request_body = ExecutionOutputVerificationRequest,
     responses(
         (status = 200, body = ExecutionOutputVerificationResponse),
@@ -4974,21 +4995,21 @@ adapters:
 
     fn valid_output_report() -> ExecutionOutputVerificationRequest {
         let products = vec![OutputInventoryProduct {
-            path: "HIPASSJ1318-21/image.fits".into(),
+            path: "source-a/result.bin".into(),
             bytes: 42,
             sha256: "a".repeat(64),
         }];
         let inventory_sha256 = canonical_products_sha256(&products).unwrap();
         ExecutionOutputVerificationRequest {
-            schema: beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA.into(),
-            patterns: vec!["**/image.*.fits".into()],
-            pattern_counts: BTreeMap::from([("**/image.*.fits".into(), 1)]),
+            schema: beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA.into(),
+            patterns: Vec::new(),
+            pattern_counts: BTreeMap::new(),
             products,
             inventory_sha256,
-            durable_destination_uri: "file:///durable/wallaby/run-1".into(),
+            durable_destination_uri: "file:///durable/project/run-1".into(),
             publication: OutputPublicationAcknowledgement {
                 acknowledged: true,
-                publisher: "wallaby-publisher".into(),
+                publisher: "project-publisher".into(),
                 receipt_id: "publication-1".into(),
                 published_at: Utc::now(),
             },
@@ -4999,7 +5020,7 @@ adapters:
     fn output_report_validates_canonical_inventory_and_publication_ack() {
         let policy = json!({
             "required": true,
-            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+            "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
         });
         let request = valid_output_report();
         assert_eq!(
@@ -5023,7 +5044,7 @@ adapters:
     fn output_report_rejects_empty_and_unsafe_products() {
         let policy = json!({
             "required": true,
-            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+            "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
         });
         for path in ["/absolute.fits", ".", "../escape.fits", "a/../b.fits"] {
             let mut request = valid_output_report();
@@ -5045,21 +5066,21 @@ adapters:
     }
 
     #[test]
-    fn output_report_accepts_wallaby_v1_inventory_fields_and_hashes_stored_report() {
+    fn output_report_accepts_generic_v1_inventory_fields_and_hashes_stored_report() {
         let inventory: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/wallaby-output-inventory-v1.json"
+            "../tests/fixtures/beampipe-output-inventory-v1.json"
         ))
         .unwrap();
         let mut request = inventory.as_object().unwrap().clone();
         request.insert(
             "durable_destination_uri".into(),
-            json!("file:///durable/wallaby/run-fixture"),
+            json!("file:///durable/project/run-fixture"),
         );
         request.insert(
             "publication".into(),
             json!({
                 "acknowledged": true,
-                "publisher": "wallaby-publisher",
+                "publisher": "project-publisher",
                 "receipt_id": "fixture-publication",
                 "published_at": Utc::now(),
             }),
@@ -5068,7 +5089,7 @@ adapters:
             serde_json::from_value(Value::Object(request)).unwrap();
         let policy = json!({
             "required": true,
-            "inventory_schema": beampipe_project::WALLABY_OUTPUT_INVENTORY_SCHEMA,
+            "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
         });
         let total = validate_output_verification_request(&request, true, &policy).unwrap();
         assert_eq!(total, 28);
@@ -5083,5 +5104,35 @@ adapters:
             artifact.metadata["inventory_sha256"],
             request.inventory_sha256
         );
+        assert_eq!(
+            artifact.media_type,
+            beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_MEDIA_TYPE
+        );
+    }
+
+    #[test]
+    fn generic_output_report_allows_no_pattern_summary() {
+        let mut value = serde_json::to_value(valid_output_report()).unwrap();
+        value.as_object_mut().unwrap().remove("patterns");
+        value.as_object_mut().unwrap().remove("pattern_counts");
+        let request: ExecutionOutputVerificationRequest = serde_json::from_value(value).unwrap();
+        let policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
+        });
+
+        assert!(request.patterns.is_empty());
+        assert!(request.pattern_counts.is_empty());
+        assert_eq!(
+            validate_output_verification_request(&request, true, &policy).unwrap(),
+            42
+        );
+
+        let mut orphan_count = request;
+        orphan_count.pattern_counts.insert("*.fits".into(), 1);
+        assert!(matches!(
+            validate_output_verification_request(&orphan_count, true, &policy),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 }

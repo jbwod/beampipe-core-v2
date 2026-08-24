@@ -12,7 +12,22 @@ pub mod expressions;
 pub mod transforms;
 pub mod wasm;
 
-pub const WALLABY_OUTPUT_INVENTORY_SCHEMA: &str = "wallaby-hires-output-inventory/v1";
+/// Project-neutral output inventory used by new project configurations.
+pub const BEAMPIPE_OUTPUT_INVENTORY_SCHEMA: &str = "beampipe-output-inventory/v1";
+/// Media type for the project-neutral output inventory.
+pub const BEAMPIPE_OUTPUT_INVENTORY_MEDIA_TYPE: &str =
+    "application/vnd.beampipe.output-inventory+json";
+
+pub fn output_inventory_media_type(schema: &str) -> Option<&'static str> {
+    match schema {
+        BEAMPIPE_OUTPUT_INVENTORY_SCHEMA => Some(BEAMPIPE_OUTPUT_INVENTORY_MEDIA_TYPE),
+        _ => None,
+    }
+}
+
+pub fn is_supported_output_inventory_schema(schema: &str) -> bool {
+    output_inventory_media_type(schema).is_some()
+}
 
 pub use expressions::evaluate_expression;
 pub use transforms::{
@@ -248,7 +263,7 @@ impl Default for OutputVerificationConfig {
 }
 
 fn default_output_inventory_schema() -> String {
-    WALLABY_OUTPUT_INVENTORY_SCHEMA.into()
+    BEAMPIPE_OUTPUT_INVENTORY_SCHEMA.into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -810,12 +825,12 @@ impl ProjectConfig {
                 }
             }
         }
-        if self.output_verification.inventory_schema != WALLABY_OUTPUT_INVENTORY_SCHEMA {
+        if !is_supported_output_inventory_schema(&self.output_verification.inventory_schema) {
             errors.push(ValidationDiagnostic::error(
                 "output_verification.inventory_schema",
                 "unsupported_output_inventory_schema",
                 format!(
-                    "output_verification.inventory_schema must be {WALLABY_OUTPUT_INVENTORY_SCHEMA}"
+                    "output_verification.inventory_schema must be {BEAMPIPE_OUTPUT_INVENTORY_SCHEMA}"
                 ),
             ));
         }
@@ -1271,13 +1286,13 @@ automation:
     }
 
     #[test]
-    fn output_verification_policy_is_explicit_and_schema_pinned() {
+    fn output_verification_is_pinned_to_the_generic_schema() {
         let mut config = ProjectConfig::default();
         config.metadata.id = "test".into();
         assert!(!config.output_verification.required);
         assert_eq!(
             config.output_verification.inventory_schema,
-            WALLABY_OUTPUT_INVENTORY_SCHEMA
+            BEAMPIPE_OUTPUT_INVENTORY_SCHEMA
         );
 
         config.output_verification.required = true;
@@ -1287,6 +1302,15 @@ automation:
             diagnostic.path == "output_verification.inventory_schema"
                 && diagnostic.code == "unsupported_output_inventory_schema"
         }));
+    }
+
+    #[test]
+    fn output_inventory_schema_has_a_generic_media_type() {
+        assert_eq!(
+            output_inventory_media_type(BEAMPIPE_OUTPUT_INVENTORY_SCHEMA),
+            Some(BEAMPIPE_OUTPUT_INVENTORY_MEDIA_TYPE)
+        );
+        assert_eq!(output_inventory_media_type("unknown/v1"), None);
     }
 
     #[test]

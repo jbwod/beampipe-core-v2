@@ -6575,7 +6575,7 @@ mod tests {
                 scheduler_state = 'running',
                 daliuge_state = 'running',
                 output_verification_required = true,
-                output_verification_policy = '{"required":true,"inventory_schema":"wallaby-hires-output-inventory/v1"}'::jsonb,
+                output_verification_policy = '{"required":true,"inventory_schema":"beampipe-output-inventory/v1"}'::jsonb,
                 output_state = 'pending'
             WHERE uuid = $1
             "#,
@@ -6679,7 +6679,7 @@ mod tests {
                     scheduler_state = 'not_submitted',
                     daliuge_state = 'running',
                     output_verification_required = true,
-                    output_verification_policy = '{"required":true,"inventory_schema":"wallaby-hires-output-inventory/v1"}'::jsonb,
+                    output_verification_policy = '{"required":true,"inventory_schema":"beampipe-output-inventory/v1"}'::jsonb,
                     output_state = 'pending'
                 WHERE uuid = $1
                 "#,

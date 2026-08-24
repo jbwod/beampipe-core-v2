@@ -6,7 +6,7 @@ been verified and durably published:
 ```yaml
 output_verification:
   required: true
-  inventory_schema: wallaby-hires-output-inventory/v1
+  inventory_schema: beampipe-output-inventory/v1
 ```
 
 This policy is copied into the execution ledger when the execution is created.
@@ -25,21 +25,19 @@ The endpoint is authenticated and restricted to superusers. Its JSON body uses:
 
 ```json
 {
-  "schema": "wallaby-hires-output-inventory/v1",
-  "patterns": ["**/image.*.10arc.final_mosaic.fits"],
-  "pattern_counts": {"**/image.*.10arc.final_mosaic.fits": 1},
+  "schema": "beampipe-output-inventory/v1",
   "products": [
     {
-      "path": "HIPASSJ1318-21/image.final_mosaic.fits",
+      "path": "source-a/result.bin",
       "bytes": 1234,
       "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     }
   ],
   "inventory_sha256": "...",
-  "durable_destination_uri": "file:///durable/wallaby/run-01",
+  "durable_destination_uri": "file:///durable/project/run-01",
   "publication": {
     "acknowledged": true,
-    "publisher": "wallaby-publisher",
+    "publisher": "project-publisher",
     "receipt_id": "publication-01",
     "published_at": "2026-08-22T00:00:00Z"
   }
@@ -47,9 +45,9 @@ The endpoint is authenticated and restricted to superusers. Its JSON body uses:
 ```
 
 `inventory_sha256` is SHA-256 over compact JSON for the `products` array with
-object keys sorted (`bytes`, `path`, `sha256`) and array order preserved. The API
-accepts Wallaby's complete v1 inventory, including `patterns` and
-`pattern_counts`, and requires at least one non-empty product, lowercase SHA-256
+object keys sorted (`bytes`, `path`, `sha256`) and array order preserved. Projects
+may additionally supply `patterns` and a positive `pattern_counts` entry for
+each pattern. Core requires at least one non-empty product, lowercase SHA-256
 values, unique safe relative paths, and an `s3`, `gs`, `https`, or absolute
 `file` destination URI. It stores the full report as the immutable
 `output_inventory` execution artifact. The artifact `sha256` and `size_bytes`

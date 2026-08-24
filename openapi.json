@@ -1027,9 +1027,11 @@
               "minimum": 0,
               "type": "integer"
             },
+            "description": "Positive match count for every supplied pattern. Empty when no patterns are supplied.",
             "type": "object"
           },
           "patterns": {
+            "description": "Optional project-defined relative patterns summarized by this inventory.",
             "items": {
               "type": "string"
             },
@@ -1045,13 +1047,13 @@
             "$ref": "#/components/schemas/OutputPublicationAcknowledgement"
           },
           "schema": {
+            "description": "Must match the schema pinned when the execution was admitted.",
+            "example": "beampipe-output-inventory/v1",
             "type": "string"
           }
         },
         "required": [
           "schema",
-          "patterns",
-          "pattern_counts",
           "products",
           "inventory_sha256",
           "durable_destination_uri",
@@ -5126,6 +5128,7 @@
     },
     "/api/v2/executions/{id}/outputs/verify": {
       "post": {
+        "description": "Validates `beampipe-output-inventory/v1`, records its publication acknowledgement, and releases an execution waiting at the output-verification completion gate.",
         "operationId": "verify_execution_outputs",
         "parameters": [
           {
@@ -5215,6 +5218,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Verify a durable Beampipe output inventory",
         "tags": [
           "executions"
         ]

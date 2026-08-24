@@ -20,7 +20,10 @@ use beampipe_domain::{
     LedgerPatch, LedgerState, OutputState, ReconciliationAction, SchedulerState, SubmissionState,
     TerminalOutcome,
 };
-use beampipe_project::{ProjectConfig, SignatureConfig, WALLABY_OUTPUT_INVENTORY_SCHEMA};
+use beampipe_project::{
+    is_supported_output_inventory_schema, output_inventory_media_type, ProjectConfig,
+    SignatureConfig,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1686,7 +1689,7 @@ async fn create_execution_internal(
         }
         None => beampipe_project::OutputVerificationConfig::default(),
     };
-    if output_config.inventory_schema != WALLABY_OUTPUT_INVENTORY_SCHEMA {
+    if !is_supported_output_inventory_schema(&output_config.inventory_schema) {
         return Err(sqlx::Error::Protocol(format!(
             "unsupported output inventory schema '{}'",
             output_config.inventory_schema
@@ -4621,6 +4624,17 @@ pub async fn verify_execution_outputs(
     if reported_schema != Some(expected_schema) {
         return Err(VerifyExecutionOutputsError::Rejected(format!(
             "inventory schema does not match pinned policy '{expected_schema}'"
+        )));
+    }
+    let expected_media_type = output_inventory_media_type(expected_schema).ok_or_else(|| {
+        VerifyExecutionOutputsError::Rejected(format!(
+            "pinned output inventory schema '{expected_schema}' is unsupported"
+        ))
+    })?;
+    if artifact.media_type != expected_media_type {
+        return Err(VerifyExecutionOutputsError::Rejected(format!(
+            "output inventory media type '{}' does not match pinned schema '{expected_schema}'",
+            artifact.media_type
         )));
     }
     if execution

@@ -356,7 +356,7 @@ evidence but cannot reopen the terminal ledger, and retry remains blocked.
 ## 8. Approval C: publish and verify outputs
 
 Slurm `COMPLETED` records compute evidence only. The production project requires
-a non-empty Wallaby output inventory, durable publication, and trusted
+a non-empty Beampipe output inventory, durable publication, and trusted
 acknowledgement. On the approved filesystem, verify and publish only the run's
 paths:
 

@@ -468,7 +468,7 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
         "metadata": {"id": module},
         "output_verification": {
             "required": true,
-            "inventory_schema": "wallaby-hires-output-inventory/v1"
+            "inventory_schema": "beampipe-output-inventory/v1"
         }
     });
     let config = repo::insert_project_config(&pool, &module, spec, &"c".repeat(64))
@@ -507,7 +507,7 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     assert_eq!(execution.output_state.as_deref(), Some("pending"));
     assert_eq!(
         execution.output_verification_policy["inventory_schema"],
-        "wallaby-hires-output-inventory/v1"
+        "beampipe-output-inventory/v1"
     );
 
     let held = repo::apply_execution_state_patch(
@@ -542,20 +542,34 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
         storage_kind: "remote".into(),
         uri: Some("file:///durable/wallaby/run-1".into()),
         inline_json: Some(json!({
-            "schema": "wallaby-hires-output-inventory/v1",
+            "schema": "beampipe-output-inventory/v1",
             "products": [{"path": "image.fits", "bytes": 42, "sha256": "b".repeat(64)}],
             "inventory_sha256": inventory_sha256,
         })),
-        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        media_type: "application/vnd.beampipe.output-inventory+json".into(),
         sha256: "e".repeat(64),
         size_bytes: Some(512),
         producer_phase: "publication_acknowledged".into(),
         metadata: json!({
-            "inventory_schema": "wallaby-hires-output-inventory/v1",
+            "inventory_schema": "beampipe-output-inventory/v1",
             "inventory_sha256": inventory_sha256,
             "publication": {"acknowledged": true, "receipt_id": "receipt-1"},
         }),
     };
+    let mut wrong_media_type = artifact.clone();
+    wrong_media_type.media_type = "application/json".into();
+    assert!(matches!(
+        repo::verify_execution_outputs(
+            &pool,
+            execution.uuid,
+            wrong_media_type,
+            "trusted-publisher:test",
+            Some("outputs:wrong-media-type"),
+        )
+        .await,
+        Err(repo::VerifyExecutionOutputsError::Rejected(_))
+    ));
+
     let (completed, stored) = repo::verify_execution_outputs(
         &pool,
         execution.uuid,
@@ -652,7 +666,7 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
         .unwrap();
     assert_eq!(
         verified_event.payload["inventory_schema"],
-        "wallaby-hires-output-inventory/v1"
+        "beampipe-output-inventory/v1"
     );
 }
 
@@ -669,7 +683,7 @@ async fn output_verification_preserves_discovery_that_changed_after_admission() 
         "metadata": {"id": module},
         "output_verification": {
             "required": true,
-            "inventory_schema": "wallaby-hires-output-inventory/v1"
+            "inventory_schema": "beampipe-output-inventory/v1"
         }
     });
     let config = repo::insert_project_config(&pool, &module, spec, &"d".repeat(64))
@@ -731,12 +745,12 @@ async fn output_verification_preserves_discovery_that_changed_after_admission() 
         storage_kind: "remote".into(),
         uri: Some("file:///durable/wallaby/run-changed".into()),
         inline_json: Some(json!({"inventory_sha256": "5".repeat(64)})),
-        media_type: "application/vnd.wallaby.output-inventory+json".into(),
+        media_type: "application/vnd.beampipe.output-inventory+json".into(),
         sha256: "6".repeat(64),
         size_bytes: Some(512),
         producer_phase: "publication_acknowledged".into(),
         metadata: json!({
-            "inventory_schema": "wallaby-hires-output-inventory/v1",
+            "inventory_schema": "beampipe-output-inventory/v1",
             "inventory_sha256": "5".repeat(64),
         }),
     };
@@ -808,7 +822,7 @@ async fn output_verification_opt_out_cannot_be_marked_verified() {
             size_bytes: Some(1),
             producer_phase: "publication_acknowledged".into(),
             metadata: json!({
-                "inventory_schema": "wallaby-hires-output-inventory/v1",
+                "inventory_schema": "beampipe-output-inventory/v1",
                 "inventory_sha256": "d".repeat(64)
             }),
         },

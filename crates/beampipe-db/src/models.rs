@@ -2,6 +2,7 @@ use beampipe_domain::{
     ControlPhase, DaliugeState, ExecutionAxes, ExecutionPhase, ExecutionStatus, FailureClass,
     OutputState, SchedulerState, SubmissionState, TerminalOutcome,
 };
+use beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -111,7 +112,7 @@ pub struct ExecutionRow {
 fn default_output_verification_policy() -> Value {
     serde_json::json!({
         "required": false,
-        "inventory_schema": "wallaby-hires-output-inventory/v1",
+        "inventory_schema": BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
     })
 }
 

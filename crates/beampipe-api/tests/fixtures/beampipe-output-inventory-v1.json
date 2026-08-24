@@ -1,0 +1,24 @@
+{
+  "schema": "beampipe-output-inventory/v1",
+  "patterns": [
+    "**/result.bin",
+    "**/summary.json"
+  ],
+  "pattern_counts": {
+    "**/result.bin": 1,
+    "**/summary.json": 1
+  },
+  "products": [
+    {
+      "path": "source-a/result.bin",
+      "bytes": 13,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "path": "source-a/summary.json",
+      "bytes": 15,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "inventory_sha256": "76c1c064cefa50b25d097405e63219a4ae2ea5d8df727133a771c6ac4ce35911"
+}
