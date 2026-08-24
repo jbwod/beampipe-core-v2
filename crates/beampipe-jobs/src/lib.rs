@@ -5394,6 +5394,7 @@ async fn reconcile_uncertain_slurm_submissions(
             repo::SlurmNameLookupOutcome::Ambiguous { .. } => "ambiguous",
             repo::SlurmNameLookupOutcome::Error { .. } => unreachable!(),
         };
+        let recovered_poll = slurm_poll_result_from_name_lookup(&outcome);
         let recorded = repo::record_slurm_name_lookup(
             pool,
             execution.uuid,
@@ -5420,8 +5421,62 @@ async fn reconcile_uncertain_slurm_submissions(
                 result_label
             },
         );
+        if let Some(result) = recovered_poll.filter(|_| !recorded.late_after_abandonment) {
+            let poll_round =
+                slurm_poll_round_from_manifest(recorded.execution.workflow_manifest.as_ref());
+            let policy = poll_policy_for_execution(pool, &recorded.execution).await?;
+            apply_slurm_poll_update(
+                pool,
+                recorded.execution.uuid,
+                &recorded.execution,
+                &result,
+                poll_round,
+                &policy,
+            )
+            .await?;
+        }
     }
     Ok(())
+}
+
+fn slurm_poll_result_from_name_lookup(
+    outcome: &repo::SlurmNameLookupOutcome,
+) -> Option<SlurmJobPollResult> {
+    let repo::SlurmNameLookupOutcome::Exact {
+        state,
+        raw_state,
+        reason,
+        source,
+        ..
+    } = outcome
+    else {
+        return None;
+    };
+    let normalized_state = match state {
+        SchedulerState::NotSubmitted => "NOT_SUBMITTED",
+        SchedulerState::Pending => "PENDING",
+        SchedulerState::Running => "RUNNING",
+        SchedulerState::Succeeded => "COMPLETED",
+        SchedulerState::Failed => "FAILED",
+        SchedulerState::Cancelled => "CANCELLED",
+        SchedulerState::TimedOut => "TIMEOUT",
+        SchedulerState::Unknown => "UNKNOWN",
+    };
+    let raw_line = Some(match reason.as_deref() {
+        Some(reason) if !reason.is_empty() => format!("{raw_state}|{reason}"),
+        _ => raw_state.clone(),
+    });
+    Some(SlurmJobPollResult {
+        raw_state: raw_state.clone(),
+        normalized_state: normalized_state.into(),
+        source: match source.as_str() {
+            "squeue" => "squeue",
+            "sacct" => "sacct",
+            _ => "name_lookup",
+        },
+        exit_code: None,
+        raw_line,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -6980,6 +7035,28 @@ mod tests {
         deployment.remote_user = Some("operator-b".into());
         let second = resolved_slurm_target_fingerprint(&deployment).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn exact_name_recovery_reuses_the_canonical_poll_state_machine() {
+        let outcome = repo::SlurmNameLookupOutcome::Exact {
+            scheduler_job_id: "47503556".into(),
+            state: SchedulerState::Cancelled,
+            raw_state: "CANCELLED".into(),
+            reason: Some("Cancelled by operator".into()),
+            source: "sacct".into(),
+            observed_at: Utc::now(),
+        };
+        let poll = slurm_poll_result_from_name_lookup(&outcome).unwrap();
+        assert_eq!(poll.normalized_state, "CANCELLED");
+        assert_eq!(poll.source, "sacct");
+        assert_eq!(
+            poll.raw_line.as_deref(),
+            Some("CANCELLED|Cancelled by operator")
+        );
+        assert!(
+            slurm_poll_result_from_name_lookup(&repo::SlurmNameLookupOutcome::NotFound).is_none()
+        );
     }
 
     #[test]
