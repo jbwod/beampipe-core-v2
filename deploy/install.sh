@@ -122,6 +122,20 @@ beampipe_has_runtime_flag() {
   return 1
 }
 
+beampipe_has_wallaby_sample() {
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = "--sample" ] && [ "$arg" = "wallaby-hires" ]; then
+      return 0
+    fi
+    case "$arg" in
+      --sample=wallaby-hires) return 0 ;;
+    esac
+    previous=$arg
+  done
+  return 1
+}
+
 beampipe_path_export() {
   printf 'export PATH="%s:$PATH"\n' "$1"
 }
@@ -197,17 +211,26 @@ beampipe_print_path_hint() {
 
 beampipe_print_next_actions() {
   home=$1
+  wallaby_sample=$2
   echo
   echo "Next actions (not applied with --yes):"
   echo "  Mock submissions finish immediately and never create a DIM session."
-  echo "  After beampipe doctor --profile NAME:"
+  echo "  beampipe doctor"
+  echo "  Add a project config and matching deployment profile before real work:"
+  echo "    beampipe project add -f PROJECT_CONFIG"
+  echo "    beampipe profile add -f DEPLOYMENT_PROFILE"
+  echo "    beampipe doctor --profile NAME"
+  echo "  After the project and profile checks pass:"
   echo "    set BEAMPIPE_USE_REAL_BACKENDS=true in ${home}/.env"
   echo "    beampipe restart"
-  echo "  beampipe profile add -f ${home}/config/deployment_profile.dlg-dim.json"
-  echo "  beampipe doctor --profile dlg-dim"
-  echo "  beampipe slurm credentials init --slot hpc --host LOGIN_NODE"
-  echo "  beampipe profile add -f ${home}/config/deployment_profile.slurm-remote.json --ssh-slot hpc"
-  echo "  set CASDA_USERNAME in ${home}/.env (Docker: CASDA_PASSWORD; host: ${home}/credentials/casda/password)"
+  if [ "$wallaby_sample" -eq 1 ]; then
+    echo "  WALLABY HiRes sample:"
+    echo "    beampipe profile add -f ${home}/config/deployment_profile.dlg-dim.json"
+    echo "    beampipe doctor --profile dlg-dim"
+    echo "    beampipe slurm credentials init --slot hpc --host LOGIN_NODE"
+    echo "    beampipe profile add -f ${home}/config/deployment_profile.slurm-remote.json --ssh-slot hpc"
+    echo "    configure CASDA staging credentials as described in the WALLABY runbook"
+  fi
 }
 
 beampipe_run_cli_setup() {
@@ -220,6 +243,10 @@ run_setup() {
   home="${BEAMPIPE_HOME:-$HOME/beampipe}"
   status=0
   print_next_recipe=0
+  wallaby_sample=0
+  if beampipe_has_wallaby_sample "$@"; then
+    wallaby_sample=1
+  fi
   if [ -t 0 ] || beampipe_has_flag --yes "$@"; then
     beampipe_run_cli_setup "$home" "$@" || status=$?
     if beampipe_has_flag --yes "$@"; then
@@ -240,7 +267,7 @@ run_setup() {
   fi
   beampipe_print_path_hint
   if [ "$print_next_recipe" -eq 1 ]; then
-    beampipe_print_next_actions "$home"
+    beampipe_print_next_actions "$home" "$wallaby_sample"
   fi
   return "$status"
 }

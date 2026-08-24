@@ -68,6 +68,18 @@ if ! beampipe_has_runtime_flag --skip-docker; then
   echo "beampipe_has_runtime_flag missed --skip-docker" >&2
   exit 1
 fi
+if beampipe_has_wallaby_sample --yes --runtime docker; then
+  echo "beampipe_has_wallaby_sample false positive" >&2
+  exit 1
+fi
+if ! beampipe_has_wallaby_sample --yes --sample wallaby-hires; then
+  echo "beampipe_has_wallaby_sample missed split sample argument" >&2
+  exit 1
+fi
+if ! beampipe_has_wallaby_sample --sample=wallaby-hires; then
+  echo "beampipe_has_wallaby_sample missed equals sample argument" >&2
+  exit 1
+fi
 echo "install target mapping ok"
 
 HOME_TMP=$(mktemp -d)
@@ -98,21 +110,31 @@ fi
 echo "install PATH persistence ok"
 
 HOME_NEXT=$(mktemp -d)
-beampipe_print_next_actions "$HOME_NEXT" > "$HOME_NEXT/out"
+beampipe_print_next_actions "$HOME_NEXT" 0 > "$HOME_NEXT/out"
 if ! grep -Fq "BEAMPIPE_USE_REAL_BACKENDS=true" "$HOME_NEXT/out"; then
   echo "next actions omitted live backends" >&2
   exit 1
 fi
-if ! grep -Fq "beampipe slurm credentials init" "$HOME_NEXT/out"; then
-  echo "next actions omitted Slurm credentials" >&2
+if ! grep -Fq "beampipe project add -f PROJECT_CONFIG" "$HOME_NEXT/out"; then
+  echo "neutral next actions omitted generic project setup" >&2
   exit 1
 fi
-if ! grep -Fq "$HOME_NEXT/config/deployment_profile.dlg-dim.json" "$HOME_NEXT/out"; then
-  echo "next actions omitted DIM profile path" >&2
+if grep -Eq 'WALLABY|deployment_profile\.dlg-dim|slurm credentials|CASDA' "$HOME_NEXT/out"; then
+  echo "neutral next actions included provider-specific setup" >&2
   exit 1
 fi
-if ! grep -Fq "CASDA_USERNAME" "$HOME_NEXT/out"; then
-  echo "next actions omitted CASDA credentials" >&2
+
+beampipe_print_next_actions "$HOME_NEXT" 1 > "$HOME_NEXT/wallaby-out"
+if ! grep -Fq "beampipe slurm credentials init" "$HOME_NEXT/wallaby-out"; then
+  echo "WALLABY next actions omitted Slurm credentials" >&2
+  exit 1
+fi
+if ! grep -Fq "$HOME_NEXT/config/deployment_profile.dlg-dim.json" "$HOME_NEXT/wallaby-out"; then
+  echo "WALLABY next actions omitted DIM profile path" >&2
+  exit 1
+fi
+if ! grep -Fq "CASDA staging credentials" "$HOME_NEXT/wallaby-out"; then
+  echo "WALLABY next actions omitted CASDA credentials" >&2
   exit 1
 fi
 rm -rf "$HOME_NEXT"
