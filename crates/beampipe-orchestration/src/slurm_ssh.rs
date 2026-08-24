@@ -586,7 +586,7 @@ impl SlurmSshPool {
 }
 
 fn squeue_query_command(job_ids: &str) -> String {
-    format!("squeue -h -j {job_ids} -o {SQUEUE_FORMAT}")
+    format!("squeue -h -j {job_ids} -o '{SQUEUE_FORMAT}'")
 }
 
 fn sacct_query_command(job_ids: &str) -> String {
@@ -757,6 +757,10 @@ mod tests {
             assert!(!command.contains("2>/dev/null"));
             assert!(!command.contains("|| true"));
         }
+        assert_eq!(
+            squeue_query_command("123,456"),
+            "squeue -h -j 123,456 -o '%i|%T|%R'"
+        );
     }
 
     #[test]
