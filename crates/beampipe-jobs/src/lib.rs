@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use beampipe_adapters::{
-    all_reachable, probe_tap_health, unreachable_adapters, HttpTapAdapter, TapClient, TapMode,
+    all_reachable, unreachable_adapters, HttpTapAdapter, TapClient, TapEndpointProbe,
+    TapHealthCache, TapMode,
 };
-use beampipe_adapters::{casda_tap, vizier_tap, AdapterError, TapRow};
+use beampipe_adapters::{AdapterError, TapRow};
 use beampipe_config::Settings;
 use beampipe_db::{
     models::{
@@ -61,6 +62,8 @@ use tracing::{debug, error, info, warn, Instrument};
 use uuid::Uuid;
 
 static SLURM_SSH_POOL: LazyLock<SlurmSshPool> = LazyLock::new(SlurmSshPool::new_from_env);
+static SCHEDULER_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> =
+    LazyLock::new(TapHealthCache::default);
 static SINGLE_TICK_WORKER_ID: LazyLock<Uuid> = LazyLock::new(Uuid::now_v7);
 const SLURM_TARGET_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -122,6 +125,7 @@ pub struct WorkerConfig {
     pub discovery_max_batches_per_tick: i64,
     pub discovery_tap_health_check_enabled: bool,
     pub discovery_tap_health_timeout_seconds: u64,
+    pub discovery_tap_health_cache_seconds: u64,
     pub shaping_enqueue_pacing_ms: u64,
     pub use_real_backends: bool,
     /// Parallel job consumers in this process (each claims jobs independently).
@@ -132,8 +136,7 @@ pub struct WorkerConfig {
     pub discovery_source_concurrency: u32,
     pub metrics_bind_addr: String,
     pub metrics_server_enabled: bool,
-    pub casda_tap_url: Option<String>,
-    pub vizier_tap_url: Option<String>,
+    pub metrics_tap_health_refresh_seconds: u64,
     pub dim_destroy_session: bool,
     pub dim_poll_interval_seconds: Option<u64>,
     pub slurm_poll_interval_seconds: Option<u64>,
@@ -161,6 +164,7 @@ impl WorkerConfig {
             discovery_max_batches_per_tick: settings.shaping_discovery_max_batches_per_tick,
             discovery_tap_health_check_enabled: settings.discovery_tap_health_check_enabled,
             discovery_tap_health_timeout_seconds: settings.discovery_tap_health_timeout_seconds,
+            discovery_tap_health_cache_seconds: settings.discovery_tap_health_cache_seconds,
             shaping_enqueue_pacing_ms: settings.shaping_enqueue_pacing_ms,
             use_real_backends: settings.use_real_backends,
             concurrency: settings.worker_concurrency.max(1),
@@ -168,8 +172,7 @@ impl WorkerConfig {
             discovery_source_concurrency: settings.discovery_source_concurrency.max(1),
             metrics_bind_addr: settings.metrics_bind_addr.clone(),
             metrics_server_enabled: settings.metrics_server_enabled,
-            casda_tap_url: settings.casda_tap_url.clone(),
-            vizier_tap_url: settings.vizier_tap_url.clone(),
+            metrics_tap_health_refresh_seconds: settings.metrics_tap_health_refresh_seconds,
             dim_destroy_session: settings.dim_destroy_session,
             dim_poll_interval_seconds: settings.dim_poll_interval_seconds,
             slurm_poll_interval_seconds: settings.slurm_poll_interval_seconds,
@@ -205,6 +208,7 @@ impl WorkerConfig {
                 discovery_max_batches_per_tick: 4,
                 discovery_tap_health_check_enabled: true,
                 discovery_tap_health_timeout_seconds: 10,
+                discovery_tap_health_cache_seconds: 30,
                 shaping_enqueue_pacing_ms: 0,
                 use_real_backends: false,
                 concurrency: 1,
@@ -212,8 +216,7 @@ impl WorkerConfig {
                 discovery_source_concurrency: 5,
                 metrics_bind_addr: "127.0.0.1:9090".into(),
                 metrics_server_enabled: true,
-                casda_tap_url: None,
-                vizier_tap_url: None,
+                metrics_tap_health_refresh_seconds: 300,
                 dim_destroy_session: false,
                 dim_poll_interval_seconds: None,
                 slurm_poll_interval_seconds: None,
@@ -221,12 +224,10 @@ impl WorkerConfig {
                 instance_name: None,
                 pool: "default".into(),
                 capabilities: vec![
-                    "discovery".into(),
-                    "manifest-generation".into(),
-                    "daliuge-translation".into(),
-                    "daliuge-deployment".into(),
-                    "slurm-remote".into(),
-                    "output-verification".into(),
+                    "discovery:tap".into(),
+                    "manifest:generic".into(),
+                    "translation:daliuge".into(),
+                    "verification:output_inventory".into(),
                 ],
                 labels: BTreeMap::new(),
             })
@@ -331,6 +332,7 @@ pub fn spawn_workers(pool: PgPool, config: WorkerConfig) -> WorkerPool {
             handles.push(metrics::server::spawn_metrics_server(
                 addr,
                 Some(pool.clone()),
+                Duration::from_secs(config.metrics_tap_health_refresh_seconds),
             ));
         }
     }
@@ -484,33 +486,44 @@ async fn bootstrap_schedulers(pool: &PgPool, config: &WorkerConfig) -> Result<()
         },
     )
     .await;
-    let tick_interval = slurm_poll_tick_interval_secs(pool, config)
-        .await
-        .unwrap_or(30);
-    let _ = repo::enqueue_recurring_job_with_options(
-        pool,
-        "slurm_poll_tick",
-        json!({ "interval_secs": tick_interval }),
-        "slurm_poll_tick",
-        repo::JobEnqueueOptions {
-            pool: Some(config.pool.clone()),
-            ..Default::default()
-        },
-    )
-    .await;
-    let dim_tick_interval = dim_poll_tick_interval_secs(pool, config).await.unwrap_or(3);
-    let _ = repo::enqueue_recurring_job_with_options(
-        pool,
-        "dim_poll_tick",
-        json!({ "interval_secs": dim_tick_interval }),
-        "dim_poll_tick",
-        repo::JobEnqueueOptions {
-            pool: Some(config.pool.clone()),
-            ..Default::default()
-        },
-    )
-    .await;
+    if worker_has_capability(config, "deployment:slurm_remote") {
+        let tick_interval = slurm_poll_tick_interval_secs(pool, config)
+            .await
+            .unwrap_or(30);
+        let _ = repo::enqueue_recurring_job_with_options(
+            pool,
+            "slurm_poll_tick",
+            json!({ "interval_secs": tick_interval }),
+            "slurm_poll_tick",
+            repo::JobEnqueueOptions {
+                pool: Some(config.pool.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+    if worker_has_capability(config, "deployment:daliuge_rest") {
+        let dim_tick_interval = dim_poll_tick_interval_secs(pool, config).await.unwrap_or(3);
+        let _ = repo::enqueue_recurring_job_with_options(
+            pool,
+            "dim_poll_tick",
+            json!({ "interval_secs": dim_tick_interval }),
+            "dim_poll_tick",
+            repo::JobEnqueueOptions {
+                pool: Some(config.pool.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
     Ok(())
+}
+
+fn worker_has_capability(config: &WorkerConfig, capability: &str) -> bool {
+    config
+        .capabilities
+        .iter()
+        .any(|configured| configured == capability)
 }
 
 pub async fn tick(pool: &PgPool, config: &WorkerConfig) -> Result<(), sqlx::Error> {
@@ -887,8 +900,6 @@ impl DiscoveryRunner for DeterministicDiscoveryRunner {
 pub struct ConfigDiscoveryRunner {
     clients: BTreeMap<String, Arc<dyn TapClient>>,
     pool: Option<PgPool>,
-    casda_tap_url: Option<String>,
-    vizier_tap_url: Option<String>,
 }
 
 impl ConfigDiscoveryRunner {
@@ -897,31 +908,14 @@ impl ConfigDiscoveryRunner {
     }
 
     pub fn from_env_with_pool(pool: Option<PgPool>) -> Self {
-        let settings = Settings::from_env().ok();
-        let casda_tap_url = settings.as_ref().and_then(|s| s.casda_tap_url.clone());
-        let vizier_tap_url = settings.as_ref().and_then(|s| s.vizier_tap_url.clone());
-        Self::with_urls(pool, casda_tap_url, vizier_tap_url)
-    }
-
-    fn from_worker_config_with_pool(config: &WorkerConfig, pool: Option<PgPool>) -> Self {
-        Self::with_urls(
-            pool,
-            config.casda_tap_url.clone(),
-            config.vizier_tap_url.clone(),
-        )
-    }
-
-    fn with_urls(
-        pool: Option<PgPool>,
-        casda_tap_url: Option<String>,
-        vizier_tap_url: Option<String>,
-    ) -> Self {
         Self {
             clients: BTreeMap::new(),
             pool,
-            casda_tap_url,
-            vizier_tap_url,
         }
+    }
+
+    fn from_worker_config_with_pool(_config: &WorkerConfig, pool: Option<PgPool>) -> Self {
+        Self::from_env_with_pool(pool)
     }
 
     fn client_for<'a>(
@@ -934,43 +928,16 @@ impl ConfigDiscoveryRunner {
         }
         let timeout = Duration::from_secs(config.adapters.tap.timeout_seconds);
         let retries = config.adapters.tap.retries;
-        let client: Arc<dyn TapClient> = match adapter {
-            "casda" => {
-                let url = config
-                    .adapters
-                    .casda_tap_url
-                    .as_deref()
-                    .or(self.casda_tap_url.as_deref())
-                    .ok_or_else(|| ConfigDiscoveryError::MissingAdapter("casda".into()))?;
-                Arc::new(casda_tap(url).with_policy(timeout, retries))
-            }
-            "vizier" => {
-                let url = config
-                    .adapters
-                    .vizier_tap_url
-                    .as_deref()
-                    .or(self.vizier_tap_url.as_deref())
-                    .ok_or_else(|| ConfigDiscoveryError::MissingAdapter("vizier".into()))?;
-                Arc::new(vizier_tap(url).with_policy(timeout, retries))
-            }
-            other => {
-                let endpoint = config
-                    .adapters
-                    .endpoints
-                    .get(other)
-                    .ok_or_else(|| ConfigDiscoveryError::MissingAdapter(other.to_string()))?;
-                let mode = match endpoint.mode {
-                    TapEndpointMode::SyncGet => TapMode::SyncGet,
-                    TapEndpointMode::SyncPost => TapMode::SyncPost,
-                    TapEndpointMode::AsyncJob => TapMode::AsyncJob,
-                };
-                Arc::new(
-                    HttpTapAdapter::new(&endpoint.url)
-                        .with_policy(timeout, retries)
-                        .with_mode(mode),
-                )
-            }
-        };
+        let endpoint = config
+            .adapters
+            .endpoints
+            .get(adapter)
+            .ok_or_else(|| ConfigDiscoveryError::MissingAdapter(adapter.to_string()))?;
+        let client: Arc<dyn TapClient> = Arc::new(
+            HttpTapAdapter::new(&endpoint.url)
+                .with_policy(timeout, retries)
+                .with_mode(tap_mode(endpoint.mode)),
+        );
         Ok(client)
     }
 
@@ -979,10 +946,40 @@ impl ConfigDiscoveryRunner {
         Self {
             clients,
             pool: None,
-            casda_tap_url: None,
-            vizier_tap_url: None,
         }
     }
+}
+
+fn tap_mode(mode: TapEndpointMode) -> TapMode {
+    match mode {
+        TapEndpointMode::SyncGet => TapMode::SyncGet,
+        TapEndpointMode::SyncPost => TapMode::SyncPost,
+        TapEndpointMode::AsyncJob => TapMode::AsyncJob,
+    }
+}
+
+fn tap_endpoint_probes(config: &ProjectConfig) -> BTreeMap<String, TapEndpointProbe> {
+    config
+        .adapters
+        .endpoints
+        .iter()
+        .map(|(name, endpoint)| {
+            (
+                name.clone(),
+                TapEndpointProbe {
+                    url: endpoint.url.clone(),
+                    mode: tap_mode(endpoint.mode),
+                },
+            )
+        })
+        .collect()
+}
+
+fn tap_health_blocks_scheduler(
+    config: &ProjectConfig,
+    report: &beampipe_adapters::TapHealthReport,
+) -> bool {
+    !config.adapters.tap.fail_open && !all_reachable(report, &config.adapters.required)
 }
 
 #[async_trait]
@@ -1331,30 +1328,42 @@ async fn run_scheduler_tick(
         .and_then(|row| serde_json::from_value::<ProjectConfig>(row.spec.clone()).ok());
 
     if config.discovery_tap_health_check_enabled {
-        if let Some(cfg) = parsed_config.as_ref() {
+        if let (Some(cfg), Some(config_row)) = (parsed_config.as_ref(), project_config.as_ref()) {
             let timeout = Duration::from_secs(config.discovery_tap_health_timeout_seconds);
-            let casda_url = cfg
-                .adapters
-                .casda_tap_url
-                .as_deref()
-                .or(config.casda_tap_url.as_deref());
-            let vizier_url = cfg
-                .adapters
-                .vizier_tap_url
-                .as_deref()
-                .or(config.vizier_tap_url.as_deref());
-            let report = probe_tap_health(casda_url, vizier_url, timeout).await;
+            let cache_key = format!(
+                "{}:{}:{}:timeout={}",
+                config_row.project_id,
+                config_row.version,
+                config_row.spec_sha256,
+                timeout.as_secs()
+            );
+            let report = SCHEDULER_TAP_HEALTH_CACHE
+                .get_or_probe(
+                    &cache_key,
+                    &tap_endpoint_probes(cfg),
+                    timeout,
+                    Duration::from_secs(config.discovery_tap_health_cache_seconds),
+                )
+                .await;
             if !all_reachable(&report, &cfg.adapters.required) {
                 result.tap_unreachable = unreachable_adapters(&report, &cfg.adapters.required);
-                result.bump(SkipReason::TapUnreachable);
-                info!(
-                    project_module,
-                    tap_unreachable = ?result.tap_unreachable,
-                    reason_counts = ?result.reason_counts,
-                    "event=discovery_scheduler_tick_complete"
-                );
-                finish_discovery_scheduler_tick(pool, project_module, &result, started).await;
-                return Ok(());
+                if tap_health_blocks_scheduler(cfg, &report) {
+                    result.bump(SkipReason::TapUnreachable);
+                    info!(
+                        project_module,
+                        tap_unreachable = ?result.tap_unreachable,
+                        reason_counts = ?result.reason_counts,
+                        "event=discovery_scheduler_tick_complete"
+                    );
+                    finish_discovery_scheduler_tick(pool, project_module, &result, started).await;
+                    return Ok(());
+                } else {
+                    warn!(
+                        project_module,
+                        tap_unreachable = ?result.tap_unreachable,
+                        "event=discovery_tap_health_failed_open"
+                    );
+                }
             }
         }
     }
@@ -7249,6 +7258,29 @@ mod tests {
         std::env::remove_var("BEAMPIPE_WORKER_CONCURRENCY");
         std::env::remove_var("BEAMPIPE_WORKER_SCHEDULER_ENABLED");
         std::env::remove_var("BEAMPIPE_DISCOVERY_SOURCE_CONCURRENCY");
+    }
+
+    #[test]
+    fn deployment_pollers_require_their_namespaced_worker_capability() {
+        let mut config = WorkerConfig::with_polling(Duration::from_secs(1), 60);
+        config.capabilities = vec!["discovery:tap".into()];
+        assert!(!worker_has_capability(&config, "deployment:slurm_remote"));
+        assert!(!worker_has_capability(&config, "deployment:daliuge_rest"));
+
+        config.capabilities.push("deployment:slurm_remote".into());
+        assert!(worker_has_capability(&config, "deployment:slurm_remote"));
+        assert!(!worker_has_capability(&config, "deployment:daliuge_rest"));
+    }
+
+    #[test]
+    fn project_fail_open_controls_unreachable_tap_scheduler_gate() {
+        let mut config = ProjectConfig::default();
+        config.adapters.required = vec!["archive".into()];
+        let report = beampipe_adapters::TapHealthReport::default();
+
+        assert!(tap_health_blocks_scheduler(&config, &report));
+        config.adapters.tap.fail_open = true;
+        assert!(!tap_health_blocks_scheduler(&config, &report));
     }
 
     #[tokio::test]

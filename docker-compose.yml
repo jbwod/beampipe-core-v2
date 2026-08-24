@@ -7,13 +7,11 @@ x-beampipe-shaping: &beampipe-shaping
   BEAMPIPE_WORKER_LOCK_SECONDS: "600"
   BEAMPIPE_WORKER_SUBMISSION_TIMEOUT_SECONDS: "1800"
 
-# TAP endpoints. Export BEAMPIPE_USE_REAL_BACKENDS=true only after `beampipe doctor` passes.
+# Provider/deployment capabilities. Enable real backends only after `beampipe doctor` passes.
 x-beampipe-backend-env: &beampipe-backend-env
   BEAMPIPE_USE_REAL_BACKENDS: ${BEAMPIPE_USE_REAL_BACKENDS:-false}
   BEAMPIPE_BACKEND_CAPABILITIES: ${BEAMPIPE_BACKEND_CAPABILITIES:-}
   BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED: ${BEAMPIPE_METRICS_LIVE_SLURM_PROBE_ENABLED:-false}
-  BEAMPIPE_CASDA_TAP_URL: ${BEAMPIPE_CASDA_TAP_URL:-}
-  BEAMPIPE_VIZIER_TAP_URL: ${BEAMPIPE_VIZIER_TAP_URL:-}
 
 x-beampipe-worker-env-file: &beampipe-worker-env-file
   env_file:

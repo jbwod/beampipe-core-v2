@@ -22,22 +22,93 @@ pub async fn query_rows_async(
         .timeout(timeout.min(Duration::from_secs(30)))
         .send()
         .await?;
-    let job_url = response
+    let create_status = response.status();
+    let location = response
         .headers()
         .get(LOCATION)
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            AdapterError::Transient("TAP async submit missing Location header".into())
-        })?;
-    wait_for_job(client, &job_url, timeout).await?;
-    let results = client
+        .map(str::to_owned);
+    if !uws_status_accepted(create_status) {
+        return Err(uws_status_error("create", response).await);
+    }
+    let location = location.ok_or_else(|| {
+        AdapterError::Transient("TAP async submit missing Location header".into())
+    })?;
+    let join_base = reqwest::Url::parse(&format!("{async_url}/")).map_err(|error| {
+        AdapterError::InvalidRowShape(format!("invalid TAP async endpoint URL: {error}"))
+    })?;
+    let job_url = join_base.join(&location).map_err(|error| {
+        AdapterError::InvalidRowShape(format!("invalid TAP async job Location: {error}"))
+    })?;
+    let job_url = job_url.as_str().trim_end_matches('/').to_string();
+
+    let run_response = client
+        .post(format!("{job_url}/phase"))
+        .form(&[("PHASE", "RUN")])
+        .timeout(timeout.min(Duration::from_secs(30)))
+        .send()
+        .await;
+    let run_response = match run_response {
+        Ok(response) => response,
+        Err(error) => {
+            best_effort_cleanup(client, &job_url, true).await;
+            return Err(AdapterError::Http(error));
+        }
+    };
+    if !uws_status_accepted(run_response.status()) {
+        let error = uws_status_error("start", run_response).await;
+        best_effort_cleanup(client, &job_url, true).await;
+        return Err(error);
+    }
+
+    if let Err(error) = wait_for_job(client, &job_url, timeout).await {
+        best_effort_cleanup(client, &job_url, true).await;
+        return Err(error);
+    }
+    let result = client
         .get(format!("{job_url}/results/result"))
         .timeout(timeout.min(Duration::from_secs(60)))
         .send()
-        .await?
-        .error_for_status()?;
-    parse_tap_body(results).await
+        .await;
+    let result = match result {
+        Ok(response) => match response.error_for_status() {
+            Ok(response) => parse_tap_body(response).await,
+            Err(error) => Err(AdapterError::Http(error)),
+        },
+        Err(error) => Err(AdapterError::Http(error)),
+    };
+    best_effort_cleanup(client, &job_url, false).await;
+    result
+}
+
+fn uws_status_accepted(status: reqwest::StatusCode) -> bool {
+    status.is_success() || status.is_redirection()
+}
+
+async fn uws_status_error(step: &str, response: reqwest::Response) -> AdapterError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let detail = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail = detail.chars().take(240).collect::<String>();
+    let message = format!("TAP async {step} failed with HTTP {status}: {detail}");
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        AdapterError::Transient(message)
+    } else {
+        AdapterError::Permanent(message)
+    }
+}
+
+async fn best_effort_cleanup(client: &reqwest::Client, job_url: &str, abort: bool) {
+    let cleanup_timeout = Duration::from_secs(5);
+    if abort {
+        let _ = client
+            .post(format!("{job_url}/phase"))
+            .form(&[("PHASE", "ABORT")])
+            .timeout(cleanup_timeout)
+            .send()
+            .await;
+    }
+    let _ = client.delete(job_url).timeout(cleanup_timeout).send().await;
 }
 
 async fn wait_for_job(
@@ -110,4 +181,96 @@ async fn parse_tap_body(response: reqwest::Response) -> Result<Vec<TapRow>, Adap
     Err(AdapterError::InvalidRowShape(
         "unsupported TAP async response content type".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_request(socket: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 2048];
+            let read = socket.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let header_end = header_end + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + content_length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).to_string()
+    }
+
+    fn response(status: &str, extra_headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn async_job_lifecycle_creates_starts_polls_reads_and_deletes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let responses = [
+                response("303 See Other", "Location: /tap/async/42\r\n", ""),
+                response("303 See Other", "", ""),
+                response("200 OK", "Content-Type: text/plain\r\n", "COMPLETED"),
+                response(
+                    "200 OK",
+                    "Content-Type: application/json\r\n",
+                    r#"[{"table_name":"TAP_SCHEMA.tables"}]"#,
+                ),
+                response("200 OK", "", ""),
+            ];
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_request(&mut socket).await);
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let rows = query_rows_async(
+            &client,
+            &format!("http://{address}/tap/async"),
+            "SELECT TOP 1 table_name FROM TAP_SCHEMA.tables",
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("POST /tap/async "));
+        assert!(requests[1].starts_with("POST /tap/async/42/phase "));
+        assert!(requests[1].contains("PHASE=RUN"));
+        assert!(requests[2].starts_with("GET /tap/async/42/phase "));
+        assert!(requests[3].starts_with("GET /tap/async/42/results/result "));
+        assert!(requests[4].starts_with("DELETE /tap/async/42 "));
+    }
 }

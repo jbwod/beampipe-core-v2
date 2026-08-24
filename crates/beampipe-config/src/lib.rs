@@ -8,6 +8,8 @@ use thiserror::Error;
 pub const CONFIG_API_VERSION: &str = "beampipe.dev/config/v1";
 pub const DEFAULT_CONFIG_FILE: &str = "beampipe.yaml";
 const MAX_WORKER_SUBMISSION_TIMEOUT_SECONDS: u64 = 86_400;
+const MAX_API_TAP_HEALTH_CACHE_SECONDS: u64 = 300;
+const MAX_METRICS_TAP_HEALTH_REFRESH_SECONDS: u64 = 3_600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -32,6 +34,7 @@ pub struct Settings {
     pub discovery_source_concurrency: u32,
     pub discovery_tap_health_check_enabled: bool,
     pub discovery_tap_health_timeout_seconds: u64,
+    pub discovery_tap_health_cache_seconds: u64,
     pub shaping_discovery_max_in_flight_batches: i64,
     pub shaping_discovery_max_batches_per_tick: i64,
     pub shaping_execution_max_in_flight_runs: i64,
@@ -46,6 +49,7 @@ pub struct Settings {
     pub metrics_bind_addr: String,
     pub metrics_server_enabled: bool,
     pub metrics_public: bool,
+    pub metrics_tap_health_refresh_seconds: u64,
     pub cors_allow_origins: Option<String>,
     pub require_rate_limiter: bool,
     pub log_json: bool,
@@ -60,10 +64,8 @@ pub struct Settings {
     ///
     /// Core defaults to no provider-specific capabilities. Project/operator
     /// bundles opt in when they require provider credentials, for example
-    /// `deployment:slurm_remote` or `staging:casda`.
+    /// `deployment:slurm_remote` or `staging:casda_uws`.
     pub backend_capabilities: Vec<String>,
-    pub casda_tap_url: Option<String>,
-    pub vizier_tap_url: Option<String>,
     pub tm_url: Option<String>,
     pub dim_url: Option<String>,
     pub slurm_remote_user: Option<String>,
@@ -287,6 +289,12 @@ impl Settings {
                 file.discovery.tap_health_timeout_seconds,
                 10,
             )?,
+            discovery_tap_health_cache_seconds: resolver.parsed(
+                "discovery_tap_health_cache_seconds",
+                "BEAMPIPE_DISCOVERY_TAP_HEALTH_CACHE_SECONDS",
+                file.discovery.tap_health_cache_seconds,
+                30,
+            )?,
             shaping_discovery_max_in_flight_batches: resolver.parsed(
                 "shaping_discovery_max_in_flight_batches",
                 "BEAMPIPE_SHAPING_DISCOVERY_MAX_IN_FLIGHT_BATCHES",
@@ -364,6 +372,12 @@ impl Settings {
                 file.metrics.public,
                 false,
             )?,
+            metrics_tap_health_refresh_seconds: resolver.parsed(
+                "metrics_tap_health_refresh_seconds",
+                "BEAMPIPE_METRICS_TAP_HEALTH_REFRESH_SECONDS",
+                file.metrics.tap_health_refresh_seconds,
+                300,
+            )?,
             cors_allow_origins: resolver.optional_string(
                 "cors_allow_origins",
                 "BEAMPIPE_CORS_ALLOW_ORIGINS",
@@ -428,16 +442,6 @@ impl Settings {
                 "BEAMPIPE_BACKEND_CAPABILITIES",
                 file.integrations.backend_capabilities.clone(),
                 Vec::new(),
-            ),
-            casda_tap_url: resolver.optional_string(
-                "casda_tap_url",
-                "BEAMPIPE_CASDA_TAP_URL",
-                file.integrations.casda_tap_url.clone(),
-            ),
-            vizier_tap_url: resolver.optional_string(
-                "vizier_tap_url",
-                "BEAMPIPE_VIZIER_TAP_URL",
-                file.integrations.vizier_tap_url.clone(),
             ),
             tm_url: resolver.optional_string(
                 "tm_url",
@@ -567,6 +571,7 @@ config_section!(DiscoveryFile {
     source_concurrency: u32,
     tap_health_check_enabled: bool,
     tap_health_timeout_seconds: u64,
+    tap_health_cache_seconds: u64,
 });
 config_section!(ShapingFile {
     discovery_max_in_flight_batches: i64,
@@ -583,6 +588,7 @@ config_section!(MetricsFile {
     bind_addr: String,
     server_enabled: bool,
     public: bool,
+    tap_health_refresh_seconds: u64,
 });
 config_section!(TelemetryFile {
     log_json: bool,
@@ -598,8 +604,6 @@ config_section!(MaintenanceFile {
 config_section!(IntegrationsFile {
     use_real_backends: bool,
     backend_capabilities: Vec<String>,
-    casda_tap_url: String,
-    vizier_tap_url: String,
     tm_url: String,
     dim_url: String,
     slurm_remote_user: String,
@@ -900,12 +904,10 @@ fn split_csv(value: &str) -> Vec<String> {
 
 fn default_worker_capabilities() -> Vec<String> {
     [
-        "discovery",
-        "manifest-generation",
-        "daliuge-translation",
-        "daliuge-deployment",
-        "slurm-remote",
-        "output-verification",
+        "discovery:tap",
+        "manifest:generic",
+        "translation:daliuge",
+        "verification:output_inventory",
     ]
     .into_iter()
     .map(ToString::to_string)
@@ -940,6 +942,22 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
         return Err(SettingsError::Invalid {
             name: "BEAMPIPE_DB_MAX_CONNECTIONS",
             value: settings.db_max_connections.to_string(),
+        });
+    }
+    if settings.discovery_tap_health_cache_seconds < 5
+        || settings.discovery_tap_health_cache_seconds > MAX_API_TAP_HEALTH_CACHE_SECONDS
+    {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_DISCOVERY_TAP_HEALTH_CACHE_SECONDS",
+            value: settings.discovery_tap_health_cache_seconds.to_string(),
+        });
+    }
+    if settings.metrics_tap_health_refresh_seconds < 30
+        || settings.metrics_tap_health_refresh_seconds > MAX_METRICS_TAP_HEALTH_REFRESH_SECONDS
+    {
+        return Err(SettingsError::Invalid {
+            name: "BEAMPIPE_METRICS_TAP_HEALTH_REFRESH_SECONDS",
+            value: settings.metrics_tap_health_refresh_seconds.to_string(),
         });
     }
     if settings.worker_concurrency == 0 {
@@ -1066,7 +1084,7 @@ mod tests {
     fn backend_capabilities_use_capability_provider_pairs() {
         assert!(validate_backend_capabilities(&[
             "deployment:slurm_remote".into(),
-            "staging:casda".into(),
+            "staging:casda_uws".into(),
         ])
         .is_ok());
         assert!(validate_backend_capabilities(&["slurm_remote".into()]).is_err());
@@ -1088,6 +1106,22 @@ mod tests {
 
         let worker: WorkerFile = serde_yaml::from_str("submission_timeout_seconds: 900\n").unwrap();
         assert_eq!(worker.submission_timeout_seconds, Some(900));
+    }
+
+    #[test]
+    fn tap_health_cache_intervals_are_bounded() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("BEAMPIPE_DISCOVERY_TAP_HEALTH_CACHE_SECONDS");
+        std::env::remove_var("BEAMPIPE_METRICS_TAP_HEALTH_REFRESH_SECONDS");
+        let mut settings = Settings::from_env().unwrap();
+        assert_eq!(settings.discovery_tap_health_cache_seconds, 30);
+        assert_eq!(settings.metrics_tap_health_refresh_seconds, 300);
+
+        settings.discovery_tap_health_cache_seconds = 4;
+        assert!(validate_settings(&settings).is_err());
+        settings.discovery_tap_health_cache_seconds = 30;
+        settings.metrics_tap_health_refresh_seconds = 3_601;
+        assert!(validate_settings(&settings).is_err());
     }
 
     #[test]

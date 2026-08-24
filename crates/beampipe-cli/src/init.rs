@@ -150,21 +150,20 @@ worker:
   submission_timeout_seconds: 1800
   scheduler_enabled: true
   capabilities:
-    - discovery
-    - manifest-generation
-    - daliuge-translation
-    - daliuge-deployment
-    - slurm-remote
-    - output-verification
+    - discovery:tap
+    - manifest:generic
+    - translation:daliuge
+    - verification:output_inventory
+discovery:
+  tap_health_cache_seconds: 30
 integrations:
   use_real_backends: false
   backend_capabilities: []
-  casda_tap_url: null
-  vizier_tap_url: null
   tm_url: http://localhost:9000
   dim_url: http://localhost:8001
 metrics:
   server_enabled: true
+  tap_health_refresh_seconds: 300
 telemetry:
   log_json: false
 "#
@@ -191,21 +190,20 @@ worker:
   submission_timeout_seconds: 1800
   scheduler_enabled: true
   capabilities:
-    - discovery
-    - manifest-generation
-    - daliuge-translation
-    - daliuge-deployment
-    - slurm-remote
-    - output-verification
+    - discovery:tap
+    - manifest:generic
+    - translation:daliuge
+    - verification:output_inventory
+discovery:
+  tap_health_cache_seconds: 30
 integrations:
   use_real_backends: true
   backend_capabilities: []
-  casda_tap_url: null
-  vizier_tap_url: null
   tm_url: null
   dim_url: null
 metrics:
   server_enabled: true
+  tap_health_refresh_seconds: 300
 redis:
   url: null
 telemetry:
@@ -228,6 +226,9 @@ DATABASE_URL=<secret-reference-or-runtime-value>
 BEAMPIPE_JWT_SECRET=<secret-reference-or-runtime-value>
 BEAMPIPE_CONFIG=beampipe.yaml
 BEAMPIPE_BACKEND_CAPABILITIES=
+BEAMPIPE_WORKER_CAPABILITIES=discovery:tap,manifest:generic,translation:daliuge,verification:output_inventory
+BEAMPIPE_DISCOVERY_TAP_HEALTH_CACHE_SECONDS=30
+BEAMPIPE_METRICS_TAP_HEALTH_REFRESH_SECONDS=300
 BEAMPIPE_TM_URL=<daliuge-translator-url>
 BEAMPIPE_DIM_URL=<daliuge-manager-url>
 BEAMPIPE_REDIS_URL=<redis-url>

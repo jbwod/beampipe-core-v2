@@ -87,6 +87,16 @@ pub fn set_dependency_up(name: &str, up: bool) {
     .set(if up { 1.0 } else { 0.0 });
 }
 
+pub fn set_project_adapter_up(project_module: &str, adapter: &str, required: bool, up: bool) {
+    gauge!(
+        "beampipe_project_adapter_up",
+        "project_module" => project_module.to_string(),
+        "adapter" => adapter.to_string(),
+        "required" => required.to_string()
+    )
+    .set(if up { 1.0 } else { 0.0 });
+}
+
 pub fn set_deployment_profile_dependency_up(profile: &str, dependency: &str, up: bool) {
     gauge!(
         "beampipe_deployment_profile_dependency_up",
@@ -111,6 +121,10 @@ pub fn set_jobs_queue_depth(depth: i64) {
 
 pub fn set_jobs_running(running: i64) {
     gauge!("beampipe_jobs_running").set(running as f64);
+}
+
+pub fn set_jobs_unroutable(count: i64) {
+    gauge!("beampipe_jobs_unroutable").set(count.max(0) as f64);
 }
 
 pub fn set_slurm_poll_batch_size(size: usize) {
@@ -353,5 +367,28 @@ pub fn record_scheduler_skip_reasons(
         for _ in 0..*count {
             record_execution_admitted(project_module, reason.as_str());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_adapter_metric_is_labelled_non_required() {
+        init_recorder();
+        set_project_adapter_up("optional-metric-fixture", "catalog", false, false);
+
+        let rendered = render_prometheus().expect("prometheus recorder installed");
+        let line = rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("beampipe_project_adapter_up{")
+                    && line.contains("project_module=\"optional-metric-fixture\"")
+                    && line.contains("adapter=\"catalog\"")
+            })
+            .expect("optional adapter series");
+        assert!(line.contains("required=\"false\""), "{line}");
+        assert!(line.ends_with(" 0"), "{line}");
     }
 }

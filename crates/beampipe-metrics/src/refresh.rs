@@ -1,6 +1,6 @@
 //! Periodic refresh of DB-backed Prometheus gauges and dependency probes.
 
-use beampipe_adapters::probe_tap_health;
+use beampipe_adapters::{TapEndpointProbe, TapHealthCache, TapMode};
 use beampipe_db::models::DeploymentProfileRow;
 use beampipe_db::test_modules::is_integration_test_project_module;
 use beampipe_orchestration::cancel::rest_endpoint;
@@ -8,8 +8,9 @@ use beampipe_orchestration::slurm_credentials::SlurmSshCredentials;
 use beampipe_orchestration::slurm_deploy::{probe_slurm_login, resolve_remote_user};
 use beampipe_orchestration::tm_health::{probe_dim_reachable, probe_tm_reachable, TmProbeResult};
 use beampipe_profiles::{DaliugeTranslationConfig, DeploymentConfig, SlurmRemoteDeploymentConfig};
+use beampipe_project::{ProjectConfig, TapEndpointMode};
 use sqlx::PgPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -21,6 +22,10 @@ static LAST_SOURCE_PROCESSING_KEYS: LazyLock<Mutex<HashSet<(String, String)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static LAST_PROFILE_DEPENDENCY_KEYS: LazyLock<Mutex<HashSet<(String, String)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+static LAST_PROJECT_ADAPTER_KEYS: LazyLock<Mutex<HashSet<(String, String, bool)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static PROJECT_ADAPTER_HEALTH_CACHE: LazyLock<TapHealthCache> =
+    LazyLock::new(TapHealthCache::default);
 static LAST_JOB_KIND_KEYS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static LAST_EXECUTION_STATUS_KEYS: LazyLock<Mutex<HashSet<String>>> =
@@ -58,7 +63,7 @@ impl ProfileProbe {
 }
 
 /// Probe Postgres and optional TAP endpoints; update `beampipe_dependency_up`.
-pub async fn refresh_dependencies(pool: &PgPool) {
+pub async fn refresh_dependencies(pool: &PgPool, tap_health_ttl: Duration) {
     let postgres_ok = sqlx::query("SELECT 1").execute(pool).await.is_ok();
     crate::set_dependency_up("postgres", postgres_ok);
 
@@ -66,22 +71,8 @@ pub async fn refresh_dependencies(pool: &PgPool) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
-    let casda_url = std::env::var("BEAMPIPE_CASDA_TAP_URL").ok();
-    let vizier_url = std::env::var("BEAMPIPE_VIZIER_TAP_URL").ok();
-    let tap_report = probe_tap_health(
-        casda_url.as_deref().filter(|u| !u.is_empty()),
-        vizier_url.as_deref().filter(|u| !u.is_empty()),
-        Duration::from_secs(timeout_secs),
-    )
-    .await;
-    crate::set_dependency_up(
-        "casda",
-        tap_report.casda.reachable || !tap_report.casda.configured,
-    );
-    crate::set_dependency_up(
-        "vizier",
-        tap_report.vizier.reachable || !tap_report.vizier.configured,
-    );
+    refresh_project_adapter_dependencies(pool, Duration::from_secs(timeout_secs), tap_health_ttl)
+        .await;
 
     let redis_up = match std::env::var("BEAMPIPE_REDIS_URL") {
         Ok(url) if !url.is_empty() => {
@@ -117,6 +108,108 @@ pub async fn refresh_dependencies(pool: &PgPool) {
         Duration::from_secs(timeout_secs),
     )
     .await;
+}
+
+async fn refresh_project_adapter_dependencies(
+    pool: &PgPool,
+    timeout: Duration,
+    cache_ttl: Duration,
+) {
+    let mut rows = match beampipe_db::repo::list_active_project_configs(pool).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(event = "metrics_project_adapter_query_failed", %error);
+            return;
+        }
+    };
+    rows.sort_by(|left, right| left.project_id.cmp(&right.project_id));
+    let cache_key = rows
+        .iter()
+        .map(|row| format!("{}:{}:{}", row.project_id, row.version, row.spec_sha256))
+        .chain(std::iter::once(format!("timeout:{}", timeout.as_secs())))
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut probes = BTreeMap::new();
+    let mut targets = Vec::new();
+    for (project_index, row) in rows.into_iter().enumerate() {
+        let config = match serde_json::from_value::<ProjectConfig>(row.spec) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(
+                    event = "metrics_project_config_parse_failed",
+                    project_module = %row.project_id,
+                    %error
+                );
+                continue;
+            }
+        };
+        let names: BTreeSet<String> = config
+            .adapters
+            .required
+            .iter()
+            .cloned()
+            .chain(config.adapters.endpoints.keys().cloned())
+            .collect();
+        for (adapter_index, adapter) in names.into_iter().enumerate() {
+            let probe_key = format!("{project_index}:{adapter_index}");
+            if let Some(endpoint) = config.adapters.endpoints.get(&adapter) {
+                let mode = match endpoint.mode {
+                    TapEndpointMode::SyncGet => TapMode::SyncGet,
+                    TapEndpointMode::SyncPost => TapMode::SyncPost,
+                    TapEndpointMode::AsyncJob => TapMode::AsyncJob,
+                };
+                probes.insert(
+                    probe_key.clone(),
+                    TapEndpointProbe {
+                        url: endpoint.url.clone(),
+                        mode,
+                    },
+                );
+            }
+            let required = config
+                .adapters
+                .required
+                .iter()
+                .any(|value| value == &adapter);
+            targets.push((probe_key, row.project_id.clone(), adapter, required));
+        }
+    }
+    let report = PROJECT_ADAPTER_HEALTH_CACHE
+        .get_or_probe(&cache_key, &probes, timeout, cache_ttl)
+        .await;
+    let mut current = HashSet::new();
+    for (probe_key, project, adapter, required) in targets {
+        current.insert((project.clone(), adapter.clone(), required));
+        let status = report.endpoint(&probe_key);
+        crate::set_project_adapter_up(
+            &project,
+            &adapter,
+            required,
+            status.configured && status.reachable,
+        );
+    }
+    clear_missing_project_adapter_gauges(&current);
+}
+
+fn clear_missing_project_adapter_gauges(current: &HashSet<(String, String, bool)>) {
+    let mut last = LAST_PROJECT_ADAPTER_KEYS
+        .lock()
+        .expect("project adapter metric keys lock");
+    for (project, adapter, required) in retired_project_adapter_keys(&last, current) {
+        // The metrics facade does not expose removal for an individual label
+        // set. Retire deleted project/adapter series to healthy so they cannot
+        // keep an alert firing. Project validation caps endpoints per revision,
+        // bounding the rate at which these retired series can be introduced.
+        crate::set_project_adapter_up(&project, &adapter, required, true);
+    }
+    *last = current.clone();
+}
+
+fn retired_project_adapter_keys(
+    previous: &HashSet<(String, String, bool)>,
+    current: &HashSet<(String, String, bool)>,
+) -> Vec<(String, String, bool)> {
+    previous.difference(current).cloned().collect()
 }
 
 async fn active_deployment_profiles(
@@ -330,14 +423,25 @@ fn zero_missing_profile_dependency_gauges(current: &HashSet<(String, String)>) {
 }
 
 /// Refresh queue, pending backlog, and execution gauges from Postgres.
-pub async fn refresh_gauges_from_pool(pool: &PgPool) {
-    refresh_dependencies(pool).await;
+pub async fn refresh_gauges_from_pool(pool: &PgPool, tap_health_ttl: Duration) {
+    refresh_dependencies(pool, tap_health_ttl).await;
 
     if let Ok(depth) = beampipe_db::repo::runnable_queue_depth(pool).await {
         crate::set_jobs_queue_depth(depth);
     }
     if let Ok(running) = beampipe_db::repo::jobs_running_count(pool).await {
         crate::set_jobs_running(running);
+    }
+    let worker_stale_after_seconds = std::env::var("BEAMPIPE_WORKER_HEARTBEAT_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(10)
+        .saturating_mul(3)
+        .max(30);
+    if let Ok(count) =
+        beampipe_db::repo::count_unroutable_queued_jobs(pool, worker_stale_after_seconds).await
+    {
+        crate::set_jobs_unroutable(count);
     }
     let mut current_job_kinds = HashSet::new();
     if let Ok(by_kind) = beampipe_db::repo::queue_depth_by_kind(pool).await {
@@ -552,6 +656,26 @@ mod tests {
         assert_eq!(counts.len(), 2);
     }
 
+    #[test]
+    fn removed_adapter_series_are_selected_for_healthy_retirement() {
+        let previous = HashSet::from([
+            ("project".into(), "removed".into(), true),
+            ("project".into(), "active".into(), false),
+        ]);
+        let current = HashSet::from([("project".into(), "active".into(), false)]);
+
+        assert_eq!(
+            retired_project_adapter_keys(&previous, &current),
+            vec![("project".into(), "removed".into(), true)]
+        );
+    }
+
+    #[test]
+    fn critical_adapter_alert_only_selects_required_integrations() {
+        let alerts = include_str!("../../../deploy/prometheus/alerts.yml");
+        assert!(alerts.contains("beampipe_project_adapter_up{required=\"true\"}"));
+    }
+
     fn profile(
         translation: serde_json::Value,
         deployment: serde_json::Value,
@@ -605,10 +729,15 @@ mod tests {
                 "kind": "slurm_remote",
                 "login_node": "login.example.org",
                 "ssh_credential": "setonix",
+                "facility": "test-facility",
                 "account": "project",
                 "home_dir": "/scratch/project",
                 "log_dir": "/scratch/project/log",
-                "dlg_root": "/scratch/project/dlg"
+                "dlg_root": "/scratch/project/dlg",
+                "runtime_contract": {
+                    "output_subdirectory": "outputs",
+                    "shared_staging_subdirectory": "shared_staging"
+                }
             }),
         );
         profile_probes(&row, None, None).unwrap().pop().unwrap()

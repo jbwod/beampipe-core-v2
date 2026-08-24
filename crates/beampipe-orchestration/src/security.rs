@@ -21,6 +21,7 @@ fn backend_capability_enabled(settings: &Settings, capability: &str) -> bool {
     settings
         .backend_capabilities
         .iter()
+        .chain(settings.worker_capabilities.iter())
         .any(|configured| configured == capability)
 }
 
@@ -87,14 +88,14 @@ pub fn collect_security_issues(settings: &Settings) -> Vec<String> {
         }
     }
 
-    if settings.use_real_backends && backend_capability_enabled(settings, "staging:casda") {
+    if settings.use_real_backends && backend_capability_enabled(settings, "staging:casda_uws") {
         let casda_user = std::env::var("CASDA_USERNAME")
             .ok()
             .filter(|s| !s.is_empty());
         let casda_pass_ok = casda_password_from_env().is_some();
         if casda_user.is_none() || !casda_pass_ok {
             errors.push(
-                "CASDA_USERNAME and CASDA_PASSWORD or CASDA_PASSWORD_FILE are required when backend capability staging:casda is enabled"
+                "CASDA_USERNAME and CASDA_PASSWORD or CASDA_PASSWORD_FILE are required when backend capability staging:casda_uws is enabled"
                     .into(),
             );
         }
@@ -236,12 +237,22 @@ api:
     #[test]
     fn backend_capabilities_are_explicit() {
         let mut settings = production_settings();
-        settings.backend_capabilities = vec!["staging:casda".into()];
+        settings.backend_capabilities = vec!["staging:casda_uws".into()];
 
-        assert!(backend_capability_enabled(&settings, "staging:casda"));
+        assert!(backend_capability_enabled(&settings, "staging:casda_uws"));
         assert!(!backend_capability_enabled(
             &settings,
             "deployment:slurm_remote"
         ));
+    }
+
+    #[test]
+    fn advertised_worker_backend_capabilities_enforce_credentials() {
+        let mut settings = production_settings();
+        settings.backend_capabilities.clear();
+        settings.worker_capabilities = vec!["staging:casda_uws".into()];
+
+        let issues = collect_security_issues(&settings);
+        assert!(issues.iter().any(|issue| issue.contains("CASDA_USERNAME")));
     }
 }

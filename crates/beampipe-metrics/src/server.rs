@@ -17,12 +17,16 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-pub async fn refresh_gauges_from_pool(pool: &PgPool) {
-    crate::refresh::refresh_gauges_from_pool(pool).await;
+pub async fn refresh_gauges_from_pool(pool: &PgPool, tap_health_ttl: std::time::Duration) {
+    crate::refresh::refresh_gauges_from_pool(pool, tap_health_ttl).await;
 }
 
 /// Spawn a minimal HTTP server exposing GET /metrics and GET /health.
-pub fn spawn_metrics_server(bind_addr: SocketAddr, pool: Option<PgPool>) -> JoinHandle<()> {
+pub fn spawn_metrics_server(
+    bind_addr: SocketAddr,
+    pool: Option<PgPool>,
+    tap_health_ttl: std::time::Duration,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let app = Router::new()
             .route("/metrics", get(metrics_handler))
@@ -41,7 +45,7 @@ pub fn spawn_metrics_server(bind_addr: SocketAddr, pool: Option<PgPool>) -> Join
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
                 loop {
                     interval.tick().await;
-                    refresh_gauges_from_pool(&refresh_pool).await;
+                    refresh_gauges_from_pool(&refresh_pool, tap_health_ttl).await;
                 }
             });
         }

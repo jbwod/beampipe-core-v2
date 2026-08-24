@@ -11,7 +11,8 @@ pub mod votable;
 pub use casda_datalink::parse_casda_datalink;
 pub use casda_staging::{extract_scan_id, parse_eval_job_results, parse_job_results};
 pub use tap_health::{
-    all_reachable, probe_tap_health, unreachable_adapters, TapEndpointStatus, TapHealthReport,
+    all_reachable, probe_tap_health, unreachable_adapters, TapEndpointProbe, TapEndpointStatus,
+    TapHealthCache, TapHealthReport,
 };
 pub use votable::parse_votable_xml;
 
@@ -275,6 +276,26 @@ impl TapClient for HttpTapAdapter {
             TapMode::AsyncJob => unreachable!("handled above"),
         }
     }
+
+    async fn health(&self) -> Result<(), AdapterError> {
+        let probe = if self.mode == TapMode::AsyncJob {
+            let trimmed = self.base_url.trim_end_matches('/');
+            let root = trimmed.strip_suffix("/async").unwrap_or(trimmed);
+            let mut probe = self.clone();
+            probe.base_url = format!("{root}/sync");
+            probe.mode = TapMode::SyncPost;
+            probe
+        } else {
+            self.clone()
+        };
+        let rows = probe
+            .query_rows("SELECT TOP 1 table_name FROM TAP_SCHEMA.tables")
+            .await?;
+        if rows.is_empty() {
+            return Err(AdapterError::EmptyResult);
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -329,41 +350,6 @@ impl TapClient for MockTapClient {
     }
 }
 
-pub fn normalize_casda_tap_url(base_url: impl Into<String>) -> String {
-    let url = base_url.into();
-    let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/tap/sync") {
-        url
-    } else if trimmed.ends_with("/tap") {
-        format!("{trimmed}/sync")
-    } else {
-        url
-    }
-}
-
-pub fn casda_tap(base_url: impl Into<String>) -> HttpTapAdapter {
-    HttpTapAdapter::new(normalize_casda_tap_url(base_url))
-}
-
-pub fn normalize_vizier_tap_url(base_url: impl Into<String>) -> String {
-    let mut url = base_url.into();
-    if url.starts_with("http://") {
-        url = url.replacen("http://", "https://", 1);
-    }
-    let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/sync") {
-        trimmed.to_string()
-    } else if trimmed.ends_with("/tap") {
-        format!("{trimmed}/sync")
-    } else {
-        trimmed.to_string()
-    }
-}
-
-pub fn vizier_tap(base_url: impl Into<String>) -> HttpTapAdapter {
-    HttpTapAdapter::new(normalize_vizier_tap_url(base_url)).with_mode(TapMode::SyncPost)
-}
-
 pub fn rows_from_json(value: Value) -> Result<Vec<TapRow>, AdapterError> {
     match value {
         Value::Array(items) => items
@@ -397,26 +383,6 @@ pub fn rows_from_json(value: Value) -> Result<Vec<TapRow>, AdapterError> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn vizier_tap_url_uses_sync_post_endpoint() {
-        assert_eq!(
-            normalize_vizier_tap_url("http://tapvizier.cds.unistra.fr/TAPVizieR/tap"),
-            "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync"
-        );
-    }
-
-    #[test]
-    fn casda_tap_url_uses_sync_endpoint() {
-        assert_eq!(
-            normalize_casda_tap_url("https://casda.csiro.au/casda_vo_tools/tap"),
-            "https://casda.csiro.au/casda_vo_tools/tap/sync"
-        );
-        assert_eq!(
-            normalize_casda_tap_url("https://casda.csiro.au/casda_vo_tools/tap/sync"),
-            "https://casda.csiro.au/casda_vo_tools/tap/sync"
-        );
-    }
 
     #[test]
     fn tap_query_params_include_adql() {

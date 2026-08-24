@@ -18,9 +18,9 @@ use crate::{
     materialize, runtime,
 };
 
-const DEFAULT_CASDA_TAP_URL: &str = "https://casda.csiro.au/casda_vo_tools/tap/sync";
-const DEFAULT_VIZIER_TAP_URL: &str = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync";
-const WALLABY_BACKEND_CAPABILITIES: &str = "staging:casda";
+const WALLABY_STAGING_CAPABILITY: &str = "staging:casda_uws";
+const DEFAULT_WORKER_CAPABILITIES: &str =
+    "discovery:tap,manifest:generic,translation:daliuge,verification:output_inventory";
 const DEFAULT_TM_URL: &str = "http://localhost:9000";
 const DEFAULT_WORKER_POOL: &str = "default";
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/beampipe";
@@ -45,7 +45,6 @@ pub struct SetupOptions {
     pub ssh_passphrase_file: Option<PathBuf>,
     pub ssh_acl: bool,
     pub accept_host_key: bool,
-    pub casda_tap_url: Option<String>,
     pub tm_url: Option<String>,
     pub worker_pool: Option<String>,
     pub skip_admin: bool,
@@ -224,7 +223,7 @@ fn env_override(flag: Option<&str>, env_key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-fn add_backend_capability(configured: &str, capability: &str) -> String {
+fn add_capability(configured: &str, capability: &str) -> String {
     let mut capabilities = configured
         .split(',')
         .map(str::trim)
@@ -460,33 +459,22 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         println!("Generated a random Grafana administrator password and stored it in .env.");
     }
 
-    let casda_tap_url = env_override(
-        opts.casda_tap_url.as_deref(),
-        "BEAMPIPE_CASDA_TAP_URL",
-        if opts.wallaby_sample {
-            DEFAULT_CASDA_TAP_URL
-        } else {
-            ""
-        },
-    );
-    let mut backend_capabilities = env_override(
-        None,
-        "BEAMPIPE_BACKEND_CAPABILITIES",
-        if opts.wallaby_sample {
-            WALLABY_BACKEND_CAPABILITIES
-        } else {
-            ""
-        },
-    );
-    let vizier_tap_url = env_override(
-        None,
-        "BEAMPIPE_VIZIER_TAP_URL",
-        if opts.wallaby_sample {
-            DEFAULT_VIZIER_TAP_URL
-        } else {
-            ""
-        },
-    );
+    let mut backend_capabilities = std::env::var("BEAMPIPE_BACKEND_CAPABILITIES")
+        .ok()
+        .or_else(|| env_file_value(&env_path, "BEAMPIPE_BACKEND_CAPABILITIES"))
+        .unwrap_or_default();
+    if opts.wallaby_sample {
+        backend_capabilities = add_capability(&backend_capabilities, WALLABY_STAGING_CAPABILITY);
+    }
+    let mut worker_capabilities = std::env::var("BEAMPIPE_WORKER_CAPABILITIES")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| env_file_value(&env_path, "BEAMPIPE_WORKER_CAPABILITIES"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_WORKER_CAPABILITIES.to_string());
+    if opts.wallaby_sample {
+        worker_capabilities = add_capability(&worker_capabilities, WALLABY_STAGING_CAPABILITY);
+    }
     let tm_url = env_override(opts.tm_url.as_deref(), "BEAMPIPE_TM_URL", DEFAULT_TM_URL);
     let worker_pool = env_override(
         opts.worker_pool.as_deref(),
@@ -523,13 +511,16 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         "BEAMPIPE_GRAFANA_ADMIN_PASSWORD",
         &grafana_admin_password,
     )?;
-    update_env_file(&env_path, "BEAMPIPE_CASDA_TAP_URL", &casda_tap_url)?;
     update_env_file(
         &env_path,
         "BEAMPIPE_BACKEND_CAPABILITIES",
         &backend_capabilities,
     )?;
-    update_env_file(&env_path, "BEAMPIPE_VIZIER_TAP_URL", &vizier_tap_url)?;
+    update_env_file(
+        &env_path,
+        "BEAMPIPE_WORKER_CAPABILITIES",
+        &worker_capabilities,
+    )?;
     update_env_file(&env_path, "BEAMPIPE_TM_URL", &tm_url)?;
     update_env_file(&env_path, "BEAMPIPE_WORKER_POOL", &worker_pool)?;
     update_env_file(&env_path, "BEAMPIPE_USE_REAL_BACKENDS", &use_real_backends)?;
@@ -568,9 +559,8 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     std::env::set_var("DATABASE_URL", &database_url);
     std::env::set_var("BEAMPIPE_JWT_SECRET", &jwt_secret);
     std::env::set_var("BEAMPIPE_GRAFANA_ADMIN_PASSWORD", &grafana_admin_password);
-    std::env::set_var("BEAMPIPE_CASDA_TAP_URL", &casda_tap_url);
     std::env::set_var("BEAMPIPE_BACKEND_CAPABILITIES", &backend_capabilities);
-    std::env::set_var("BEAMPIPE_VIZIER_TAP_URL", &vizier_tap_url);
+    std::env::set_var("BEAMPIPE_WORKER_CAPABILITIES", &worker_capabilities);
     std::env::set_var("BEAMPIPE_TM_URL", &tm_url);
     std::env::set_var("BEAMPIPE_WORKER_POOL", &worker_pool);
     std::env::set_var("BEAMPIPE_USE_REAL_BACKENDS", &use_real_backends);
@@ -651,18 +641,28 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             Some((path, profile)) => (Some(path), Some(profile)),
             None => (None, None),
         };
-    if prepared_profile
-        .as_ref()
-        .is_some_and(|profile| matches!(&profile.deployment, DeploymentConfig::SlurmRemote(_)))
+    if let Some(deployment_capability) =
+        prepared_profile
+            .as_ref()
+            .map(|profile| match &profile.deployment {
+                DeploymentConfig::SlurmRemote(_) => "deployment:slurm_remote",
+                DeploymentConfig::RestRemote(_) => "deployment:daliuge_rest",
+            })
     {
-        backend_capabilities =
-            add_backend_capability(&backend_capabilities, "deployment:slurm_remote");
+        backend_capabilities = add_capability(&backend_capabilities, deployment_capability);
+        worker_capabilities = add_capability(&worker_capabilities, deployment_capability);
         update_env_file(
             &env_path,
             "BEAMPIPE_BACKEND_CAPABILITIES",
             &backend_capabilities,
         )?;
+        update_env_file(
+            &env_path,
+            "BEAMPIPE_WORKER_CAPABILITIES",
+            &worker_capabilities,
+        )?;
         std::env::set_var("BEAMPIPE_BACKEND_CAPABILITIES", &backend_capabilities);
+        std::env::set_var("BEAMPIPE_WORKER_CAPABILITIES", &worker_capabilities);
     }
 
     let pool = match beampipe_db::connect(&database_url).await {
@@ -3179,17 +3179,30 @@ mod tests {
     }
 
     #[test]
-    fn backend_capabilities_are_added_without_duplicates() {
+    fn capabilities_are_added_without_duplicates() {
+        let defaults = DEFAULT_WORKER_CAPABILITIES.split(',').collect::<Vec<_>>();
         assert_eq!(
-            add_backend_capability("staging:casda", "deployment:slurm_remote"),
-            "staging:casda,deployment:slurm_remote"
+            defaults,
+            vec![
+                "discovery:tap",
+                "manifest:generic",
+                "translation:daliuge",
+                "verification:output_inventory"
+            ]
+        );
+        assert!(!defaults
+            .iter()
+            .any(|value| value.starts_with("deployment:")));
+        assert_eq!(
+            add_capability("staging:casda_uws", "deployment:slurm_remote"),
+            "staging:casda_uws,deployment:slurm_remote"
         );
         assert_eq!(
-            add_backend_capability(
-                "deployment:slurm_remote,staging:casda",
+            add_capability(
+                "deployment:slurm_remote,staging:casda_uws",
                 "deployment:slurm_remote"
             ),
-            "deployment:slurm_remote,staging:casda"
+            "deployment:slurm_remote,staging:casda_uws"
         );
     }
 

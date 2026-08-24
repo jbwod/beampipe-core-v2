@@ -656,7 +656,7 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, data: &ConsoleData) {
     );
     frame.render_widget(panel("Control plane", counts), columns[0]);
     let integrations = format!(
-        "CASDA discovery  configured sources={}\nTranslator       {}\nData Island Mgr  {}\nSLURM            {}\n\nWorker pools\n{}",
+        "Discovery       registered sources={}\nTranslator       {}\nData Island Mgr  {}\nScheduler        {}\n\nWorker pools\n{}",
         data.sources.len(),
         data.integrations.translator,
         data.integrations.manager,

@@ -1,19 +1,19 @@
 use beampipe_adapters::{all_reachable, TapEndpointStatus, TapHealthReport};
 use beampipe_domain::SkipReason;
+use std::collections::BTreeMap;
 
 #[test]
 fn tap_unreachable_maps_to_skip_reason() {
     let report = TapHealthReport {
-        casda: TapEndpointStatus {
-            configured: true,
-            reachable: false,
-        },
-        vizier: TapEndpointStatus {
-            configured: false,
-            reachable: true,
-        },
+        endpoints: BTreeMap::from([(
+            "catalog".into(),
+            TapEndpointStatus {
+                configured: true,
+                reachable: false,
+            },
+        )]),
     };
-    assert!(!all_reachable(&report, &["casda".into()]));
+    assert!(!all_reachable(&report, &["catalog".into()]));
     assert_eq!(SkipReason::TapUnreachable.as_str(), "tap_unreachable");
 }
 

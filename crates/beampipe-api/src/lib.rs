@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use beampipe_adapters::probe_tap_health;
+use beampipe_adapters::{TapEndpointProbe, TapEndpointStatus, TapHealthCache, TapMode};
 use beampipe_config::Settings;
 use beampipe_db::{models::*, repo};
 use beampipe_domain::{
@@ -33,8 +33,8 @@ use beampipe_orchestration::{
 };
 use beampipe_profiles::DeploymentProfile;
 use beampipe_project::{
-    output_inventory_media_type, DiagnosticSeverity, ProjectConfig, ValidationDiagnostic,
-    ValidationReport, WasmHost,
+    output_inventory_media_type, DiagnosticSeverity, ProjectConfig, TapEndpointMode,
+    ValidationDiagnostic, ValidationReport, WasmHost,
 };
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
@@ -46,7 +46,7 @@ use sqlx::PgPool;
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -65,6 +65,8 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub wasm_host: Arc<WasmHost>,
 }
+
+static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthCache::default);
 
 #[derive(OpenApi)]
 #[openapi(
@@ -94,7 +96,8 @@ pub struct AppState {
         observability::list_project_events
     ),
     components(schemas(
-        HealthResponse, ReadyResponse, LoginRequest, TokenResponse, CurrentUserResponse,
+        HealthResponse, ReadyResponse, TapHealthResponse, AdapterHealthResponse,
+        LoginRequest, TokenResponse, CurrentUserResponse,
         RefreshRequest, LogoutRequest,
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
         DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
@@ -163,7 +166,8 @@ pub struct AppState {
         observability::AlertRuleCreate, observability::AlertRuleUpdate,
         ProvenanceEventRow, NotificationChannelRow, AlertRuleRow, AlertDeliveryRow,
         ProvenanceSummary,
-        OperatorOverviewResponse, WorkerRead, WorkerRegisterRequest, WorkerHeartbeatResponse,
+        OperatorOverviewResponse, UnroutableJobResponse,
+        WorkerRead, WorkerRegisterRequest, WorkerHeartbeatResponse,
         WorkerLeaseRead, ExecutionRead, ExecutionDebugUrls, ExecutionStatusResponse,
         ExecutionSummaryResponse,
         SchedulerStatusResponse, SchedulerJobRead, DaliugeInspectResponse,
@@ -171,11 +175,11 @@ pub struct AppState {
         ExecutionArtifactRow, OperatorOverviewCounts, DiagnosticsResponse,
     )),
     tags(
-        (name = "health", description = "Liveness, readiness, and archive TAP connectivity probes."),
+        (name = "health", description = "Liveness, readiness, and configured project TAP connectivity probes."),
         (name = "auth", description = "OAuth2 password flow and token refresh."),
-        (name = "sources", description = "Source registry: register astronomical sources, trigger discovery, and read archive metadata."),
+        (name = "sources", description = "Source registry: register sources, trigger discovery, and read adapter metadata."),
         (name = "executions", description = "Batch execution ledger: create runs, enqueue staging/submit jobs, and inspect status."),
-        (name = "project-configs", description = "Registered project modules and versioned survey configuration."),
+        (name = "project-configs", description = "Registered project modules and versioned project configuration."),
         (name = "jobs", description = "Postgres-backed async jobs."),
         (name = "deployment-profiles", description = "DALiuGE deployment profiles (translation + REST/Slurm remote deployment configuration)."),
         (name = "slurm-credentials", description = "Read-only inventory of installed Slurm SSH credential slots (names and file presence, no key material)."),
@@ -398,6 +402,7 @@ pub async fn serve(settings: Settings, pool: PgPool, with_worker: bool) -> anyho
             drop(metrics::server::spawn_metrics_server(
                 addr,
                 Some(pool.clone()),
+                Duration::from_secs(settings.metrics_tap_health_refresh_seconds),
             ));
         }
     }
@@ -776,7 +781,11 @@ async fn metrics(
     if !state.settings.metrics_public {
         AuthUser::from_request_parts(&mut parts, &state).await?;
     }
-    metrics::refresh_gauges_from_pool(&state.pool).await;
+    metrics::refresh_gauges_from_pool(
+        &state.pool,
+        Duration::from_secs(state.settings.metrics_tap_health_refresh_seconds),
+    )
+    .await;
     let body = metrics::render_prometheus().unwrap_or_default();
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -794,8 +803,7 @@ pub struct ReadyResponse {
     pub service: String,
     pub database: String,
     pub redis: String,
-    pub tap_casda: String,
-    pub tap_vizier: String,
+    pub adapters: Vec<AdapterHealthResponse>,
     pub queue_depth: i64,
     pub jobs_running: i64,
 }
@@ -832,23 +840,15 @@ async fn ready(
     } else {
         "not_configured".into()
     };
-    let timeout = Duration::from_secs(state.settings.discovery_tap_health_timeout_seconds);
-    let tap_report = probe_tap_health(
-        state.settings.casda_tap_url.as_deref(),
-        state.settings.vizier_tap_url.as_deref(),
-        timeout,
-    )
-    .await;
-    let tap_casda = endpoint_status_label(&tap_report.casda);
-    let tap_vizier = endpoint_status_label(&tap_report.vizier);
-    metrics::set_dependency_up(
-        "casda",
-        tap_report.casda.reachable || !tap_report.casda.configured,
-    );
-    metrics::set_dependency_up(
-        "vizier",
-        tap_report.vizier.reachable || !tap_report.vizier.configured,
-    );
+    let adapters = active_project_adapter_health(&state).await?;
+    for adapter in &adapters {
+        metrics::set_project_adapter_up(
+            &adapter.project_module,
+            &adapter.adapter,
+            adapter.required,
+            adapter.status == "ok",
+        );
+    }
     let queue_depth = repo::runnable_queue_depth(&state.pool).await?;
     let jobs_running = repo::jobs_running_count(&state.pool).await?;
     metrics::set_jobs_queue_depth(queue_depth);
@@ -870,8 +870,7 @@ async fn ready(
             service: "beampipe-v2".into(),
             database,
             redis,
-            tap_casda,
-            tap_vizier,
+            adapters,
             queue_depth,
             jobs_running,
         }),
@@ -940,21 +939,38 @@ async fn diagnostics(
             .with_hint("run `beampipe security check` and correct the reported setting"),
         );
     }
-    let tap = probe_tap_health(
-        state.settings.casda_tap_url.as_deref(),
-        state.settings.vizier_tap_url.as_deref(),
-        Duration::from_secs(state.settings.discovery_tap_health_timeout_seconds),
-    )
-    .await;
-    for (name, endpoint) in [("casda", tap.casda), ("vizier", tap.vizier)] {
-        if endpoint.configured && !endpoint.reachable {
-            diagnostics.push(
+    if let Ok(adapters) = active_project_adapter_health(&state).await {
+        for adapter in adapters
+            .into_iter()
+            .filter(|adapter| adapter.status != "ok")
+        {
+            let diagnostic = if adapter.required {
                 beampipe_domain::Diagnostic::error(
-                    format!("adapters.{name}"),
-                    format!("{name}.unreachable"),
-                    format!("the configured {name} TAP endpoint is unreachable"),
+                    format!(
+                        "projects.{}.adapters.{}",
+                        adapter.project_module, adapter.adapter
+                    ),
+                    "adapter.unavailable",
+                    format!(
+                        "required TAP adapter '{}' for project '{}' is {}",
+                        adapter.adapter, adapter.project_module, adapter.status
+                    ),
                 )
-                .with_hint("check endpoint URL, network access, proxy, and credentials"),
+            } else {
+                beampipe_domain::Diagnostic::warning(
+                    format!(
+                        "projects.{}.adapters.{}",
+                        adapter.project_module, adapter.adapter
+                    ),
+                    "adapter.unavailable",
+                    format!(
+                        "optional TAP adapter '{}' for project '{}' is {}",
+                        adapter.adapter, adapter.project_module, adapter.status
+                    ),
+                )
+            };
+            diagnostics.push(
+                diagnostic.with_hint("check endpoint URL, network access, and proxy settings"),
             );
         }
     }
@@ -1091,9 +1107,34 @@ pub struct OperatorOverviewResponse {
     pub generated_at: chrono::DateTime<Utc>,
     #[serde(flatten)]
     pub counts: OperatorOverviewCounts,
-    pub casda: String,
+    pub adapters: Vec<AdapterHealthResponse>,
+    pub unroutable_job_count: i64,
+    pub unroutable_jobs: Vec<UnroutableJobResponse>,
     pub daliuge: String,
     pub scheduler: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UnroutableJobResponse {
+    pub job_id: Uuid,
+    pub kind: String,
+    pub pool: String,
+    pub required_capabilities: Vec<String>,
+    pub required_labels: Value,
+    pub queued_at: chrono::DateTime<Utc>,
+}
+
+impl From<JobRow> for UnroutableJobResponse {
+    fn from(job: JobRow) -> Self {
+        Self {
+            job_id: job.uuid,
+            kind: job.kind,
+            pool: job.pool,
+            required_capabilities: job.required_capabilities,
+            required_labels: job.required_labels,
+            queued_at: job.created_at,
+        }
+    }
 }
 
 #[utoipa::path(get, path = "/api/v2/overview", tag = "operators", responses((status = 200, body = OperatorOverviewResponse)))]
@@ -1102,16 +1143,25 @@ async fn operator_overview(
     AuthUser(_user): AuthUser,
 ) -> Result<Json<OperatorOverviewResponse>, ApiError> {
     let stale_after = (state.settings.worker_heartbeat_interval_seconds as i64 * 3).max(30);
-    let counts = repo::operator_overview_counts(&state.pool, stale_after).await?;
+    let (counts, adapters, unroutable_job_count, unroutable_jobs) = tokio::join!(
+        repo::operator_overview_counts(&state.pool, stale_after),
+        active_project_adapter_health(&state),
+        repo::count_unroutable_queued_jobs(&state.pool, stale_after),
+        repo::list_unroutable_queued_jobs(&state.pool, stale_after, 20),
+    );
+    let counts = counts?;
+    let adapters = adapters?;
+    let unroutable_job_count = unroutable_job_count?;
+    let unroutable_jobs = unroutable_jobs?
+        .into_iter()
+        .map(UnroutableJobResponse::from)
+        .collect();
     Ok(Json(OperatorOverviewResponse {
         generated_at: Utc::now(),
         counts,
-        casda: if state.settings.casda_tap_url.is_some() {
-            "configured"
-        } else {
-            "not_configured"
-        }
-        .into(),
+        adapters,
+        unroutable_job_count,
+        unroutable_jobs,
         daliuge: if state.settings.tm_url.is_some() || state.settings.dim_url.is_some() {
             "configured"
         } else {
@@ -1407,7 +1457,7 @@ pub struct WorkerLeaseRead {
     pub worker_id: Option<Uuid>,
     pub claim_id: Option<Uuid>,
     pub pool: String,
-    pub required_capability: Option<String>,
+    pub required_capabilities: Vec<String>,
     pub attempts: i32,
     pub lease_expires_at: Option<chrono::DateTime<Utc>>,
     pub heartbeat_at: Option<chrono::DateTime<Utc>>,
@@ -1429,7 +1479,7 @@ async fn list_worker_leases(
             worker_id: job.lease_owner,
             claim_id: job.lease_token,
             pool: job.pool,
-            required_capability: job.required_capability,
+            required_capabilities: job.required_capabilities,
             attempts: job.attempts,
             lease_expires_at: job.lease_expires_at,
             heartbeat_at: job.heartbeat_at,
@@ -1683,26 +1733,95 @@ async fn daliuge_sessions(
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TapHealthResponse {
-    pub casda: String,
-    pub vizier: String,
+    pub adapters: Vec<AdapterHealthResponse>,
 }
 
 #[utoipa::path(get, path = "/api/v2/health/tap", tag = "health")]
-async fn health_tap(State(state): State<Arc<AppState>>) -> Json<TapHealthResponse> {
-    let timeout = Duration::from_secs(state.settings.discovery_tap_health_timeout_seconds);
-    let report = probe_tap_health(
-        state.settings.casda_tap_url.as_deref(),
-        state.settings.vizier_tap_url.as_deref(),
-        timeout,
-    )
-    .await;
-    Json(TapHealthResponse {
-        casda: endpoint_status_label(&report.casda),
-        vizier: endpoint_status_label(&report.vizier),
-    })
+async fn health_tap(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TapHealthResponse>, ApiError> {
+    Ok(Json(TapHealthResponse {
+        adapters: active_project_adapter_health(&state).await?,
+    }))
 }
 
-fn endpoint_status_label(status: &beampipe_adapters::TapEndpointStatus) -> String {
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AdapterHealthResponse {
+    pub project_module: String,
+    pub adapter: String,
+    pub required: bool,
+    pub status: String,
+}
+
+async fn active_project_adapter_health(
+    state: &AppState,
+) -> Result<Vec<AdapterHealthResponse>, ApiError> {
+    let mut rows = repo::list_active_project_configs(&state.pool).await?;
+    rows.sort_by(|left, right| left.project_id.cmp(&right.project_id));
+    let timeout = Duration::from_secs(state.settings.discovery_tap_health_timeout_seconds);
+    let ttl = Duration::from_secs(state.settings.discovery_tap_health_cache_seconds);
+    let cache_key = rows
+        .iter()
+        .map(|row| format!("{}:{}:{}", row.project_id, row.version, row.spec_sha256))
+        .chain(std::iter::once(format!("timeout:{}", timeout.as_secs())))
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut targets = Vec::new();
+    let mut probes = BTreeMap::new();
+    for (project_index, row) in rows.into_iter().enumerate() {
+        let config = serde_json::from_value::<ProjectConfig>(row.spec)
+            .map_err(|_| ApiError::ServiceUnavailable)?;
+        let names: BTreeSet<String> = config
+            .adapters
+            .required
+            .iter()
+            .cloned()
+            .chain(config.adapters.endpoints.keys().cloned())
+            .collect();
+        for (adapter_index, name) in names.into_iter().enumerate() {
+            let probe_key = format!("{project_index}:{adapter_index}");
+            if let Some(endpoint) = config.adapters.endpoints.get(&name) {
+                probes.insert(
+                    probe_key.clone(),
+                    TapEndpointProbe {
+                        url: endpoint.url.clone(),
+                        mode: tap_mode(endpoint.mode),
+                    },
+                );
+            }
+            targets.push((
+                probe_key,
+                row.project_id.clone(),
+                name.clone(),
+                config.adapters.required.iter().any(|value| value == &name),
+            ));
+        }
+    }
+    let report = API_TAP_HEALTH_CACHE
+        .get_or_probe(&cache_key, &probes, timeout, ttl)
+        .await;
+    Ok(targets
+        .into_iter()
+        .map(
+            |(probe_key, project_module, adapter, required)| AdapterHealthResponse {
+                project_module,
+                adapter,
+                required,
+                status: endpoint_status_label(&report.endpoint(&probe_key)),
+            },
+        )
+        .collect())
+}
+
+fn tap_mode(mode: TapEndpointMode) -> TapMode {
+    match mode {
+        TapEndpointMode::SyncGet => TapMode::SyncGet,
+        TapEndpointMode::SyncPost => TapMode::SyncPost,
+        TapEndpointMode::AsyncJob => TapMode::AsyncJob,
+    }
+}
+
+fn endpoint_status_label(status: &TapEndpointStatus) -> String {
     if !status.configured {
         "not_configured".into()
     } else if status.reachable {
@@ -3860,6 +3979,9 @@ async fn execute_execution(
         "do_submit": req.do_submit,
     });
     let payload = metrics::payload_with_trace(payload, &tc);
+    let required_capabilities =
+        repo::execution_required_capabilities(&state.pool, &execution, req.do_stage, req.do_submit)
+            .await?;
     let job = repo::enqueue_job_with_options(
         &state.pool,
         "execute",
@@ -3867,7 +3989,7 @@ async fn execute_execution(
         repo::JobEnqueueOptions {
             execution_id: Some(id),
             idempotency_key: Some(idempotency_key.clone()),
-            required_capability: Some(repo::execution_required_capability(&execution).to_string()),
+            required_capabilities,
             ..Default::default()
         },
     )

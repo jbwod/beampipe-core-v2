@@ -138,8 +138,6 @@ enum CliCommand {
         #[arg(long, requires = "ssh_private_key")]
         accept_host_key: bool,
         #[arg(long)]
-        casda_tap_url: Option<String>,
-        #[arg(long)]
         tm_url: Option<String>,
         #[arg(long)]
         worker_pool: Option<String>,
@@ -872,7 +870,6 @@ async fn main() -> anyhow::Result<()> {
             ssh_passphrase_file,
             ssh_acl,
             accept_host_key,
-            casda_tap_url,
             tm_url,
             worker_pool,
             use_real_backends,
@@ -915,7 +912,6 @@ async fn main() -> anyhow::Result<()> {
                     ssh_passphrase_file,
                     ssh_acl,
                     accept_host_key,
-                    casda_tap_url,
                     tm_url,
                     worker_pool,
                     skip_admin,

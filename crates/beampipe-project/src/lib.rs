@@ -17,6 +17,7 @@ pub const BEAMPIPE_OUTPUT_INVENTORY_SCHEMA: &str = "beampipe-output-inventory/v1
 /// Media type for the project-neutral output inventory.
 pub const BEAMPIPE_OUTPUT_INVENTORY_MEDIA_TYPE: &str =
     "application/vnd.beampipe.output-inventory+json";
+const MAX_TAP_ENDPOINTS: usize = 64;
 
 pub fn output_inventory_media_type(schema: &str) -> Option<&'static str> {
     match schema {
@@ -285,10 +286,6 @@ pub struct ProjectMetadata {
 pub struct AdapterConfig {
     #[serde(default)]
     pub required: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub casda_tap_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vizier_tap_url: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub endpoints: BTreeMap<String, TapEndpointConfig>,
     #[serde(default)]
@@ -785,6 +782,12 @@ impl ProjectConfig {
                     "required",
                     "adapter identifiers must be non-empty",
                 ));
+            } else if !self.adapters.endpoints.contains_key(adapter) {
+                errors.push(ValidationDiagnostic::error(
+                    format!("adapters.required[{index}]"),
+                    "endpoint_not_configured",
+                    format!("required adapter '{adapter}' must have an adapters.endpoints entry"),
+                ));
             }
         }
         for (name, endpoint) in &self.adapters.endpoints {
@@ -802,6 +805,13 @@ impl ProjectConfig {
                     "adapter endpoint URLs must be non-empty",
                 ));
             }
+        }
+        if self.adapters.endpoints.len() > MAX_TAP_ENDPOINTS {
+            errors.push(ValidationDiagnostic::error(
+                "adapters.endpoints",
+                "too_many_endpoints",
+                format!("adapters.endpoints must contain at most {MAX_TAP_ENDPOINTS} entries"),
+            ));
         }
         if self.adapters.tap.timeout_seconds == 0 {
             errors.push(ValidationDiagnostic::error(
@@ -1018,6 +1028,18 @@ impl ProjectConfig {
                             format!("discovery {collection} {field} must be non-empty"),
                         ));
                     }
+                }
+                if !query.adapter.trim().is_empty()
+                    && !self.adapters.endpoints.contains_key(&query.adapter)
+                {
+                    errors.push(ValidationDiagnostic::error(
+                        format!("discovery.{collection}[{index}].adapter"),
+                        "endpoint_not_configured",
+                        format!(
+                            "discovery adapter '{}' must have an adapters.endpoints entry",
+                            query.adapter
+                        ),
+                    ));
                 }
                 if collection == "enrichments" && query.for_each.is_none() {
                     errors.push(ValidationDiagnostic::error(
@@ -1430,6 +1452,62 @@ discovery:
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         assert!(config.validate_report().valid);
+    }
+
+    #[test]
+    fn required_adapter_must_have_an_endpoint() {
+        let mut config = ProjectConfig::default();
+        config.metadata.id = "missing-endpoint".into();
+        config.adapters.required = vec!["archive".into()];
+
+        let report = config.validate_report();
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "adapters.required[0]"
+                && diagnostic.code == "endpoint_not_configured"
+        }));
+    }
+
+    #[test]
+    fn optional_query_adapter_needs_an_endpoint_but_need_not_be_required() {
+        let mut config = ProjectConfig::default();
+        config.metadata.id = "optional-adapter".into();
+        config.adapters.required = vec!["archive".into()];
+        config.adapters.endpoints.insert(
+            "archive".into(),
+            TapEndpointConfig {
+                url: "https://archive.example.test/tap/sync".into(),
+                mode: TapEndpointMode::SyncPost,
+            },
+        );
+        config.adapters.endpoints.insert(
+            "catalog".into(),
+            TapEndpointConfig {
+                url: "https://catalog.example.test/tap/sync".into(),
+                mode: TapEndpointMode::SyncPost,
+            },
+        );
+        config.discovery.queries.push(DiscoveryQuery {
+            name: "catalog".into(),
+            adapter: "catalog".into(),
+            template: "SELECT 1".into(),
+            source_id_transform: None,
+            for_each: None,
+            result: QueryResultPolicy::Many,
+            required: false,
+        });
+
+        let report = config.validate_report();
+        assert!(!report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "discovery.queries[0].adapter"
+                || diagnostic.code == "adapter_not_required"
+        }));
+
+        config.adapters.endpoints.remove("catalog");
+        let report = config.validate_report();
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "discovery.queries[0].adapter"
+                && diagnostic.code == "endpoint_not_configured"
+        }));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::{
     installation::{advertised_api_port, InstallationContext},
     runtime,
 };
-use beampipe_adapters::probe_tap_health;
+use beampipe_adapters::{probe_tap_health, TapEndpointProbe, TapHealthReport, TapMode};
 use beampipe_config::Settings;
 use beampipe_db::{models::DeploymentProfileRow, repo};
 use beampipe_orchestration::{
@@ -11,9 +11,11 @@ use beampipe_orchestration::{
     SshSlurmClient,
 };
 use beampipe_profiles::{DeploymentConfig, DeploymentProfile};
+use beampipe_project::{ProjectConfig, TapEndpointMode};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::PgPool;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
@@ -400,7 +402,7 @@ pub async fn run_doctor(
     });
 
     check_redis(settings, &mut checks).await;
-    check_tap(settings, &mut checks).await;
+    check_tap(pool, settings, &mut checks).await;
     check_queue_and_workers(pool, settings, &mut checks).await;
     check_projects(pool, settings, &mut checks).await;
 
@@ -473,44 +475,95 @@ async fn check_redis(settings: &Settings, checks: &mut Vec<DoctorCheck>) {
     });
 }
 
-async fn check_tap(settings: &Settings, checks: &mut Vec<DoctorCheck>) {
+async fn check_tap(pool: &PgPool, settings: &Settings, checks: &mut Vec<DoctorCheck>) {
     let timeout = Duration::from_secs(settings.discovery_tap_health_timeout_seconds);
-    let tap = probe_tap_health(
-        settings.casda_tap_url.as_deref(),
-        settings.vizier_tap_url.as_deref(),
-        timeout,
-    )
-    .await;
-    let mut configured = 0;
-    for (name, endpoint) in [("casda", tap.casda), ("vizier", tap.vizier)] {
-        if !endpoint.configured {
-            continue;
-        }
-        configured += 1;
-        if endpoint.reachable {
-            checks.push(success(
-                &format!("tap.{name}_reachable"),
-                "archive_adapter",
-                format!("configured TAP endpoint '{name}' is reachable"),
-            ));
-        } else {
+    let rows = match repo::list_active_project_configs(pool).await {
+        Ok(rows) => rows,
+        Err(error) => {
             checks.push(failure(
-                &format!("tap.{name}_unreachable"),
+                "tap.projects_unreadable",
                 "archive_adapter",
-                settings.use_real_backends,
-                format!("configured TAP endpoint '{name}' health probe failed"),
-                "verify this adapter's URL, credentials, VPN, and network path",
+                true,
+                bounded(&error.to_string()),
+                "verify PostgreSQL and active project configuration records",
             ));
+            return;
         }
-    }
-    if configured == 0 {
-        checks.push(warning(
-            "tap.none_configured",
-            "archive_adapter",
-            "no archive TAP endpoint is configured",
-            "configure only the archive endpoints required by installed projects",
+    };
+    for row in rows {
+        let Ok(config) = serde_json::from_value::<ProjectConfig>(row.spec) else {
+            continue;
+        };
+        let probes: BTreeMap<String, TapEndpointProbe> = config
+            .adapters
+            .endpoints
+            .iter()
+            .map(|(name, endpoint)| {
+                let mode = match endpoint.mode {
+                    TapEndpointMode::SyncGet => TapMode::SyncGet,
+                    TapEndpointMode::SyncPost => TapMode::SyncPost,
+                    TapEndpointMode::AsyncJob => TapMode::AsyncJob,
+                };
+                (
+                    name.clone(),
+                    TapEndpointProbe {
+                        url: endpoint.url.clone(),
+                        mode,
+                    },
+                )
+            })
+            .collect();
+        let report = probe_tap_health(&probes, timeout).await;
+        checks.extend(tap_checks_for_report(
+            &row.project_id,
+            &config,
+            &report,
+            settings.use_real_backends,
         ));
     }
+}
+
+fn tap_checks_for_report(
+    project_module: &str,
+    config: &ProjectConfig,
+    report: &TapHealthReport,
+    real_backends: bool,
+) -> Vec<DoctorCheck> {
+    let names: BTreeSet<String> = config
+        .adapters
+        .required
+        .iter()
+        .cloned()
+        .chain(config.adapters.endpoints.keys().cloned())
+        .collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let endpoint = report.endpoint(&name);
+            let required = config.adapters.required.iter().any(|value| value == &name);
+            let code_name = name.replace(|character: char| !character.is_ascii_alphanumeric(), "_");
+            if endpoint.configured && endpoint.reachable {
+                success(
+                    &format!("tap.{project_module}.{code_name}.reachable"),
+                    "archive_adapter",
+                    format!("TAP adapter '{name}' for project '{project_module}' is reachable"),
+                )
+            } else {
+                let state = if endpoint.configured {
+                    "health probe failed"
+                } else {
+                    "is not configured"
+                };
+                failure(
+                    &format!("tap.{project_module}.{code_name}.unavailable"),
+                    "archive_adapter",
+                    real_backends && required,
+                    format!("TAP adapter '{name}' for project '{project_module}' {state}"),
+                    "verify the project endpoint URL, mode, VPN, and network path",
+                )
+            }
+        })
+        .collect()
 }
 
 async fn check_queue_and_workers(
@@ -615,6 +668,48 @@ async fn check_queue_and_workers(
             "ensure an eligible worker is active so it can recover expired claims",
         )
     });
+
+    match repo::count_unroutable_queued_jobs(pool, stale_after).await {
+        Ok(0) => checks.push(success(
+            "queue.routing",
+            "job_queue",
+            "every runnable job has an eligible live worker",
+        )),
+        Ok(count) => {
+            let sample = repo::list_unroutable_queued_jobs(pool, stale_after, 20)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|job| {
+                    format!(
+                        "{} kind={} pool={} capabilities=[{}] labels={}",
+                        job.uuid,
+                        job.kind,
+                        job.pool,
+                        job.required_capabilities.join(","),
+                        job.required_labels
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            checks.push(failure(
+                "queue.unroutable",
+                "job_queue",
+                true,
+                bounded(&format!(
+                    "{count} runnable jobs have no eligible worker; sample: {sample}"
+                )),
+                "start or reconfigure a live worker whose pool, capabilities, and labels satisfy each job contract",
+            ));
+        }
+        Err(error) => checks.push(failure(
+            "queue.routing_unreadable",
+            "job_queue",
+            true,
+            bounded(&error.to_string()),
+            "verify PostgreSQL and apply the current job-routing migration",
+        )),
+    }
 }
 
 async fn check_projects(pool: &PgPool, settings: &Settings, checks: &mut Vec<DoctorCheck>) {
@@ -1027,4 +1122,56 @@ pub async fn run_status(pool: &PgPool) -> serde_json::Value {
         "workflow_pending_by_module": pending,
         "worker_pools": workers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beampipe_adapters::TapEndpointStatus;
+    use beampipe_project::TapEndpointConfig;
+
+    #[test]
+    fn tap_doctor_only_gates_required_project_adapters() {
+        let mut config = ProjectConfig::default();
+        config.adapters.required = vec!["archive".into()];
+        for name in ["archive", "catalog"] {
+            config.adapters.endpoints.insert(
+                name.into(),
+                TapEndpointConfig {
+                    url: format!("https://{name}.example.test/tap/sync"),
+                    mode: TapEndpointMode::SyncPost,
+                },
+            );
+        }
+        let report = TapHealthReport {
+            endpoints: BTreeMap::from([
+                (
+                    "archive".into(),
+                    TapEndpointStatus {
+                        configured: true,
+                        reachable: false,
+                    },
+                ),
+                (
+                    "catalog".into(),
+                    TapEndpointStatus {
+                        configured: true,
+                        reachable: false,
+                    },
+                ),
+            ]),
+        };
+
+        let checks = tap_checks_for_report("project", &config, &report, true);
+        let archive = checks
+            .iter()
+            .find(|check| check.code.contains("archive"))
+            .unwrap();
+        let catalog = checks
+            .iter()
+            .find(|check| check.code.contains("catalog"))
+            .unwrap();
+        assert!(archive.required);
+        assert!(!catalog.required);
+    }
 }

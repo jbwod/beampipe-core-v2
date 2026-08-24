@@ -38,6 +38,13 @@ adapters:
   required:
     - casda
     - vizier
+  endpoints:
+    casda:
+      url: https://casda.csiro.au/casda_vo_tools/tap/sync
+      mode: sync_get
+    vizier:
+      url: https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync
+      mode: sync_post
   tap:
     timeout_seconds: 90
     retries: 2
