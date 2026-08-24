@@ -124,7 +124,8 @@ enum CliCommand {
     ///
     /// Guided mode requires a terminal, explains each choice, shows the complete plan,
     /// and asks for confirmation before configuring the environment. Use `--yes` for
-    /// unattended setup; it never prompts and requires an explicit runtime.
+    /// unattended setup; it never prompts and requires an explicit runtime. Docker Core
+    /// can start automatically; host mode prints the foreground `beampipe start` command.
     #[command(after_long_help = SETUP_AFTER_LONG_HELP)]
     Setup {
         #[command(subcommand)]
@@ -170,7 +171,7 @@ enum CliCommand {
         /// Compatibility alias for --runtime host.
         #[arg(long, help_heading = "Runtime and database")]
         skip_docker: bool,
-        /// Start the selected database and runtime after setup (true by default).
+        /// Start managed PostgreSQL and Docker Core; host mode prints its foreground start command.
         #[arg(
             long,
             default_value_t = true,
@@ -1225,6 +1226,9 @@ async fn main() -> anyhow::Result<()> {
                     acl,
                     force,
                     accept_host_key,
+                    non_interactive: !std::io::IsTerminal::is_terminal(
+                        &std::io::stdin(),
+                    ),
                 })?;
                 slurm_credentials::print_init_next_steps(&result);
             }
@@ -1533,6 +1537,7 @@ mod cli_help_tests {
             "GUIDED SETUP",
             "AUTOMATIC SETUP",
             "CONFIGURE WITHOUT STARTING",
+            "host mode prints the foreground",
             "--admin-password-file",
             "--ssh-passphrase-file",
             "--no-start",

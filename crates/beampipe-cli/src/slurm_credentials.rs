@@ -66,6 +66,46 @@ pub struct ImportOptions {
     pub acl: bool,
     pub force: bool,
     pub accept_host_key: bool,
+    /// Refuse prompts and implicit host-key discovery unless it was explicitly accepted.
+    pub non_interactive: bool,
+}
+
+trait HostKeyOperations {
+    fn confirm(&mut self, prompt: &str, default_yes: bool) -> Result<bool>;
+    fn keyscan(&mut self, host: &str, port: u16) -> Result<String>;
+    fn print_fingerprints(&mut self, known_hosts: &str) -> Result<()>;
+}
+
+struct SystemHostKeyOperations;
+
+impl HostKeyOperations for SystemHostKeyOperations {
+    fn confirm(&mut self, prompt: &str, default_yes: bool) -> Result<bool> {
+        prompt_yes_no(prompt, default_yes)
+    }
+
+    fn keyscan(&mut self, host: &str, port: u16) -> Result<String> {
+        let port = port.to_string();
+        let output = Command::new("ssh-keyscan")
+            .args(["-p", port.as_str(), "-t", "ed25519", "-T", "8", host])
+            .output()
+            .context("run ssh-keyscan (install OpenSSH client)")?;
+        if !output.status.success() || output.stdout.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("ssh-keyscan failed for {host}: {stderr}");
+        }
+        String::from_utf8(output.stdout).context("ssh-keyscan stdout")
+    }
+
+    fn print_fingerprints(&mut self, known_hosts: &str) -> Result<()> {
+        print_host_key_fingerprints(known_hosts)
+    }
+}
+
+enum KnownHostsMaterial {
+    Existing,
+    ReviewedFile(PathBuf),
+    Scanned(String),
+    Skip,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +194,13 @@ fn validate_slot(slot: &str) -> Result<()> {
 }
 
 pub fn init(opts: InitOptions) -> Result<InitResult> {
+    init_with_host_key_operations(opts, &mut SystemHostKeyOperations)
+}
+
+fn init_with_host_key_operations(
+    opts: InitOptions,
+    host_keys: &mut impl HostKeyOperations,
+) -> Result<InitResult> {
     validate_slot(&opts.slot)?;
     if !opts.skip_keyscan && opts.host.trim().is_empty() {
         bail!("--host is required unless --skip-keyscan");
@@ -168,10 +215,6 @@ pub fn init(opts: InitOptions) -> Result<InitResult> {
 
     let root = resolve_root(opts.dir.as_deref());
     let slot_dir = root.join(&opts.slot);
-    fs::create_dir_all(&slot_dir).with_context(|| format!("create {}", slot_dir.display()))?;
-    set_dir_mode(&root, 0o700)?;
-    set_dir_mode(&slot_dir, 0o700)?;
-
     let private_key = slot_dir.join("private_key");
     let public_key = slot_dir.join("private_key.pub");
     let passphrase_path = slot_dir.join("passphrase");
@@ -183,6 +226,22 @@ pub fn init(opts: InitOptions) -> Result<InitResult> {
     }
 
     let passphrase = resolve_passphrase_input(&opts)?;
+    let known_hosts_material = if opts.skip_keyscan {
+        KnownHostsMaterial::Skip
+    } else {
+        KnownHostsMaterial::Scanned(scan_known_hosts(
+            &opts.host,
+            opts.port,
+            opts.yes,
+            opts.accept_host_key,
+            host_keys,
+        )?)
+    };
+
+    fs::create_dir_all(&slot_dir).with_context(|| format!("create {}", slot_dir.display()))?;
+    set_dir_mode(&root, 0o700)?;
+    set_dir_mode(&slot_dir, 0o700)?;
+
     generate_ed25519_key(
         &private_key,
         passphrase.as_deref().map(String::as_str),
@@ -201,16 +260,15 @@ pub fn init(opts: InitOptions) -> Result<InitResult> {
     };
 
     let known_hosts = root.join("known_hosts");
-    if !opts.skip_keyscan {
-        acquire_known_hosts(
-            &known_hosts,
-            &opts.host,
-            opts.port,
-            opts.yes,
-            opts.accept_host_key,
-        )?;
-    } else if !known_hosts.exists() {
-        fs::write(&known_hosts, "").with_context(|| format!("write {}", known_hosts.display()))?;
+    match known_hosts_material {
+        KnownHostsMaterial::Scanned(scanned) => merge_known_hosts(&known_hosts, &scanned)?,
+        KnownHostsMaterial::Skip if !known_hosts.exists() => {
+            atomic_write(&known_hosts, b"", 0o600)?;
+        }
+        KnownHostsMaterial::Skip => {}
+        KnownHostsMaterial::Existing | KnownHostsMaterial::ReviewedFile(_) => {
+            unreachable!("init only scans or explicitly skips host-key discovery")
+        }
     }
 
     if opts.acl {
@@ -239,14 +297,17 @@ pub fn init(opts: InitOptions) -> Result<InitResult> {
 }
 
 pub fn import(opts: ImportOptions) -> Result<InitResult> {
+    import_with_host_key_operations(opts, &mut SystemHostKeyOperations)
+}
+
+fn import_with_host_key_operations(
+    opts: ImportOptions,
+    host_keys: &mut impl HostKeyOperations,
+) -> Result<InitResult> {
     validate_slot(&opts.slot)?;
     validate_import_source(&opts.private_key, "private key")?;
     let root = resolve_root(opts.dir.as_deref());
     let slot_dir = root.join(&opts.slot);
-    fs::create_dir_all(&slot_dir).with_context(|| format!("create {}", slot_dir.display()))?;
-    set_dir_mode(&root, 0o700)?;
-    set_dir_mode(&slot_dir, 0o700)?;
-
     let private_key = slot_dir.join("private_key");
     let public_key = slot_dir.join("private_key.pub");
     let slot_known_hosts = slot_dir.join("known_hosts");
@@ -256,36 +317,58 @@ pub fn import(opts: ImportOptions) -> Result<InitResult> {
             private_key.display()
         );
     }
-    atomic_copy(&opts.private_key, &private_key, 0o600)?;
 
     let inferred_public = inferred_public_key(&opts.private_key);
     let public_source = opts
         .public_key
+        .clone()
         .or_else(|| inferred_public.is_file().then_some(inferred_public));
-    if let Some(source) = public_source {
-        validate_import_source(&source, "public key")?;
-        atomic_copy(&source, &public_key, 0o644)?;
+    if let Some(source) = public_source.as_deref() {
+        validate_import_source(source, "public key")?;
     }
 
-    if let Some(source) = opts.known_hosts {
-        validate_import_source(&source, "known_hosts")?;
-        atomic_copy(&source, &slot_known_hosts, 0o600)?;
+    let known_hosts_material = if let Some(source) = opts.known_hosts.as_deref() {
+        validate_import_source(source, "known_hosts")?;
+        KnownHostsMaterial::ReviewedFile(source.to_path_buf())
     } else if let Some(host) = opts.host.as_deref() {
-        acquire_known_hosts(
-            &slot_known_hosts,
+        KnownHostsMaterial::Scanned(scan_known_hosts(
             host,
             opts.port,
-            false,
+            opts.non_interactive,
             opts.accept_host_key,
-        )?;
-    } else if !slot_known_hosts.is_file() && !root.join("known_hosts").is_file() {
+            host_keys,
+        )?)
+    } else if slot_known_hosts.is_file() || root.join("known_hosts").is_file() {
+        KnownHostsMaterial::Existing
+    } else {
         bail!("known_hosts is required: pass --known-hosts or --host with --accept-host-key");
-    }
+    };
 
     let passphrase_path = slot_dir.join("passphrase");
-    if let Some(source) = opts.passphrase_file {
-        validate_import_source(&source, "passphrase")?;
-        atomic_copy(&source, &passphrase_path, 0o600)?;
+    if let Some(source) = opts.passphrase_file.as_deref() {
+        validate_import_source(source, "passphrase")?;
+    }
+
+    fs::create_dir_all(&slot_dir).with_context(|| format!("create {}", slot_dir.display()))?;
+    set_dir_mode(&root, 0o700)?;
+    set_dir_mode(&slot_dir, 0o700)?;
+
+    atomic_copy(&opts.private_key, &private_key, 0o600)?;
+    if let Some(source) = public_source.as_deref() {
+        atomic_copy(source, &public_key, 0o644)?;
+    }
+    match known_hosts_material {
+        KnownHostsMaterial::ReviewedFile(source) => {
+            atomic_copy(&source, &slot_known_hosts, 0o600)?;
+        }
+        KnownHostsMaterial::Scanned(scanned) => {
+            merge_known_hosts(&slot_known_hosts, &scanned)?;
+        }
+        KnownHostsMaterial::Existing => {}
+        KnownHostsMaterial::Skip => unreachable!("import never creates empty known_hosts"),
+    }
+    if let Some(source) = opts.passphrase_file.as_deref() {
+        atomic_copy(source, &passphrase_path, 0o600)?;
     }
 
     if opts.acl {
@@ -690,32 +773,42 @@ fn generate_ed25519_key(path: &Path, passphrase: Option<&str>, force: bool) -> R
     Ok(())
 }
 
-fn acquire_known_hosts(
-    path: &Path,
+fn scan_known_hosts(
     host: &str,
     port: u16,
     non_interactive: bool,
     accept_host_key: bool,
-) -> Result<()> {
+    operations: &mut impl HostKeyOperations,
+) -> Result<String> {
+    if host.trim().is_empty() {
+        bail!("host-key discovery requires a non-empty host");
+    }
     if non_interactive && !accept_host_key {
         bail!(
-            "non-interactive ssh-keyscan requires --accept-host-key; importing a verified --known-hosts file is preferred"
+            "non-interactive host-key discovery requires a reviewed --known-hosts/--ssh-known-hosts file or explicit --accept-host-key; no credentials were written"
         );
     }
-    let port = port.to_string();
-    let output = Command::new("ssh-keyscan")
-        .args(["-p", port.as_str(), "-t", "ed25519", "-T", "8", host])
-        .output()
-        .context("run ssh-keyscan (install OpenSSH client)")?;
-    if !output.status.success() || output.stdout.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("ssh-keyscan failed for {host}: {stderr}");
+    if !accept_host_key {
+        let prompt = format!(
+            "Run ssh-keyscan against {host}:{port} to retrieve its SSH host key?"
+        );
+        if !operations.confirm(&prompt, false)? {
+            bail!("ssh-keyscan was not authorized; no credentials were written");
+        }
     }
-    let scanned = String::from_utf8(output.stdout).context("ssh-keyscan stdout")?;
-    print_host_key_fingerprints(&scanned)?;
-    if !accept_host_key && !prompt_yes_no("Trust these SSH host keys?", false)? {
+
+    let scanned = operations.keyscan(host, port)?;
+    if scanned.trim().is_empty() {
+        bail!("ssh-keyscan returned no SSH host keys for {host}");
+    }
+    operations.print_fingerprints(&scanned)?;
+    if !accept_host_key && !operations.confirm("Trust these SSH host keys?", false)? {
         bail!("SSH host key was not accepted");
     }
+    Ok(scanned)
+}
+
+fn merge_known_hosts(path: &Path, scanned: &str) -> Result<()> {
     let mut existing = if path.exists() {
         fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
     } else {
@@ -1034,6 +1127,47 @@ fn unix_mode(_path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct FakeHostKeyOperations {
+        confirmations: VecDeque<bool>,
+        prompts: Vec<String>,
+        keyscan_calls: usize,
+        fingerprint_calls: usize,
+    }
+
+    impl FakeHostKeyOperations {
+        fn declining() -> Self {
+            Self {
+                confirmations: VecDeque::from([false]),
+                ..Self::default()
+            }
+        }
+
+        fn external_command_calls(&self) -> usize {
+            self.keyscan_calls + self.fingerprint_calls
+        }
+    }
+
+    impl HostKeyOperations for FakeHostKeyOperations {
+        fn confirm(&mut self, prompt: &str, _default_yes: bool) -> Result<bool> {
+            self.prompts.push(prompt.to_string());
+            Ok(self.confirmations.pop_front().unwrap_or(false))
+        }
+
+        fn keyscan(&mut self, host: &str, _port: u16) -> Result<String> {
+            self.keyscan_calls += 1;
+            Ok(format!(
+                "{host} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeHostKeyForTestsOnly\n"
+            ))
+        }
+
+        fn print_fingerprints(&mut self, _known_hosts: &str) -> Result<()> {
+            self.fingerprint_calls += 1;
+            Ok(())
+        }
+    }
 
     fn temp_opts(dir: &Path, slot: &str) -> InitOptions {
         InitOptions {
@@ -1044,6 +1178,141 @@ mod tests {
             yes: true,
             ..InitOptions::default()
         }
+    }
+
+    fn import_opts(source: &Path, target: &Path) -> ImportOptions {
+        ImportOptions {
+            slot: "setonix".into(),
+            dir: Some(target.to_path_buf()),
+            private_key: source.to_path_buf(),
+            public_key: None,
+            known_hosts: None,
+            passphrase_file: None,
+            host: Some("setonix.example.org".into()),
+            port: 22,
+            acl: false,
+            force: false,
+            accept_host_key: false,
+            non_interactive: true,
+        }
+    }
+
+    #[test]
+    fn unattended_generation_without_host_consent_runs_nothing_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("managed");
+        let mut commands = FakeHostKeyOperations::default();
+        let error = init_with_host_key_operations(
+            InitOptions {
+                slot: "setonix".into(),
+                dir: Some(target.clone()),
+                host: "setonix.example.org".into(),
+                no_passphrase: true,
+                yes: true,
+                ..InitOptions::default()
+            },
+            &mut commands,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("reviewed --known-hosts/--ssh-known-hosts"));
+        assert_eq!(commands.external_command_calls(), 0);
+        assert!(commands.prompts.is_empty());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn interactive_generation_declining_keyscan_runs_nothing_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("managed");
+        let mut commands = FakeHostKeyOperations::declining();
+        let error = init_with_host_key_operations(
+            InitOptions {
+                slot: "setonix".into(),
+                dir: Some(target.clone()),
+                host: "setonix.example.org".into(),
+                no_passphrase: true,
+                ..InitOptions::default()
+            },
+            &mut commands,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("ssh-keyscan was not authorized"));
+        assert_eq!(commands.external_command_calls(), 0);
+        assert_eq!(commands.prompts.len(), 1);
+        assert!(commands.prompts[0].starts_with("Run ssh-keyscan"));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn unattended_import_without_host_consent_runs_nothing_and_copies_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source-key");
+        let target = dir.path().join("managed");
+        fs::write(&source, "private-key-for-test").unwrap();
+        let mut commands = FakeHostKeyOperations::default();
+
+        let error = import_with_host_key_operations(
+            import_opts(&source, &target),
+            &mut commands,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("reviewed --known-hosts/--ssh-known-hosts"));
+        assert_eq!(commands.external_command_calls(), 0);
+        assert!(commands.prompts.is_empty());
+        assert!(!target.join("setonix/private_key").exists());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn interactive_import_declining_keyscan_runs_nothing_and_copies_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source-key");
+        let target = dir.path().join("managed");
+        fs::write(&source, "private-key-for-test").unwrap();
+        let mut options = import_opts(&source, &target);
+        options.non_interactive = false;
+        let mut commands = FakeHostKeyOperations::declining();
+
+        let error = import_with_host_key_operations(options, &mut commands)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("ssh-keyscan was not authorized"));
+        assert_eq!(commands.external_command_calls(), 0);
+        assert_eq!(commands.prompts.len(), 1);
+        assert!(!target.join("setonix/private_key").exists());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn reviewed_known_hosts_import_is_offline_and_copies_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source-key");
+        let reviewed = dir.path().join("reviewed-known-hosts");
+        let target = dir.path().join("managed");
+        fs::write(&source, "private-key-for-test").unwrap();
+        fs::write(&reviewed, "setonix.example.org ssh-ed25519 reviewed\n").unwrap();
+        let mut options = import_opts(&source, &target);
+        options.known_hosts = Some(reviewed);
+        let mut commands = FakeHostKeyOperations::default();
+
+        let result = import_with_host_key_operations(options, &mut commands).unwrap();
+
+        assert_eq!(commands.external_command_calls(), 0);
+        assert!(commands.prompts.is_empty());
+        assert_eq!(
+            fs::read_to_string(result.private_key).unwrap(),
+            "private-key-for-test"
+        );
+        assert!(fs::read_to_string(result.known_hosts)
+            .unwrap()
+            .contains("reviewed"));
     }
 
     #[test]

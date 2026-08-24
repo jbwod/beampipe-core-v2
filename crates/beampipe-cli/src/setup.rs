@@ -2795,6 +2795,7 @@ fn prepare_deployment_profile(
                 acl: opts.ssh_acl || (runtime == RuntimeKind::Docker && cfg!(target_os = "linux")),
                 force: false,
                 accept_host_key: opts.accept_host_key,
+                non_interactive: opts.yes,
             })?;
         }
     }
@@ -2859,6 +2860,7 @@ fn configure_slurm_credential_interactive(
             acl,
             force: false,
             accept_host_key: false,
+            non_interactive: false,
         })?;
         crate::slurm_credentials::print_init_next_steps(&imported);
     } else {
@@ -3318,6 +3320,7 @@ fn standalone_slurm_credentials(opts: &SetupOptions, runtime: RuntimeKind) -> Re
             acl,
             force: false,
             accept_host_key: false,
+            non_interactive: false,
         })?;
         crate::slurm_credentials::print_init_next_steps(&imported);
     } else {

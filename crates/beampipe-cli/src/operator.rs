@@ -180,6 +180,9 @@ pub async fn run_profile_command(command: ProfileCommand) -> Result<()> {
                         acl: ssh_acl,
                         force,
                         accept_host_key,
+                        non_interactive: !std::io::IsTerminal::is_terminal(
+                            &std::io::stdin(),
+                        ),
                     })?;
                 println!(
                     "Imported SSH credential slot '{}' for profile '{}'.",
