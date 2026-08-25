@@ -1012,6 +1012,131 @@ async fn publisher_receipt_first_is_bound_idempotent_and_completed_by_later_poll
 }
 
 #[tokio::test]
+async fn replacement_publisher_credential_recovers_an_immutable_older_receipt() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("DATABASE_URL not set; skipping integration test");
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let module = format!("publisher_recovery_{}", &suffix[..12]);
+    let execution =
+        create_running_output_required_execution(&pool, &module, "source-1").await;
+    let first_id = Uuid::now_v7();
+    let first_hash = "8".repeat(64);
+    repo::issue_execution_publisher_credential(
+        &pool,
+        execution.uuid,
+        first_id,
+        &first_hash,
+        None,
+        "system:execute-worker",
+        Utc::now() + Duration::hours(1),
+        Some("publisher:recovery:first"),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_publisher_credentials SET created_at = now() - interval '20 minutes' WHERE uuid = $1",
+    )
+    .bind(first_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut artifact = publisher_inventory_artifact("replacement-recovery", '8');
+    artifact.inline_json.as_mut().unwrap()["publication"]["published_at"] =
+        json!(Utc::now() - Duration::minutes(10));
+    let (_, stored) = repo::verify_execution_outputs_with_publisher(
+        &pool,
+        execution.uuid,
+        artifact.clone(),
+        &format!("trusted-publisher:credential:{first_id}"),
+        Some("publisher:recovery:committed-response-lost"),
+        repo::PublisherCredentialUse {
+            credential_id: first_id,
+            token_hash: first_hash,
+        },
+    )
+    .await
+    .unwrap();
+    repo::revoke_execution_publisher_credentials(
+        &pool,
+        execution.uuid,
+        "publisher_response_recovery",
+    )
+    .await
+    .unwrap();
+
+    let replacement_id = Uuid::now_v7();
+    let replacement_hash = "9".repeat(64);
+    repo::issue_execution_publisher_credential(
+        &pool,
+        execution.uuid,
+        replacement_id,
+        &replacement_hash,
+        None,
+        "operator:recovery",
+        Utc::now() + Duration::hours(1),
+        Some("publisher:recovery:replacement"),
+    )
+    .await
+    .unwrap();
+    let (replayed, replayed_artifact) = repo::verify_execution_outputs_with_publisher(
+        &pool,
+        execution.uuid,
+        artifact,
+        &format!("trusted-publisher:credential:{replacement_id}"),
+        Some("publisher:recovery:exact-replay"),
+        repo::PublisherCredentialUse {
+            credential_id: replacement_id,
+            token_hash: replacement_hash,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed.status_enum(), Some(ExecutionStatus::Running));
+    assert_eq!(replayed.output_state.as_deref(), Some("verified"));
+    assert_eq!(replayed_artifact.uuid, stored.uuid);
+    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "execution.outputs_verified")
+            .count(),
+        1
+    );
+
+    let completed = repo::apply_execution_state_patch(
+        &pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            daliuge_state: Some(DaliugeState::Finished),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(completed.status_enum(), Some(ExecutionStatus::Completed));
+    assert!(matches!(
+        repo::issue_execution_publisher_credential(
+            &pool,
+            execution.uuid,
+            Uuid::now_v7(),
+            &"a".repeat(64),
+            None,
+            "operator:too-late",
+            Utc::now() + Duration::hours(1),
+            Some("publisher:recovery:terminal"),
+        )
+        .await,
+        Err(repo::IssueExecutionPublisherCredentialError::Rejected(_))
+    ));
+}
+
+#[tokio::test]
 async fn backend_first_scoped_publisher_completes_and_replays_after_terminal_revocation() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");

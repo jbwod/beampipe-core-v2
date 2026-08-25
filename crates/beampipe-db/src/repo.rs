@@ -4955,14 +4955,12 @@ pub async fn issue_execution_publisher_credential(
             "the execution does not require output verification".into(),
         ));
     }
-    if execution.output_state.as_deref().and_then(OutputState::parse)
-        == Some(OutputState::Verified)
-        || execution
-            .status_enum()
-            .is_some_and(ExecutionStatus::is_terminal)
+    if execution
+        .status_enum()
+        .is_some_and(ExecutionStatus::is_terminal)
     {
         return Err(IssueExecutionPublisherCredentialError::Rejected(
-            "the execution is already terminal or its outputs are already verified".into(),
+            "the execution is already terminal".into(),
         ));
     }
 
@@ -5187,12 +5185,15 @@ async fn verify_execution_outputs_authorized(
                 )
             })?;
         let clock_skew = chrono::Duration::minutes(5);
-        if published_at < credential.created_at - clock_skew
-            || published_at > credential.expires_at + clock_skew
-        {
+        // A durable, immutable receipt can legitimately predate a replacement
+        // credential when Core committed the original request but its response
+        // was lost. Execution/attempt binding and the exact stored-artifact
+        // replay check below provide the authorization boundary; rejecting an
+        // older timestamp would make that receipt unrecoverable.
+        if published_at > credential.expires_at + clock_skew {
             return Err(
                 VerifyExecutionOutputsError::PublisherCredentialConflict(
-                    "publication timestamp is outside this credential's execution-attempt window"
+                    "publication timestamp is later than this credential's execution-attempt window"
                         .into(),
                 ),
             );
