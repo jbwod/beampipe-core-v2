@@ -2037,16 +2037,7 @@ const DASH_OVERRIDE_FILE: &str = "compose.beampipe-local.yml";
 const DASH_INSTALL_SCRIPT: &str = "scripts/install.sh";
 
 fn env_value_empty(path: &Path, key: &str) -> bool {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return true;
-    };
-    let prefix = format!("{key}=");
-    for line in content.lines() {
-        if let Some(value) = line.strip_prefix(&prefix) {
-            return value.trim().is_empty();
-        }
-    }
-    true
+    env_file_value(path, key).is_none()
 }
 
 fn compose_file_exists(root: &Path) -> bool {
@@ -4183,6 +4174,16 @@ staging:
             assert_eq!(env_file_value(&path, &key).as_deref(), Some(*value));
         }
         assert!(env_file_encode("line one\nline two").is_err());
+    }
+
+    #[test]
+    fn encoded_empty_env_values_remain_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".env");
+        update_env_file(&path, "OPTIONAL_VALUE", "").unwrap();
+        assert!(env_value_empty(&path, "OPTIONAL_VALUE"));
+        update_env_file(&path, "OPTIONAL_VALUE", "configured").unwrap();
+        assert!(!env_value_empty(&path, "OPTIONAL_VALUE"));
     }
 
     #[test]
