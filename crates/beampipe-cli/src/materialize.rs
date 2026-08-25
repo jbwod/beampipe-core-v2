@@ -248,6 +248,20 @@ mod tests {
         let project = fs::read(dir.path().join("config/wallaby_hires.v2.yaml")).unwrap();
         let config = ProjectConfig::from_slice(&project).unwrap();
         assert!(config.validate_report().valid);
+        let profile: serde_json::Value = serde_json::from_slice(
+            &fs::read(dir.path().join("config/deployment_profile.slurm-remote.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(profile["deployment"]["job_duration_minutes"], 120);
+        assert_eq!(
+            profile["deployment"]["resources"]["wall_time_minutes"],
+            120
+        );
+        assert_eq!(
+            profile["deployment"]["runtime_contract"]["required_python_modules"],
+            serde_json::json!(["wallaby_hires", "beampipe_pallette"])
+        );
         assert_eq!(
             sha256(
                 &fs::read(
@@ -256,7 +270,7 @@ mod tests {
                 )
                 .unwrap()
             ),
-            "3d0d464907fce7d1992e41103d6ce8fd40653a8f66cc37a4ec66e343a9642a66"
+            "54c4251c3bec6ee86bbfd01c7a73bd396fc91a7ff97456126dacddd287e2f48f"
         );
     }
 

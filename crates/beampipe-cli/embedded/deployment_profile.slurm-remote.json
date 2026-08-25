@@ -23,8 +23,8 @@
     "modules": "module load singularity/4.1.0-askap && module load py-numpy/1.26.4 && module use /group/askap/modulefiles",
     "venv": "source /software/projects/pawsey0411/jblackwood/venv/bin/activate",
     "runtime_contract": {
-      "required_commands": ["wallaby_hires", "singularity"],
-      "required_python_modules": ["wallaby_hires"],
+      "required_commands": ["wallaby_hires", "beampipe-publish", "singularity"],
+      "required_python_modules": ["wallaby_hires", "beampipe_pallette"],
       "required_environment": [
         {
           "name": "BEAMPIPE_ASKAPSOFT_SIF",
@@ -42,7 +42,7 @@
       "credential_ttl_minutes": 720
     },
     "exec_prefix": "srun -l",
-    "job_duration_minutes": 50,
+    "job_duration_minutes": 120,
     "num_nodes": 1,
     "num_islands": 1,
     "resources": {
@@ -50,7 +50,7 @@
       "nodes": 1,
       "tasks": 1,
       "cpus_per_task": 1,
-      "wall_time_minutes": 50
+      "wall_time_minutes": 120
     },
     "manager_topology": {
       "nodes": 1,

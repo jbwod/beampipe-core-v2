@@ -115,7 +115,7 @@ The production qualification artifacts are:
 
 | Artifact | Expected evidence |
 |---|---|
-| WALLABY graph | SHA-256 `279776976d0650321a8813aac1ff5f73e81696913480ef045692f7d295696b83` |
+| WALLABY graph | SHA-256 `54c4251c3bec6ee86bbfd01c7a73bd396fc91a7ff97456126dacddd287e2f48f` |
 | Wallaby package | `wallaby_hires --version` matches the reviewed release |
 | Publisher package | `beampipe-publish --version` matches the reviewed standalone package release |
 | Python wheels | SHA-256 recorded for every exact installed wheel |
