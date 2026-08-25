@@ -170,6 +170,9 @@ graph_patches:
 output_verification:
   required: true
   inventory_schema: beampipe-output-inventory/v1
+  expected_patterns:
+    - "**/image.*.10arc.final_mosaic.fits"
+    - "**/weights.*.10arc.final_mosaic.fits"
 
 automation:
   execution:

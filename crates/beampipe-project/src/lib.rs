@@ -1,4 +1,5 @@
 pub use beampipe_domain::{Diagnostic as ValidationDiagnostic, DiagnosticSeverity};
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,74 @@ pub const BEAMPIPE_OUTPUT_INVENTORY_SCHEMA: &str = "beampipe-output-inventory/v1
 pub const BEAMPIPE_OUTPUT_INVENTORY_MEDIA_TYPE: &str =
     "application/vnd.beampipe.output-inventory+json";
 const MAX_TAP_ENDPOINTS: usize = 64;
+pub const MAX_OUTPUT_EXPECTED_PATTERNS: usize = 32;
+pub const MAX_OUTPUT_PATTERN_LENGTH: usize = 256;
+
+pub struct OutputGlob(Regex);
+
+impl OutputGlob {
+    pub fn compile(pattern: &str) -> Result<Self, String> {
+        if !valid_output_glob(pattern) {
+            return Err("unsafe or unsupported relative output glob".into());
+        }
+        let chars = pattern.chars().collect::<Vec<_>>();
+        let mut expression = String::from("^");
+        let mut index = 0;
+        while index < chars.len() {
+            match chars[index] {
+                '*' if chars.get(index + 1) == Some(&'*')
+                    && chars.get(index + 2) == Some(&'/') =>
+                {
+                    // `**/name` matches both `name` and any directory depth.
+                    expression.push_str("(?:.*/)?");
+                    index += 3;
+                }
+                '*' if chars.get(index + 1) == Some(&'*') => {
+                    expression.push_str(".*");
+                    index += 2;
+                }
+                '*' => {
+                    expression.push_str("[^/]*");
+                    index += 1;
+                }
+                '?' => {
+                    expression.push_str("[^/]");
+                    index += 1;
+                }
+                literal => {
+                    expression.push_str(&regex::escape(&literal.to_string()));
+                    index += 1;
+                }
+            }
+        }
+        expression.push('$');
+        Regex::new(&expression)
+            .map(Self)
+            .map_err(|error| format!("could not compile output glob: {error}"))
+    }
+
+    pub fn is_match(&self, path: &str) -> bool {
+        self.0.is_match(path)
+    }
+}
+
+pub fn valid_output_glob(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && pattern.trim() == pattern
+        && pattern.len() <= MAX_OUTPUT_PATTERN_LENGTH
+        && !pattern.starts_with('/')
+        && !pattern.starts_with('\\')
+        && !pattern.contains('\\')
+        && !pattern
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '[' | ']' | '{' | '}'))
+        && !pattern
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        && pattern
+            .split('/')
+            .all(|component| !component.contains("**") || component == "**")
+}
 
 pub fn output_inventory_media_type(schema: &str) -> Option<&'static str> {
     match schema {
@@ -258,6 +327,10 @@ pub struct OutputVerificationConfig {
     pub required: bool,
     #[serde(default = "default_output_inventory_schema")]
     pub inventory_schema: String,
+    /// Project-neutral relative glob patterns that every accepted inventory
+    /// must report with a positive match count.
+    #[serde(default)]
+    pub expected_patterns: Vec<String>,
 }
 
 impl Default for OutputVerificationConfig {
@@ -265,6 +338,7 @@ impl Default for OutputVerificationConfig {
         Self {
             required: false,
             inventory_schema: default_output_inventory_schema(),
+            expected_patterns: Vec::new(),
         }
     }
 }
@@ -962,6 +1036,39 @@ impl ProjectConfig {
                 ),
             ));
         }
+        let patterns = &self.output_verification.expected_patterns;
+        if self.output_verification.required && patterns.is_empty() {
+            errors.push(ValidationDiagnostic::error(
+                "output_verification.expected_patterns",
+                "required",
+                "required output verification must declare at least one expected relative glob",
+            ));
+        }
+        if patterns.len() > MAX_OUTPUT_EXPECTED_PATTERNS {
+            errors.push(ValidationDiagnostic::error(
+                "output_verification.expected_patterns",
+                "too_many",
+                format!(
+                    "at most {MAX_OUTPUT_EXPECTED_PATTERNS} expected output patterns are allowed"
+                ),
+            ));
+        }
+        let mut seen_patterns = std::collections::BTreeSet::new();
+        for (index, pattern) in patterns.iter().enumerate() {
+            if !valid_output_glob(pattern) {
+                errors.push(ValidationDiagnostic::error(
+                    format!("output_verification.expected_patterns[{index}]"),
+                    "unsafe_relative_glob",
+                    "expected pattern must be a trimmed relative glob without empty, '.', '..', backslash, or control-character components; '**' must be a complete path component",
+                ));
+            } else if !seen_patterns.insert(pattern) {
+                errors.push(ValidationDiagnostic::error(
+                    format!("output_verification.expected_patterns[{index}]"),
+                    "duplicate",
+                    "expected output patterns must be unique",
+                ));
+            }
+        }
         if let Some(graph) = &self.graph {
             let source_count = usize::from(graph.url.is_some()) + usize::from(graph.path.is_some());
             if source_count != 1 {
@@ -1563,6 +1670,7 @@ automation:
             config.output_verification.inventory_schema,
             BEAMPIPE_OUTPUT_INVENTORY_SCHEMA
         );
+        assert!(config.output_verification.expected_patterns.is_empty());
 
         config.output_verification.required = true;
         config.output_verification.inventory_schema = "unknown/v1".into();
@@ -1570,6 +1678,26 @@ automation:
         assert!(report.errors.iter().any(|diagnostic| {
             diagnostic.path == "output_verification.inventory_schema"
                 && diagnostic.code == "unsupported_output_inventory_schema"
+        }));
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "output_verification.expected_patterns"
+                && diagnostic.code == "required"
+        }));
+
+        config.output_verification.inventory_schema = BEAMPIPE_OUTPUT_INVENTORY_SCHEMA.into();
+        config.output_verification.expected_patterns = vec![
+            "**/result.bin".into(),
+            "**/result.bin".into(),
+            "../escape".into(),
+        ];
+        let report = config.validate_report();
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "output_verification.expected_patterns[1]"
+                && diagnostic.code == "duplicate"
+        }));
+        assert!(report.errors.iter().any(|diagnostic| {
+            diagnostic.path == "output_verification.expected_patterns[2]"
+                && diagnostic.code == "unsafe_relative_glob"
         }));
     }
 
@@ -1580,6 +1708,25 @@ automation:
             Some(BEAMPIPE_OUTPUT_INVENTORY_MEDIA_TYPE)
         );
         assert_eq!(output_inventory_media_type("unknown/v1"), None);
+    }
+
+    #[test]
+    fn output_globs_are_relative_bounded_and_match_directory_depths() {
+        let image = OutputGlob::compile("**/image.*.fits").unwrap();
+        assert!(image.is_match("image.source.fits"));
+        assert!(image.is_match("source/image.source.fits"));
+        assert!(image.is_match("a/b/image.source.fits"));
+        assert!(!image.is_match("a/b/weights.source.fits"));
+        let nested = OutputGlob::compile("products/**/result.bin").unwrap();
+        assert!(nested.is_match("products/result.bin"));
+        assert!(nested.is_match("products/source/a/result.bin"));
+        assert!(OutputGlob::compile("products/**").is_ok());
+        assert!(OutputGlob::compile("products/***/result.bin").is_err());
+        assert!(OutputGlob::compile("products/prefix**/result.bin").is_err());
+        assert!(OutputGlob::compile("products/**suffix/result.bin").is_err());
+        assert!(OutputGlob::compile("../image.*").is_err());
+        assert!(OutputGlob::compile("images/[abc].fits").is_err());
+        assert!(OutputGlob::compile(&"x".repeat(MAX_OUTPUT_PATTERN_LENGTH + 1)).is_err());
     }
 
     #[test]

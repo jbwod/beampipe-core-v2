@@ -4,6 +4,50 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+use zeroize::Zeroizing;
+
+pub const EXECUTION_PUBLISHER_TOKEN_PREFIX: &str = "bpp_";
+
+/// One-time plaintext material for an execution publisher capability. Debug
+/// and serialization are intentionally not implemented, and the plaintext is
+/// zeroized when this value is dropped.
+pub struct PublisherTokenMaterial {
+    token: Zeroizing<String>,
+    token_hash: String,
+}
+
+impl PublisherTokenMaterial {
+    pub fn token(&self) -> &str {
+        self.token.as_str()
+    }
+
+    pub fn token_hash(&self) -> &str {
+        &self.token_hash
+    }
+}
+
+pub fn issue_publisher_token_material() -> PublisherTokenMaterial {
+    // Two independent UUIDv4 values provide 244 random bits while keeping the
+    // token URL/header safe without another encoding dependency.
+    let token = format!(
+        "{EXECUTION_PUBLISHER_TOKEN_PREFIX}{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    let token_hash = token_hash(&token);
+    PublisherTokenMaterial {
+        token: Zeroizing::new(token),
+        token_hash,
+    }
+}
+
+pub fn is_publisher_token(value: &str) -> bool {
+    value.len() == EXECUTION_PUBLISHER_TOKEN_PREFIX.len() + 64
+        && value.starts_with(EXECUTION_PUBLISHER_TOKEN_PREFIX)
+        && value[EXECUTION_PUBLISHER_TOKEN_PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -145,5 +189,16 @@ mod tests {
         let c2 = decode_access_token(&two, "01234567890123456789012345678901").unwrap();
         assert!(!c1.jti.is_empty());
         assert_ne!(c1.jti, c2.jti);
+    }
+
+    #[test]
+    fn publisher_tokens_are_high_entropy_header_safe_and_hashed() {
+        let one = issue_publisher_token_material();
+        let two = issue_publisher_token_material();
+        assert!(is_publisher_token(one.token()));
+        assert!(is_publisher_token(two.token()));
+        assert_ne!(one.token(), two.token());
+        assert_eq!(one.token_hash(), token_hash(one.token()));
+        assert!(!one.token_hash().contains(one.token()));
     }
 }

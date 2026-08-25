@@ -383,6 +383,27 @@ pub struct ExecutionArtifactInput {
     pub metadata: Value,
 }
 
+/// Stored metadata for a publisher capability. The plaintext bearer token is
+/// intentionally never persisted.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ExecutionPublisherCredentialRow {
+    pub uuid: Uuid,
+    pub execution_id: Uuid,
+    pub token_hash: String,
+    pub audience: String,
+    pub scope: String,
+    pub execution_attempt: i32,
+    pub issued_by: Option<Uuid>,
+    pub issued_by_actor: String,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub request_sha256: Option<String>,
+    pub output_artifact_id: Option<Uuid>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct ProvenanceEventRow {
     pub id: Uuid,

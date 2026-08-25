@@ -4137,15 +4137,21 @@ async fn apply_dim_poll_update(
         )
         .await?;
         if entered_terminal {
-            let sources = source_identifiers_from_json(&execution.sources);
-            finalize_execution_source_pending(
-                pool,
-                &execution.project_module,
-                &sources,
-                aggregate_status,
-                Some(execution_id),
-            )
-            .await?;
+            if !(aggregate_status == ExecutionStatus::Completed
+                && reconciled.output_verification_required
+                && reconciled.output_state.as_deref().and_then(OutputState::parse)
+                    == Some(OutputState::Verified))
+            {
+                let sources = source_identifiers_from_json(&execution.sources);
+                finalize_execution_source_pending(
+                    pool,
+                    &execution.project_module,
+                    &sources,
+                    aggregate_status,
+                    Some(execution_id),
+                )
+                .await?;
+            }
             metrics::record_execute_terminal(&execution.project_module, aggregate_status.as_str());
         }
         return Ok(());
@@ -4756,15 +4762,21 @@ async fn apply_slurm_poll_update(
     )
     .await?;
     if entered_terminal {
-        let sources = source_identifiers_from_json(&execution.sources);
-        finalize_execution_source_pending(
-            pool,
-            &execution.project_module,
-            &sources,
-            aggregate_status,
-            Some(execution_id),
-        )
-        .await?;
+        if !(aggregate_status == ExecutionStatus::Completed
+            && reconciled.output_verification_required
+            && reconciled.output_state.as_deref().and_then(OutputState::parse)
+                == Some(OutputState::Verified))
+        {
+            let sources = source_identifiers_from_json(&execution.sources);
+            finalize_execution_source_pending(
+                pool,
+                &execution.project_module,
+                &sources,
+                aggregate_status,
+                Some(execution_id),
+            )
+            .await?;
+        }
         metrics::record_execute_terminal(&execution.project_module, aggregate_status.as_str());
     }
     Ok(())

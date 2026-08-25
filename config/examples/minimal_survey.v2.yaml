@@ -68,6 +68,8 @@ manifest:
 output_verification:
   required: true
   inventory_schema: beampipe-output-inventory/v1
+  expected_patterns:
+    - "**/result.bin"
 
 automation:
   discovery:

@@ -6,7 +6,7 @@ mod route_metrics;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, FromRef, FromRequestParts, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, FromRef, FromRequestParts, Path, Query, State},
     http::{request::Parts, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -34,7 +34,7 @@ use beampipe_orchestration::{
 use beampipe_profiles::DeploymentProfile;
 use beampipe_project::{
     output_inventory_media_type, DiagnosticSeverity, ProjectConfig, TapEndpointMode,
-    ValidationDiagnostic, ValidationReport, WasmHost,
+    OutputGlob, ValidationDiagnostic, ValidationReport, WasmHost,
 };
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
@@ -77,7 +77,8 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         list_sources, get_source, get_source_status, update_source, delete_source, get_source_metadata,
         list_source_executions, prepare_execution, create_execution, list_executions, get_execution,
         execution_status, execution_summary, execution_ledger_snapshot, execution_observations,
-        execution_artifacts, verify_execution_outputs, patch_execution, execute_execution,
+        execution_artifacts, issue_execution_publisher_token, verify_execution_outputs,
+        patch_execution, execute_execution,
         retry_execution, abandon_execution_submission, prepare_graph,
         scheduler_status, scheduler_jobs, daliuge_inspect, daliuge_sessions,
         upload_project_config, get_project_config, list_project_config_versions,
@@ -105,7 +106,8 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         ExecutionRetryRequest, ExecutionRetryResponse, ExecutionSubmissionAbandonRequest,
         OutputInventoryProduct,
         OutputPublicationAcknowledgement, ExecutionOutputVerificationRequest,
-        ExecutionOutputVerificationResponse, GraphPrepareRequest, GraphPrepareResponse,
+        ExecutionOutputVerificationResponse, ExecutionPublisherTokenRequest,
+        ExecutionPublisherTokenResponse, GraphPrepareRequest, GraphPrepareResponse,
         ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
         ProjectConfig, ValidationReport, ValidationDiagnostic, DiagnosticSeverity,
@@ -217,7 +219,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v2/executions/:id/outputs/verify",
-            post(verify_execution_outputs),
+            post(verify_execution_outputs)
+                .layer(DefaultBodyLimit::max(OUTPUT_VERIFICATION_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/v2/executions/:id/outputs/publisher-token",
+            post(issue_execution_publisher_token),
         )
         .route("/api/v2/graphs/prepare", post(prepare_graph))
         .layer(middleware::from_fn_with_state(
@@ -688,6 +695,87 @@ impl AuthUser {
         } else {
             Err(ApiError::Forbidden("superuser required".into()))
         }
+    }
+}
+
+enum OutputVerificationPrincipal {
+    Operator(AuthUser),
+    Publisher(ExecutionPublisherCredentialRow),
+}
+
+impl OutputVerificationPrincipal {
+    fn authorize(
+        &self,
+        execution_id: Uuid,
+    ) -> Result<Option<repo::PublisherCredentialUse>, ApiError> {
+        match self {
+            Self::Operator(user) => {
+                user.require_superuser()?;
+                Ok(None)
+            }
+            Self::Publisher(credential) => {
+                if credential.execution_id != execution_id
+                    || credential.audience != repo::OUTPUT_PUBLISHER_AUDIENCE
+                    || credential.scope != repo::output_publisher_scope(execution_id)
+                {
+                    return Err(ApiError::Forbidden(
+                        "publisher credential does not authorize this execution and action".into(),
+                    ));
+                }
+                Ok(Some(repo::PublisherCredentialUse {
+                    credential_id: credential.uuid,
+                    token_hash: credential.token_hash.clone(),
+                }))
+            }
+        }
+    }
+
+    fn actor(&self) -> String {
+        match self {
+            Self::Operator(user) => format!("trusted-publisher:{}", user.0.uuid),
+            Self::Publisher(credential) => {
+                format!("trusted-publisher:credential:{}", credential.uuid)
+            }
+        }
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for OutputVerificationPrincipal
+where
+    Arc<AppState>: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app = Arc::<AppState>::from_ref(state);
+        let Some(token) = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::trim)
+        else {
+            return Err(ApiError::Unauthorized(
+                "missing or invalid Bearer Authorization header".into(),
+            ));
+        };
+        if beampipe_auth::is_publisher_token(token) {
+            let token_hash = beampipe_auth::token_hash(token);
+            let credential = repo::get_active_execution_publisher_credential_by_token_hash(
+                &app.pool,
+                &token_hash,
+            )
+            .await?
+            .ok_or_else(|| {
+                ApiError::Unauthorized("publisher credential is invalid or expired".into())
+            })?;
+            return Ok(Self::Publisher(credential));
+        }
+        Ok(Self::Operator(
+            AuthUser::from_request_parts(parts, state).await?,
+        ))
     }
 }
 
@@ -3287,6 +3375,9 @@ pub struct OutputPublicationAcknowledgement {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionOutputVerificationRequest {
+    /// Must equal the execution's current retry generation.
+    #[schema(example = 0, minimum = 0)]
+    pub execution_attempt: i32,
     /// Must match the schema pinned when the execution was admitted.
     #[schema(example = "beampipe-output-inventory/v1")]
     pub schema: String,
@@ -3306,6 +3397,119 @@ pub struct ExecutionOutputVerificationRequest {
 pub struct ExecutionOutputVerificationResponse {
     pub execution: ExecutionRead,
     pub artifact: ExecutionArtifactRow,
+}
+
+const DEFAULT_OUTPUT_PUBLISHER_TTL_SECONDS: u32 = 6 * 60 * 60;
+const MIN_OUTPUT_PUBLISHER_TTL_SECONDS: u32 = 5 * 60;
+const OUTPUT_VERIFICATION_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionPublisherTokenRequest {
+    /// Execution-lifetime credential TTL. Issue immediately before submission.
+    /// Values are bounded to 5 minutes through 24 hours.
+    #[schema(example = 21600, minimum = 300, maximum = 86400)]
+    pub ttl_seconds: Option<u32>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ExecutionPublisherTokenResponse {
+    pub credential_id: Uuid,
+    pub execution_id: Uuid,
+    /// Returned once. Core stores only its SHA-256 digest.
+    pub access_token: String,
+    #[schema(example = "Bearer")]
+    pub token_type: String,
+    #[schema(example = "beampipe-output-verification")]
+    pub audience: String,
+    #[schema(example = "execution:019c1234-0000-7000-8000-000000000000:verify_outputs")]
+    pub scope: String,
+    pub execution_attempt: i32,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
+fn output_publisher_ttl_seconds(
+    request: &ExecutionPublisherTokenRequest,
+) -> Result<i64, ApiError> {
+    let ttl = request
+        .ttl_seconds
+        .unwrap_or(DEFAULT_OUTPUT_PUBLISHER_TTL_SECONDS);
+    let maximum = u32::try_from(repo::MAX_OUTPUT_PUBLISHER_TTL_SECONDS)
+        .expect("publisher TTL maximum fits u32");
+    if !(MIN_OUTPUT_PUBLISHER_TTL_SECONDS..=maximum).contains(&ttl) {
+        return Err(ApiError::BadRequest(format!(
+            "ttl_seconds must be between {MIN_OUTPUT_PUBLISHER_TTL_SECONDS} and {maximum}"
+        )));
+    }
+    Ok(i64::from(ttl))
+}
+
+/// Issue a least-privilege publisher capability for one execution attempt.
+///
+/// The plaintext is returned once; Core persists only a digest. This endpoint
+/// requires a superuser bearer token, but that credential is never given to the
+/// graph.
+#[utoipa::path(
+    post,
+    path = "/api/v2/executions/{id}/outputs/publisher-token",
+    tag = "executions",
+    request_body = ExecutionPublisherTokenRequest,
+    security(("BearerAuth" = [])),
+    responses(
+        (status = 200, body = ExecutionPublisherTokenResponse),
+        (status = 400, body = ApiErrorResponse),
+        (status = 403, body = ApiErrorResponse),
+        (status = 404, body = ApiErrorResponse),
+        (status = 409, body = ApiErrorResponse)
+    )
+)]
+async fn issue_execution_publisher_token(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<Arc<correlation::RequestContext>>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ExecutionPublisherTokenRequest>,
+) -> Result<(HeaderMap, Json<ExecutionPublisherTokenResponse>), ApiError> {
+    user.require_superuser()?;
+    let ttl_seconds = output_publisher_ttl_seconds(&request)?;
+    let material = beampipe_auth::issue_publisher_token_material();
+    let credential_id = Uuid::now_v7();
+    let expires_at = Utc::now() + chrono::Duration::seconds(ttl_seconds);
+    let issuer_actor = format!("operator:{}", user.0.uuid);
+    let credential = repo::issue_execution_publisher_credential(
+        &state.pool,
+        id,
+        credential_id,
+        material.token_hash(),
+        Some(user.0.uuid),
+        &issuer_actor,
+        expires_at,
+        Some(ctx.correlation_id()),
+    )
+    .await
+    .map_err(|error| match error {
+        repo::IssueExecutionPublisherCredentialError::NotFound => ApiError::NotFound,
+        repo::IssueExecutionPublisherCredentialError::Rejected(message) => {
+            ApiError::Conflict(message)
+        }
+        repo::IssueExecutionPublisherCredentialError::Database(error) => ApiError::Db(error),
+    })?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    headers.insert("pragma", HeaderValue::from_static("no-cache"));
+    Ok((headers, Json(ExecutionPublisherTokenResponse {
+        credential_id: credential.uuid,
+        execution_id: credential.execution_id,
+        access_token: material.token().to_owned(),
+        token_type: "Bearer".into(),
+        audience: credential.audience,
+        scope: credential.scope,
+        execution_attempt: credential.execution_attempt,
+        expires_at: credential.expires_at,
+    })))
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -3385,11 +3589,18 @@ fn validate_output_verification_request(
     request: &ExecutionOutputVerificationRequest,
     output_verification_required: bool,
     output_verification_policy: &Value,
+    expected_execution_attempt: i32,
 ) -> Result<u64, ApiError> {
     if !output_verification_required {
         return Err(ApiError::Conflict(
             "this execution explicitly opts out of output verification".into(),
         ));
+    }
+    if request.execution_attempt != expected_execution_attempt {
+        return Err(ApiError::Conflict(format!(
+            "inventory execution_attempt {} does not match the current execution attempt {expected_execution_attempt}",
+            request.execution_attempt
+        )));
     }
     let expected_schema = output_verification_policy
         .get("inventory_schema")
@@ -3406,9 +3617,27 @@ fn validate_output_verification_request(
             "pinned output inventory schema '{expected_schema}' is unsupported"
         )));
     }
-    if request.patterns.is_empty() && !request.pattern_counts.is_empty() {
-        return Err(ApiError::BadRequest(
-            "pattern_counts must be empty when patterns is empty".into(),
+    let expected_patterns = output_verification_policy
+        .get("expected_patterns")
+        .and_then(Value::as_array)
+        .and_then(|patterns| {
+            patterns
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| {
+            ApiError::Conflict("pinned output policy has no valid expected_patterns".into())
+        })?;
+    if expected_patterns.is_empty() {
+        return Err(ApiError::Conflict(
+            "required output policy has no expected patterns".into(),
+        ));
+    }
+    if request.patterns.iter().map(String::as_str).collect::<Vec<_>>() != expected_patterns {
+        return Err(ApiError::Conflict(
+            "inventory patterns do not exactly match the execution's pinned expected_patterns"
+                .into(),
         ));
     }
     let unique_patterns: BTreeSet<_> = request.patterns.iter().collect();
@@ -3440,6 +3669,7 @@ fn validate_output_verification_request(
     for product in &request.products {
         let path = product.path.trim();
         let unsafe_path = path.is_empty()
+            || path.len() > 4096
             || path.starts_with('/')
             || path.starts_with('\\')
             || path.contains('\\')
@@ -3474,6 +3704,21 @@ fn validate_output_verification_request(
         total_bytes = total_bytes.checked_add(product.bytes).ok_or_else(|| {
             ApiError::BadRequest("total output product size overflows u64".into())
         })?;
+    }
+    for pattern in &expected_patterns {
+        let matcher = OutputGlob::compile(pattern)
+            .map_err(|_| ApiError::Conflict("pinned output policy has an invalid glob".into()))?;
+        let actual_count = request
+            .products
+            .iter()
+            .filter(|product| matcher.is_match(&product.path))
+            .count() as u64;
+        let claimed_count = request.pattern_counts.get(*pattern).copied().unwrap_or(0);
+        if actual_count == 0 || claimed_count != actual_count {
+            return Err(ApiError::BadRequest(format!(
+                "pattern_counts['{pattern}'] must equal the positive match count {actual_count} computed from products"
+            )));
+        }
     }
     if !valid_sha256(&request.inventory_sha256) {
         return Err(ApiError::BadRequest(
@@ -3557,11 +3802,13 @@ fn output_inventory_artifact(
 ///
 /// Validates `beampipe-output-inventory/v1`, records its publication
 /// acknowledgement, and releases an execution waiting at the output-verification
-/// completion gate.
+/// completion gate. The bearer may be a superuser access token or the
+/// execution-scoped publisher capability issued for this exact action.
 #[utoipa::path(
     post,
     path = "/api/v2/executions/{id}/outputs/verify",
     tag = "executions",
+    security(("BearerAuth" = [])),
     request_body = ExecutionOutputVerificationRequest,
     responses(
         (status = 200, body = ExecutionOutputVerificationResponse),
@@ -3574,11 +3821,11 @@ fn output_inventory_artifact(
 async fn verify_execution_outputs(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<Arc<correlation::RequestContext>>,
-    user: AuthUser,
+    principal: OutputVerificationPrincipal,
     Path(id): Path<Uuid>,
     Json(request): Json<ExecutionOutputVerificationRequest>,
 ) -> Result<Json<ExecutionOutputVerificationResponse>, ApiError> {
-    user.require_superuser()?;
+    let publisher_credential = principal.authorize(id)?;
     let execution = repo::get_execution(&state.pool, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -3586,20 +3833,39 @@ async fn verify_execution_outputs(
         &request,
         execution.output_verification_required,
         &execution.output_verification_policy,
+        execution.retry_count,
     )?;
     let artifact = output_inventory_artifact(&request, total_product_bytes)?;
-    let actor = format!("trusted-publisher:{}", user.0.uuid);
-    let (execution, artifact) = repo::verify_execution_outputs(
-        &state.pool,
-        id,
-        artifact,
-        &actor,
-        Some(ctx.correlation_id()),
-    )
-    .await
-    .map_err(|error| match error {
+    let actor = principal.actor();
+    let verification = if let Some(credential) = publisher_credential {
+        repo::verify_execution_outputs_with_publisher(
+            &state.pool,
+            id,
+            artifact,
+            &actor,
+            Some(ctx.correlation_id()),
+            credential,
+        )
+        .await
+    } else {
+        repo::verify_execution_outputs(
+            &state.pool,
+            id,
+            artifact,
+            &actor,
+            Some(ctx.correlation_id()),
+        )
+        .await
+    };
+    let (execution, artifact) = verification.map_err(|error| match error {
         repo::VerifyExecutionOutputsError::NotFound => ApiError::NotFound,
         repo::VerifyExecutionOutputsError::Rejected(message) => ApiError::Conflict(message),
+        repo::VerifyExecutionOutputsError::PublisherCredentialInvalid(message) => {
+            ApiError::Unauthorized(message)
+        }
+        repo::VerifyExecutionOutputsError::PublisherCredentialConflict(message) => {
+            ApiError::Conflict(message)
+        }
         repo::VerifyExecutionOutputsError::Database(error) => ApiError::Db(error),
     })?;
     Ok(Json(ExecutionOutputVerificationResponse {
@@ -5135,9 +5401,10 @@ adapters:
         }];
         let inventory_sha256 = canonical_products_sha256(&products).unwrap();
         ExecutionOutputVerificationRequest {
+            execution_attempt: 0,
             schema: beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA.into(),
-            patterns: Vec::new(),
-            pattern_counts: BTreeMap::new(),
+            patterns: vec!["**/result.bin".into()],
+            pattern_counts: BTreeMap::from([("**/result.bin".into(), 1)]),
             products,
             inventory_sha256,
             durable_destination_uri: "file:///durable/project/run-1".into(),
@@ -5151,25 +5418,107 @@ adapters:
     }
 
     #[test]
+    fn output_verification_has_an_explicit_bounded_body_budget() {
+        assert_eq!(OUTPUT_VERIFICATION_BODY_LIMIT_BYTES, 32 * 1024 * 1024);
+        assert!(OUTPUT_VERIFICATION_BODY_LIMIT_BYTES > 2 * 1024 * 1024);
+        assert!(OUTPUT_VERIFICATION_BODY_LIMIT_BYTES <= 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn publisher_credential_ttl_is_execution_lifetime_but_bounded() {
+        assert_eq!(
+            output_publisher_ttl_seconds(&ExecutionPublisherTokenRequest::default()).unwrap(),
+            i64::from(DEFAULT_OUTPUT_PUBLISHER_TTL_SECONDS)
+        );
+        for invalid in [
+            MIN_OUTPUT_PUBLISHER_TTL_SECONDS - 1,
+            u32::try_from(repo::MAX_OUTPUT_PUBLISHER_TTL_SECONDS).unwrap() + 1,
+        ] {
+            assert!(matches!(
+                output_publisher_ttl_seconds(&ExecutionPublisherTokenRequest {
+                    ttl_seconds: Some(invalid),
+                }),
+                Err(ApiError::BadRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn publisher_principal_authorizes_only_its_exact_execution_scope_and_audience() {
+        let execution_id = Uuid::now_v7();
+        let principal = OutputVerificationPrincipal::Publisher(
+            ExecutionPublisherCredentialRow {
+                uuid: Uuid::now_v7(),
+                execution_id,
+                token_hash: "a".repeat(64),
+                audience: repo::OUTPUT_PUBLISHER_AUDIENCE.into(),
+                scope: repo::output_publisher_scope(execution_id),
+                execution_attempt: 0,
+                issued_by: None,
+                issued_by_actor: "system:test".into(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                consumed_at: None,
+                request_sha256: None,
+                output_artifact_id: None,
+                revoked_at: None,
+                revoked_reason: None,
+                created_at: Utc::now(),
+            },
+        );
+        assert!(principal.authorize(execution_id).unwrap().is_some());
+        assert!(matches!(
+            principal.authorize(Uuid::now_v7()),
+            Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
     fn output_report_validates_canonical_inventory_and_publication_ack() {
         let policy = json!({
             "required": true,
             "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
+            "expected_patterns": ["**/result.bin"],
         });
         let request = valid_output_report();
         assert_eq!(
-            validate_output_verification_request(&request, true, &policy).unwrap(),
+            validate_output_verification_request(&request, true, &policy, 0).unwrap(),
             42
         );
 
         let mut tampered = request.clone();
         tampered.products[0].bytes = 43;
         assert!(matches!(
-            validate_output_verification_request(&tampered, true, &policy),
+            validate_output_verification_request(&tampered, true, &policy, 0),
+            Err(ApiError::BadRequest(_))
+        ));
+        let mut false_count = request.clone();
+        false_count
+            .pattern_counts
+            .insert("**/result.bin".into(), 2);
+        assert!(matches!(
+            validate_output_verification_request(&false_count, true, &policy, 0),
+            Err(ApiError::BadRequest(_))
+        ));
+        let mut unmatched = request.clone();
+        unmatched.patterns = vec!["**/missing.bin".into()];
+        unmatched.pattern_counts = BTreeMap::from([("**/missing.bin".into(), 1)]);
+        let unmatched_policy = json!({
+            "required": true,
+            "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
+            "expected_patterns": ["**/missing.bin"],
+        });
+        assert!(matches!(
+            validate_output_verification_request(&unmatched, true, &unmatched_policy, 0),
             Err(ApiError::BadRequest(_))
         ));
         assert!(matches!(
-            validate_output_verification_request(&request, false, &policy),
+            validate_output_verification_request(&request, false, &policy, 0),
+            Err(ApiError::Conflict(_))
+        ));
+        let mut wrong_attempt = request.clone();
+        wrong_attempt.execution_attempt = 1;
+        assert!(matches!(
+            validate_output_verification_request(&wrong_attempt, true, &policy, 0),
             Err(ApiError::Conflict(_))
         ));
     }
@@ -5179,13 +5528,14 @@ adapters:
         let policy = json!({
             "required": true,
             "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
+            "expected_patterns": ["**/result.bin"],
         });
         for path in ["/absolute.fits", ".", "../escape.fits", "a/../b.fits"] {
             let mut request = valid_output_report();
             request.products[0].path = path.into();
             request.inventory_sha256 = canonical_products_sha256(&request.products).unwrap();
             assert!(matches!(
-                validate_output_verification_request(&request, true, &policy),
+                validate_output_verification_request(&request, true, &policy, 0),
                 Err(ApiError::BadRequest(_))
             ));
         }
@@ -5194,7 +5544,7 @@ adapters:
         request.products[0].bytes = 0;
         request.inventory_sha256 = canonical_products_sha256(&request.products).unwrap();
         assert!(matches!(
-            validate_output_verification_request(&request, true, &policy),
+            validate_output_verification_request(&request, true, &policy, 0),
             Err(ApiError::BadRequest(_))
         ));
     }
@@ -5224,8 +5574,9 @@ adapters:
         let policy = json!({
             "required": true,
             "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
+            "expected_patterns": ["**/result.bin", "**/summary.json"],
         });
-        let total = validate_output_verification_request(&request, true, &policy).unwrap();
+        let total = validate_output_verification_request(&request, true, &policy, 0).unwrap();
         assert_eq!(total, 28);
 
         let artifact = output_inventory_artifact(&request, total).unwrap();
@@ -5245,7 +5596,7 @@ adapters:
     }
 
     #[test]
-    fn generic_output_report_allows_no_pattern_summary() {
+    fn required_output_report_rejects_missing_or_changed_pinned_patterns() {
         let mut value = serde_json::to_value(valid_output_report()).unwrap();
         value.as_object_mut().unwrap().remove("patterns");
         value.as_object_mut().unwrap().remove("pattern_counts");
@@ -5253,20 +5604,22 @@ adapters:
         let policy = json!({
             "required": true,
             "inventory_schema": beampipe_project::BEAMPIPE_OUTPUT_INVENTORY_SCHEMA,
+            "expected_patterns": ["**/result.bin"],
         });
 
         assert!(request.patterns.is_empty());
         assert!(request.pattern_counts.is_empty());
-        assert_eq!(
-            validate_output_verification_request(&request, true, &policy).unwrap(),
-            42
-        );
-
-        let mut orphan_count = request;
-        orphan_count.pattern_counts.insert("*.fits".into(), 1);
         assert!(matches!(
-            validate_output_verification_request(&orphan_count, true, &policy),
-            Err(ApiError::BadRequest(_))
+            validate_output_verification_request(&request, true, &policy, 0),
+            Err(ApiError::Conflict(_))
+        ));
+
+        let mut changed = valid_output_report();
+        changed.patterns = vec!["**/other.bin".into()];
+        changed.pattern_counts = BTreeMap::from([("**/other.bin".into(), 1)]);
+        assert!(matches!(
+            validate_output_verification_request(&changed, true, &policy, 0),
+            Err(ApiError::Conflict(_))
         ));
     }
 }

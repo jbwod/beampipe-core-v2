@@ -1,4 +1,5 @@
 {
+  "execution_attempt": 0,
   "schema": "beampipe-output-inventory/v1",
   "patterns": [
     "**/result.bin",
