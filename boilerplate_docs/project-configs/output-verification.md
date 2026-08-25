@@ -80,6 +80,12 @@ The default lifetime is six hours; the accepted range is five minutes through
 delay, pinned outer wall time, and a small publication grace period, while
 remaining within that cap.
 
+For automatic Slurm delivery, pin that choice in the deployment profile as
+`publication.credential_ttl_minutes`. Core requires 5–1440 minutes and rejects
+a value shorter than the effective outer wall time plus 30 minutes. The
+remaining allowance is the operator's queue-delay budget; increase it for a
+busy partition instead of relying on a hidden default.
+
 The response returns `access_token` exactly once and includes the credential
 ID, expiry, execution attempt, audience
 `beampipe-output-verification`, and exact scope
@@ -91,9 +97,18 @@ Treat delivery as runtime secret handling:
 - write the plaintext only to an execution-scoped, mode-`0600` runtime secret
   file (or an equivalent non-persisted secret mount);
 - give the publisher the secret path, not the token as a command argument;
-- remove the file after the terminal application finishes;
+- retain that exact private file while DALiuGE may retry a post-return failure;
 - never put the plaintext in a project config, manifest, logical graph,
   physical graph, INI, `sbatch` script, artifact, provenance payload, or log.
+
+The token is single-purpose and Core accepts only an exact replay after its
+first successful use. Terminal reconciliation revokes it. A Slurm session can
+therefore retain the private file long enough for DALiuGE retries without
+granting a second publication. Automatic removal on the outer job's `EXIT` is
+not implemented yet; operators should treat stale session secret directories
+as a cleanup residual and remove them under their normal workspace-retention
+policy. Do not add an early graph cleanup node, because DALiuGE can retry the
+publisher after the application has returned.
 
 The capability is bound to the execution UUID, action, audience, and current
 `retry_count`. Retry, cancellation, abandonment, or a terminal transition

@@ -1047,6 +1047,60 @@
         ],
         "type": "object"
       },
+      "ExecutionOutputVerificationArtifactAck": {
+        "properties": {
+          "execution_attempt": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "uri": {
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "kind",
+          "sha256",
+          "execution_attempt"
+        ],
+        "type": "object"
+      },
+      "ExecutionOutputVerificationExecutionAck": {
+        "properties": {
+          "output_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "retry_count": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "retry_count",
+          "status"
+        ],
+        "type": "object"
+      },
       "ExecutionOutputVerificationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1107,10 +1161,10 @@
       "ExecutionOutputVerificationResponse": {
         "properties": {
           "artifact": {
-            "$ref": "#/components/schemas/ExecutionArtifactRow"
+            "$ref": "#/components/schemas/ExecutionOutputVerificationArtifactAck"
           },
           "execution": {
-            "$ref": "#/components/schemas/ExecutionRead"
+            "$ref": "#/components/schemas/ExecutionOutputVerificationExecutionAck"
           }
         },
         "required": [
@@ -2630,6 +2684,11 @@
             "description": "Worker environment variable containing the reachable Core base URL.",
             "type": "string"
           },
+          "credential_ttl_minutes": {
+            "description": "Lifetime of the execution-scoped publisher capability. This includes\nscheduler queueing, the complete outer allocation, and publication.\nOperators must size the queue-delay allowance for their facility.",
+            "format": "int32",
+            "type": "integer"
+          },
           "durable_destination_uri_environment": {
             "description": "Worker environment variable containing the durable destination base\nURI. The publisher adds its execution/attempt namespace.",
             "type": "string"
@@ -2637,7 +2696,8 @@
         },
         "required": [
           "core_url_environment",
-          "durable_destination_uri_environment"
+          "durable_destination_uri_environment",
+          "credential_ttl_minutes"
         ],
         "type": "object"
       },
@@ -2736,14 +2796,6 @@
             "format": "int32",
             "nullable": true,
             "type": "integer"
-          },
-          "publication": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/PublicationRuntimeConfig"
-              }
-            ],
-            "nullable": true
           },
           "use_https": {
             "type": "boolean"
