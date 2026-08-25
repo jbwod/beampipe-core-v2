@@ -14,6 +14,13 @@ expect() {
   fi
 }
 
+expect_equal() {
+  if [ "$1" != "$2" ]; then
+    echo "expected [$2], got [$1]" >&2
+    exit 1
+  fi
+}
+
 expect Linux x86_64 x86_64-unknown-linux-gnu
 expect linux amd64 x86_64-unknown-linux-gnu
 expect Linux aarch64 aarch64-unknown-linux-gnu
@@ -78,6 +85,43 @@ HOME_TMP=$(mktemp -d)
 trap 'rm -rf "$tmp" "$HOME_TMP"' EXIT
 HOME=$HOME_TMP
 SHELL=/bin/bash
+unset BEAMPIPE_HOME || true
+
+expect_equal "$(beampipe_effective_home)" "$HOME_TMP/beampipe"
+expect_equal "$(BEAMPIPE_HOME="$HOME_TMP/environment home" beampipe_effective_home)" \
+  "$HOME_TMP/environment home"
+expect_equal "$(beampipe_effective_home --home "$HOME_TMP/global home")" \
+  "$HOME_TMP/global home"
+expect_equal "$(beampipe_effective_home --home="$HOME_TMP/equals home")" \
+  "$HOME_TMP/equals home"
+expect_equal "$(beampipe_effective_home --directory "$HOME_TMP/setup directory" \
+  --home "$HOME_TMP/ignored home")" "$HOME_TMP/setup directory"
+expect_equal "$(beampipe_effective_home --home "$HOME_TMP/ignored home" \
+  --directory="$HOME_TMP/setup directory")" "$HOME_TMP/setup directory"
+expect_equal "$(beampipe_effective_home --directory '~/tilde home')" \
+  "$HOME_TMP/tilde home"
+(
+  cd "$HOME_TMP"
+  expect_equal "$(beampipe_effective_home --directory 'relative home')" \
+    "$(pwd -P)/relative home"
+  expect_equal "$(beampipe_effective_home --home '../sibling home')" \
+    "$(pwd -P)/../sibling home"
+)
+if beampipe_effective_home --home > /dev/null 2>&1; then
+  echo "missing --home value was accepted" >&2
+  exit 1
+fi
+if beampipe_effective_home --directory= > /dev/null 2>&1; then
+  echo "empty --directory value was accepted" >&2
+  exit 1
+fi
+BAD_HOME=$(printf 'bad\ninstallation')
+if beampipe_effective_home --home "$BAD_HOME" > /dev/null 2>&1; then
+  echo "multiline installation home was accepted" >&2
+  exit 1
+fi
+echo "install home selection ok"
+
 beampipe_persist_path "$HOME_TMP/.local/bin"
 if ! grep -Fq "$HOME_TMP/.local/bin" "$HOME_TMP/.profile"; then
   echo "PATH was not added to .profile" >&2
@@ -102,6 +146,8 @@ fi
 echo "install PATH persistence ok"
 
 HOME_OUTPUT=$(mktemp -d)
+SAFETY_TMP=$(mktemp -d)
+trap 'rm -rf "$tmp" "$HOME_TMP" "$HOME_OUTPUT" "$SAFETY_TMP"' EXIT
 if beampipe_require_explicit_unattended --runtime docker < /dev/null > "$HOME_OUTPUT/implicit" 2>&1; then
   echo "headless setup accepted implicit unattended mode" >&2
   exit 1
@@ -155,5 +201,151 @@ if ! grep -Fq "beampipe --home '$HOME_OUTPUT/Jack'\\''s install' setup" "$HOME_O
   echo "setup failure omitted its safe resume command" >&2
   exit 1
 fi
-rm -rf "$HOME_OUTPUT"
+
+PATH_SUB_MARKER="$SAFETY_TMP/path-substitution-ran"
+PATH_TICK_MARKER="$SAFETY_TMP/path-backtick-ran"
+PATH_SEPARATOR_MARKER="$SAFETY_TMP/path-separator-ran"
+SPECIAL_HOME=$(printf "%s/home space ' \$HOME \$(touch %s) \`touch %s\` \\tail" \
+  "$SAFETY_TMP" "$PATH_SUB_MARKER" "$PATH_TICK_MARKER")
+SPECIAL_ARG=$(printf "%s/project space ' \$USER; touch %s; \$(touch %s) \`touch %s\` \\tail" \
+  "$SAFETY_TMP" "$PATH_SEPARATOR_MARKER" "$PATH_SUB_MARKER" "$PATH_TICK_MARKER")
+beampipe_print_setup_failure "$SPECIAL_HOME" 9 \
+  --home "$SAFETY_TMP/ignored global home" \
+  --yes --runtime docker \
+  --directory "$SPECIAL_HOME" \
+  --project-config "$SPECIAL_ARG" > "$SAFETY_TMP/recovery" 2>&1
+RECOVERY_COMMAND=$(awk '/^  beampipe / { sub(/^  /, ""); print; exit }' "$SAFETY_TMP/recovery")
+if [ -z "$RECOVERY_COMMAND" ]; then
+  echo "setup failure omitted its recovery command" >&2
+  exit 1
+fi
+if printf '%s\n' "$RECOVERY_COMMAND" | grep -Fq -- "--directory"; then
+  echo "setup failure repeated the compatibility home option" >&2
+  exit 1
+fi
+
+MOCK_BIN="$SAFETY_TMP/mock-bin"
+mkdir -p "$MOCK_BIN"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf '\''%s\n'\'' "$@" > "$BEAMPIPE_TEST_ARGS_FILE"' \
+  'printf '\''%s\n'\'' "${BEAMPIPE_HOME-}" > "$BEAMPIPE_TEST_HOME_FILE"' \
+  > "$MOCK_BIN/beampipe"
+chmod +x "$MOCK_BIN/beampipe"
+(
+  cd "$SAFETY_TMP"
+  PATH="$MOCK_BIN:/usr/bin:/bin"
+  export PATH
+  BEAMPIPE_TEST_ARGS_FILE="$SAFETY_TMP/recovery-args"
+  BEAMPIPE_TEST_HOME_FILE="$SAFETY_TMP/recovery-home-env"
+  export BEAMPIPE_TEST_ARGS_FILE BEAMPIPE_TEST_HOME_FILE
+  eval "$RECOVERY_COMMAND"
+)
+printf '%s\n' --home "$SPECIAL_HOME" setup --yes --runtime docker \
+  --project-config "$SPECIAL_ARG" > "$SAFETY_TMP/expected-recovery-args"
+if ! cmp -s "$SAFETY_TMP/expected-recovery-args" "$SAFETY_TMP/recovery-args"; then
+  echo "setup failure did not preserve safely quoted arguments" >&2
+  exit 1
+fi
+for marker in "$PATH_SUB_MARKER" "$PATH_TICK_MARKER" "$PATH_SEPARATOR_MARKER"; do
+  if [ -e "$marker" ]; then
+    echo "setup recovery command executed path content" >&2
+    exit 1
+  fi
+done
+
+BEAMPIPE_TEST_ARGS_FILE="$SAFETY_TMP/setup-args"
+BEAMPIPE_TEST_HOME_FILE="$SAFETY_TMP/setup-home-env"
+export BEAMPIPE_TEST_ARGS_FILE BEAMPIPE_TEST_HOME_FILE
+PATH="$MOCK_BIN:/usr/bin:/bin"
+export PATH
+beampipe_run_cli_setup "$SPECIAL_HOME" --yes --runtime docker --directory "$SPECIAL_HOME"
+expect_equal "$(sed -n '1p' "$SAFETY_TMP/setup-home-env")" "$SPECIAL_HOME"
+printf '%s\n' --home "$SPECIAL_HOME" setup --yes --runtime docker \
+  > "$SAFETY_TMP/expected-setup-args"
+if ! cmp -s "$SAFETY_TMP/expected-setup-args" "$SAFETY_TMP/setup-args"; then
+  echo "CLI setup handoff changed caller arguments" >&2
+  exit 1
+fi
+(
+  cd "$SAFETY_TMP"
+  RELATIVE_HOME=$(beampipe_effective_home --home "relative core")
+  BEAMPIPE_TEST_ARGS_FILE="$SAFETY_TMP/relative-setup-args"
+  BEAMPIPE_TEST_HOME_FILE="$SAFETY_TMP/relative-setup-home-env"
+  export BEAMPIPE_TEST_ARGS_FILE BEAMPIPE_TEST_HOME_FILE
+  beampipe_run_cli_setup "$RELATIVE_HOME" --yes --runtime docker --home "relative core"
+)
+printf '%s\n' --home "$SAFETY_TMP/relative core" setup --yes --runtime docker \
+  > "$SAFETY_TMP/expected-relative-setup-args"
+if ! cmp -s "$SAFETY_TMP/expected-relative-setup-args" "$SAFETY_TMP/relative-setup-args"; then
+  echo "relative setup home was not normalized before the CLI handoff" >&2
+  exit 1
+fi
+
+SPECIAL_BIN=$(printf "%s/bin space ' \$HOME \$(touch %s) \`touch %s\` \\tail" \
+  "$SAFETY_TMP" "$PATH_SUB_MARKER" "$PATH_TICK_MARKER")
+PATH_LINE=$(beampipe_path_export "$SPECIAL_BIN")
+(
+  cd "$SAFETY_TMP"
+  PATH=/usr/bin:/bin
+  eval "$PATH_LINE"
+  expect_equal "${PATH%%:*}" "$SPECIAL_BIN"
+)
+BEAMPIPE_BIN="$SPECIAL_BIN" beampipe_print_path_hint > "$SAFETY_TMP/path-hint"
+HINT_LINE=$(awk '/^  export PATH=/ { sub(/^  /, ""); print; exit }' "$SAFETY_TMP/path-hint")
+(
+  cd "$SAFETY_TMP"
+  PATH=/usr/bin:/bin
+  eval "$HINT_LINE"
+  expect_equal "${PATH%%:*}" "$SPECIAL_BIN"
+)
+
+SAFE_HOME="$SAFETY_TMP/path-home"
+mkdir -p "$SAFE_HOME"
+HOME=$SAFE_HOME
+SHELL=/bin/bash
+beampipe_persist_path "$SPECIAL_BIN" > "$SAFETY_TMP/path-persist-output"
+(
+  PATH=/usr/bin:/bin
+  # shellcheck disable=SC1090
+  . "$SAFE_HOME/.profile"
+  expect_equal "${PATH%%:*}" "$SPECIAL_BIN"
+)
+beampipe_persist_path "$SPECIAL_BIN" > /dev/null
+if [ "$(grep -c 'Added by Beampipe installer' "$SAFE_HOME/.profile")" -ne 1 ]; then
+  echo "special PATH line was duplicated" >&2
+  exit 1
+fi
+
+SHELL=/usr/bin/fish
+beampipe_persist_path "$SPECIAL_BIN" > "$SAFETY_TMP/fish-persist-output"
+FISH_FILE="$SAFE_HOME/.config/fish/config.fish"
+expect_equal "$(sed -n '1p' "$FISH_FILE")" "$(beampipe_fish_path_command "$SPECIAL_BIN")"
+if command -v fish > /dev/null 2>&1; then
+  fish -n "$FISH_FILE"
+  fish -c 'source "$argv[1]"; test "$PATH[1]" = "$argv[2]"' "$FISH_FILE" "$SPECIAL_BIN"
+fi
+
+BAD_PATH=$(printf 'bad\npath')
+REJECT_HOME="$SAFETY_TMP/rejected-home"
+mkdir -p "$REJECT_HOME"
+if HOME="$REJECT_HOME" beampipe_persist_path "$BAD_PATH" > "$SAFETY_TMP/bad-path" 2>&1; then
+  echo "multiline PATH directory was accepted" >&2
+  exit 1
+fi
+if [ -e "$REJECT_HOME/.profile" ]; then
+  echo "multiline PATH directory changed a startup file" >&2
+  exit 1
+fi
+if beampipe_validate_setup_args --project-config "$BAD_PATH" > "$SAFETY_TMP/bad-arg" 2>&1; then
+  echo "multiline setup argument was accepted" >&2
+  exit 1
+fi
+for marker in "$PATH_SUB_MARKER" "$PATH_TICK_MARKER" "$PATH_SEPARATOR_MARKER"; do
+  if [ -e "$marker" ]; then
+    echo "PATH persistence executed path content" >&2
+    exit 1
+  fi
+done
+
 echo "install progress and recovery output ok"

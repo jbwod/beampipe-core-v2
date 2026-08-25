@@ -74,9 +74,123 @@ beampipe_check_install_requirements() {
 }
 
 beampipe_shell_quote() {
+  beampipe_require_single_line "$1" "shell value" || return 1
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+beampipe_fish_quote() {
+  beampipe_require_single_line "$1" "fish path" || return 1
+  printf "'"
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g"
+  printf "'"
+}
+
+beampipe_require_single_line() {
+  value=$1
+  label=$2
+  carriage_return=$(printf '\r')
+  case "$value" in
+    *'
+'*|*"$carriage_return"*)
+      beampipe_error "${label} must not contain newline characters"
+      return 1
+      ;;
+  esac
+}
+
+beampipe_expand_home_path() {
+  case "$1" in
+    '~') printf '%s\n' "$HOME" ;;
+    '~/'*) printf '%s/%s\n' "$HOME" "${1#\~/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+beampipe_absolute_home_path() {
+  expanded_home=$(beampipe_expand_home_path "$1") || return 2
+  case "$expanded_home" in
+    /*) printf '%s\n' "$expanded_home" ;;
+    *)
+      launch_directory=$(pwd -P) || {
+        beampipe_error "could not resolve the installer launch directory"
+        return 2
+      }
+      printf '%s/%s\n' "$launch_directory" "$expanded_home"
+      ;;
+  esac
+}
+
+beampipe_effective_home() {
+  beampipe_require_single_line "$HOME" "HOME" || return 2
+  selected_home="${BEAMPIPE_HOME:-$HOME/beampipe}"
+  setup_home=
+  setup_home_set=0
+  setup_directory=
+  setup_directory_set=0
+  pending_home_option=
+  for arg in "$@"; do
+    if [ -n "$pending_home_option" ]; then
+      if [ -z "$arg" ]; then
+        beampipe_error "${pending_home_option} requires a non-empty path"
+        return 2
+      fi
+      case "$pending_home_option" in
+        --home)
+          setup_home=$arg
+          setup_home_set=1
+          ;;
+        --directory)
+          setup_directory=$arg
+          setup_directory_set=1
+          ;;
+      esac
+      pending_home_option=
+      continue
+    fi
+    case "$arg" in
+      --home|--directory)
+        pending_home_option=$arg
+        ;;
+      --home=*)
+        setup_home=${arg#--home=}
+        [ -n "$setup_home" ] || {
+          beampipe_error "--home requires a non-empty path"
+          return 2
+        }
+        setup_home_set=1
+        ;;
+      --directory=*)
+        setup_directory=${arg#--directory=}
+        [ -n "$setup_directory" ] || {
+          beampipe_error "--directory requires a non-empty path"
+          return 2
+        }
+        setup_directory_set=1
+        ;;
+    esac
+  done
+  if [ -n "$pending_home_option" ]; then
+    beampipe_error "${pending_home_option} requires a path"
+    return 2
+  fi
+  if [ "$setup_home_set" -eq 1 ]; then
+    selected_home=$setup_home
+  fi
+  if [ "$setup_directory_set" -eq 1 ]; then
+    selected_home=$setup_directory
+  fi
+  beampipe_require_single_line "$selected_home" "installation home" || return 2
+  beampipe_absolute_home_path "$selected_home"
+}
+
+beampipe_validate_setup_args() {
+  position=0
+  for arg in "$@"; do
+    position=$((position + 1))
+    beampipe_require_single_line "$arg" "setup argument ${position}" || return 2
+  done
 }
 
 beampipe_release_target_from() {
@@ -128,6 +242,7 @@ install_beampipe() {
   target=$(beampipe_release_target)
   version="${BEAMPIPE_VERSION:-latest}"
   bindir="${BEAMPIPE_BIN:-$HOME/.local/bin}"
+  beampipe_require_single_line "$bindir" "binary directory" || return 2
   mkdir -p "$bindir"
 
   beampipe_step 2 3 "Download and install"
@@ -210,14 +325,26 @@ beampipe_require_explicit_unattended() {
 }
 
 beampipe_path_export() {
-  printf 'export PATH="%s:$PATH"\n' "$1"
+  bindir=$1
+  quoted_bindir=$(beampipe_shell_quote "$bindir") || return 1
+  printf 'export PATH=%s:"$PATH"\n' "$quoted_bindir"
+}
+
+beampipe_fish_path_command() {
+  bindir=$1
+  quoted_bindir=$(beampipe_fish_quote "$bindir") || return 1
+  printf 'fish_add_path -- %s\n' "$quoted_bindir"
 }
 
 beampipe_rc_mentions_bindir() {
   file=$1
   bindir=$2
   [ -f "$file" ] || return 1
-  if grep -Fq "$bindir" "$file"; then
+  path_line=$(beampipe_path_export "$bindir") || return 1
+  if grep -Fqx -- "$path_line" "$file"; then
+    return 0
+  fi
+  if grep -Fq -- "$bindir" "$file"; then
     return 0
   fi
   case "$bindir" in
@@ -233,6 +360,8 @@ beampipe_rc_mentions_bindir() {
 beampipe_append_path_rc() {
   file=$1
   bindir=$2
+  beampipe_require_single_line "$file" "shell startup file" || return 1
+  beampipe_require_single_line "$bindir" "binary directory" || return 1
   if beampipe_rc_mentions_bindir "$file" "$bindir"; then
     return 0
   fi
@@ -244,11 +373,13 @@ beampipe_append_path_rc() {
     echo "# Added by Beampipe installer"
     beampipe_path_export "$bindir"
   } >> "$file"
-  echo "Added ${bindir} to PATH in ${file}"
+  printf 'Added %s to PATH in %s\n' "$bindir" "$file"
 }
 
 beampipe_persist_path() {
   bindir=$1
+  beampipe_require_single_line "$HOME" "HOME" || return 1
+  beampipe_require_single_line "$bindir" "binary directory" || return 1
   beampipe_append_path_rc "${HOME}/.profile" "$bindir"
   shellname=$(basename "${SHELL:-}")
   case "$shellname" in
@@ -258,12 +389,15 @@ beampipe_persist_path() {
       ;;
     fish)
       fish_file="${HOME}/.config/fish/config.fish"
-      if [ -f "$fish_file" ] && grep -Fq "$bindir" "$fish_file"; then
-        return 0
+      if [ -f "$fish_file" ]; then
+        fish_path_line=$(beampipe_fish_path_command "$bindir") || return 1
+        if grep -Fqx -- "$fish_path_line" "$fish_file" || grep -Fq -- "$bindir" "$fish_file"; then
+          return 0
+        fi
       fi
       mkdir -p "$(dirname "$fish_file")"
-      printf 'fish_add_path %s\n' "$bindir" >> "$fish_file"
-      echo "Added ${bindir} to PATH in ${fish_file}"
+      beampipe_fish_path_command "$bindir" >> "$fish_file"
+      printf 'Added %s to PATH in %s\n' "$bindir" "$fish_file"
       ;;
     *)
       beampipe_append_path_rc "${HOME}/.bashrc" "$bindir"
@@ -276,31 +410,83 @@ beampipe_persist_path() {
 
 beampipe_print_path_hint() {
   bindir="${BEAMPIPE_BIN:-$HOME/.local/bin}"
+  beampipe_require_single_line "$bindir" "binary directory" || return 1
   echo
-  echo "Command installed: ${bindir}/beampipe"
+  printf 'Command installed: %s/beampipe\n' "$bindir"
   echo "A new terminal will pick up the PATH change. For this terminal, run:"
-  echo "  export PATH=\"${bindir}:\$PATH\""
+  printf '  '
+  beampipe_path_export "$bindir"
 }
 
 beampipe_print_setup_failure() {
   home=$1
   status=$2
+  shift 2
   quoted_home=$(beampipe_shell_quote "$home")
   echo
   beampipe_error "Setup stopped with exit status ${status}"
   echo "The verified beampipe binary is installed; no automatic rollback was attempted."
   echo "Review the message above, then resume safely with:"
-  echo "  beampipe --home ${quoted_home} setup"
+  printf '  beampipe --home %s setup' "$quoted_home"
+  beampipe_print_preserved_setup_args "$@"
+  printf '\n'
+}
+
+beampipe_print_preserved_setup_args() {
+  skip_home_value=0
+  for arg in "$@"; do
+    if [ "$skip_home_value" -eq 1 ]; then
+      skip_home_value=0
+      continue
+    fi
+    case "$arg" in
+      --home|--directory)
+        skip_home_value=1
+        ;;
+      --home=*|--directory=*)
+        ;;
+      *)
+        quoted_arg=$(beampipe_shell_quote "$arg") || return 1
+        printf ' %s' "$quoted_arg"
+        ;;
+    esac
+  done
 }
 
 beampipe_run_cli_setup() {
   home=$1
   shift
-  beampipe --home "$home" setup "$@"
+  first_setup_arg=1
+  skip_home_value=0
+  for arg in "$@"; do
+    if [ "$first_setup_arg" -eq 1 ]; then
+      set --
+      first_setup_arg=0
+    fi
+    if [ "$skip_home_value" -eq 1 ]; then
+      skip_home_value=0
+      continue
+    fi
+    case "$arg" in
+      --home|--directory)
+        skip_home_value=1
+        ;;
+      --home=*|--directory=*)
+        ;;
+      *)
+        set -- "$@" "$arg"
+        ;;
+    esac
+  done
+  if [ "$first_setup_arg" -eq 1 ]; then
+    set --
+  fi
+  BEAMPIPE_HOME="$home" beampipe --home "$home" setup "$@"
 }
 
 run_setup() {
-  home="${BEAMPIPE_HOME:-$HOME/beampipe}"
+  home=$1
+  shift
   status=0
   beampipe_step 3 3 "Configure Beampipe"
   beampipe_detail "Home" "$home"
@@ -320,7 +506,7 @@ run_setup() {
   fi
   beampipe_print_path_hint
   if [ "$status" -ne 0 ]; then
-    beampipe_print_setup_failure "$home" "$status"
+    beampipe_print_setup_failure "$home" "$status" "$@"
   fi
   return "$status"
 }
@@ -329,11 +515,13 @@ main() {
   beampipe_init_ui
   beampipe_step 1 3 "Check this machine"
   beampipe_check_install_requirements
+  beampipe_validate_setup_args "$@"
   beampipe_require_explicit_unattended "$@"
+  effective_home=$(beampipe_effective_home "$@")
   beampipe_detail "System" "$(uname -s) $(uname -m)"
   beampipe_ok "Installer requirements available"
   install_beampipe
-  run_setup "$@"
+  run_setup "$effective_home" "$@"
 }
 
 if [ "${BEAMPIPE_INSTALL_LIB:-}" = "1" ]; then
