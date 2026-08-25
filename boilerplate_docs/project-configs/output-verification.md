@@ -28,16 +28,17 @@ whereas the neutral example requires `**/result.bin`.
 ## Publication topology
 
 The terminal `beampipe-publish` DALiuGE application belongs to the standalone
-`beampipe-pallette` package. A project graph configures its storage adapter; the
-Core contract is unchanged for S3, NGAS, HTTPS-backed project storage, or an
-approved durable filesystem.
+`beampipe-pallette` package. Its initial storage adapters support an approved
+project filesystem and S3-compatible object storage. The Core report contract
+can also represent future NGAS or HTTPS-backed adapters, but their URI support
+does not imply that the standalone package implements them yet.
 
 <div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Output publication flows from pipeline products through a terminal publisher and durable storage to the Core verification ledger">
   <div class="bp-flow-node" data-tone="cyan"><span>DALiuGE</span><strong>pipeline products</strong><small>execution workspace</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
   <div class="bp-flow-node" data-tone="amber"><span>PUBLISH</span><strong>beampipe-publish</strong><small>upload + re-read</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
-  <div class="bp-flow-node" data-tone="green"><span>STORAGE</span><strong>durable objects</strong><small>S3, NGAS, HTTPS, file</small></div>
+  <div class="bp-flow-node" data-tone="green"><span>STORAGE</span><strong>durable objects</strong><small>filesystem or S3-compatible</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
   <div class="bp-flow-node" data-tone="green"><span>CORE</span><strong>verified inventory</strong><small>immutable ledger evidence</small></div>
 </div>

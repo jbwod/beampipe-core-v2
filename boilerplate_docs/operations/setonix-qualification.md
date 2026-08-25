@@ -128,6 +128,24 @@ wallaby_hires --version
 beampipe-publish --version
 ```
 
+Set the non-secret publication endpoints in the Core/jobs worker environment,
+using a Core URL that Setonix compute nodes can actually reach. The destination
+must select an implemented standalone publisher adapter:
+
+```bash
+export BEAMPIPE_CORE_URL='https://<reachable-core-host>'
+export BEAMPIPE_OUTPUT_DESTINATION_URI='file:///scratch/<project>/<user>/beampipe-published'
+
+test -n "$BEAMPIPE_CORE_URL"
+test -n "$BEAMPIPE_OUTPUT_DESTINATION_URI"
+beampipe profile validate slurm-remote
+```
+
+These values are not the publisher capability. The submission worker delivers
+that secret separately through its private execution file. For an S3-compatible
+destination, use its approved `s3://` base URI and configure storage credentials
+through the publisher adapter's secret mechanism, never the profile JSON.
+
 Installing the package into a local `/daliuge` runtime does not prove that the
 Setonix login environment and compute-node environment contain the same build.
 
@@ -145,12 +163,22 @@ command -v scontrol
 command -v srun
 command -v python3
 command -v wallaby_hires
+command -v beampipe-publish
+beampipe-publish --version
+curl -fsS "${BEAMPIPE_CORE_URL%/}/api/v2/health"
 sinfo --version
 python3 -c '<import every runtime_contract.required_python_modules entry>'
 test -d '<DLG_ROOT>' && test -w '<DLG_ROOT>'
 command -v singularity
 test -f "$BEAMPIPE_ASKAPSOFT_SIF" && test -r "$BEAMPIPE_ASKAPSOFT_SIF"
 ```
+
+For a filesystem destination, resolve the URI to the exact approved path and add
+`test -d '<PUBLISH_ROOT>' && test -r '<PUBLISH_ROOT>' && test -w '<PUBLISH_ROOT>'`
+to the read-only preflight. Creating and re-reading a probe object needs a
+separate bounded mutation approval. For S3-compatible storage, use the publisher
+adapter's non-mutating credential and destination preflight. Include every exact
+command in the relevant approval before running it over SSH.
 
 The Wallaby commands, module, SIF, and directory bindings above come from the
 bundled profile's `runtime_contract`; they are not built into Core's Slurm

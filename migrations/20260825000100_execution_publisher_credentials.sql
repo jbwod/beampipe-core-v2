@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS execution_publisher_credentials (
     CONSTRAINT execution_publisher_credentials_attempt_nonnegative CHECK (
         execution_attempt >= 0
     ),
+    CONSTRAINT execution_publisher_credentials_lifetime_bounded CHECK (
+        expires_at > created_at
+        AND expires_at <= created_at + INTERVAL '24 hours'
+    ),
     CONSTRAINT execution_publisher_credentials_consumption_complete CHECK (
         (consumed_at IS NULL AND request_sha256 IS NULL AND output_artifact_id IS NULL)
         OR
