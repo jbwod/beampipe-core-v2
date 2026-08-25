@@ -1053,6 +1053,13 @@
           "durable_destination_uri": {
             "type": "string"
           },
+          "execution_attempt": {
+            "description": "Must equal the execution's current retry generation.",
+            "example": 0,
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "inventory_sha256": {
             "type": "string"
           },
@@ -1088,6 +1095,7 @@
           }
         },
         "required": [
+          "execution_attempt",
           "schema",
           "products",
           "inventory_sha256",
@@ -1120,6 +1128,68 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "ExecutionPublisherTokenRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "ttl_seconds": {
+            "description": "Execution-lifetime credential TTL. Issue immediately before submission.\nValues are bounded to 5 minutes through 24 hours.",
+            "example": 21600,
+            "format": "int32",
+            "maximum": 86400,
+            "minimum": 300,
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "ExecutionPublisherTokenResponse": {
+        "properties": {
+          "access_token": {
+            "description": "Returned once. Core stores only its SHA-256 digest.",
+            "type": "string"
+          },
+          "audience": {
+            "example": "beampipe-output-verification",
+            "type": "string"
+          },
+          "credential_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "execution_attempt": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "execution_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "scope": {
+            "example": "execution:019c1234-0000-7000-8000-000000000000:verify_outputs",
+            "type": "string"
+          },
+          "token_type": {
+            "example": "Bearer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "credential_id",
+          "execution_id",
+          "access_token",
+          "token_type",
+          "audience",
+          "scope",
+          "execution_attempt",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -2292,6 +2362,13 @@
       "OutputVerificationConfig": {
         "additionalProperties": false,
         "properties": {
+          "expected_patterns": {
+            "description": "Project-neutral relative glob patterns that every accepted inventory\nmust report with a positive match count.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "inventory_schema": {
             "type": "string"
           },
@@ -2542,6 +2619,28 @@
         ],
         "type": "object"
       },
+      "PublicationRuntimeConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_insecure_core_http": {
+            "description": "Development-only HTTP escape hatch. Runtime validation still permits\nHTTP only for a loopback Core endpoint.",
+            "type": "boolean"
+          },
+          "core_url_environment": {
+            "description": "Worker environment variable containing the reachable Core base URL.",
+            "type": "string"
+          },
+          "durable_destination_uri_environment": {
+            "description": "Worker environment variable containing the durable destination base\nURI. The publisher adds its execution/attempt namespace.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "core_url_environment",
+          "durable_destination_uri_environment"
+        ],
+        "type": "object"
+      },
       "QueryIteration": {
         "additionalProperties": false,
         "properties": {
@@ -2637,6 +2736,14 @@
             "format": "int32",
             "nullable": true,
             "type": "integer"
+          },
+          "publication": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PublicationRuntimeConfig"
+              }
+            ],
+            "nullable": true
           },
           "use_https": {
             "type": "boolean"
@@ -2882,6 +2989,14 @@
           "num_nodes": {
             "format": "int32",
             "type": "integer"
+          },
+          "publication": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PublicationRuntimeConfig"
+              }
+            ],
+            "nullable": true
           },
           "remote_user": {
             "nullable": true,
@@ -5387,9 +5502,107 @@
         ]
       }
     },
+    "/api/v2/executions/{id}/outputs/publisher-token": {
+      "post": {
+        "description": "The plaintext is returned once; Core persists only a digest. This endpoint\nrequires a superuser bearer token, but that credential is never given to the\ngraph.",
+        "operationId": "issue_execution_publisher_token",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionPublisherTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionPublisherTokenResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Response"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Issue a least-privilege publisher capability for one execution attempt.",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
     "/api/v2/executions/{id}/outputs/verify": {
       "post": {
-        "description": "Validates `beampipe-output-inventory/v1`, records its publication\nacknowledgement, and releases an execution waiting at the output-verification\ncompletion gate.",
+        "description": "Validates `beampipe-output-inventory/v1`, records its publication\nacknowledgement, and releases an execution waiting at the output-verification\ncompletion gate. The bearer may be a superuser access token or the\nexecution-scoped publisher capability issued for this exact action.",
         "operationId": "verify_execution_outputs",
         "parameters": [
           {
