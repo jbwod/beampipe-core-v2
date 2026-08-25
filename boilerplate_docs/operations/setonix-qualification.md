@@ -238,11 +238,11 @@ imager jobs. Each child requests:
 
 ```text
 partition=work  nodes=1  ntasks=6  ntasks-per-node=6
-cpus-per-task=1  memory=6G  time=00:20:00
+cpus-per-task=1  memory=4G  time=00:50:00
 ```
 
-The nested upper bound is therefore three concurrent nodes, 18 tasks, 18 GB
-requested memory, and 60 node-minutes. Add the separately rendered outer
+The nested upper bound is therefore three concurrent nodes, 18 tasks, 12 GB
+requested memory, and 150 node-minutes. Add the separately rendered outer
 DALiuGE allocation. The approval packet must show both; approving the outer job
 does not conceal the nested request.
 
