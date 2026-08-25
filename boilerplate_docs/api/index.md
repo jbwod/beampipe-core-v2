@@ -1,6 +1,10 @@
 # API workflow
 
-The Axum API is mounted at `/api/v2`. Health is public; operational resources require a bearer token, and mutating administrative surfaces require a superuser.
+The Axum API is mounted at `/api/v2`. Health is public; operational resources
+require a bearer token, and mutating administrative surfaces require a
+superuser. The one deliberate least-privilege exception is output verification:
+its bearer may be a superuser access token or the matching execution-scoped
+publisher capability.
 
 ## Authenticate
 
@@ -141,6 +145,14 @@ curl -fsS "$BASE/api/v2/executions/$EXEC_ID/observations" -H "$AUTH" | jq .
 curl -fsS "$BASE/api/v2/executions/$EXEC_ID/artifacts" -H "$AUTH" | jq .
 curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 ```
+
+When the pinned project requires durable output verification, use the terminal
+`beampipe-publish` application from standalone `beampipe-pallette`. The trusted
+submission path supplies a short-lived capability restricted to
+`execution:$EXEC_ID:verify_outputs`; it must never put the superuser token or
+publisher plaintext in graph or scheduler artifacts. The complete issuance,
+secret-delivery, inventory, ordering, and idempotent-retry contract is in
+[Output verification](../project-configs/output-verification.md).
 
 ## Clean-break field migration
 

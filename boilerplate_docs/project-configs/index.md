@@ -243,12 +243,15 @@ graph:
 output_verification:
   required: true
   inventory_schema: beampipe-output-inventory/v1
+  expected_patterns:
+    - "**/result.bin"
 ```
 
 A graph may use an immutable URL instead of a path. Every source is bounded,
 hashed, and checked against the configured SHA-256 before parsing. Successful
 backend completion does not satisfy required output verification; a trusted
-publisher must submit the generic inventory described in
+publisher must durably verify at least one product for every pinned pattern and
+submit the generic inventory described in
 [Output verification](output-verification.md).
 
 ## Automation

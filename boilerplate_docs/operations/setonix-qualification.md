@@ -116,8 +116,17 @@ The production qualification artifacts are:
 | Artifact | Expected evidence |
 |---|---|
 | WALLABY graph | SHA-256 `279776976d0650321a8813aac1ff5f73e81696913480ef045692f7d295696b83` |
-| Wallaby package | version `0.1.11` |
-| Python wheel | SHA-256 `593bbd412744cdff68e32097b685b95e81b46505ac2de4ef7f51c5623d8a08de` |
+| Wallaby package | `wallaby_hires --version` matches the reviewed release |
+| Publisher package | `beampipe-publish --version` matches the reviewed standalone package release |
+| Python wheels | SHA-256 recorded for every exact installed wheel |
+
+Capture the versions without pinning this runbook to a release that will go
+stale:
+
+```bash
+wallaby_hires --version
+beampipe-publish --version
+```
 
 Installing the package into a local `/daliuge` runtime does not prove that the
 Setonix login environment and compute-node environment contain the same build.
@@ -223,8 +232,8 @@ limit**. Use at least 120 minutes for the one-source qualification unless a
 measured site-specific bound justifies more. A warm cache is not evidence that
 the cold-cache limit is sufficient.
 
-Wallaby 0.1.11 publishes a newly validated extracted MeasurementSet by atomic
-same-filesystem rename. Older builds copied the full extracted tree a second
+The qualified Wallaby package publishes a newly validated extracted
+MeasurementSet by atomic same-filesystem rename. Older builds copied the full extracted tree a second
 time, doubled write I/O, exposed a partially populated beam directory, and can
 consume most of a 50-minute outer allocation before imaging starts.
 
@@ -297,8 +306,8 @@ state, source (`squeue` or `sacct`), reason, and timestamp. Each Wallaby child i
 submitted held, records its exact ID in a mode-0600 lifecycle directory, and is
 then released. Capture every `BEAMPIPE_CHILD_JOB_ID`. Core requests an advance
 TERM notification before the outer wall-time, and the normal supervisor trap
-cancels its recorded exact child. Wallaby 0.1.11 also embeds the validated outer
-job ID in every child script; a child terminates its own `srun` if that parent
+cancels its recorded exact child. The qualified Wallaby supervisor also embeds
+the validated outer job ID in every child script; a child terminates its own `srun` if that parent
 disappears. `SIGKILL`, node loss, or an older Wallaby build can still orphan a
 child; never cancel by username, wildcard, or job-name prefix.
 
@@ -359,18 +368,16 @@ evidence but cannot reopen the terminal ledger, and retry remains blocked.
 
 Slurm `COMPLETED` records compute evidence only. The production project requires
 a non-empty Beampipe output inventory, durable publication, and trusted
-acknowledgement. On the approved filesystem, verify and publish only the run's
-paths:
-
-```text
-wallaby_hires verify-inventory <STAGING_ROOT> <INVENTORY>
-wallaby_hires publish-local <STAGING_ROOT> <INVENTORY> <DURABLE_DESTINATION>
-```
-
-Re-hash the durable copy. Keep the Core superuser token off Setonix. From the
-trusted local publisher, send the complete inventory, durable URI, receipt ID,
-publisher, timestamp, and `publication.acknowledged=true` to
+acknowledgement. Its terminal `beampipe-publish` application from standalone
+`beampipe-pallette` uploads only the run's selected paths, re-reads or re-hashes
+the durable objects, emits the inventory DROP, and sends the same report to
 `POST /api/v2/executions/{id}/outputs/verify`.
+
+Keep the Core superuser token off Setonix. The publisher receives only the
+short-lived capability scoped to this execution and action, through the
+runtime-secret delivery described in
+[Output verification](../project-configs/output-verification.md). Never persist
+its plaintext in the graph, INI, `sbatch` script, artifact, provenance, or log.
 
 Expected immutable Core artifacts are `manifest`, `source_graph`,
 `patched_graph`, `physical_graph`, and the output inventory, each with a
