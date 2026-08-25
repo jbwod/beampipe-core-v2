@@ -112,7 +112,7 @@ Run the API and durable job system locally. External execution stays mocked unti
         <div class="bp-install-builder__checks">
           <label class="bp-install-builder__toggle">
             <input id="bp-install-start" name="start" type="checkbox" checked>
-            <span>Start Postgres and the stack</span>
+            <span id="bp-install-start-label">Start Core automatically</span>
           </label>
           <label class="bp-install-builder__toggle" id="bp-install-dashboard-label">
             <input id="bp-install-dashboard" name="dashboard" type="checkbox">
@@ -130,10 +130,11 @@ Run the API and durable job system locally. External execution stays mocked unti
           </div>
           <div class="bp-install-builder__field">
             <label for="bp-install-admin-password-file">Password file</label>
-            <input id="bp-install-admin-password-file" name="admin-password-file" type="text" spellcheck="false" placeholder="generated if empty" autocomplete="off">
+            <input id="bp-install-admin-password-file" name="admin-password-file" type="text" spellcheck="false" placeholder="/run/secrets/beampipe-admin" autocomplete="off">
           </div>
         </div>
-        <p class="bp-install-builder__note">Leave the password file empty to generate a password. Secrets are never placed in the generated command.</p>
+        <p class="bp-install-builder__note" id="bp-install-password-note" aria-live="polite">Username, email, and a protected password file supplied here take precedence. Leave the file empty and the guided wizard prompts securely. Secrets are never placed in the generated command.</p>
+        <p class="bp-install-builder__note" id="bp-install-start-note" aria-live="polite">Docker starts Core automatically after setup checks pass.</p>
       </div>
     </div>
   </form>
@@ -144,7 +145,7 @@ Run the API and durable job system locally. External execution stays mocked unti
       <button type="button" class="terminal-button bp-install-builder__copy" id="bp-install-copy">Copy</button>
     </div>
     <p class="bp-install-builder__summary" id="bp-install-summary" aria-live="polite">Guided Docker setup · neutral Core · external execution mocked</p>
-    <p class="bp-install-builder__hint">After setup: <code>beampipe status</code>, then <code>beampipe doctor</code>. API at <code id="bp-install-api-url">http://127.0.0.1:18080/api/v2</code>. Files in <code id="bp-install-home">~/beampipe</code>.</p>
+    <p class="bp-install-builder__hint">After setup: <code id="bp-install-status-command">beampipe status</code>, then <code id="bp-install-doctor-command">beampipe doctor</code>. API at <code id="bp-install-api-url">http://127.0.0.1:18080/api/v2</code>. Files in <code id="bp-install-home">~/beampipe</code>.</p>
     <p class="bp-install-builder__status" id="bp-install-status" aria-live="polite"></p>
   </div>
   <noscript>

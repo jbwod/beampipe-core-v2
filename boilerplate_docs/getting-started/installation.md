@@ -21,7 +21,7 @@ $BEAMPIPE_HOME/                  default: ~/beampipe
 `-- credentials/ssh/<slot>/     managed SSH credential copies
 ```
 
-The active installation is selected by global `--home`, then `BEAMPIPE_HOME`, then `~/beampipe`. The current directory does not select an installation. Setup never stores secrets in `installation.json`.
+The active installation is selected by global `--home`, then `BEAMPIPE_HOME`, then `~/beampipe`. Setup also accepts `--directory` as a compatibility alias; it takes precedence over `--home` only for that setup invocation. The current directory does not select an installation. Setup never stores secrets in `installation.json`.
 
 ## 1. Docker: recommended
 
@@ -35,7 +35,9 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 The wrapper checks local installer tools, selects the release for your platform, verifies its SHA-256 checksum, installs `beampipe`, and hands the terminal to the setup wizard. Choose Docker and managed PostgreSQL for the shortest path.
 
-The wizard walks through **Runtime → PostgreSQL → Network → optional Dash → Project and deployment → Review**. It confirms the install home at the beginning and the complete plan before configuration starts. Setup then creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, creates the first administrator, and starts the selected services. No scientific project, provider integration, or real execution backend is enabled implicitly.
+The wizard walks through **Runtime → PostgreSQL → Network → optional Dash → Project and deployment → Review**. It confirms the install home at the beginning and the complete plan before configuration starts. Setup then creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, and creates the first administrator. Docker setup starts Core automatically after its checks pass. With host runtime selected, it prepares managed PostgreSQL when requested and prints the foreground `beampipe --home … start` command instead. No scientific project, provider integration, or real execution backend is enabled implicitly.
+
+When guided setup has no administrator password file, the wizard prompts for the password securely. Explicit `--admin-user`, `--admin-email`, and `--admin-password-file` values take precedence in guided and unattended modes.
 
 When setup finishes, open a new terminal or update this one, then verify it:
 
@@ -43,6 +45,13 @@ When setup finishes, open a new terminal or update this one, then verify it:
 export PATH="$HOME/.local/bin:$PATH"
 beampipe status
 beampipe doctor
+```
+
+For a custom installation home, keep using an explicit global selector:
+
+```bash
+beampipe --home "$HOME/beampipe control" status
+beampipe --home "$HOME/beampipe control" doctor
 ```
 
 If setup stops, the verified binary remains installed and the installer prints a safely quoted resume command. `beampipe setup` is idempotent; fix the reported issue and rerun that command.
@@ -74,7 +83,7 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 `--yes` answers setup questions from explicit flags or safe defaults. The CLI remains the single source of the resulting **SETUP COMPLETE → ACCESS → NEXT ACTIONS** handoff. Pass `--use-real-backends` only after `beampipe doctor --profile NAME` is known to pass.
 
-For unattended administrator creation, omit a password to generate one or use a mode-`0600` file:
+For unattended administrator creation, omit the password file to generate a private password or supply a protected file:
 
 ```bash
 beampipe setup --yes --runtime docker --postgres compose \
@@ -82,7 +91,7 @@ beampipe setup --yes --runtime docker --postgres compose \
   --admin-password-file /run/secrets/beampipe-admin
 ```
 
-Do not pass `--admin-password` in shell history, CI logs, or a copied installer command. When unattended setup generates the password, it writes it to `$BEAMPIPE_HOME/credentials/admin/password` with mode `0600` and does not print it to standard output.
+Do not pass `--admin-password` in shell history, CI logs, or a copied installer command. The supplied username, email, and password-file path take precedence over defaults. When unattended setup has no password file, it generates the password at `$BEAMPIPE_HOME/credentials/admin/password` with mode `0600` and does not print it to standard output.
 
 Supply any project during setup with `--project-config PATH`. Omitting it produces a project-neutral installation. The bundled WALLABY HiRes example is opt-in:
 
@@ -103,6 +112,8 @@ beampipe stop
 beampipe start
 beampipe uninstall
 ```
+
+Add `--home '/custom/install path'` immediately after `beampipe` in each command when the installation does not use the default home.
 
 Production API startup requires a reachable Redis service configured through
 `BEAMPIPE_REDIS_URL`. Setting `BEAMPIPE_REQUIRE_RATE_LIMITER=false` does not
@@ -139,7 +150,7 @@ beampipe setup --yes --runtime host --postgres compose --no-start
 beampipe start
 ```
 
-`beampipe start` starts the managed PostgreSQL container when required, then runs the compact API/scheduler process in the foreground. Production native deployments should run separate API, singleton scheduler, and worker units under systemd or another process supervisor; see [Process roles](../operations/index.md).
+The host setup command does not detach Core in the background. It prints the exact `beampipe --home … start` handoff; that command starts the managed PostgreSQL container when required, then runs the compact API/scheduler process in the foreground. Keep the terminal open for evaluation. Production native deployments should run separate API, singleton scheduler, and worker units under systemd or another process supervisor; see [Process roles](../operations/index.md).
 
 ## 3. Build from source
 

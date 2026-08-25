@@ -27,7 +27,9 @@ The installer shows three stages:
 [3/3] Configure Beampipe
 ```
 
-Choose **Docker Compose**, **managed PostgreSQL**, and the default ports for the shortest path. The wizard walks through install home, runtime, PostgreSQL, network ports, optional Dash, project and deployment choices, and a final review before configuration begins. It creates private random secrets, installs the release binary under `~/.local/bin`, writes the operator bundle under `~/beampipe`, applies database migrations, and starts the API, scheduler, and worker.
+Choose **Docker Compose**, **managed PostgreSQL**, and the default ports for the shortest path. The wizard walks through install home, runtime, PostgreSQL, network ports, optional Dash, project and deployment choices, and a final review before configuration begins. It creates private random secrets, installs the release binary under `~/.local/bin`, writes the operator bundle under `~/beampipe`, applies database migrations, and starts the API, scheduler, and worker automatically.
+
+In guided mode, leave the administrator password file unset and the wizard prompts securely. An explicit username, email, or protected password-file path takes precedence over the prompted value. The password itself is never added to a copied installer command.
 
 No scientific project is selected and no real DALiuGE or Slurm submission is enabled implicitly.
 
@@ -53,7 +55,14 @@ curl -fsS http://127.0.0.1:18080/api/v2/health
 
 `status` should show the configured services, `doctor` should finish without error diagnostics, and the health request should succeed. If you chose another API port, use it in the URL.
 
-The last screen is intentionally ordered as **SETUP COMPLETE → ACCESS → NEXT ACTIONS**, so login details and the next safe command stay together. An unattended generated administrator password is written to `~/beampipe/credentials/admin/password` with mode `0600`; it is never printed to standard output.
+If you chose a custom install home, select it explicitly for every later command. The command builder writes the exact path into its verification hints; for example:
+
+```bash
+beampipe --home "$HOME/beampipe control" status
+beampipe --home "$HOME/beampipe control" doctor
+```
+
+The last screen is intentionally ordered as **SETUP COMPLETE → ACCESS → NEXT ACTIONS**, so login details and the next safe command stay together. When unattended setup has no password file, it generates an administrator password at `$BEAMPIPE_HOME/credentials/admin/password` with mode `0600`; it is never printed to standard output.
 
 Useful day-two commands:
 

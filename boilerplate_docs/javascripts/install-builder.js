@@ -29,7 +29,7 @@
       flags.push("--dashboard");
     }
     if (state.directory) {
-      flags.push("--directory", shellQuote(state.directory));
+      flags.push("--directory", homeArgument(state.directory));
     }
     if (state.projectMode === "wallaby-hires") {
       flags.push("--sample", "wallaby-hires");
@@ -59,6 +59,58 @@
       return;
     }
     flags.push(name, value);
+  }
+
+  function operatorCommand(state, action) {
+    var command = "beampipe";
+    if (state.directory) {
+      command += " --home " + homeArgument(state.directory);
+    }
+    return command + " " + action;
+  }
+
+  function homeArgument(value) {
+    if (value === "~") {
+      return '"$HOME"';
+    }
+    if (value.slice(0, 2) === "~/") {
+      return '"$HOME"/' + shellQuote(value.slice(2));
+    }
+    return shellQuote(value);
+  }
+
+  function passwordNote(state) {
+    var prefix =
+      "Username, email, and a protected password file supplied here take precedence in either mode. ";
+    if (state.adminPasswordFile) {
+      return prefix + "The generated command reads that file without copying its secret value.";
+    }
+    if (state.unattended) {
+      return (
+        prefix +
+        "With the file empty, unattended setup generates a password in $BEAMPIPE_HOME/credentials/admin/password with mode 0600."
+      );
+    }
+    return prefix + "With the file empty, the guided wizard prompts securely.";
+  }
+
+  function startNote(state) {
+    if (!state.start) {
+      return (
+        "Services stay stopped. Run " +
+        operatorCommand(state, "start") +
+        " when ready" +
+        (state.runtime === "host" ? "; the host process stays in the foreground." : ".")
+      );
+    }
+    if (state.runtime === "host") {
+      return (
+        "Setup prepares managed PostgreSQL when selected, then prints " +
+        operatorCommand(state, "start") +
+        " for the foreground Core process. Keep that terminal open or use a supervisor."
+      );
+    }
+    return "Docker starts Core automatically after setup checks pass.";
   }
 
   function selectedValue(root, name, fallback) {
@@ -111,6 +163,14 @@
   }
 
   function validationError(state) {
+    if (
+      state.directory &&
+      state.directory !== "~" &&
+      state.directory.slice(0, 2) !== "~/" &&
+      state.directory.charAt(0) !== "/"
+    ) {
+      return "Install directory must be an absolute path or start with ~/.";
+    }
     if (state.projectMode === "custom" && !state.projectConfig) {
       return "Enter the path to your project YAML before copying the command.";
     }
@@ -183,6 +243,14 @@
     if (home) {
       home.textContent = state.directory || DEFAULT_HOME;
     }
+    var statusCommand = root.querySelector("#bp-install-status-command");
+    if (statusCommand) {
+      statusCommand.textContent = operatorCommand(state, "status");
+    }
+    var doctorCommand = root.querySelector("#bp-install-doctor-command");
+    if (doctorCommand) {
+      doctorCommand.textContent = operatorCommand(state, "doctor");
+    }
     var summary = root.querySelector("#bp-install-summary");
     if (summary) {
       summary.textContent =
@@ -191,13 +259,33 @@
         (state.runtime === "docker" ? "Docker" : "host") +
         " setup · " +
         projectLabel(state) +
-        " · external execution mocked";
+        " · external execution mocked · " +
+        (!state.start
+          ? "configure only"
+          : state.runtime === "docker"
+            ? "automatic start"
+            : "foreground start handoff");
     }
     var modeNote = root.querySelector("#bp-install-mode-note");
     if (modeNote) {
       modeNote.textContent = state.unattended
         ? "Uses explicit defaults and does not prompt; suitable for repeatable automation."
         : "Recommended for a first install. Prompts are read from your terminal even though the script arrives through a pipe.";
+    }
+    var password = root.querySelector("#bp-install-password-note");
+    if (password) {
+      password.textContent = passwordNote(state);
+    }
+    var start = root.querySelector("#bp-install-start-note");
+    if (start) {
+      start.textContent = startNote(state);
+    }
+    var startLabel = root.querySelector("#bp-install-start-label");
+    if (startLabel) {
+      startLabel.textContent =
+        state.runtime === "host"
+          ? "Prepare foreground Core start"
+          : "Start Core automatically";
     }
     var copy = root.querySelector("#bp-install-copy");
     if (copy) {
@@ -302,7 +390,11 @@
   if (typeof module === "object" && module.exports) {
     module.exports = {
       buildCommand: buildCommand,
+      homeArgument: homeArgument,
+      operatorCommand: operatorCommand,
+      passwordNote: passwordNote,
       shellQuote: shellQuote,
+      startNote: startNote,
       validationError: validationError,
     };
   }

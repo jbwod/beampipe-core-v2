@@ -32,8 +32,13 @@ assert.equal(
 
 const homepage = fs.readFileSync("boilerplate_docs/index.md", "utf8");
 assert.match(homepage, /id="bp-install-admin-password-file"/);
+assert.match(homepage, /id="bp-install-password-note"/);
+assert.match(homepage, /id="bp-install-start-note"/);
+assert.match(homepage, /id="bp-install-status-command"/);
+assert.match(homepage, /id="bp-install-doctor-command"/);
 assert.doesNotMatch(homepage, /id="bp-install-admin-password"/);
 assert.doesNotMatch(homepage, /type="password"/);
+assert.doesNotMatch(homepage, /placeholder="generated if empty"/);
 
 const unattended = builder.buildCommand(
   state({
@@ -54,6 +59,43 @@ assert.match(unattended, /--admin-password-file '\/run\/secrets\/beampipe admin'
 assert.match(unattended, /--api-port 18081/);
 assert.doesNotMatch(unattended, /--admin-password(?:\s|$)/);
 
+const specialHome = "/srv/beam pipe's $HOME $(touch nope) `touch nope2` \\data";
+assert.equal(
+  builder.operatorCommand(state({ directory: specialHome }), "status"),
+  "beampipe --home '/srv/beam pipe'\\''s $HOME $(touch nope) `touch nope2` \\data' status"
+);
+assert.equal(
+  builder.operatorCommand(state({ directory: specialHome }), "doctor"),
+  "beampipe --home '/srv/beam pipe'\\''s $HOME $(touch nope) `touch nope2` \\data' doctor"
+);
+assert.equal(
+  builder.operatorCommand(state({ directory: "~/custom home" }), "status"),
+  'beampipe --home "$HOME"/' + "'custom home' status"
+);
+assert.match(
+  builder.buildCommand(state({ directory: "~/custom home" })),
+  /--directory "\$HOME"\/'custom home'/
+);
+
+assert.match(builder.passwordNote(state()), /guided wizard prompts securely/);
+assert.match(
+  builder.passwordNote(state({ unattended: true })),
+  /credentials\/admin\/password with mode 0600/
+);
+assert.match(
+  builder.passwordNote(state({ adminPasswordFile: "/run/secrets/admin" })),
+  /reads that file without copying its secret value/
+);
+assert.match(builder.startNote(state()), /Docker starts Core automatically/);
+assert.match(
+  builder.startNote(state({ runtime: "host", directory: "/srv/beampipe control" })),
+  /beampipe --home '\/srv\/beampipe control' start.*foreground Core process/
+);
+assert.match(
+  builder.startNote(state({ runtime: "host", start: false })),
+  /Services stay stopped.*host process stays in the foreground/
+);
+
 const wallaby = builder.buildCommand(
   state({ projectMode: "wallaby-hires", dashboard: true })
 );
@@ -66,6 +108,11 @@ assert.equal(
   "Enter the path to your project YAML before copying the command."
 );
 assert.equal(
+  builder.validationError(state({ directory: "relative/home" })),
+  "Install directory must be an absolute path or start with ~/."
+);
+assert.equal(builder.validationError(state({ directory: "~/custom home" })), "");
+assert.equal(
   builder.validationError(
     state({ projectMode: "custom", projectConfig: "/tmp/project.yaml" })
   ),
@@ -75,5 +122,18 @@ assert.equal(
   builder.validationError(state({ apiPort: "65536" })),
   "API port must be a whole number from 1 to 65535."
 );
+
+const quickStart = fs.readFileSync(
+  "boilerplate_docs/getting-started/index.md",
+  "utf8"
+);
+const installation = fs.readFileSync(
+  "boilerplate_docs/getting-started/installation.md",
+  "utf8"
+);
+assert.match(quickStart, /beampipe --home .* status/);
+assert.match(quickStart, /wizard prompts securely/);
+assert.match(installation, /Docker setup starts Core automatically/);
+assert.match(installation, /host.*foreground/i);
 
 console.log("install command builder ok");

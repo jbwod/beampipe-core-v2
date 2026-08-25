@@ -139,13 +139,15 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 [3/3] Configure Beampipe
 ```
 
-That installs `beampipe` to `~/.local/bin`, writes a project-neutral operator bundle to `~/beampipe`, and starts PostgreSQL plus the stack. It creates private random secrets and keeps external execution mocked. Verify the result from a new terminal:
+That installs `beampipe` to `~/.local/bin`, writes a project-neutral operator bundle to `~/beampipe`, and, for the recommended Docker path, starts PostgreSQL plus Core automatically. It creates private random secrets and keeps external execution mocked. Host mode instead prints the foreground start command. Verify the Docker result from a new terminal:
 
 ```bash
 beampipe status
 beampipe doctor
 curl -fsS http://127.0.0.1:18080/api/v2/health
 ```
+
+If you selected a custom install home, keep it explicit: `beampipe --home '/custom/install path' status` and `beampipe --home '/custom/install path' doctor`.
 
 Headless installation requires explicit unattended intent and runtime selection:
 
