@@ -5,7 +5,17 @@ use std::path::{Component, Path};
 use thiserror::Error;
 use utoipa::ToSchema;
 
-const RESERVED_SLURM_RUNTIME_ENVIRONMENT: [&str; 2] = ["BEAMPIPE_SLURM_ACCOUNT", "PYTHONPATH"];
+const RESERVED_SLURM_RUNTIME_ENVIRONMENT: [&str; 9] = [
+    "BEAMPIPE_SLURM_ACCOUNT",
+    "PYTHONPATH",
+    "BEAMPIPE_EXECUTION_ID",
+    "BEAMPIPE_EXECUTION_ATTEMPT",
+    "BEAMPIPE_CORE_URL",
+    "BEAMPIPE_OUTPUT_DESTINATION_URI",
+    "BEAMPIPE_OUTPUT_ROOT",
+    "BEAMPIPE_PUBLISHER_TOKEN",
+    "BEAMPIPE_PUBLISHER_TOKEN_FILE",
+];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +73,50 @@ pub struct RestRemoteDeploymentConfig {
     #[serde(default = "default_true")]
     pub verify_ssl: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationRuntimeConfig {
+    /// Worker environment variable containing the reachable Core base URL.
+    pub core_url_environment: String,
+    /// Worker environment variable containing the durable destination base
+    /// URI. The publisher adds its execution/attempt namespace.
+    pub durable_destination_uri_environment: String,
+    /// Development-only HTTP escape hatch. Runtime validation still permits
+    /// HTTP only for a loopback Core endpoint.
+    #[serde(default)]
+    pub allow_insecure_core_http: bool,
+    /// Lifetime of the execution-scoped publisher capability. This includes
+    /// scheduler queueing, the complete outer allocation, and publication.
+    /// Operators must size the queue-delay allowance for their facility.
+    pub credential_ttl_minutes: i32,
+}
+
+impl PublicationRuntimeConfig {
+    pub fn validate(&self) -> Result<(), ProfileValidationError> {
+        validate_publication_environment_name(
+            &self.core_url_environment,
+            "deployment.publication.core_url_environment",
+        )?;
+        validate_publication_environment_name(
+            &self.durable_destination_uri_environment,
+            "deployment.publication.durable_destination_uri_environment",
+        )?;
+        if self.core_url_environment == self.durable_destination_uri_environment {
+            return Err(ProfileValidationError::Message(
+                "deployment.publication environment variables must differ".into(),
+            ));
+        }
+        if !(5..=24 * 60).contains(&self.credential_ttl_minutes) {
+            return Err(ProfileValidationError::Message(
+                "deployment.publication.credential_ttl_minutes must be 5-1440".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+const PUBLISHER_COMPLETION_GRACE_MINUTES: i32 = 30;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -218,6 +272,10 @@ pub struct SlurmRemoteDeploymentConfig {
     /// Typed, project-specific runtime requirements. This field is required so
     /// a Slurm profile cannot silently inherit a bundled project's runtime.
     pub runtime_contract: SlurmRuntimeContractConfig,
+    /// Non-secret runtime inputs for the terminal output publisher. The
+    /// execution-scoped credential is issued and delivered separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationRuntimeConfig>,
 }
 
 impl SlurmRemoteDeploymentConfig {
@@ -385,6 +443,22 @@ impl DeploymentProfile {
                     validate_positive(nodes, "deployment.manager_topology.nodes")?;
                 }
                 dep.runtime_contract.validate()?;
+                if let Some(publication) = dep.publication.as_ref() {
+                    publication.validate()?;
+                    let minimum_ttl = dep
+                        .effective_wall_time_minutes()
+                        .checked_add(PUBLISHER_COMPLETION_GRACE_MINUTES)
+                        .ok_or_else(|| {
+                            ProfileValidationError::Message(
+                                "deployment publication lifetime overflowed".into(),
+                            )
+                        })?;
+                    if publication.credential_ttl_minutes < minimum_ttl {
+                        return Err(ProfileValidationError::Message(format!(
+                            "deployment.publication.credential_ttl_minutes must be at least the effective outer wall time plus {PUBLISHER_COMPLETION_GRACE_MINUTES} minutes ({minimum_ttl} minutes for this profile); scheduler queue delay is an additional operator allowance"
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -585,6 +659,35 @@ fn validate_environment_name(value: &str, name: &str) -> Result<(), ProfileValid
     Ok(())
 }
 
+fn validate_publication_environment_name(
+    value: &str,
+    name: &str,
+) -> Result<(), ProfileValidationError> {
+    if value.is_empty()
+        || value.len() > 255
+        || !value
+            .chars()
+            .next()
+            .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        || !value
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return Err(ProfileValidationError::Message(format!(
+            "{name} must be a POSIX environment variable name"
+        )));
+    }
+    if matches!(
+        value,
+        "BEAMPIPE_PUBLISHER_TOKEN" | "BEAMPIPE_PUBLISHER_TOKEN_FILE"
+    ) {
+        return Err(ProfileValidationError::Message(format!(
+            "{name} must name a non-secret runtime value"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_port(v: Option<i32>, name: &str) -> Result<(), ProfileValidationError> {
     if let Some(port) = v {
         if !(1..=65535).contains(&port) {
@@ -657,6 +760,25 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("deployment.deploy_host"));
+    }
+
+    #[test]
+    fn rest_profile_rejects_unsupported_publication_delivery() {
+        let error = serde_json::from_value::<DeploymentProfile>(json!({
+            "name": "rest",
+            "translation": {"num_par": 1},
+            "deployment": {
+                "kind": "rest_remote",
+                "deploy_host": "dim.example.org",
+                "publication": {
+                    "core_url_environment": "BEAMPIPE_CORE_URL",
+                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
+                    "credential_ttl_minutes": 720
+                }
+            }
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `publication`"));
     }
 
     #[test]
@@ -832,5 +954,120 @@ mod tests {
             ..Default::default()
         };
         assert!(contract.validate().is_err());
+    }
+
+    #[test]
+    fn publication_contract_names_only_non_secret_runtime_inputs() {
+        let profile: DeploymentProfile = serde_json::from_value(json!({
+            "name": "generic-slurm",
+            "translation": {"num_par": 1},
+            "deployment": {
+                "kind": "slurm_remote",
+                "login_node": "login.example.org",
+                "facility": "generic",
+                "account": "project",
+                "home_dir": "/scratch/project",
+                "log_dir": "/scratch/project/logs",
+                "dlg_root": "/scratch/project/dlg",
+                "runtime_contract": {
+                    "output_subdirectory": "science-products",
+                    "shared_staging_subdirectory": "archive-cache"
+                },
+                "publication": {
+                    "core_url_environment": "BEAMPIPE_CORE_URL",
+                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
+                    "credential_ttl_minutes": 720
+                }
+            }
+        }))
+        .unwrap();
+        profile.validate().unwrap();
+
+        let DeploymentConfig::SlurmRemote(mut deployment) = profile.deployment else {
+            panic!("expected Slurm profile");
+        };
+        deployment
+            .publication
+            .as_mut()
+            .unwrap()
+            .core_url_environment = "BEAMPIPE_PUBLISHER_TOKEN_FILE".into();
+        assert!(deployment
+            .publication
+            .as_ref()
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("non-secret"));
+
+        let mut publication = deployment.publication.unwrap();
+        publication.core_url_environment = "BEAMPIPE_CORE_URL".into();
+        publication.credential_ttl_minutes = 4;
+        assert!(publication
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("5-1440"));
+    }
+
+    #[test]
+    fn slurm_publication_lifetime_covers_outer_wall_time_and_grace() {
+        let mut profile: DeploymentProfile = serde_json::from_value(json!({
+            "name": "generic-slurm",
+            "translation": {"num_par": 1},
+            "deployment": {
+                "kind": "slurm_remote",
+                "login_node": "login.example.org",
+                "facility": "generic",
+                "account": "project",
+                "home_dir": "/scratch/project",
+                "log_dir": "/scratch/project/logs",
+                "dlg_root": "/scratch/project/dlg",
+                "resources": {"wall_time_minutes": 120},
+                "runtime_contract": {
+                    "output_subdirectory": "science-products",
+                    "shared_staging_subdirectory": "archive-cache"
+                },
+                "publication": {
+                    "core_url_environment": "BEAMPIPE_CORE_URL",
+                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
+                    "credential_ttl_minutes": 149
+                }
+            }
+        }))
+        .unwrap();
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("at least the effective outer wall time plus 30 minutes"));
+
+        let DeploymentConfig::SlurmRemote(deployment) = &mut profile.deployment else {
+            panic!("expected Slurm profile");
+        };
+        deployment
+            .publication
+            .as_mut()
+            .unwrap()
+            .credential_ttl_minutes = 150;
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn project_runtime_cannot_override_core_publisher_environment() {
+        for name in ["BEAMPIPE_CORE_URL", "BEAMPIPE_PUBLISHER_TOKEN"] {
+            let contract = SlurmRuntimeContractConfig {
+                required_environment: vec![SlurmRuntimeEnvironmentRequirement {
+                    name: name.into(),
+                    kind: SlurmRuntimeEnvironmentKind::NonEmpty,
+                }],
+                ..Default::default()
+            };
+            assert!(contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("reserved Core variable"));
+        }
     }
 }

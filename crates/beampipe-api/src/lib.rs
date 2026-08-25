@@ -106,7 +106,8 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         ExecutionRetryRequest, ExecutionRetryResponse, ExecutionSubmissionAbandonRequest,
         OutputInventoryProduct,
         OutputPublicationAcknowledgement, ExecutionOutputVerificationRequest,
-        ExecutionOutputVerificationResponse, ExecutionPublisherTokenRequest,
+        ExecutionOutputVerificationResponse, ExecutionOutputVerificationExecutionAck,
+        ExecutionOutputVerificationArtifactAck, ExecutionPublisherTokenRequest,
         ExecutionPublisherTokenResponse, GraphPrepareRequest, GraphPrepareResponse,
         ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
@@ -155,6 +156,7 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         beampipe_profiles::DaliugeAlgo,
         beampipe_profiles::DeploymentConfig,
         beampipe_profiles::RestRemoteDeploymentConfig,
+        beampipe_profiles::PublicationRuntimeConfig,
         beampipe_profiles::SlurmRemoteDeploymentConfig,
         beampipe_profiles::SlurmResourceConfig,
         beampipe_profiles::SlurmRuntimeContractConfig,
@@ -1627,6 +1629,7 @@ fn scheduler_client_from_profile(
         ssh_port: slurm.ssh_port,
         dlg_root: slurm.dlg_root.clone(),
         deployment: Some(slurm),
+        publisher_credential: None,
     })
 }
 
@@ -3395,8 +3398,25 @@ pub struct ExecutionOutputVerificationRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExecutionOutputVerificationResponse {
-    pub execution: ExecutionRead,
-    pub artifact: ExecutionArtifactRow,
+    pub execution: ExecutionOutputVerificationExecutionAck,
+    pub artifact: ExecutionOutputVerificationArtifactAck,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionOutputVerificationExecutionAck {
+    pub uuid: Uuid,
+    pub retry_count: i32,
+    pub output_state: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionOutputVerificationArtifactAck {
+    pub uuid: Uuid,
+    pub kind: String,
+    pub sha256: String,
+    pub uri: Option<String>,
+    pub execution_attempt: i32,
 }
 
 const DEFAULT_OUTPUT_PUBLISHER_TTL_SECONDS: u32 = 6 * 60 * 60;
@@ -3869,9 +3889,21 @@ async fn verify_execution_outputs(
         }
         repo::VerifyExecutionOutputsError::Database(error) => ApiError::Db(error),
     })?;
+    let execution_attempt = execution.retry_count;
     Ok(Json(ExecutionOutputVerificationResponse {
-        execution: enrich_execution(&state.pool, execution).await?,
-        artifact,
+        execution: ExecutionOutputVerificationExecutionAck {
+            uuid: execution.uuid,
+            retry_count: execution.retry_count,
+            output_state: execution.output_state,
+            status: execution.status,
+        },
+        artifact: ExecutionOutputVerificationArtifactAck {
+            uuid: artifact.uuid,
+            kind: artifact.kind,
+            sha256: artifact.sha256,
+            uri: artifact.uri,
+            execution_attempt,
+        },
     }))
 }
 
@@ -5423,6 +5455,49 @@ adapters:
         assert_eq!(OUTPUT_VERIFICATION_BODY_LIMIT_BYTES, 32 * 1024 * 1024);
         assert!(OUTPUT_VERIFICATION_BODY_LIMIT_BYTES > 2 * 1024 * 1024);
         assert!(OUTPUT_VERIFICATION_BODY_LIMIT_BYTES <= 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn output_verification_response_is_a_minimal_acknowledgement() {
+        let execution_id = Uuid::now_v7();
+        let artifact_id = Uuid::now_v7();
+        let value = serde_json::to_value(ExecutionOutputVerificationResponse {
+            execution: ExecutionOutputVerificationExecutionAck {
+                uuid: execution_id,
+                retry_count: 2,
+                output_state: Some("verified".into()),
+                status: "completed".into(),
+            },
+            artifact: ExecutionOutputVerificationArtifactAck {
+                uuid: artifact_id,
+                kind: "output_inventory".into(),
+                sha256: "a".repeat(64),
+                uri: Some("s3://project/run".into()),
+                execution_attempt: 2,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "execution": {
+                    "uuid": execution_id,
+                    "retry_count": 2,
+                    "output_state": "verified",
+                    "status": "completed"
+                },
+                "artifact": {
+                    "uuid": artifact_id,
+                    "kind": "output_inventory",
+                    "sha256": "a".repeat(64),
+                    "uri": "s3://project/run",
+                    "execution_attempt": 2
+                }
+            })
+        );
+        assert!(value.pointer("/artifact/inline_json").is_none());
+        assert!(value.pointer("/artifact/metadata").is_none());
+        assert!(value.pointer("/execution/workflow_manifest").is_none());
     }
 
     #[test]

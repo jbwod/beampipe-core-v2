@@ -477,6 +477,7 @@ impl SchedulerAdapter for SshSlurmClient {
             pgt_json: request.physical_graph,
             deployment: profile,
             username,
+            publisher_credential: self.publisher_credential.clone(),
         })
         .await
         .map_err(|error| SchedulerAdapterError::backend("submit", &target, error))?;
@@ -927,6 +928,7 @@ mod tests {
             container_runtime: Some("singularity".into()),
             environment_setup: None,
             runtime_contract: Default::default(),
+            publication: None,
         }
     }
 

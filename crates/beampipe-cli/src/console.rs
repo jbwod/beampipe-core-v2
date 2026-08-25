@@ -317,6 +317,7 @@ async fn refresh_integrations(pool: &PgPool, settings: &Settings, data: &mut Int
                 ssh_port: slurm.ssh_port,
                 dlg_root: slurm.dlg_root.clone(),
                 deployment: Some(slurm),
+                publisher_credential: None,
             };
             data.scheduler = match tokio::time::timeout(
                 Duration::from_secs(8),

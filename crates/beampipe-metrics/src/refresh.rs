@@ -335,7 +335,7 @@ async fn run_profile_probe(
         |slurm, timeout| async move {
             let username = resolve_remote_user(&slurm);
             matches!(
-                tokio::time::timeout(timeout, probe_slurm_login(&slurm, &username)).await,
+                tokio::time::timeout(timeout, probe_slurm_login(&slurm, &username, false)).await,
                 Ok(Ok(()))
             )
         },

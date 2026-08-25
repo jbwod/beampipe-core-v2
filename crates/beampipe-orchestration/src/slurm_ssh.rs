@@ -5,6 +5,7 @@ use crate::slurm_batch::{
     SlurmJobPollResult,
 };
 use crate::slurm_credentials::SlurmSshCredentials;
+use crate::slurm_sftp::SftpV3;
 use crate::OrchestrationError;
 use beampipe_profiles::SlurmRemoteDeploymentConfig;
 use russh::client;
@@ -433,6 +434,96 @@ impl SlurmSshSession {
         result.map(|_| ())
     }
 
+    /// Deliver one execution capability through SFTP. Secret bytes are sent
+    /// only as binary channel data; remote commands contain paths and modes,
+    /// never credential content.
+    pub async fn upload_secret_atomic(
+        &mut self,
+        remote_directory: &str,
+        remote_path: &str,
+        content: &[u8],
+    ) -> Result<(), OrchestrationError> {
+        validate_private_remote_path(remote_directory, "publisher secret directory")?;
+        validate_private_remote_path(remote_path, "publisher credential file")?;
+        let expected_prefix = format!("{}/", remote_directory.trim_end_matches('/'));
+        if !remote_path.starts_with(&expected_prefix) {
+            return Err(OrchestrationError::Backend(
+                "publisher credential file must be inside its private directory".into(),
+            ));
+        }
+        let temporary_path = format!("{remote_path}.tmp-{}", uuid::Uuid::now_v7().simple());
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|error| OrchestrationError::Backend(format!("SSH SFTP channel: {error}")))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|error| {
+                OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}"))
+            })?;
+        let mut sftp = SftpV3::connect(channel.into_stream()).await?;
+        let result = async {
+            sftp.ensure_private_directory(remote_directory, 0o700)
+                .await?;
+            sftp.upload_private_file_atomic(remote_path, &temporary_path, content, 0o600)
+                .await
+        }
+        .await;
+        let close_result = sftp.shutdown().await;
+        match (result, close_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => {
+                // The original subsystem may have died after the server
+                // committed the atomic rename. Same-stream cleanup inside
+                // SftpV3 cannot prove either pathname is absent in that
+                // case, so retry both removals on fresh SFTP channels before
+                // reporting a definite pre-submission failure.
+                for path in
+                    failed_secret_upload_cleanup_paths(false, &temporary_path, remote_path)
+                {
+                    let _ = self.remove_file_sftp(path).await;
+                }
+                Err(error)
+            }
+            (Ok(()), Err(error)) => {
+                // A failed subsystem shutdown occurs before sbatch dispatch.
+                // The final LSTAT already confirmed the file, so open a new
+                // SFTP channel and remove it before reporting failure.
+                for path in failed_secret_upload_cleanup_paths(true, &temporary_path, remote_path) {
+                    let _ = self.remove_file_sftp(path).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Best-effort SFTP cleanup used only after a definitely rejected outer
+    /// submission. An uncertain submission retains the credential for the
+    /// possibly running allocation.
+    pub async fn remove_file_sftp(
+        &mut self,
+        remote_path: &str,
+    ) -> Result<(), OrchestrationError> {
+        validate_private_remote_path(remote_path, "publisher credential file")?;
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|error| OrchestrationError::Backend(format!("SSH SFTP channel: {error}")))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|error| {
+                OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}"))
+            })?;
+        let mut sftp = SftpV3::connect(channel.into_stream()).await?;
+        let result = sftp.remove_file_if_present(remote_path).await;
+        let close_result = sftp.shutdown().await;
+        result.and(close_result)
+    }
+
     pub async fn close(self) -> Result<(), OrchestrationError> {
         let _ = self
             .handle
@@ -500,6 +591,32 @@ fn shell_escape_single(s: &str) -> String {
 
 fn upload_text_command(remote_path: &str) -> String {
     format!("umask 077 && tee {}", shell_escape_single(remote_path))
+}
+
+fn validate_private_remote_path(path: &str, label: &str) -> Result<(), OrchestrationError> {
+    if !path.starts_with('/')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err(OrchestrationError::Backend(format!(
+            "{label} must be an absolute path without traversal components"
+        )));
+    }
+    Ok(())
+}
+
+fn failed_secret_upload_cleanup_paths<'a>(
+    upload_completed: bool,
+    temporary_path: &'a str,
+    final_path: &'a str,
+) -> Vec<&'a str> {
+    if upload_completed {
+        vec![final_path]
+    } else {
+        // A broken stream can hide a committed rename, so neither name can
+        // be assumed absent after an incomplete upload.
+        vec![temporary_path, final_path]
+    }
 }
 
 struct PooledEntry {
@@ -680,11 +797,11 @@ pub fn scancel_command(job_id: &str) -> Result<String, OrchestrationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_stdout, is_missing_squeue_job_error, known_host_patterns_match,
-        known_hosts_has_target, load_known_host_keys, remote_command_transport_error,
-        sacct_query_command, scancel_command, squeue_query_command, squeue_stdout,
-        ssh_client_config, upload_text_command, validate_slurm_job_id, RemoteCommandKind,
-        RemoteCommandOutput, SlurmSshPool, SlurmTarget,
+        command_stdout, failed_secret_upload_cleanup_paths, is_missing_squeue_job_error,
+        known_host_patterns_match, known_hosts_has_target, load_known_host_keys,
+        remote_command_transport_error, sacct_query_command, scancel_command,
+        squeue_query_command, squeue_stdout, ssh_client_config, upload_text_command,
+        validate_slurm_job_id, RemoteCommandKind, RemoteCommandOutput, SlurmSshPool, SlurmTarget,
     };
     use crate::OrchestrationError;
     use std::sync::Arc;
@@ -712,6 +829,20 @@ mod tests {
         let command = upload_text_command("/scratch/session graph.pgt");
         assert!(command.starts_with("umask 077 && tee "));
         assert!(command.contains("'/scratch/session graph.pgt'"));
+    }
+
+    #[test]
+    fn interrupted_secret_upload_rechecks_both_names_on_fresh_channels() {
+        let temporary = "/session/.beampipe-secrets/publisher.token.tmp-test";
+        let final_path = "/session/.beampipe-secrets/publisher.token";
+        assert_eq!(
+            failed_secret_upload_cleanup_paths(false, temporary, final_path),
+            vec![temporary, final_path]
+        );
+        assert_eq!(
+            failed_secret_upload_cleanup_paths(true, temporary, final_path),
+            vec![final_path]
+        );
     }
 
     #[test]

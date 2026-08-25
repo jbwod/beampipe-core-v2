@@ -315,6 +315,7 @@ fn scheduler_client(row: &DeploymentProfileRow) -> Result<SshSlurmClient> {
         ssh_port: slurm.ssh_port,
         dlg_root: slurm.dlg_root.clone(),
         deployment: Some(slurm),
+        publisher_credential: None,
     })
 }
 

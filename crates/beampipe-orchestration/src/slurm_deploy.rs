@@ -2,16 +2,29 @@ use crate::scheduler::SchedulerResourceRequest;
 use crate::slurm_ssh::{SlurmSshSession, SlurmTarget};
 use crate::OrchestrationError;
 use beampipe_profiles::{
-    DaliugeAlgo, SlurmRemoteDeploymentConfig, SlurmRuntimeContractConfig,
-    SlurmRuntimeEnvironmentKind,
+    DaliugeAlgo, PublicationRuntimeConfig, SlurmRemoteDeploymentConfig,
+    SlurmRuntimeContractConfig, SlurmRuntimeEnvironmentKind,
 };
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use url::Url;
+use zeroize::Zeroizing;
 
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
 const PYTHON_PATH_ENV: &str = "PYTHONPATH";
 const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
+const PUBLISHER_COMMAND: &str = "beampipe-publish";
+const PUBLISHER_PYTHON_MODULE: &str = "beampipe_pallette.publish";
+const PUBLISHER_EXECUTION_ID_ENV: &str = "BEAMPIPE_EXECUTION_ID";
+const PUBLISHER_EXECUTION_ATTEMPT_ENV: &str = "BEAMPIPE_EXECUTION_ATTEMPT";
+const PUBLISHER_CORE_URL_ENV: &str = "BEAMPIPE_CORE_URL";
+const PUBLISHER_DESTINATION_URI_ENV: &str = "BEAMPIPE_OUTPUT_DESTINATION_URI";
+const PUBLISHER_OUTPUT_ROOT_ENV: &str = "BEAMPIPE_OUTPUT_ROOT";
+const PUBLISHER_TOKEN_FILE_ENV: &str = "BEAMPIPE_PUBLISHER_TOKEN_FILE";
+const PUBLISHER_SECRETS_DIRECTORY: &str = ".beampipe-secrets";
+const PUBLISHER_TOKEN_FILENAME: &str = "publisher.token";
 const DALIUGE_FAILED_SESSION_SITECUSTOMIZE: &str = r#"# Beampipe compatibility shim for DALiuGE deploy.common.
 from dlg.deploy import common as _beampipe_common
 from dlg.manager.session import SessionStates as _beampipe_session_states
@@ -35,8 +48,76 @@ pub struct SlurmSubmitParams {
     pub pgt_json: Value,
     pub deployment: SlurmRemoteDeploymentConfig,
     pub username: String,
+    pub publisher_credential: Option<PublisherRuntimeCredential>,
 }
 
+struct PublisherToken(Zeroizing<Vec<u8>>);
+
+/// Execution-scoped capability delivered outside every persisted graph and
+/// manifest. Debug output is intentionally redacted and clones share one
+/// zeroizing allocation rather than duplicating plaintext bytes.
+#[derive(Clone)]
+pub struct PublisherRuntimeCredential {
+    execution_attempt: i32,
+    token: Arc<PublisherToken>,
+}
+
+impl std::fmt::Debug for PublisherRuntimeCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublisherRuntimeCredential")
+            .field("execution_attempt", &self.execution_attempt)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PublisherRuntimeCredential {
+    pub fn new(
+        execution_attempt: i32,
+        token: impl Into<Vec<u8>>,
+    ) -> Result<Self, OrchestrationError> {
+        if execution_attempt < 0 {
+            return Err(OrchestrationError::Backend(
+                "publisher execution attempt must be non-negative".into(),
+            ));
+        }
+        let token = Zeroizing::new(token.into());
+        if token.len() < 32
+            || token.len() > 1024
+            || !token
+                .iter()
+                .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+        {
+            return Err(OrchestrationError::Backend(
+                "publisher credential is not a valid opaque token".into(),
+            ));
+        }
+        Ok(Self {
+            execution_attempt,
+            token: Arc::new(PublisherToken(token)),
+        })
+    }
+
+    pub fn execution_attempt(&self) -> i32 {
+        self.execution_attempt
+    }
+
+    fn token_bytes(&self) -> &[u8] {
+        self.token.0.as_slice()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedPublisherRuntime {
+    execution_id: String,
+    execution_attempt: i32,
+    core_url: String,
+    durable_destination_uri: String,
+    token_file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlurmSubmitResult {
     pub slurm_job_id: String,
     pub session_dir: String,
@@ -169,15 +250,30 @@ where
 
 fn slurm_preflight_script_with<F>(
     deployment: &SlurmRemoteDeploymentConfig,
-    read_environment: F,
+    publication_required: bool,
+    mut read_environment: F,
 ) -> Result<String, OrchestrationError>
 where
     F: FnMut(&str) -> Option<String>,
 {
-    let mut lines = vec![env_prelude_with(deployment, read_environment)?];
+    if publication_required {
+        let publication = deployment.publication.as_ref().ok_or_else(|| {
+            OrchestrationError::Backend(
+                "required output publication has no pinned deployment publication contract"
+                    .into(),
+            )
+        })?;
+        resolve_publication_inputs_with(publication, |name| read_environment(name))?;
+    }
+    let mut lines = vec![env_prelude_with(deployment, |name| {
+        read_environment(name)
+    })?];
     let mut commands = vec![
         "sbatch", "squeue", "sacct", "scancel", "scontrol", "srun", "python3",
     ];
+    if publication_required {
+        commands.push(PUBLISHER_COMMAND);
+    }
     for command in &deployment.runtime_contract.required_commands {
         if !commands.contains(&command.as_str()) {
             commands.push(command);
@@ -195,6 +291,9 @@ where
         root = shell_quote(&deployment.dlg_root)
     ));
     let mut python_modules = vec!["dlg.deploy.create_dlg_job"];
+    if publication_required {
+        python_modules.push(PUBLISHER_PYTHON_MODULE);
+    }
     for module in &deployment.runtime_contract.required_python_modules {
         if !python_modules.contains(&module.as_str()) {
             python_modules.push(module);
@@ -220,10 +319,142 @@ where
     Ok(lines.join("\n"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedPublicationInputs {
+    core_url: String,
+    durable_destination_uri: String,
+}
+
+fn resolve_publication_inputs_with<F>(
+    publication: &PublicationRuntimeConfig,
+    mut read_environment: F,
+) -> Result<ResolvedPublicationInputs, OrchestrationError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    publication
+        .validate()
+        .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
+    let core_url = read_environment(&publication.core_url_environment)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            OrchestrationError::Backend(format!(
+                "deployment publication requires non-empty {}",
+                publication.core_url_environment
+            ))
+        })?;
+    let durable_destination_uri =
+        read_environment(&publication.durable_destination_uri_environment)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                OrchestrationError::Backend(format!(
+                    "deployment publication requires non-empty {}",
+                    publication.durable_destination_uri_environment
+                ))
+            })?;
+    let core_url = validated_core_url(&core_url, publication.allow_insecure_core_http)?;
+    let durable_destination_uri = validated_destination_uri(&durable_destination_uri)?;
+    Ok(ResolvedPublicationInputs {
+        core_url,
+        durable_destination_uri,
+    })
+}
+
+fn validated_core_url(
+    raw: &str,
+    allow_insecure_core_http: bool,
+) -> Result<String, OrchestrationError> {
+    let mut url = Url::parse(raw).map_err(|_| {
+        OrchestrationError::Backend(
+            "publisher Core URL must be an absolute HTTPS URL".into(),
+        )
+    })?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+    {
+        return Err(OrchestrationError::Backend(
+            "publisher Core URL must not contain credentials, a query, or a fragment".into(),
+        ));
+    }
+    match url.scheme() {
+        "https" => {}
+        "http"
+            if allow_insecure_core_http
+                && !crate::slurm_credentials::is_production_env()
+                && url.host_str().is_some_and(is_loopback_host) => {}
+        _ => {
+            return Err(OrchestrationError::Backend(
+                "publisher Core URL must use HTTPS; loopback HTTP requires the profile development override"
+                    .into(),
+            ));
+        }
+    }
+    if url.path() == "/" {
+        url.set_path("");
+    } else {
+        let normalized = url.path().trim_end_matches('/').to_string();
+        url.set_path(&normalized);
+    }
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn validated_destination_uri(raw: &str) -> Result<String, OrchestrationError> {
+    let mut url = Url::parse(raw).map_err(|_| {
+        OrchestrationError::Backend(
+            "publisher destination must be an absolute file or s3 URI".into(),
+        )
+    })?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(OrchestrationError::Backend(
+            "publisher destination must not contain credentials, a query, or a fragment".into(),
+        ));
+    }
+    match url.scheme() {
+        "s3" if url.host_str().is_some_and(|bucket| !bucket.is_empty()) => {}
+        "file"
+            if url
+                .host_str()
+                .is_none_or(|host| host.is_empty() || is_loopback_host(host))
+                && url.path().starts_with('/') => {}
+        _ => {
+            return Err(OrchestrationError::Backend(
+                "publisher destination must use s3://bucket/... or an absolute file:///... URI"
+                    .into(),
+            ));
+        }
+    }
+    let normalized = url.path().trim_end_matches('/').to_string();
+    if normalized.is_empty() && url.scheme() != "s3" {
+        return Err(OrchestrationError::Backend(
+            "publisher file destination must name a dedicated directory, not filesystem root"
+                .into(),
+        ));
+    }
+    url.set_path(&normalized);
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 fn slurm_preflight_script(
     deployment: &SlurmRemoteDeploymentConfig,
+    publication_required: bool,
 ) -> Result<String, OrchestrationError> {
-    slurm_preflight_script_with(deployment, |name| std::env::var(name).ok())
+    slurm_preflight_script_with(deployment, publication_required, |name| {
+        std::env::var(name).ok()
+    })
 }
 
 fn sbatch_command_with<F>(
@@ -233,6 +464,7 @@ fn sbatch_command_with<F>(
     staging_root: &str,
     cache_root: &str,
     python_path: &str,
+    publisher: Option<&ResolvedPublisherRuntime>,
     read_environment: F,
 ) -> Result<String, OrchestrationError>
 where
@@ -258,6 +490,20 @@ where
         exported.push(name.clone());
     }
     exported.push(PYTHON_PATH_ENV.to_string());
+    if publisher.is_some() {
+        exported.extend(
+            [
+                PUBLISHER_EXECUTION_ID_ENV,
+                PUBLISHER_EXECUTION_ATTEMPT_ENV,
+                PUBLISHER_CORE_URL_ENV,
+                PUBLISHER_DESTINATION_URI_ENV,
+                PUBLISHER_OUTPUT_ROOT_ENV,
+                PUBLISHER_TOKEN_FILE_ENV,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
     for requirement in &contract.required_environment {
         exported.push(requirement.name.clone());
     }
@@ -315,6 +561,34 @@ where
     if let Some(name) = contract.shared_staging_environment_variable.as_deref() {
         inner.push(format!("export {name}={}", shell_quote(&cache_root)));
     }
+    if let Some(publisher) = publisher {
+        inner.extend([
+            format!(
+                "export {PUBLISHER_EXECUTION_ID_ENV}={}",
+                shell_quote(&publisher.execution_id)
+            ),
+            format!(
+                "export {PUBLISHER_EXECUTION_ATTEMPT_ENV}={}",
+                publisher.execution_attempt
+            ),
+            format!(
+                "export {PUBLISHER_CORE_URL_ENV}={}",
+                shell_quote(&publisher.core_url)
+            ),
+            format!(
+                "export {PUBLISHER_DESTINATION_URI_ENV}={}",
+                shell_quote(&publisher.durable_destination_uri)
+            ),
+            format!(
+                "export {PUBLISHER_OUTPUT_ROOT_ENV}={}",
+                shell_quote(&staging_root)
+            ),
+            format!(
+                "export {PUBLISHER_TOKEN_FILE_ENV}={}",
+                shell_quote(&publisher.token_file)
+            ),
+        ]);
+    }
     inner.push(format!(
         "if [ -n \"${{PYTHONPATH:-}}\" ]; then export {PYTHON_PATH_ENV}={}:\"$PYTHONPATH\"; else export {PYTHON_PATH_ENV}={}; fi",
         shell_quote(python_path),
@@ -337,6 +611,7 @@ fn sbatch_command(
     staging_root: &str,
     cache_root: &str,
     python_path: &str,
+    publisher: Option<&ResolvedPublisherRuntime>,
 ) -> Result<String, OrchestrationError> {
     sbatch_command_with(
         deployment,
@@ -345,6 +620,7 @@ fn sbatch_command(
         staging_root,
         cache_root,
         python_path,
+        publisher,
         |name| std::env::var(name).ok(),
     )
 }
@@ -512,6 +788,16 @@ fn derive_session_paths(
     ))
 }
 
+fn publisher_secret_paths(session_dir: &str) -> Result<(String, String), OrchestrationError> {
+    let session_dir = normalized_remote_absolute_path(session_dir, "DALiuGE session directory")?;
+    let directory = session_dir.join(PUBLISHER_SECRETS_DIRECTORY);
+    let token_file = directory.join(PUBLISHER_TOKEN_FILENAME);
+    Ok((
+        directory.to_string_lossy().into_owned(),
+        token_file.to_string_lossy().into_owned(),
+    ))
+}
+
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
@@ -533,7 +819,22 @@ pub async fn submit_slurm_session(
         mut pgt_json,
         deployment,
         username,
+        publisher_credential,
     } = params;
+    let publication_inputs = match publisher_credential.as_ref() {
+        Some(_) => {
+            let publication = deployment.publication.as_ref().ok_or_else(|| {
+                OrchestrationError::Backend(
+                    "required output publication has no pinned deployment publication contract"
+                        .into(),
+                )
+            })?;
+            Some(resolve_publication_inputs_with(publication, |name| {
+                std::env::var(name).ok()
+            })?)
+        }
+        None => None,
+    };
     let dlg_root = deployment.dlg_root.trim_end_matches('/').to_string();
     let staging_dir = format!("{dlg_root}/staging");
     let pgt_remote_path = format!("{staging_dir}/BeampipeExecution_{execution_id}.pgt.graph");
@@ -605,6 +906,27 @@ pub async fn submit_slurm_session(
             DALIUGE_FAILED_SESSION_SITECUSTOMIZE,
         )
         .await?;
+    let publisher_runtime = match (publisher_credential.as_ref(), publication_inputs) {
+        (Some(credential), Some(inputs)) => {
+            let (secrets_directory, token_file) = publisher_secret_paths(&session_dir)?;
+            Some((
+                ResolvedPublisherRuntime {
+                    execution_id: execution_id.clone(),
+                    execution_attempt: credential.execution_attempt(),
+                    core_url: inputs.core_url,
+                    durable_destination_uri: inputs.durable_destination_uri,
+                    token_file,
+                },
+                secrets_directory,
+            ))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(OrchestrationError::Backend(
+                "publisher runtime inputs were not resolved consistently".into(),
+            ));
+        }
+    };
     let sbatch = sbatch_command(
         &deployment,
         &session_id,
@@ -612,8 +934,31 @@ pub async fn submit_slurm_session(
         &staging_root,
         &cache_root,
         &python_shim_dir,
+        publisher_runtime.as_ref().map(|(runtime, _)| runtime),
     )?;
-    let sbatch_out = session.run_submission_command(&sbatch).await?;
+    if let (Some(credential), Some((runtime, secrets_directory))) =
+        (publisher_credential.as_ref(), publisher_runtime.as_ref())
+    {
+        session
+            .upload_secret_atomic(
+                secrets_directory,
+                &runtime.token_file,
+                credential.token_bytes(),
+            )
+            .await?;
+    }
+    let sbatch_out = match session.run_submission_command(&sbatch).await {
+        Ok(output) => output,
+        Err(error) => {
+            if !matches!(error, OrchestrationError::SubmissionUncertain(_)) {
+                if let Some((runtime, _)) = publisher_runtime.as_ref() {
+                    let _ = session.remove_file_sftp(&runtime.token_file).await;
+                }
+            }
+            let _ = session.close().await;
+            return Err(error);
+        }
+    };
     let _ = session.close().await;
 
     let slurm_job_id = parse_dispatched_sbatch_job_id(&sbatch_out)?;
@@ -639,7 +984,13 @@ pub async fn submit_slurm_session(
 pub async fn probe_slurm_login(
     deployment: &SlurmRemoteDeploymentConfig,
     username: &str,
+    publication_required: bool,
 ) -> Result<(), String> {
+    // Resolve all local, non-secret publication inputs before opening an SSH
+    // connection. A missing or insecure callback/destination is a local
+    // configuration failure, not a remote probe.
+    let preflight = slurm_preflight_script(deployment, publication_required)
+        .map_err(|error| error.to_string())?;
     let target = SlurmTarget::from_deployment(deployment, username);
     let mut session = SlurmSshSession::connect(&target).await.map_err(|e| {
         format!(
@@ -647,7 +998,6 @@ pub async fn probe_slurm_login(
             deployment.login_node, username, deployment.login_node
         )
     })?;
-    let preflight = slurm_preflight_script(deployment).map_err(|error| error.to_string())?;
     session
         .run_command(&format!("bash -lc {}", shell_quote(&preflight)))
         .await
@@ -810,6 +1160,7 @@ mod tests {
             &output_a,
             &cache_a,
             "/dlg root/sessions/execution-a/.beampipe-python",
+            None,
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap.sif".into()),
         )
         .unwrap();
@@ -902,7 +1253,7 @@ mod tests {
         let mut dep = deployment();
         dep.dlg_root = "/scratch/project/user/dlg root".into();
         dep.runtime_contract = wallaby_runtime_contract();
-        let script = slurm_preflight_script_with(&dep, |name| {
+        let script = slurm_preflight_script_with(&dep, false, |name| {
             (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askapsoft.sif".into())
         })
         .unwrap();
@@ -948,6 +1299,7 @@ mod tests {
             "/dlg/wallaby_staging_data",
             "/dlg/shared-cache",
             "/dlg/.beampipe-python",
+            None,
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into()),
         )
         .unwrap();
@@ -993,6 +1345,7 @@ mod tests {
             "/dlg/wallaby_staging_data",
             "/dlg/shared-cache",
             "/dlg/.beampipe-python",
+            None,
             |_| None,
         )
         .unwrap();
@@ -1004,7 +1357,7 @@ mod tests {
     #[test]
     fn generic_runtime_has_no_wallaby_requirements_or_names() {
         let dep = deployment();
-        let script = slurm_preflight_script_with(&dep, |_| None).unwrap();
+        let script = slurm_preflight_script_with(&dep, false, |_| None).unwrap();
         assert!(!script.to_ascii_lowercase().contains("wallaby"));
         assert!(!script.to_ascii_lowercase().contains("askap"));
 
@@ -1024,12 +1377,150 @@ mod tests {
             &output_root,
             &shared_root,
             "/dlg/sessions/execution-a/.beampipe-python",
+            None,
             |_| None,
         )
         .unwrap();
         assert!(!command.to_ascii_lowercase().contains("wallaby"));
         assert!(!command.to_ascii_lowercase().contains("askap"));
         assert!(command.contains("--export=BEAMPIPE_SLURM_ACCOUNT,PYTHONPATH"));
+    }
+
+    #[test]
+    fn publication_runtime_is_resolved_and_validated_before_remote_use() {
+        let publication = PublicationRuntimeConfig {
+            core_url_environment: "SETONIX_BEAMPIPE_CORE_URL".into(),
+            durable_destination_uri_environment: "SETONIX_BEAMPIPE_OUTPUT_DESTINATION".into(),
+            allow_insecure_core_http: false,
+            credential_ttl_minutes: 720,
+        };
+        let resolved = resolve_publication_inputs_with(&publication, |name| match name {
+            "SETONIX_BEAMPIPE_CORE_URL" => Some("https://core.example.org/".into()),
+            "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => {
+                Some("s3://science-products/beampipe/".into())
+            }
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(resolved.core_url, "https://core.example.org");
+        assert_eq!(
+            resolved.durable_destination_uri,
+            "s3://science-products/beampipe"
+        );
+
+        for core_url in [
+            "http://core.example.org",
+            "https://user:password@core.example.org",
+            "https://core.example.org?token=secret",
+        ] {
+            assert!(resolve_publication_inputs_with(&publication, |name| match name {
+                "SETONIX_BEAMPIPE_CORE_URL" => Some(core_url.into()),
+                "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => {
+                    Some("file:///durable/beampipe".into())
+                }
+                _ => None,
+            })
+            .is_err());
+        }
+        assert!(resolve_publication_inputs_with(&publication, |_| None).is_err());
+    }
+
+    #[test]
+    fn loopback_http_requires_an_explicit_development_override() {
+        assert!(validated_core_url("http://127.0.0.1:18080", false).is_err());
+        assert_eq!(
+            validated_core_url("http://127.0.0.1:18080/", true).unwrap(),
+            "http://127.0.0.1:18080"
+        );
+        assert!(validated_core_url("http://core.internal:18080", true).is_err());
+    }
+
+    #[test]
+    fn publication_preflight_is_standalone_and_project_neutral() {
+        let mut dep = deployment();
+        dep.publication = Some(PublicationRuntimeConfig {
+            core_url_environment: "BEAMPIPE_CORE_URL".into(),
+            durable_destination_uri_environment: "BEAMPIPE_OUTPUT_DESTINATION_URI".into(),
+            allow_insecure_core_http: false,
+            credential_ttl_minutes: 720,
+        });
+        let script = slurm_preflight_script_with(&dep, true, |name| match name {
+            "BEAMPIPE_CORE_URL" => Some("https://core.example.org".into()),
+            "BEAMPIPE_OUTPUT_DESTINATION_URI" => Some("file:///durable/beampipe".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert!(script.contains("command -v beampipe-publish"));
+        assert!(script.contains("beampipe_pallette.publish"));
+        assert!(!script.to_ascii_lowercase().contains("wallaby"));
+
+        let opt_out = slurm_preflight_script_with(&dep, false, |_| None).unwrap();
+        assert!(!opt_out.contains("beampipe-publish"));
+        assert!(!opt_out.contains("beampipe_pallette.publish"));
+    }
+
+    #[test]
+    fn publisher_command_exports_paths_but_never_the_capability() {
+        let token = "bpp_this-secret-must-never-enter-a-command-0123456789";
+        let credential = PublisherRuntimeCredential::new(0, token.as_bytes().to_vec()).unwrap();
+        let (secrets_directory, token_file) =
+            publisher_secret_paths("/dlg/sessions/execution-a").unwrap();
+        assert_eq!(
+            secrets_directory,
+            "/dlg/sessions/execution-a/.beampipe-secrets"
+        );
+        assert_eq!(
+            token_file,
+            "/dlg/sessions/execution-a/.beampipe-secrets/publisher.token"
+        );
+        let runtime = ResolvedPublisherRuntime {
+            execution_id: "018f0000-0000-7000-8000-000000000001".into(),
+            execution_attempt: credential.execution_attempt(),
+            core_url: "https://core.example.org".into(),
+            durable_destination_uri: "s3://science-products/beampipe".into(),
+            token_file,
+        };
+        let dep = deployment();
+        let command = sbatch_command_with(
+            &dep,
+            "execution-a",
+            "/dlg/sessions/execution-a/jobsub.sh",
+            "/dlg/sessions/execution-a/outputs",
+            "/dlg/shared_staging",
+            "/dlg/sessions/execution-a/.beampipe-python",
+            Some(&runtime),
+            |_| None,
+        )
+        .unwrap();
+        for expected in [
+            "BEAMPIPE_EXECUTION_ID",
+            "BEAMPIPE_EXECUTION_ATTEMPT",
+            "BEAMPIPE_CORE_URL",
+            "BEAMPIPE_OUTPUT_DESTINATION_URI",
+            "BEAMPIPE_OUTPUT_ROOT",
+            "BEAMPIPE_PUBLISHER_TOKEN_FILE",
+            "export BEAMPIPE_EXECUTION_ATTEMPT=0",
+            "/dlg/sessions/execution-a/.beampipe-secrets/publisher.token",
+            "https://core.example.org",
+            "s3://science-products/beampipe",
+        ] {
+            assert!(
+                command.contains(expected),
+                "missing {expected:?} in {command}"
+            );
+        }
+        let physical_graph = serde_json::json!(["execution-a.pgt.graph", {"oid": "drop"}]);
+        let receipt = SlurmSubmitResult {
+            slurm_job_id: "42".into(),
+            session_dir: "/dlg/sessions/execution-a".into(),
+            staging_root: Some("/dlg/sessions/execution-a/outputs".into()),
+            composite_scheduler_job_id: "execution-a:42".into(),
+        };
+        let observable = format!(
+            "{command}\n{physical_graph}\n{receipt:?}\n{credential:?}"
+        );
+        assert!(!observable.contains(token));
+        assert!(observable.contains("[REDACTED]"));
     }
 
     fn wallaby_runtime_contract() -> SlurmRuntimeContractConfig {
@@ -1077,6 +1568,7 @@ mod tests {
             container_runtime: None,
             environment_setup: None,
             runtime_contract: Default::default(),
+            publication: None,
         }
     }
 }

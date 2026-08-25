@@ -31,6 +31,7 @@ fn sample_slurm_config() -> SlurmRemoteDeploymentConfig {
         container_runtime: None,
         environment_setup: None,
         runtime_contract: Default::default(),
+        publication: None,
     }
 }
 

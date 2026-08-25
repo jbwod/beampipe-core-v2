@@ -36,6 +36,11 @@
       "output_environment_variable": "WALLABY_HIRES_STAGING_ROOT",
       "shared_staging_environment_variable": "WALLABY_HIRES_CACHE_ROOT"
     },
+    "publication": {
+      "core_url_environment": "BEAMPIPE_CORE_URL",
+      "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
+      "credential_ttl_minutes": 720
+    },
     "exec_prefix": "srun -l",
     "job_duration_minutes": 50,
     "num_nodes": 1,

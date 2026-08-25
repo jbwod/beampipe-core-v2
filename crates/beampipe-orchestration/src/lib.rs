@@ -17,6 +17,7 @@ pub mod slurm_batch;
 pub mod slurm_credentials;
 pub mod slurm_deploy;
 pub mod slurm_ssh;
+mod slurm_sftp;
 pub mod staging;
 pub mod tm_health;
 pub mod translator;
@@ -50,6 +51,7 @@ pub use slurm_credentials::{
     list_credential_slots, ssh_credentials_dir, SlotPresence, SlurmSshCredentials,
 };
 pub use slurm_deploy::probe_slurm_login;
+pub use slurm_deploy::PublisherRuntimeCredential;
 pub use slurm_ssh::{query_slurm_states_batch, SlurmSshPool, SlurmSshSession, SlurmTarget};
 pub use staging::{casda_password_from_env, CasdaStagingClient};
 pub use tm_health::{

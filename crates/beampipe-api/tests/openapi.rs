@@ -95,4 +95,42 @@ fn publisher_capability_endpoints_are_bearer_authenticated_and_typed() {
         .get("required")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|required| required.contains(&serde_json::json!("execution_attempt"))));
+
+    let response = spec
+        .pointer("/components/schemas/ExecutionOutputVerificationResponse")
+        .expect("output verification response schema");
+    assert_eq!(
+        response.pointer("/properties/execution/$ref"),
+        Some(&serde_json::json!(
+            "#/components/schemas/ExecutionOutputVerificationExecutionAck"
+        ))
+    );
+    assert_eq!(
+        response.pointer("/properties/artifact/$ref"),
+        Some(&serde_json::json!(
+            "#/components/schemas/ExecutionOutputVerificationArtifactAck"
+        ))
+    );
+    let execution_properties = spec
+        .pointer("/components/schemas/ExecutionOutputVerificationExecutionAck/properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("minimal execution acknowledgement properties");
+    assert_eq!(
+        execution_properties.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+        ["output_state", "retry_count", "status", "uuid"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let artifact_properties = spec
+        .pointer("/components/schemas/ExecutionOutputVerificationArtifactAck/properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("minimal artifact acknowledgement properties");
+    assert_eq!(
+        artifact_properties.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+        ["execution_attempt", "kind", "sha256", "uri", "uuid"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
 }

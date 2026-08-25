@@ -39,6 +39,7 @@ use beampipe_orchestration::{
     HttpClientOptions, HttpDimClient, HttpTranslatorClient, MockDimClient, OrchestrationError,
     PassThroughStagingClient, RestExecutionBackend, SchedulerAdapter, SlurmExecutionBackend,
     SlurmJobPollResult, SlurmSshPool, SlurmTarget, SshSlurmClient, StagingClient, TmProbeResult,
+    PublisherRuntimeCredential,
 };
 use beampipe_profiles::{
     DeploymentConfig, RestRemoteDeploymentConfig, SlurmRemoteDeploymentConfig,
@@ -2820,6 +2821,7 @@ async fn preflight_execute(
     do_submit: bool,
     requires_casda: bool,
     backend_kind: &str,
+    publication_required: bool,
     profile: Option<&DeploymentProfileRow>,
     casda: Option<&CasdaStagingClient>,
 ) -> Result<(), String> {
@@ -2854,10 +2856,12 @@ async fn preflight_execute(
                         login_node = %slurm.login_node,
                         remote_user = %user
                     );
-                    probe_slurm_login(&slurm, &user).await.map_err(|e| {
-                        warn!(event = "execute_preflight_slurm_failed", error = %e);
-                        e
-                    })?;
+                    probe_slurm_login(&slurm, &user, publication_required)
+                        .await
+                        .map_err(|e| {
+                            warn!(event = "execute_preflight_slurm_failed", error = %e);
+                            e
+                        })?;
                     info!(event = "execute_preflight_slurm_ok", login_node = %slurm.login_node);
                 }
             }
@@ -3337,6 +3341,13 @@ async fn run_execute_body(
         .as_ref()
         .and_then(|row| deployment_kind(&row.deployment))
         .unwrap_or("rest_remote");
+    ensure_publisher_delivery_supported(
+        execution.output_verification_required,
+        do_submit,
+        use_real,
+        backend_kind,
+        profile.as_ref(),
+    )?;
     let requires_casda = use_real && execution_requires_casda(&project_config);
     let casda_client = CasdaStagingClient::from_env();
     ensure_execution_active(pool, execution_id, true).await?;
@@ -3356,6 +3367,7 @@ async fn run_execute_body(
         do_submit && use_real,
         requires_casda,
         backend_kind,
+        execution.output_verification_required,
         profile.as_ref(),
         casda_client.as_ref(),
     )
@@ -3598,9 +3610,15 @@ fn execution_backend(
     backend_kind: &str,
     use_real: bool,
     created_at: chrono::DateTime<chrono::Utc>,
+    publisher_credential: Option<PublisherRuntimeCredential>,
 ) -> Box<dyn beampipe_orchestration::ExecutionBackend> {
     match (backend_kind, use_real) {
-        ("slurm_remote", true) => Box::new(slurm_backend_from_profile(profile, true, created_at)),
+        ("slurm_remote", true) => Box::new(slurm_backend_from_profile(
+            profile,
+            true,
+            created_at,
+            publisher_credential,
+        )),
         ("slurm_remote", false) => Box::new(SlurmExecutionBackend {
             session_created_at: created_at,
             ..Default::default()
@@ -3611,6 +3629,40 @@ fn execution_backend(
             ..Default::default()
         }),
     }
+}
+
+fn ensure_publisher_delivery_supported(
+    output_verification_required: bool,
+    do_submit: bool,
+    use_real: bool,
+    backend_kind: &str,
+    profile: Option<&DeploymentProfileRow>,
+) -> Result<(), String> {
+    if !output_verification_required || !do_submit || !use_real {
+        return Ok(());
+    }
+    if backend_kind != "slurm_remote" {
+        return Err(
+            "required output publication cannot use rest_remote until a validated shared credential-directory contract is configured; Core refuses graph token injection"
+                .into(),
+        );
+    }
+    let deployment = profile
+        .ok_or_else(|| {
+            "required output publication needs a pinned slurm_remote deployment profile"
+                .to_string()
+        })
+        .and_then(|profile| {
+            serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
+                .map_err(|error| format!("pinned deployment profile is invalid: {error}"))
+        })?;
+    let DeploymentConfig::SlurmRemote(deployment) = deployment else {
+        return Err("required output publication needs a slurm_remote deployment profile".into());
+    };
+    deployment.publication.as_ref().ok_or_else(|| {
+        "required output publication has no pinned deployment publication contract".to_string()
+    })?;
+    Ok(())
 }
 
 fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
@@ -3637,6 +3689,85 @@ fn submission_timeout_patch(error: String) -> ExecutionStatePatch {
     }
 }
 
+fn system_publisher_expiration(
+    profile: Option<&DeploymentProfileRow>,
+    issued_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>, String> {
+    let deployment = profile
+        .ok_or_else(|| "publisher credential requires a pinned deployment profile".to_string())
+        .and_then(|profile| {
+            serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
+                .map_err(|error| format!("pinned deployment profile is invalid: {error}"))
+        })?;
+    let DeploymentConfig::SlurmRemote(deployment) = deployment else {
+        return Err("automatic publisher credentials are supported only for slurm_remote".into());
+    };
+    let ttl_minutes = deployment
+        .publication
+        .as_ref()
+        .ok_or_else(|| "publisher credential requires a pinned publication contract".to_string())?
+        .credential_ttl_minutes;
+    let ttl_seconds = i64::from(ttl_minutes)
+        .checked_mul(60)
+        .ok_or_else(|| "publisher credential lifetime overflowed".to_string())?;
+    if !(5 * 60..=repo::MAX_OUTPUT_PUBLISHER_TTL_SECONDS).contains(&ttl_seconds) {
+        return Err(format!(
+            "publisher credential lifetime must be 5-1440 minutes, got {ttl_minutes}"
+        ));
+    }
+    issued_at
+        .checked_add_signed(chrono::Duration::seconds(ttl_seconds))
+        .ok_or_else(|| "publisher credential expiration is out of range".to_string())
+}
+
+async fn issue_system_publisher_credential(
+    pool: &PgPool,
+    execution_id: Uuid,
+    profile: Option<&DeploymentProfileRow>,
+    correlation_id: Option<&str>,
+) -> Result<PublisherRuntimeCredential, String> {
+    let expires_at = system_publisher_expiration(profile, Utc::now())?;
+    repo::revoke_execution_publisher_credentials(
+        pool,
+        execution_id,
+        "publisher_credential_replaced_before_submission",
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let material = beampipe_auth::issue_publisher_token_material();
+    let credential = repo::issue_execution_publisher_credential(
+        pool,
+        execution_id,
+        Uuid::now_v7(),
+        material.token_hash(),
+        None,
+        "system:execute",
+        expires_at,
+        correlation_id,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    match PublisherRuntimeCredential::new(
+        credential.execution_attempt,
+        material.token().as_bytes().to_vec(),
+    ) {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => {
+            let _ = repo::revoke_execution_publisher_credentials(
+                pool,
+                execution_id,
+                "publisher_runtime_material_rejected",
+            )
+            .await;
+            Err(error.to_string())
+        }
+    }
+}
+
+fn should_revoke_publisher_after_submit_error(error: &OrchestrationError) -> bool {
+    !submission_error_is_uncertain(error)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_submit_phase(
     pool: &PgPool,
@@ -3659,7 +3790,6 @@ async fn run_submit_phase(
         backend_kind,
         tm_url = %tm_url
     );
-    let backend = execution_backend(profile, backend_kind, use_real, execution.created_at);
     let started = std::time::Instant::now();
     let expected_session_id = beampipe_session_id(&execution_id.to_string(), execution.created_at);
     let daliuge_manager_url = profile.and_then(|profile| {
@@ -3718,6 +3848,49 @@ async fn run_submit_phase(
         );
         return Ok(());
     };
+    let publisher_credential =
+        if execution.output_verification_required && use_real && backend_kind == "slurm_remote" {
+            match issue_system_publisher_credential(
+                pool,
+                execution_id,
+                profile,
+                correlation_id,
+            )
+            .await
+            {
+                Ok(credential) => Some(credential),
+                Err(error) => {
+                    let _ = repo::revoke_execution_publisher_credentials(
+                        pool,
+                        execution_id,
+                        "publisher_credential_issue_failed",
+                    )
+                    .await;
+                    repo::apply_execution_state_patch(
+                        pool,
+                        execution_id,
+                        ExecutionStatePatch {
+                            submission_state: Some(SubmissionState::Failed),
+                            failure_class: Some(FailureClass::Configuration),
+                            last_error: Some(error.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|db_error| db_error.to_string())?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+    let backend = execution_backend(
+        profile,
+        backend_kind,
+        use_real,
+        execution.created_at,
+        publisher_credential.clone(),
+    );
     async {
         let submitted = match within_submission_timeout(
             submission_timeout_remaining(submission_deadline_at, Utc::now()),
@@ -3728,7 +3901,7 @@ async fn run_submit_phase(
             Ok(Ok(submitted)) => submitted,
             Ok(Err(error)) => {
                 let uncertain = submission_error_is_uncertain(&error);
-                repo::apply_execution_state_patch(
+                let patch_result = repo::apply_execution_state_patch(
                     pool,
                     execution_id,
                     ExecutionStatePatch {
@@ -3746,8 +3919,22 @@ async fn run_submit_phase(
                         ..Default::default()
                     },
                 )
-                .await
-                .map_err(|db_error| db_error.to_string())?;
+                .await;
+                let revoke_result = if publisher_credential.is_some()
+                    && should_revoke_publisher_after_submit_error(&error)
+                {
+                    repo::revoke_execution_publisher_credentials(
+                        pool,
+                        execution_id,
+                        "external_submission_definitely_failed",
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    Ok(())
+                };
+                patch_result.map_err(|db_error| db_error.to_string())?;
+                revoke_result.map_err(|db_error| db_error.to_string())?;
                 return Err(error.to_string());
             }
             Err(_) => {
@@ -5253,7 +5440,8 @@ async fn reconcile_uncertain_slurm_submissions(
         let target_fingerprint = intent_target_fingerprint;
         let lookup_id = Uuid::now_v7();
         let lookup_started_at = Utc::now();
-        let client = slurm_backend_from_profile(Some(&profile), true, execution.created_at).slurm;
+        let client =
+            slurm_backend_from_profile(Some(&profile), true, execution.created_at, None).slurm;
         let lookup = match within_slurm_target_timeout(
             SLURM_TARGET_WALL_CLOCK_TIMEOUT,
             client.find_by_name(&session_id, intent.observed_at),
@@ -5605,6 +5793,7 @@ fn slurm_backend_from_profile(
     profile: Option<&DeploymentProfileRow>,
     _use_real: bool,
     created_at: chrono::DateTime<chrono::Utc>,
+    publisher_credential: Option<PublisherRuntimeCredential>,
 ) -> SlurmExecutionBackend<HttpTranslatorClient, SshSlurmClient> {
     let mut session_dir = "/tmp/beampipe".to_string();
     let mut login = "localhost".to_string();
@@ -5661,6 +5850,7 @@ fn slurm_backend_from_profile(
                 .map(|s| s.dlg_root.clone())
                 .unwrap_or_else(|| "/tmp".into()),
             deployment: slurm_dep,
+            publisher_credential,
         },
         profile_name: profile.map(|p| p.name.clone()),
         session_dir,
@@ -5777,6 +5967,48 @@ mod tests {
             .unwrap()
     }
 
+    fn pinned_profile(deployment: Value) -> DeploymentProfileRow {
+        DeploymentProfileRow {
+            uuid: Uuid::now_v7(),
+            name: "publication-test".into(),
+            description: None,
+            project_module: None,
+            is_default: false,
+            max_concurrent_executions: None,
+            translation: json!({"num_par": 1}),
+            deployment,
+            revision: 1,
+            spec_sha256: None,
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    fn pinned_slurm_profile(credential_ttl_minutes: Option<i32>) -> DeploymentProfileRow {
+        let mut deployment = json!({
+            "kind": "slurm_remote",
+            "login_node": "login.example.org",
+            "facility": "generic",
+            "account": "project",
+            "home_dir": "/scratch/project",
+            "log_dir": "/scratch/project/logs",
+            "dlg_root": "/scratch/project/dlg",
+            "resources": {"wall_time_minutes": 120},
+            "runtime_contract": {
+                "output_subdirectory": "outputs",
+                "shared_staging_subdirectory": "shared_staging"
+            }
+        });
+        if let Some(ttl) = credential_ttl_minutes {
+            deployment["publication"] = json!({
+                "core_url_environment": "BEAMPIPE_CORE_URL",
+                "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
+                "credential_ttl_minutes": ttl
+            });
+        }
+        pinned_profile(deployment)
+    }
+
     #[test]
     fn slurm_unknown_does_not_map_to_terminal() {
         let result = SlurmJobPollResult {
@@ -5823,6 +6055,67 @@ mod tests {
         assert!(!submission_error_is_uncertain(
             &OrchestrationError::GraphNotObject
         ));
+        assert!(!should_revoke_publisher_after_submit_error(
+            &OrchestrationError::SubmissionUncertain("lost sbatch response".into())
+        ));
+        assert!(should_revoke_publisher_after_submit_error(
+            &OrchestrationError::Backend("definite pre-submit failure".into())
+        ));
+    }
+
+    #[test]
+    fn required_publication_fails_closed_without_slurm_secret_delivery() {
+        let rest = pinned_profile(json!({
+            "kind": "rest_remote",
+            "deploy_host": "dim.example.org"
+        }));
+        let error = ensure_publisher_delivery_supported(
+            true,
+            true,
+            true,
+            "rest_remote",
+            Some(&rest),
+        )
+        .unwrap_err();
+        assert!(error.contains("shared credential-directory contract"));
+
+        let missing = pinned_slurm_profile(None);
+        let error = ensure_publisher_delivery_supported(
+            true,
+            true,
+            true,
+            "slurm_remote",
+            Some(&missing),
+        )
+        .unwrap_err();
+        assert!(error.contains("no pinned deployment publication contract"));
+
+        let supported = pinned_slurm_profile(Some(720));
+        ensure_publisher_delivery_supported(
+            true,
+            true,
+            true,
+            "slurm_remote",
+            Some(&supported),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn system_publisher_expiration_uses_the_pinned_ttl_without_hidden_defaults() {
+        let issued_at = DateTime::parse_from_rfc3339("2026-08-25T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let profile = pinned_slurm_profile(Some(720));
+        assert_eq!(
+            system_publisher_expiration(Some(&profile), issued_at).unwrap(),
+            issued_at + chrono::Duration::minutes(720)
+        );
+
+        let invalid = pinned_slurm_profile(Some(1_441));
+        assert!(system_publisher_expiration(Some(&invalid), issued_at)
+            .unwrap_err()
+            .contains("5-1440"));
     }
 
     #[test]

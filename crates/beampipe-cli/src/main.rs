@@ -1450,6 +1450,7 @@ async fn slurm_ping(
         container_runtime: None,
         environment_setup: None,
         runtime_contract: Default::default(),
+        publication: None,
     };
     let target = beampipe_orchestration::SlurmTarget::from_deployment(&deployment, &remote_user);
     let mut session = beampipe_orchestration::SlurmSshSession::connect(&target).await?;
