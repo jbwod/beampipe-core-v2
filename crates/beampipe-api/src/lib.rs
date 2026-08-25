@@ -3789,6 +3789,7 @@ fn output_inventory_artifact(
         ),
         producer_phase: "publication_acknowledged".into(),
         metadata: json!({
+            "execution_attempt": request.execution_attempt,
             "inventory_schema": request.schema,
             "inventory_sha256": request.inventory_sha256,
             "product_count": request.products.len(),
@@ -5588,6 +5589,10 @@ adapters:
         assert_eq!(
             artifact.metadata["inventory_sha256"],
             request.inventory_sha256
+        );
+        assert_eq!(
+            artifact.metadata["execution_attempt"],
+            request.execution_attempt
         );
         assert_eq!(
             artifact.media_type,
