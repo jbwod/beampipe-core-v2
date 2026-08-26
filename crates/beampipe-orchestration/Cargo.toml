@@ -25,6 +25,7 @@ tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 russh.workspace = true
+openssh-sftp-client.workspace = true
 ssh-key.workspace = true
 libc.workspace = true
 zeroize.workspace = true

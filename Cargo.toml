@@ -55,6 +55,7 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 ipnet = "2"
 russh = "0.61"
+openssh-sftp-client = { version = "=0.15.7", default-features = false }
 ssh-key = "0.7.0-rc.10"
 axum-test = "15"
 libc = "0.2"

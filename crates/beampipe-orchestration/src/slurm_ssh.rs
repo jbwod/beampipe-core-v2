@@ -5,7 +5,7 @@ use crate::slurm_batch::{
     SlurmJobPollResult,
 };
 use crate::slurm_credentials::SlurmSshCredentials;
-use crate::slurm_sftp::SftpV3;
+use crate::slurm_sftp::PrivateSftp;
 use crate::OrchestrationError;
 use beampipe_profiles::SlurmRemoteDeploymentConfig;
 use russh::client;
@@ -463,7 +463,7 @@ impl SlurmSshSession {
             .map_err(|error| {
                 OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}"))
             })?;
-        let mut sftp = SftpV3::connect(channel.into_stream()).await?;
+        let mut sftp = PrivateSftp::connect(channel.into_stream()).await?;
         let result = async {
             sftp.ensure_private_directory(remote_directory, 0o700)
                 .await?;
@@ -476,10 +476,10 @@ impl SlurmSshSession {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), _) => {
                 // The original subsystem may have died after the server
-                // committed the atomic rename. Same-stream cleanup inside
-                // SftpV3 cannot prove either pathname is absent in that
-                // case, so retry both removals on fresh SFTP channels before
-                // reporting a definite pre-submission failure.
+                // committed the atomic rename. The failed channel cannot
+                // prove either pathname is absent, so retry both removals on
+                // fresh SFTP channels before reporting a definite
+                // pre-submission failure.
                 for path in
                     failed_secret_upload_cleanup_paths(false, &temporary_path, remote_path)
                 {
@@ -518,7 +518,7 @@ impl SlurmSshSession {
             .map_err(|error| {
                 OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}"))
             })?;
-        let mut sftp = SftpV3::connect(channel.into_stream()).await?;
+        let mut sftp = PrivateSftp::connect(channel.into_stream()).await?;
         let result = sftp.remove_file_if_present(remote_path).await;
         let close_result = sftp.shutdown().await;
         result.and(close_result)
