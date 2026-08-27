@@ -33,6 +33,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::{debug, info};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 pub async fn upsert_source(
@@ -6687,7 +6688,7 @@ pub async fn cleanup_expired_blacklisted_tokens(pool: &PgPool) -> Result<u64, sq
     Ok(result.rows_affected())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PaginatedExecutions {
     pub items: Vec<ExecutionRow>,
     pub total: i64,

@@ -58,7 +58,7 @@ pub struct ArchiveMetadataRow {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct ExecutionRow {
     pub uuid: Uuid,
     pub project_module: String,
@@ -221,7 +221,7 @@ pub struct DeploymentProfileRow {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct ProjectConfigRow {
     pub uuid: Uuid,
     pub project_id: String,

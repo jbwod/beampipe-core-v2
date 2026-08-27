@@ -101,7 +101,8 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         LoginRequest, TokenResponse, CurrentUserResponse,
         RefreshRequest, LogoutRequest,
         SourceCreate, SourceBulkCreate, SourceBulkCreateResponse, SourceUpdate,
-        DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, ArchiveMetadataResponse,
+        DiscoverTriggerRequest, DiscoverTriggerResponse, SourceRegistryRow, SourceMetadataResponse,
+        ArchiveMetadataResponse,
         ExecutionCreate, ExecutionSourceSelection, ExecutionPatchRequest, ExecuteRequest,
         ExecutionRetryRequest, ExecutionRetryResponse, ExecutionSubmissionAbandonRequest,
         OutputInventoryProduct,
@@ -165,18 +166,21 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         beampipe_profiles::DaliugeManagerTopologyConfig,
         SourceExecutionStatus,
         observability::NotificationChannelCreate, observability::NotificationChannelUpdate,
-        observability::NotificationChannelResponse, observability::AlertDeliveryResponse,
+        observability::NotificationChannelResponse, observability::NotificationTestResponse,
+        observability::AlertDeliveryResponse,
         observability::ProvenanceEventResponse, beampipe_security::SecretRef,
         observability::AlertRuleCreate, observability::AlertRuleUpdate,
         ProvenanceEventRow, NotificationChannelRow, AlertRuleRow, AlertDeliveryRow,
         ProvenanceSummary,
         OperatorOverviewResponse, UnroutableJobResponse,
         WorkerRead, WorkerRegisterRequest, WorkerHeartbeatResponse,
-        WorkerLeaseRead, ExecutionRead, ExecutionDebugUrls, ExecutionStatusResponse,
-        ExecutionSummaryResponse,
+        WorkerLeaseRead, ExecutionRead, ExecutionDebugUrls, ExecutionPrepareResponse,
+        ExecutionStatusResponse, ExecutionSummaryResponse, ExecuteResponse,
+        LedgerSnapshotResponse, ProjectListItem,
         SchedulerStatusResponse, SchedulerJobRead, DaliugeInspectResponse,
         WorkerInstanceRow, WorkerPoolSummary, ExecutionObservationRow,
         ExecutionArtifactRow, OperatorOverviewCounts, DiagnosticsResponse,
+        ExecutionRow, ProjectConfigRow, repo::PaginatedExecutions, WasmMetaResponse,
     )),
     tags(
         (name = "health", description = "Liveness, readiness, and configured project TAP connectivity probes."),
@@ -863,7 +867,7 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-#[utoipa::path(get, path = "/api/v2/metrics", tag = "health", responses((status = 200), (status = 401)))]
+#[utoipa::path(get, path = "/api/v2/metrics", tag = "health", responses((status = 200, body = String, content_type = "text/plain"), (status = 401)))]
 async fn metrics(
     State(state): State<Arc<AppState>>,
     mut parts: Parts,
@@ -1805,7 +1809,7 @@ async fn daliuge_inspect(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/daliuge/sessions", tag = "daliuge", responses((status = 200)))]
+#[utoipa::path(get, path = "/api/v2/daliuge/sessions", tag = "daliuge", responses((status = 200, body = Value)))]
 async fn daliuge_sessions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -1827,7 +1831,7 @@ pub struct TapHealthResponse {
     pub adapters: Vec<AdapterHealthResponse>,
 }
 
-#[utoipa::path(get, path = "/api/v2/health/tap", tag = "health")]
+#[utoipa::path(get, path = "/api/v2/health/tap", tag = "health", responses((status = 200, body = TapHealthResponse)))]
 async fn health_tap(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<TapHealthResponse>, ApiError> {
@@ -1927,7 +1931,7 @@ pub struct RefreshRequest {
     pub refresh_token: Option<String>,
 }
 
-#[utoipa::path(post, path = "/api/v2/refresh", tag = "auth")]
+#[utoipa::path(post, path = "/api/v2/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, body = TokenResponse)))]
 async fn refresh(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
@@ -1963,7 +1967,7 @@ pub struct LogoutRequest {
     pub refresh_token: Option<String>,
 }
 
-#[utoipa::path(post, path = "/api/v2/logout", tag = "auth")]
+#[utoipa::path(post, path = "/api/v2/logout", tag = "auth", request_body = LogoutRequest, responses((status = 204)))]
 async fn logout(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LogoutRequest>,
@@ -2007,7 +2011,7 @@ fn validate_logout_tokens(
     Ok(validated)
 }
 
-#[utoipa::path(get, path = "/api/v2/executions", tag = "executions")]
+#[utoipa::path(get, path = "/api/v2/executions", tag = "executions", responses((status = 200, body = repo::PaginatedExecutions)))]
 async fn list_executions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2067,7 +2071,8 @@ pub struct LedgerSnapshotResponse {
 #[utoipa::path(
     get,
     path = "/api/v2/executions/{id}/ledger-snapshot",
-    tag = "executions"
+    tag = "executions",
+    responses((status = 200, body = LedgerSnapshotResponse), (status = 404))
 )]
 async fn execution_ledger_snapshot(
     State(state): State<Arc<AppState>>,
@@ -2127,7 +2132,7 @@ pub struct ProjectListItem {
     pub active: bool,
 }
 
-#[utoipa::path(get, path = "/api/v2/projects", tag = "project-configs")]
+#[utoipa::path(get, path = "/api/v2/projects", tag = "project-configs", responses((status = 200, body = [ProjectListItem])))]
 async fn list_projects(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2144,7 +2149,7 @@ async fn list_projects(
     ))
 }
 
-#[utoipa::path(get, path = "/api/v2/projects/contracts", tag = "project-configs")]
+#[utoipa::path(get, path = "/api/v2/projects/contracts", tag = "project-configs", responses((status = 200, body = [ValidationReport])))]
 async fn list_project_contracts(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2159,7 +2164,7 @@ async fn list_project_contracts(
     Ok(Json(reports))
 }
 
-#[utoipa::path(get, path = "/api/v2/projects/contracts/{id}", tag = "project-configs")]
+#[utoipa::path(get, path = "/api/v2/projects/contracts/{id}", tag = "project-configs", responses((status = 200, body = ValidationReport), (status = 404)))]
 async fn get_project_contract(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2335,7 +2340,7 @@ pub struct ListSourcesQuery {
     pub offset: Option<i64>,
 }
 
-#[utoipa::path(post, path = "/api/v2/sources", tag = "sources", request_body = SourceCreate, responses((status = 200)))]
+#[utoipa::path(post, path = "/api/v2/sources", tag = "sources", request_body = SourceCreate, responses((status = 200, body = SourceRegistryRow)))]
 async fn create_source(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2352,7 +2357,7 @@ async fn create_source(
     ))
 }
 
-#[utoipa::path(post, path = "/api/v2/sources/bulk", tag = "sources", request_body = SourceBulkCreate, responses((status = 200)))]
+#[utoipa::path(post, path = "/api/v2/sources/bulk", tag = "sources", request_body = SourceBulkCreate, responses((status = 200, body = SourceBulkCreateResponse)))]
 async fn bulk_create_sources(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2376,7 +2381,7 @@ async fn bulk_create_sources(
     }))
 }
 
-#[utoipa::path(post, path = "/api/v2/sources/discover", tag = "sources", request_body = DiscoverTriggerRequest, responses((status = 200), (status = 400)))]
+#[utoipa::path(post, path = "/api/v2/sources/discover", tag = "sources", request_body = DiscoverTriggerRequest, responses((status = 200, body = DiscoverTriggerResponse), (status = 400)))]
 async fn discover_sources(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<Arc<correlation::RequestContext>>,
@@ -2414,7 +2419,7 @@ async fn discover_sources(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/sources", tag = "sources", responses((status = 200)))]
+#[utoipa::path(get, path = "/api/v2/sources", tag = "sources", responses((status = 200, body = [SourceRegistryRow])))]
 async fn list_sources(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2431,7 +2436,7 @@ async fn list_sources(
     ))
 }
 
-#[utoipa::path(get, path = "/api/v2/sources/{id}", tag = "sources", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/sources/{id}", tag = "sources", responses((status = 200, body = SourceRegistryRow), (status = 404)))]
 async fn get_source(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2474,7 +2479,7 @@ async fn get_source_status(
     )))
 }
 
-#[utoipa::path(patch, path = "/api/v2/sources/{id}", tag = "sources", request_body = SourceUpdate, responses((status = 200), (status = 404)))]
+#[utoipa::path(patch, path = "/api/v2/sources/{id}", tag = "sources", request_body = SourceUpdate, responses((status = 200, body = SourceRegistryRow), (status = 404)))]
 async fn update_source(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2500,7 +2505,7 @@ async fn delete_source(
     }
 }
 
-#[utoipa::path(get, path = "/api/v2/sources/{id}/metadata", tag = "sources", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/sources/{id}/metadata", tag = "sources", responses((status = 200, body = SourceMetadataResponse), (status = 404)))]
 async fn get_source_metadata(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2520,7 +2525,7 @@ async fn get_source_metadata(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/sources/{id}/executions", tag = "sources", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/sources/{id}/executions", tag = "sources", responses((status = 200, body = [ExecutionRow]), (status = 404)))]
 async fn list_source_executions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2681,7 +2686,7 @@ pub struct ExecutionSummaryResponse {
     pub last_error: Option<String>,
 }
 
-#[utoipa::path(post, path = "/api/v2/executions/prepare", tag = "executions", request_body = ExecutionCreate, responses((status = 200)))]
+#[utoipa::path(post, path = "/api/v2/executions/prepare", tag = "executions", request_body = ExecutionCreate, responses((status = 200, body = ExecutionPrepareResponse)))]
 async fn prepare_execution(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -3031,7 +3036,7 @@ fn execution_create_request_sha256(req: &ExecutionCreate) -> String {
     tag = "executions",
     request_body = ExecutionCreate,
     params(("Idempotency-Key" = Option<String>, Header, description = "Optional per-user retry key. Exact replays return the existing execution; reuse with a different request returns 409.")),
-    responses((status = 201), (status = 200), (status = 409))
+    responses((status = 201, body = ExecutionRead), (status = 200, body = ExecutionRead), (status = 409))
 )]
 async fn create_execution(
     State(state): State<Arc<AppState>>,
@@ -3099,7 +3104,7 @@ fn map_execution_create_error(error: sqlx::Error) -> ApiError {
     }
 }
 
-#[utoipa::path(get, path = "/api/v2/executions/{id}", tag = "executions", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/executions/{id}", tag = "executions", responses((status = 200, body = ExecutionRead), (status = 404)))]
 async fn get_execution(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -3250,7 +3255,7 @@ async fn deployment_for_execution(
     Ok(repo::resolve_execution_deployment(pool, execution).await?)
 }
 
-#[utoipa::path(get, path = "/api/v2/executions/{id}/status", tag = "executions", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/executions/{id}/status", tag = "executions", responses((status = 200, body = ExecutionStatusResponse), (status = 404)))]
 async fn execution_status(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -3288,7 +3293,7 @@ async fn execution_status(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/executions/{id}/summary", tag = "executions", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/executions/{id}/summary", tag = "executions", responses((status = 200, body = ExecutionSummaryResponse), (status = 404)))]
 async fn execution_summary(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -3913,7 +3918,7 @@ pub struct ExecutionPatchRequest {
     pub status: ExecutionStatus,
 }
 
-#[utoipa::path(patch, path = "/api/v2/executions/{id}", tag = "executions", request_body = ExecutionPatchRequest, responses((status = 200), (status = 404)))]
+#[utoipa::path(patch, path = "/api/v2/executions/{id}", tag = "executions", request_body = ExecutionPatchRequest, responses((status = 200, body = ExecutionRead), (status = 404)))]
 async fn patch_execution(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<Arc<correlation::RequestContext>>,
@@ -4230,7 +4235,7 @@ fn execute_job_options(payload: &Value) -> (bool, bool) {
     )
 }
 
-#[utoipa::path(post, path = "/api/v2/executions/{id}/execute", tag = "executions", responses((status = 202)))]
+#[utoipa::path(post, path = "/api/v2/executions/{id}/execute", tag = "executions", request_body = ExecuteRequest, responses((status = 202, body = ExecuteResponse)))]
 async fn execute_execution(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<Arc<correlation::RequestContext>>,
@@ -4527,7 +4532,7 @@ async fn upload_project_config(
     Ok((StatusCode::CREATED, Json(report)))
 }
 
-#[utoipa::path(get, path = "/api/v2/project-configs/{id}", tag = "project-configs", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/project-configs/{id}", tag = "project-configs", responses((status = 200, body = ProjectConfigRow), (status = 404)))]
 async fn get_project_config(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -4539,7 +4544,7 @@ async fn get_project_config(
         .ok_or(ApiError::NotFound)
 }
 
-#[utoipa::path(get, path = "/api/v2/project-configs/{id}/versions", tag = "project-configs", responses((status = 200)))]
+#[utoipa::path(get, path = "/api/v2/project-configs/{id}/versions", tag = "project-configs", responses((status = 200, body = [ProjectConfigRow])))]
 async fn list_project_config_versions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -4588,10 +4593,22 @@ pub struct WasmMetaResponse {
     pub bytes_len: Option<usize>,
 }
 
+/// OpenAPI-only representation of the raw WASM download response.
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+pub struct WasmBinaryResponse(Vec<u8>);
+
 #[utoipa::path(
     get,
     path = "/api/v2/project-configs/{id}/wasm/{sha256}",
-    tag = "project-configs"
+    tag = "project-configs",
+    responses(
+        (status = 200, content(
+            ("application/json" = WasmMetaResponse),
+            ("application/wasm" = inline(WasmBinaryResponse))
+        )),
+        (status = 404)
+    )
 )]
 async fn get_project_config_wasm(
     State(state): State<Arc<AppState>>,
@@ -4717,7 +4734,7 @@ impl From<DeploymentProfileRow> for DeploymentProfileResponse {
     }
 }
 
-#[utoipa::path(post, path = "/api/v2/jobs", tag = "jobs", request_body = JobCreate, responses((status = 202)))]
+#[utoipa::path(post, path = "/api/v2/jobs", tag = "jobs", request_body = JobCreate, responses((status = 202, body = JobResponse)))]
 async fn enqueue_job_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<Arc<correlation::RequestContext>>,
@@ -4739,7 +4756,7 @@ async fn enqueue_job_handler(
     Ok((StatusCode::ACCEPTED, Json(job.into())))
 }
 
-#[utoipa::path(post, path = "/api/v2/deployment-profiles", tag = "deployment-profiles", request_body = DeploymentProfile, responses((status = 201)))]
+#[utoipa::path(post, path = "/api/v2/deployment-profiles", tag = "deployment-profiles", request_body = DeploymentProfile, responses((status = 201, body = DeploymentProfileResponse)))]
 async fn create_deployment_profile(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -4774,7 +4791,7 @@ async fn create_deployment_profile(
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
-#[utoipa::path(get, path = "/api/v2/deployment-profiles", tag = "deployment-profiles", responses((status = 200)))]
+#[utoipa::path(get, path = "/api/v2/deployment-profiles", tag = "deployment-profiles", responses((status = 200, body = [DeploymentProfileResponse])))]
 async fn list_deployment_profiles(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -4791,7 +4808,7 @@ async fn list_deployment_profiles(
     ))
 }
 
-#[utoipa::path(get, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", responses((status = 200), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", responses((status = 200, body = DeploymentProfileResponse), (status = 404)))]
 async fn get_deployment_profile(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -4804,7 +4821,7 @@ async fn get_deployment_profile(
         .ok_or(ApiError::NotFound)
 }
 
-#[utoipa::path(patch, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", request_body = DeploymentProfile, responses((status = 200), (status = 404)))]
+#[utoipa::path(patch, path = "/api/v2/deployment-profiles/{id}", tag = "deployment-profiles", request_body = DeploymentProfile, responses((status = 200, body = DeploymentProfileResponse), (status = 404)))]
 async fn update_deployment_profile(
     State(state): State<Arc<AppState>>,
     user: AuthUser,

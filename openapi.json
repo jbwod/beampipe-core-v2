@@ -825,6 +825,35 @@
         },
         "type": "object"
       },
+      "ExecuteResponse": {
+        "properties": {
+          "do_stage": {
+            "type": "boolean"
+          },
+          "do_submit": {
+            "type": "boolean"
+          },
+          "execution_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "job_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "execution_id",
+          "job_id",
+          "do_stage",
+          "do_submit"
+        ],
+        "type": "object"
+      },
       "ExecutionArtifactRow": {
         "properties": {
           "created_at": {
@@ -1185,6 +1214,38 @@
         ],
         "type": "object"
       },
+      "ExecutionPrepareResponse": {
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "sources_preview": {
+            "items": {},
+            "type": "array"
+          },
+          "total_records": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "project_module",
+          "valid",
+          "errors",
+          "total_records",
+          "sources_preview"
+        ],
+        "type": "object"
+      },
       "ExecutionPublisherTokenRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1490,6 +1551,201 @@
           "submit"
         ],
         "type": "string"
+      },
+      "ExecutionRow": {
+        "properties": {
+          "archive_name": {
+            "type": "string"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "control_phase": {
+            "nullable": true,
+            "type": "string"
+          },
+          "create_idempotency_key": {
+            "nullable": true,
+            "type": "string"
+          },
+          "create_request_sha256": {
+            "nullable": true,
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_by_id": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "daliuge_manager_url": {
+            "nullable": true,
+            "type": "string"
+          },
+          "daliuge_raw_status": {
+            "nullable": true
+          },
+          "daliuge_session_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "daliuge_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "deployment_profile_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "deployment_profile_revision": {
+            "format": "int32",
+            "nullable": true,
+            "type": "integer"
+          },
+          "deployment_profile_snapshot": {
+            "nullable": true
+          },
+          "discovery_signature": {
+            "nullable": true,
+            "type": "string"
+          },
+          "execution_phase": {
+            "nullable": true,
+            "type": "string"
+          },
+          "failure_class": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_reconciled_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "manifest_sha256": {
+            "nullable": true,
+            "type": "string"
+          },
+          "output_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "output_verification_policy": {},
+          "output_verification_required": {
+            "type": "boolean"
+          },
+          "patched_graph_sha256": {
+            "nullable": true,
+            "type": "string"
+          },
+          "phase_timestamps": {},
+          "physical_graph_sha256": {
+            "nullable": true,
+            "type": "string"
+          },
+          "project_config_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "project_module": {
+            "type": "string"
+          },
+          "remote_session_dir": {
+            "nullable": true,
+            "type": "string"
+          },
+          "retry_count": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "scheduler_job_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_raw_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_reason": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source_graph_sha256": {
+            "nullable": true,
+            "type": "string"
+          },
+          "sources": {},
+          "started_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "submission_abandoned_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "submission_deadline_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "submission_state": {
+            "nullable": true,
+            "type": "string"
+          },
+          "terminal_outcome": {
+            "nullable": true,
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "workflow_manifest": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "uuid",
+          "project_module",
+          "sources",
+          "archive_name",
+          "output_verification_required",
+          "output_verification_policy",
+          "phase_timestamps",
+          "status",
+          "retry_count",
+          "created_at"
+        ],
+        "type": "object"
       },
       "ExecutionSourceSelection": {
         "additionalProperties": false,
@@ -2063,6 +2319,56 @@
         ],
         "type": "object"
       },
+      "LedgerSnapshotResponse": {
+        "properties": {
+          "active_job_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "correlation_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "execution_phase": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "provenance_summary": {
+            "$ref": "#/components/schemas/ProvenanceSummary"
+          },
+          "run_record_phases": {},
+          "scheduler_job_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scheduler_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "workflow_manifest": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "uuid",
+          "status",
+          "run_record_phases",
+          "provenance_summary"
+        ],
+        "type": "object"
+      },
       "LoginRequest": {
         "properties": {
           "password": {
@@ -2273,6 +2579,22 @@
         },
         "type": "object"
       },
+      "NotificationTestResponse": {
+        "properties": {
+          "delivery_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "status"
+        ],
+        "type": "object"
+      },
       "OperatorOverviewCounts": {
         "properties": {
           "active_workers": {
@@ -2433,6 +2755,35 @@
         },
         "type": "object"
       },
+      "PaginatedExecutions": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionRow"
+            },
+            "type": "array"
+          },
+          "items_per_page": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "page": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "page",
+          "items_per_page"
+        ],
+        "type": "object"
+      },
       "PrepareMetadataConfig": {
         "additionalProperties": false,
         "properties": {
@@ -2543,6 +2894,62 @@
           "apiVersion",
           "kind",
           "metadata"
+        ],
+        "type": "object"
+      },
+      "ProjectConfigRow": {
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "spec": {},
+          "spec_sha256": {
+            "type": "string"
+          },
+          "uploaded_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "uuid": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "version": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "uuid",
+          "project_id",
+          "version",
+          "spec",
+          "spec_sha256",
+          "active",
+          "uploaded_at"
+        ],
+        "type": "object"
+      },
+      "ProjectListItem": {
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "version": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_id",
+          "version",
+          "active"
         ],
         "type": "object"
       },
@@ -3326,6 +3733,29 @@
         },
         "type": "object"
       },
+      "SourceMetadataResponse": {
+        "properties": {
+          "metadata": {
+            "items": {
+              "$ref": "#/components/schemas/ArchiveMetadataResponse"
+            },
+            "type": "array"
+          },
+          "metadata_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceRegistryRow"
+          }
+        },
+        "required": [
+          "source",
+          "metadata",
+          "metadata_count"
+        ],
+        "type": "object"
+      },
       "SourceRegistryRow": {
         "properties": {
           "created_at": {
@@ -3710,6 +4140,32 @@
           "valid",
           "errors",
           "spec_sha256"
+        ],
+        "type": "object"
+      },
+      "WasmMetaResponse": {
+        "properties": {
+          "bytes_len": {
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          },
+          "project_config_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "uploaded_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "wasm_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wasm_sha256",
+          "project_config_id",
+          "uploaded_at"
         ],
         "type": "object"
       },
@@ -4595,6 +5051,11 @@
         "operationId": "daliuge_sessions",
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -4634,6 +5095,16 @@
         "operationId": "list_deployment_profiles",
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeploymentProfileResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -4682,6 +5153,13 @@
         },
         "responses": {
           "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentProfileResponse"
+                }
+              }
+            },
             "description": "Created"
           },
           "400": {
@@ -4795,6 +5273,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentProfileResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -4857,6 +5342,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentProfileResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "400": {
@@ -4954,6 +5446,16 @@
         "description": "Filter executions by project module and status.",
         "operationId": "list_executions",
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedExecutions"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -5012,9 +5514,23 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionRead"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionRead"
+                }
+              }
+            },
             "description": "Created"
           },
           "400": {
@@ -5078,6 +5594,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionPrepareResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "400": {
@@ -5139,6 +5662,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionRead"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -5201,6 +5731,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionRead"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "400": {
@@ -5395,11 +5932,17 @@
               }
             }
           },
-          "description": "",
           "required": true
         },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecuteResponse"
+                }
+              }
+            },
             "description": "Accepted"
           },
           "400": {
@@ -5460,6 +6003,16 @@
           }
         ],
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LedgerSnapshotResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -5479,6 +6032,9 @@
               }
             },
             "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
           }
         },
         "security": [
@@ -5856,6 +6412,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionStatusResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -6026,6 +6589,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionSummaryResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -6147,7 +6717,18 @@
       "get": {
         "description": "Probe configured archive TAP endpoints used by discovery.",
         "operationId": "health_tap",
-        "responses": {},
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TapHealthResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
         "summary": "Archive TAP probe",
         "tags": [
           "health"
@@ -6170,6 +6751,13 @@
         },
         "responses": {
           "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            },
             "description": "Accepted"
           },
           "400": {
@@ -6271,10 +6859,12 @@
               }
             }
           },
-          "description": "",
           "required": true
         },
         "responses": {
+          "204": {
+            "description": "No content"
+          },
           "400": {
             "content": {
               "application/json": {
@@ -6298,6 +6888,13 @@
         "operationId": "metrics",
         "responses": {
           "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -6593,6 +7190,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationTestResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -6748,6 +7352,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectConfigRow"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -6801,6 +7412,16 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectConfigRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -6936,6 +7557,22 @@
           }
         ],
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmMetaResponse"
+                }
+              },
+              "application/wasm": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -6955,6 +7592,9 @@
               }
             },
             "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
           }
         },
         "security": [
@@ -6972,6 +7612,19 @@
         "description": "Registered project modules with active configuration.",
         "operationId": "list_projects",
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectListItem"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -7009,6 +7662,19 @@
         "description": "Discovery contract validation status per module.",
         "operationId": "list_project_contracts",
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ValidationReport"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -7056,6 +7722,16 @@
           }
         ],
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationReport"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -7075,6 +7751,9 @@
               }
             },
             "description": "Authenticated but not permitted"
+          },
+          "404": {
+            "description": "Response"
           }
         },
         "security": [
@@ -7211,10 +7890,19 @@
               }
             }
           },
-          "description": "",
           "required": true
         },
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
           "400": {
             "content": {
               "application/json": {
@@ -7442,6 +8130,16 @@
         "operationId": "list_sources",
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SourceRegistryRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -7490,6 +8188,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryRow"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "400": {
@@ -7550,6 +8255,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceBulkCreateResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "400": {
@@ -7610,6 +8322,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoverTriggerResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "400": {
@@ -7716,6 +8435,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryRow"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -7778,6 +8504,13 @@
         },
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceRegistryRow"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "400": {
@@ -7904,6 +8637,16 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ExecutionRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {
@@ -7958,6 +8701,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceMetadataResponse"
+                }
+              }
+            },
             "description": "Successful response"
           },
           "401": {

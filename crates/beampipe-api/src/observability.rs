@@ -45,6 +45,12 @@ pub struct NotificationChannelResponse {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NotificationTestResponse {
+    pub delivery_id: Uuid,
+    pub status: String,
+}
+
 impl From<NotificationChannelRow> for NotificationChannelResponse {
     fn from(row: NotificationChannelRow) -> Self {
         let configured_fields = row
@@ -380,20 +386,21 @@ pub async fn delete_notification_channel(
     path = "/api/v2/notification-channels/{id}/test",
     tag = "alerts",
     params(("id" = Uuid, Path, description = "Channel UUID")),
-    responses((status = 200))
+    responses((status = 200, body = NotificationTestResponse))
 )]
 pub async fn test_notification_channel(
     State(state): State<Arc<crate::AppState>>,
     user: AuthUser,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<NotificationTestResponse>, ApiError> {
     user.require_superuser()?;
     let delivery_id = beampipe_alerts::send_test_notification(&state.pool, id)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(
-        json!({"delivery_id": delivery_id, "status": "sent_or_failed"}),
-    ))
+    Ok(Json(NotificationTestResponse {
+        delivery_id,
+        status: "sent_or_failed".into(),
+    }))
 }
 
 #[utoipa::path(

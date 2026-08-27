@@ -6,6 +6,115 @@ fn openapi_spec_generates() {
 }
 
 #[test]
+fn every_success_response_has_content_and_resolvable_schemas() {
+    const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+    fn assert_schema_refs_resolve(
+        value: &serde_json::Value,
+        schemas: &serde_json::Map<String, serde_json::Value>,
+        operation: &str,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str) {
+                    if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                        assert!(
+                            schemas.contains_key(name),
+                            "{operation} references unregistered response schema {name}"
+                        );
+                    }
+                }
+                for child in object.values() {
+                    assert_schema_refs_resolve(child, schemas, operation);
+                }
+            }
+            serde_json::Value::Array(array) => {
+                for child in array {
+                    assert_schema_refs_resolve(child, schemas, operation);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let spec = beampipe_api::export_openapi_json();
+    let schemas = spec
+        .pointer("/components/schemas")
+        .and_then(serde_json::Value::as_object)
+        .expect("components.schemas");
+    let paths = spec
+        .get("paths")
+        .and_then(serde_json::Value::as_object)
+        .expect("paths");
+
+    for (path, path_item) in paths {
+        let operations = path_item.as_object().expect("path item");
+        for method in HTTP_METHODS {
+            let Some(operation) = operations.get(*method) else {
+                continue;
+            };
+            let operation_name = format!("{} {}", method.to_uppercase(), path);
+            let responses = operation
+                .get("responses")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{operation_name} has no responses"));
+            let success_responses = responses
+                .iter()
+                .filter(|(status, _)| status.starts_with('2'))
+                .collect::<Vec<_>>();
+            assert!(
+                !success_responses.is_empty(),
+                "{operation_name} has no success response"
+            );
+
+            for (status, response) in success_responses {
+                if status == "204" {
+                    continue;
+                }
+                let content = response
+                    .get("content")
+                    .and_then(serde_json::Value::as_object)
+                    .unwrap_or_else(|| {
+                        panic!("{operation_name} {status} has no response content")
+                    });
+                assert!(
+                    !content.is_empty(),
+                    "{operation_name} {status} has empty response content"
+                );
+                for (media_type, media) in content {
+                    assert!(
+                        media.get("schema").is_some(),
+                        "{operation_name} {status} {media_type} has no schema"
+                    );
+                    assert_schema_refs_resolve(media, schemas, &operation_name);
+                }
+            }
+        }
+    }
+
+    for required in [
+        "PaginatedExecutions",
+        "ExecutionRead",
+        "SourceRegistryRow",
+        "DeploymentProfileResponse",
+        "ProjectConfigRow",
+    ] {
+        assert!(
+            schemas.contains_key(required),
+            "generated-client response component {required} is not registered"
+        );
+    }
+
+    assert_eq!(
+        spec.pointer(
+            "/paths/~1api~1v2~1project-configs~1{id}~1wasm~1{sha256}/get/responses/200/content/application~1wasm/schema",
+        ),
+        Some(&serde_json::json!({"type": "string", "format": "binary"})),
+        "WASM downloads must not reuse the JSON metadata schema",
+    );
+}
+
+#[test]
 fn openapi_uses_http_bearer_auth_for_json_login() {
     let spec = beampipe_api::export_openapi_json();
     assert_eq!(
