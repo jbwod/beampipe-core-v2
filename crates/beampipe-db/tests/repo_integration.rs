@@ -47,6 +47,14 @@ async fn complete_job_for_test(pool: &sqlx::PgPool, id: Uuid) {
     .unwrap();
 }
 
+async fn delete_test_sources(pool: &sqlx::PgPool, project_module: &str) {
+    sqlx::query("DELETE FROM source_registry WHERE project_module = $1")
+        .bind(project_module)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 fn output_inventory_artifact(
     execution_id: Uuid,
     pattern: &str,
@@ -198,9 +206,7 @@ async fn discovery_claim_and_release() {
             .await
             .unwrap();
     assert_eq!(released, 1);
-    repo::delete_all_sources_for_project_module(&pool, &module)
-        .await
-        .unwrap();
+    delete_test_sources(&pool, &module).await;
 }
 
 #[tokio::test]
@@ -229,29 +235,7 @@ async fn workflow_pending_claim_and_clear() {
         .await
         .unwrap();
     assert_eq!(cleared, 1);
-    repo::delete_all_sources_for_project_module(&pool, &module)
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn job_queue_deferred_enqueue() {
-    let Some(pool) = test_pool().await else {
-        eprintln!("DATABASE_URL not set; skipping integration test");
-        return;
-    };
-    let job = repo::enqueue_job_deferred(
-        &pool,
-        "scheduler_tick",
-        json!({"project_module": "wallaby_hires"}),
-        3600,
-        None,
-        Some(&format!("deferred:{}", Uuid::now_v7())),
-    )
-    .await
-    .unwrap();
-    assert_eq!(job.kind, "scheduler_tick");
-    assert_eq!(job.status, "queued");
+    delete_test_sources(&pool, &module).await;
 }
 
 #[tokio::test]
@@ -294,9 +278,7 @@ async fn manual_discovery_requeues_its_completed_trigger() {
     assert_eq!(second.payload["manual"], true);
 
     complete_job_for_test(&pool, second.uuid).await;
-    repo::delete_all_sources_for_project_module(&pool, &module)
-        .await
-        .unwrap();
+    delete_test_sources(&pool, &module).await;
 }
 
 #[tokio::test]

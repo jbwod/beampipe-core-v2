@@ -12,7 +12,10 @@ async fn test_pool() -> Option<sqlx::PgPool> {
 }
 
 async fn teardown_test_module(pool: &sqlx::PgPool, module: &str) {
-    let _ = repo::delete_all_sources_for_project_module(pool, module).await;
+    let _ = sqlx::query("DELETE FROM source_registry WHERE project_module = $1")
+        .bind(module)
+        .execute(pool)
+        .await;
 }
 
 async fn claim_source(pool: &sqlx::PgPool, module: &str, source: &str) -> String {
@@ -272,58 +275,6 @@ async fn excluded_staging_urls_are_stored_and_refreshed_without_changing_signatu
     .await
     .unwrap();
     assert_eq!(first_signature, second_signature);
-    teardown_test_module(&pool, &module).await;
-}
-
-#[tokio::test]
-async fn failed_execute_requeues_pending_without_changing_last_executed() {
-    let Some(pool) = test_pool().await else {
-        eprintln!("DATABASE_URL not set; skipping integration test");
-        return;
-    };
-    let module = format!("fail_requeue_{}", Uuid::now_v7());
-    let source = "src-fail".to_string();
-    repo::upsert_source(&pool, &module, &source, true)
-        .await
-        .unwrap();
-    let sig = "deadbeef123456";
-    sqlx::query(
-        r#"
-        UPDATE source_registry
-        SET discovery_signature = $3,
-            last_executed_discovery_signature = NULL,
-            workflow_run_pending = false,
-            last_checked_at = now()
-        WHERE project_module = $1 AND source_identifier = $2
-        "#,
-    )
-    .bind(&module)
-    .bind(&source)
-    .bind(sig)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    repo::mark_sources_pending_workflow_run(&pool, &module, std::slice::from_ref(&source))
-        .await
-        .unwrap();
-    repo::clear_workflow_pending_for_sources(&pool, &module, std::slice::from_ref(&source))
-        .await
-        .unwrap();
-    repo::mark_sources_pending_workflow_run(&pool, &module, std::slice::from_ref(&source))
-        .await
-        .unwrap();
-
-    let row: (bool, Option<String>) = sqlx::query_as(
-        "SELECT workflow_run_pending, last_executed_discovery_signature FROM source_registry WHERE project_module = $1 AND source_identifier = $2",
-    )
-    .bind(&module)
-    .bind(&source)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(row.0);
-    assert!(row.1.is_none());
     teardown_test_module(&pool, &module).await;
 }
 

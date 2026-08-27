@@ -1608,30 +1608,6 @@ pub async fn create_execution(
     project_config_id: Option<Uuid>,
     created_by_id: Option<i32>,
 ) -> Result<ExecutionRow, sqlx::Error> {
-    create_execution_with_correlation(
-        pool,
-        project_module,
-        sources,
-        archive_name,
-        deployment_profile_id,
-        project_config_id,
-        created_by_id,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn create_execution_with_correlation(
-    pool: &PgPool,
-    project_module: &str,
-    sources: Value,
-    archive_name: &str,
-    deployment_profile_id: Option<Uuid>,
-    project_config_id: Option<Uuid>,
-    created_by_id: Option<i32>,
-    correlation_id: Option<&str>,
-) -> Result<ExecutionRow, sqlx::Error> {
     let (row, _) = create_execution_idempotent_with_correlation(
         pool,
         project_module,
@@ -1640,7 +1616,7 @@ pub async fn create_execution_with_correlation(
         deployment_profile_id,
         project_config_id,
         created_by_id,
-        correlation_id,
+        None,
         None,
         None,
     )
@@ -5754,28 +5730,6 @@ fn normalize_required_capabilities(capabilities: &mut Vec<String>) -> Result<(),
     Ok(())
 }
 
-pub async fn enqueue_job_deferred(
-    pool: &PgPool,
-    kind: &str,
-    payload: Value,
-    delay_secs: i64,
-    execution_id: Option<Uuid>,
-    idempotency_key: Option<&str>,
-) -> Result<JobRow, sqlx::Error> {
-    enqueue_job_deferred_with_options(
-        pool,
-        kind,
-        payload,
-        delay_secs,
-        JobEnqueueOptions {
-            execution_id,
-            idempotency_key: idempotency_key.map(str::to_string),
-            ..Default::default()
-        },
-    )
-    .await
-}
-
 pub async fn enqueue_job_deferred_with_options(
     pool: &PgPool,
     kind: &str,
@@ -5959,23 +5913,6 @@ pub async fn mark_sources_and_enqueue_discovery_tick(
     .await?;
     tx.commit().await?;
     Ok((marked, Some(job)))
-}
-
-/// Enqueue or re-queue a recurring scheduler job (discovery/execution ticks).
-pub async fn enqueue_recurring_job(
-    pool: &PgPool,
-    kind: &str,
-    payload: Value,
-    idempotency_key: &str,
-) -> Result<JobRow, sqlx::Error> {
-    enqueue_recurring_job_with_options(
-        pool,
-        kind,
-        payload,
-        idempotency_key,
-        JobEnqueueOptions::default(),
-    )
-    .await
 }
 
 pub async fn enqueue_recurring_job_with_options(
@@ -7372,18 +7309,6 @@ pub async fn list_sources_currently_processing(
     )
     .fetch_all(pool)
     .await
-}
-
-/// Remove all registry rows for a module (integration-test teardown).
-pub async fn delete_all_sources_for_project_module(
-    pool: &PgPool,
-    project_module: &str,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM source_registry WHERE project_module = $1")
-        .bind(project_module)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
 }
 
 #[allow(clippy::too_many_arguments)]
