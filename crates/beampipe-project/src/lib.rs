@@ -10,8 +10,18 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 pub mod expressions;
+pub mod output_inventory;
 pub mod transforms;
 pub mod wasm;
+
+pub use output_inventory::{
+    build_output_inventory_artifact, canonical_json_bytes, canonical_products_sha256,
+    parse_canonical_output_inventory, validate_output_verification_request,
+    validate_output_verification_request_at, ExecutionOutputVerificationRequest,
+    OutputInventoryArtifactDescriptor, OutputInventoryProduct, OutputInventoryValidationError,
+    OutputInventoryValidationKind,
+    OutputPublicationAcknowledgement, MAX_OUTPUT_INVENTORY_BYTES, MAX_OUTPUT_PRODUCTS,
+};
 
 /// Project-neutral output inventory used by new project configurations.
 pub const BEAMPIPE_OUTPUT_INVENTORY_SCHEMA: &str = "beampipe-output-inventory/v1";

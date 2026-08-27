@@ -39,15 +39,15 @@ use beampipe_orchestration::{
     HttpClientOptions, HttpDimClient, HttpTranslatorClient, MockDimClient, OrchestrationError,
     PassThroughStagingClient, RestExecutionBackend, SchedulerAdapter, SlurmExecutionBackend,
     SlurmJobPollResult, SlurmSshPool, SlurmTarget, SshSlurmClient, StagingClient, TmProbeResult,
-    PublisherRuntimeCredential,
 };
 use beampipe_profiles::{
     DeploymentConfig, RestRemoteDeploymentConfig, SlurmRemoteDeploymentConfig,
 };
 use beampipe_project::{
-    apply_field_transform, build_template_context, DiscoveryQuery, ExecutionAutomationConfig,
-    HookKind, ProjectConfig, QueryResultPolicy, StagingProvider, TapEndpointMode,
-    TransformRegistry, WasmHost,
+    apply_field_transform, build_output_inventory_artifact, build_template_context,
+    parse_canonical_output_inventory, validate_output_verification_request, DiscoveryQuery,
+    ExecutionAutomationConfig, HookKind, ProjectConfig, QueryResultPolicy, StagingProvider,
+    TapEndpointMode, TransformRegistry, WasmHost,
 };
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -3610,14 +3610,14 @@ fn execution_backend(
     backend_kind: &str,
     use_real: bool,
     created_at: chrono::DateTime<chrono::Utc>,
-    publisher_credential: Option<PublisherRuntimeCredential>,
+    publication_execution_attempt: Option<i32>,
 ) -> Box<dyn beampipe_orchestration::ExecutionBackend> {
     match (backend_kind, use_real) {
         ("slurm_remote", true) => Box::new(slurm_backend_from_profile(
             profile,
             true,
             created_at,
-            publisher_credential,
+            publication_execution_attempt,
         )),
         ("slurm_remote", false) => Box::new(SlurmExecutionBackend {
             session_created_at: created_at,
@@ -3643,7 +3643,7 @@ fn ensure_publisher_delivery_supported(
     }
     if backend_kind != "slurm_remote" {
         return Err(
-            "required output publication cannot use rest_remote until a validated shared credential-directory contract is configured; Core refuses graph token injection"
+            "required output publication cannot use rest_remote until Core has a trusted handoff retrieval contract for that control plane"
                 .into(),
         );
     }
@@ -3676,7 +3676,9 @@ fn submission_error_is_uncertain(error: &OrchestrationError) -> bool {
                 || !matches!(error.operation.as_str(), "unroll_and_partition" | "map")
         }
         OrchestrationError::SubmissionUncertain(_) => true,
-        OrchestrationError::Backend(_) => false,
+        OrchestrationError::Backend(_)
+        | OrchestrationError::OutputInventoryNotReady
+        | OrchestrationError::OutputInventoryRejected(_) => false,
     }
 }
 
@@ -3687,85 +3689,6 @@ fn submission_timeout_patch(error: String) -> ExecutionStatePatch {
         last_error: Some(error),
         ..Default::default()
     }
-}
-
-fn system_publisher_expiration(
-    profile: Option<&DeploymentProfileRow>,
-    issued_at: DateTime<Utc>,
-) -> Result<DateTime<Utc>, String> {
-    let deployment = profile
-        .ok_or_else(|| "publisher credential requires a pinned deployment profile".to_string())
-        .and_then(|profile| {
-            serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
-                .map_err(|error| format!("pinned deployment profile is invalid: {error}"))
-        })?;
-    let DeploymentConfig::SlurmRemote(deployment) = deployment else {
-        return Err("automatic publisher credentials are supported only for slurm_remote".into());
-    };
-    let ttl_minutes = deployment
-        .publication
-        .as_ref()
-        .ok_or_else(|| "publisher credential requires a pinned publication contract".to_string())?
-        .credential_ttl_minutes;
-    let ttl_seconds = i64::from(ttl_minutes)
-        .checked_mul(60)
-        .ok_or_else(|| "publisher credential lifetime overflowed".to_string())?;
-    if !(5 * 60..=repo::MAX_OUTPUT_PUBLISHER_TTL_SECONDS).contains(&ttl_seconds) {
-        return Err(format!(
-            "publisher credential lifetime must be 5-1440 minutes, got {ttl_minutes}"
-        ));
-    }
-    issued_at
-        .checked_add_signed(chrono::Duration::seconds(ttl_seconds))
-        .ok_or_else(|| "publisher credential expiration is out of range".to_string())
-}
-
-async fn issue_system_publisher_credential(
-    pool: &PgPool,
-    execution_id: Uuid,
-    profile: Option<&DeploymentProfileRow>,
-    correlation_id: Option<&str>,
-) -> Result<PublisherRuntimeCredential, String> {
-    let expires_at = system_publisher_expiration(profile, Utc::now())?;
-    repo::revoke_execution_publisher_credentials(
-        pool,
-        execution_id,
-        "publisher_credential_replaced_before_submission",
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let material = beampipe_auth::issue_publisher_token_material();
-    let credential = repo::issue_execution_publisher_credential(
-        pool,
-        execution_id,
-        Uuid::now_v7(),
-        material.token_hash(),
-        None,
-        "system:execute",
-        expires_at,
-        correlation_id,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    match PublisherRuntimeCredential::new(
-        credential.execution_attempt,
-        material.token().as_bytes().to_vec(),
-    ) {
-        Ok(runtime) => Ok(runtime),
-        Err(error) => {
-            let _ = repo::revoke_execution_publisher_credentials(
-                pool,
-                execution_id,
-                "publisher_runtime_material_rejected",
-            )
-            .await;
-            Err(error.to_string())
-        }
-    }
-}
-
-fn should_revoke_publisher_after_submit_error(error: &OrchestrationError) -> bool {
-    !submission_error_is_uncertain(error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3848,48 +3771,16 @@ async fn run_submit_phase(
         );
         return Ok(());
     };
-    let publisher_credential =
-        if execution.output_verification_required && use_real && backend_kind == "slurm_remote" {
-            match issue_system_publisher_credential(
-                pool,
-                execution_id,
-                profile,
-                correlation_id,
-            )
-            .await
-            {
-                Ok(credential) => Some(credential),
-                Err(error) => {
-                    let _ = repo::revoke_execution_publisher_credentials(
-                        pool,
-                        execution_id,
-                        "publisher_credential_issue_failed",
-                    )
-                    .await;
-                    repo::apply_execution_state_patch(
-                        pool,
-                        execution_id,
-                        ExecutionStatePatch {
-                            submission_state: Some(SubmissionState::Failed),
-                            failure_class: Some(FailureClass::Configuration),
-                            last_error: Some(error.clone()),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .map_err(|db_error| db_error.to_string())?;
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
+    let publication_execution_attempt = (execution.output_verification_required
+        && use_real
+        && backend_kind == "slurm_remote")
+        .then_some(execution.retry_count);
     let backend = execution_backend(
         profile,
         backend_kind,
         use_real,
         execution.created_at,
-        publisher_credential.clone(),
+        publication_execution_attempt,
     );
     async {
         let submitted = match within_submission_timeout(
@@ -3920,21 +3811,7 @@ async fn run_submit_phase(
                     },
                 )
                 .await;
-                let revoke_result = if publisher_credential.is_some()
-                    && should_revoke_publisher_after_submit_error(&error)
-                {
-                    repo::revoke_execution_publisher_credentials(
-                        pool,
-                        execution_id,
-                        "external_submission_definitely_failed",
-                    )
-                    .await
-                    .map(|_| ())
-                } else {
-                    Ok(())
-                };
                 patch_result.map_err(|db_error| db_error.to_string())?;
-                revoke_result.map_err(|db_error| db_error.to_string())?;
                 return Err(error.to_string());
             }
             Err(_) => {
@@ -5085,9 +4962,6 @@ async fn run_slurm_poll_tick(
     reconcile_uncertain_slurm_submissions(pool, use_real).await?;
     let executions = repo::list_slurm_executions_pending_poll(pool).await?;
     metrics::set_slurm_poll_batch_size(executions.len());
-    if executions.is_empty() {
-        return Ok(());
-    }
 
     let mut by_target: HashMap<SlurmTarget, Vec<SlurmPollExec>> = HashMap::new();
     for execution in executions {
@@ -5290,6 +5164,275 @@ async fn run_slurm_poll_tick(
             )
             .await?;
         }
+    }
+    retrieve_slurm_output_inventories(pool, use_real).await?;
+    Ok(())
+}
+
+const OUTPUT_INVENTORY_RETRIEVAL_ERROR_LIMIT: usize = 2048;
+
+fn bounded_output_inventory_error(detail: &str) -> String {
+    let redacted = beampipe_security::redact_string(detail);
+    redacted
+        .chars()
+        .take(OUTPUT_INVENTORY_RETRIEVAL_ERROR_LIMIT)
+        .collect()
+}
+
+async fn record_output_inventory_retrieval_failure(
+    pool: &PgPool,
+    execution: &beampipe_db::models::ExecutionRow,
+    code: &str,
+    detail: &str,
+    failure_class: FailureClass,
+    retryable: bool,
+) -> Result<(), sqlx::Error> {
+    let detail = bounded_output_inventory_error(detail);
+    repo::record_execution_observation(
+        pool,
+        execution.uuid,
+        ExecutionObservationInput {
+            kind: "output".into(),
+            normalized_state: if retryable { "pending" } else { "failed" }.into(),
+            raw_state: Some(code.into()),
+            reason: Some(detail.clone()),
+            payload: json!({
+                "source": "slurm_sftp",
+                "retryable": retryable,
+                "scheduler_state_preserved": "succeeded",
+            }),
+            source_version: Some("beampipe-output-inventory/v1".into()),
+            observed_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    let transition = repo::apply_execution_state_patch_with_transition(
+        pool,
+        execution.uuid,
+        ExecutionStatePatch {
+            control_phase: Some(ControlPhase::OutputVerification),
+            output_state: Some(if retryable {
+                OutputState::Pending
+            } else {
+                OutputState::Failed
+            }),
+            failure_class: Some(failure_class),
+            last_error: Some(detail),
+            last_reconciled_at: Some(Utc::now()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    if transition.is_some_and(|transition| transition.entered_terminal) {
+        let sources = source_identifiers_from_json(&execution.sources);
+        finalize_execution_source_pending(
+            pool,
+            &execution.project_module,
+            &sources,
+            ExecutionStatus::Failed,
+            Some(execution.uuid),
+        )
+        .await?;
+        metrics::record_execute_terminal(&execution.project_module, "failed");
+    }
+    Ok(())
+}
+
+async fn commit_retrieved_output_inventory(
+    pool: &PgPool,
+    execution: &beampipe_db::models::ExecutionRow,
+    receipt: &[u8],
+) -> Result<(), String> {
+    let report = parse_canonical_output_inventory(receipt).map_err(|error| error.to_string())?;
+    let total_product_bytes = validate_output_verification_request(
+        &report,
+        execution.output_verification_required,
+        &execution.output_verification_policy,
+        execution.uuid,
+        execution.retry_count,
+    )
+    .map_err(|error| error.to_string())?;
+    let artifact = build_output_inventory_artifact(&report, total_product_bytes)
+        .map(ExecutionArtifactInput::from)
+        .map_err(|error| error.to_string())?;
+    let correlation_id = execution.uuid.to_string();
+    repo::verify_execution_outputs(
+        pool,
+        execution.uuid,
+        artifact,
+        "trusted-retriever:ssh",
+        Some(&correlation_id),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+#[async_trait]
+trait OutputInventoryRetriever: Send + Sync {
+    async fn read_output_inventory(
+        &self,
+        target: &SlurmTarget,
+        remote_session_dir: &str,
+        execution_attempt: i32,
+    ) -> Result<Vec<u8>, OrchestrationError>;
+}
+
+#[async_trait]
+impl OutputInventoryRetriever for SlurmSshPool {
+    async fn read_output_inventory(
+        &self,
+        target: &SlurmTarget,
+        remote_session_dir: &str,
+        execution_attempt: i32,
+    ) -> Result<Vec<u8>, OrchestrationError> {
+        SlurmSshPool::read_output_inventory(
+            self,
+            target,
+            remote_session_dir,
+            execution_attempt,
+        )
+        .await
+    }
+}
+
+async fn retrieve_slurm_output_inventories(
+    pool: &PgPool,
+    use_real: bool,
+) -> Result<(), sqlx::Error> {
+    retrieve_slurm_output_inventories_with(pool, use_real, &*SLURM_SSH_POOL).await
+}
+
+async fn retrieve_slurm_output_inventories_with<R: OutputInventoryRetriever>(
+    pool: &PgPool,
+    use_real: bool,
+    retriever: &R,
+) -> Result<(), sqlx::Error> {
+    if !use_real {
+        return Ok(());
+    }
+    for execution in repo::list_slurm_executions_pending_output_inventory(pool).await? {
+        let profile = deployment_profile_for_execution(pool, &execution).await?;
+        let Some(profile) = profile else {
+            record_output_inventory_retrieval_failure(
+                pool,
+                &execution,
+                "missing_deployment_profile",
+                "no pinned deployment profile is available for output inventory retrieval",
+                FailureClass::Configuration,
+                false,
+            )
+            .await?;
+            continue;
+        };
+        let deployment = match serde_json::from_value::<DeploymentConfig>(profile.deployment) {
+            Ok(DeploymentConfig::SlurmRemote(deployment)) => deployment,
+            Ok(_) => {
+                record_output_inventory_retrieval_failure(
+                    pool,
+                    &execution,
+                    "invalid_deployment_profile_kind",
+                    "the pinned deployment profile is not a Slurm remote profile",
+                    FailureClass::Configuration,
+                    false,
+                )
+                .await?;
+                continue;
+            }
+            Err(error) => {
+                record_output_inventory_retrieval_failure(
+                    pool,
+                    &execution,
+                    "invalid_deployment_profile",
+                    &format!("the pinned Slurm deployment profile is invalid: {error}"),
+                    FailureClass::Configuration,
+                    false,
+                )
+                .await?;
+                continue;
+            }
+        };
+        let remote_session_dir = execution.remote_session_dir.as_deref().unwrap_or_default();
+        let username = resolve_remote_user(&deployment);
+        let target = SlurmTarget::from_deployment(&deployment, &username);
+        let retrieval = within_slurm_target_timeout(
+            SLURM_TARGET_WALL_CLOCK_TIMEOUT,
+            retriever.read_output_inventory(&target, remote_session_dir, execution.retry_count),
+        )
+        .await;
+        let receipt = match retrieval {
+            Ok(Ok(receipt)) => receipt,
+            Ok(Err(error @ OrchestrationError::OutputInventoryNotReady)) => {
+                record_output_inventory_retrieval_failure(
+                    pool,
+                    &execution,
+                    "inventory_not_ready",
+                    &error.to_string(),
+                    FailureClass::DependencyUnavailable,
+                    true,
+                )
+                .await?;
+                continue;
+            }
+            Ok(Err(error @ OrchestrationError::OutputInventoryRejected(_))) => {
+                record_output_inventory_retrieval_failure(
+                    pool,
+                    &execution,
+                    "inventory_rejected",
+                    &error.to_string(),
+                    FailureClass::Validation,
+                    false,
+                )
+                .await?;
+                continue;
+            }
+            Ok(Err(error)) => {
+                let detail = error.to_string();
+                record_output_inventory_retrieval_failure(
+                    pool,
+                    &execution,
+                    "inventory_retrieval_failed",
+                    &detail,
+                    classify_slurm_poll_failure(&detail),
+                    true,
+                )
+                .await?;
+                continue;
+            }
+            Err(_) => {
+                record_output_inventory_retrieval_failure(
+                    pool,
+                    &execution,
+                    "inventory_retrieval_timeout",
+                    &format!(
+                        "Slurm output inventory retrieval exceeded the {} second wall-clock limit",
+                        SLURM_TARGET_WALL_CLOCK_TIMEOUT.as_secs()
+                    ),
+                    FailureClass::Timeout,
+                    true,
+                )
+                .await?;
+                continue;
+            }
+        };
+        if let Err(error) = commit_retrieved_output_inventory(pool, &execution, &receipt).await {
+            record_output_inventory_retrieval_failure(
+                pool,
+                &execution,
+                "inventory_rejected",
+                &error,
+                FailureClass::Validation,
+                false,
+            )
+            .await?;
+            continue;
+        }
+        info!(
+            event = "slurm_output_inventory_verified",
+            execution_id = %execution.uuid,
+            actor = "trusted-retriever:ssh",
+        );
+        metrics::record_reconciliation_result("output_inventory", "verified");
     }
     Ok(())
 }
@@ -5793,7 +5936,7 @@ fn slurm_backend_from_profile(
     profile: Option<&DeploymentProfileRow>,
     _use_real: bool,
     created_at: chrono::DateTime<chrono::Utc>,
-    publisher_credential: Option<PublisherRuntimeCredential>,
+    publication_execution_attempt: Option<i32>,
 ) -> SlurmExecutionBackend<HttpTranslatorClient, SshSlurmClient> {
     let mut session_dir = "/tmp/beampipe".to_string();
     let mut login = "localhost".to_string();
@@ -5850,7 +5993,7 @@ fn slurm_backend_from_profile(
                 .map(|s| s.dlg_root.clone())
                 .unwrap_or_else(|| "/tmp".into()),
             deployment: slurm_dep,
-            publisher_credential,
+            publication_execution_attempt,
         },
         profile_name: profile.map(|p| p.name.clone()),
         session_dir,
@@ -5898,6 +6041,7 @@ mod tests {
     use super::*;
     use beampipe_adapters::MockTapClient;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn archive_row(source: &str, group_key: &str, records: Vec<Value>) -> ArchiveMetadataRow {
         ArchiveMetadataRow {
@@ -5984,7 +6128,7 @@ mod tests {
         }
     }
 
-    fn pinned_slurm_profile(credential_ttl_minutes: Option<i32>) -> DeploymentProfileRow {
+    fn pinned_slurm_profile(publication: bool) -> DeploymentProfileRow {
         let mut deployment = json!({
             "kind": "slurm_remote",
             "login_node": "login.example.org",
@@ -5999,14 +6143,238 @@ mod tests {
                 "shared_staging_subdirectory": "shared_staging"
             }
         });
-        if let Some(ttl) = credential_ttl_minutes {
+        if publication {
             deployment["publication"] = json!({
-                "core_url_environment": "BEAMPIPE_CORE_URL",
-                "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
-                "credential_ttl_minutes": ttl
+                "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI"
             });
         }
         pinned_profile(deployment)
+    }
+
+    enum FakeOutputInventoryOutcome {
+        Receipt(Vec<u8>),
+        NotReady,
+        Rejected,
+    }
+
+    struct FakeOutputInventoryRetriever {
+        outcome: FakeOutputInventoryOutcome,
+        calls: AtomicUsize,
+        expected_session_dir: String,
+        expected_attempt: i32,
+    }
+
+    impl FakeOutputInventoryRetriever {
+        fn new(outcome: FakeOutputInventoryOutcome, execution: &beampipe_db::models::ExecutionRow) -> Self {
+            Self {
+                outcome,
+                calls: AtomicUsize::new(0),
+                expected_session_dir: execution.remote_session_dir.clone().unwrap(),
+                expected_attempt: execution.retry_count,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OutputInventoryRetriever for FakeOutputInventoryRetriever {
+        async fn read_output_inventory(
+            &self,
+            _target: &SlurmTarget,
+            remote_session_dir: &str,
+            execution_attempt: i32,
+        ) -> Result<Vec<u8>, OrchestrationError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(remote_session_dir, self.expected_session_dir);
+            assert_eq!(execution_attempt, self.expected_attempt);
+            match &self.outcome {
+                FakeOutputInventoryOutcome::Receipt(bytes) => Ok(bytes.clone()),
+                FakeOutputInventoryOutcome::NotReady => {
+                    Err(OrchestrationError::OutputInventoryNotReady)
+                }
+                FakeOutputInventoryOutcome::Rejected => Err(
+                    OrchestrationError::OutputInventoryRejected("unsafe remote handoff".into()),
+                ),
+            }
+        }
+    }
+
+    async fn slurm_output_inventory_execution(
+        pool: &sqlx::PgPool,
+        suffix: &str,
+    ) -> beampipe_db::models::ExecutionRow {
+        let unique = Uuid::now_v7().simple().to_string();
+        let module = format!("jobs_output_pull_{suffix}_{}", &unique[..16]);
+        let template = pinned_slurm_profile(true);
+        let profile = repo::create_deployment_profile(
+            pool,
+            &format!("output-pull-{}", &unique[..16]),
+            None,
+            Some(&module),
+            false,
+            None,
+            template.translation,
+            template.deployment,
+        )
+        .await
+        .unwrap();
+        let execution = repo::create_execution(
+            pool,
+            &module,
+            json!([{"source_identifier": "source-1"}]),
+            "local",
+            Some(profile.uuid),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE batch_execution_record
+            SET status = 'running',
+                control_phase = 'output_verification',
+                scheduler_name = 'slurm',
+                scheduler_job_id = '4242',
+                submission_state = 'submitted',
+                scheduler_state = 'succeeded',
+                daliuge_session_id = 'session-output-pull',
+                daliuge_state = 'finished',
+                remote_session_dir = '/scratch/project/dlg/session-output-pull',
+                output_verification_required = true,
+                output_verification_policy = '{"required":true,"inventory_schema":"beampipe-output-inventory/v1","expected_patterns":["**/result.bin"]}'::jsonb,
+                output_state = 'pending',
+                retry_count = 2
+            WHERE uuid = $1
+            "#,
+        )
+        .bind(execution.uuid)
+        .execute(pool)
+        .await
+        .unwrap();
+        repo::get_execution(pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    fn canonical_output_inventory_receipt(
+        execution: &beampipe_db::models::ExecutionRow,
+    ) -> Vec<u8> {
+        let products = vec![beampipe_project::OutputInventoryProduct {
+            path: "products/result.bin".into(),
+            bytes: 4,
+            sha256: "a".repeat(64),
+        }];
+        let report = beampipe_project::ExecutionOutputVerificationRequest {
+            execution_id: execution.uuid,
+            execution_attempt: execution.retry_count,
+            schema: "beampipe-output-inventory/v1".into(),
+            patterns: vec!["**/result.bin".into()],
+            pattern_counts: BTreeMap::from([("**/result.bin".into(), 1)]),
+            inventory_sha256: beampipe_project::canonical_products_sha256(&products).unwrap(),
+            products,
+            durable_destination_uri: format!("file:///durable/{}", execution.uuid),
+            publication: beampipe_project::OutputPublicationAcknowledgement {
+                acknowledged: true,
+                publisher: "beampipe-publish".into(),
+                receipt_id: execution.uuid.to_string(),
+                published_at: Utc::now(),
+            },
+        };
+        beampipe_project::canonical_json_bytes(&serde_json::to_value(report).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pulled_slurm_inventory_releases_the_output_gate() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let execution = slurm_output_inventory_execution(&pool, "success").await;
+        let retriever = FakeOutputInventoryRetriever::new(
+            FakeOutputInventoryOutcome::Receipt(canonical_output_inventory_receipt(&execution)),
+            &execution,
+        );
+
+        retrieve_slurm_output_inventories_with(&pool, true, &retriever)
+            .await
+            .unwrap();
+
+        let completed = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retriever.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(completed.status_enum(), Some(ExecutionStatus::Completed));
+        assert_eq!(completed.output_state.as_deref(), Some("verified"));
+        assert_eq!(completed.scheduler_state.as_deref(), Some("succeeded"));
+        assert_eq!(completed.terminal_outcome.as_deref(), Some("succeeded"));
+    }
+
+    #[tokio::test]
+    async fn missing_slurm_inventory_remains_pending_and_is_requeried() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let execution = slurm_output_inventory_execution(&pool, "not-ready").await;
+        let retriever = FakeOutputInventoryRetriever::new(
+            FakeOutputInventoryOutcome::NotReady,
+            &execution,
+        );
+
+        retrieve_slurm_output_inventories_with(&pool, true, &retriever)
+            .await
+            .unwrap();
+        retrieve_slurm_output_inventories_with(&pool, true, &retriever)
+            .await
+            .unwrap();
+
+        let pending = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retriever.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(pending.status_enum(), Some(ExecutionStatus::Running));
+        assert_eq!(pending.output_state.as_deref(), Some("pending"));
+        assert_eq!(pending.scheduler_state.as_deref(), Some("succeeded"));
+        assert!(repo::list_slurm_executions_pending_output_inventory(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.uuid == execution.uuid));
+    }
+
+    #[tokio::test]
+    async fn rejected_slurm_inventory_fails_instead_of_waiting_forever() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("DATABASE_URL not set; skipping integration test");
+            return;
+        };
+        let execution = slurm_output_inventory_execution(&pool, "rejected").await;
+        let retriever = FakeOutputInventoryRetriever::new(
+            FakeOutputInventoryOutcome::Rejected,
+            &execution,
+        );
+
+        retrieve_slurm_output_inventories_with(&pool, true, &retriever)
+            .await
+            .unwrap();
+
+        let failed = repo::get_execution(&pool, execution.uuid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retriever.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(failed.status_enum(), Some(ExecutionStatus::Failed));
+        assert_eq!(failed.output_state.as_deref(), Some("failed"));
+        assert_eq!(failed.scheduler_state.as_deref(), Some("succeeded"));
+        assert_eq!(failed.failure_class.as_deref(), Some("validation"));
+        assert!(!repo::list_slurm_executions_pending_output_inventory(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.uuid == execution.uuid));
     }
 
     #[test]
@@ -6055,16 +6423,10 @@ mod tests {
         assert!(!submission_error_is_uncertain(
             &OrchestrationError::GraphNotObject
         ));
-        assert!(!should_revoke_publisher_after_submit_error(
-            &OrchestrationError::SubmissionUncertain("lost sbatch response".into())
-        ));
-        assert!(should_revoke_publisher_after_submit_error(
-            &OrchestrationError::Backend("definite pre-submit failure".into())
-        ));
     }
 
     #[test]
-    fn required_publication_fails_closed_without_slurm_secret_delivery() {
+    fn required_publication_fails_closed_without_slurm_pull_contract() {
         let rest = pinned_profile(json!({
             "kind": "rest_remote",
             "deploy_host": "dim.example.org"
@@ -6077,9 +6439,9 @@ mod tests {
             Some(&rest),
         )
         .unwrap_err();
-        assert!(error.contains("shared credential-directory contract"));
+        assert!(error.contains("trusted handoff retrieval contract"));
 
-        let missing = pinned_slurm_profile(None);
+        let missing = pinned_slurm_profile(false);
         let error = ensure_publisher_delivery_supported(
             true,
             true,
@@ -6090,7 +6452,7 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("no pinned deployment publication contract"));
 
-        let supported = pinned_slurm_profile(Some(720));
+        let supported = pinned_slurm_profile(true);
         ensure_publisher_delivery_supported(
             true,
             true,
@@ -6099,23 +6461,6 @@ mod tests {
             Some(&supported),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn system_publisher_expiration_uses_the_pinned_ttl_without_hidden_defaults() {
-        let issued_at = DateTime::parse_from_rfc3339("2026-08-25T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let profile = pinned_slurm_profile(Some(720));
-        assert_eq!(
-            system_publisher_expiration(Some(&profile), issued_at).unwrap(),
-            issued_at + chrono::Duration::minutes(720)
-        );
-
-        let invalid = pinned_slurm_profile(Some(1_441));
-        assert!(system_publisher_expiration(Some(&invalid), issued_at)
-            .unwrap_err()
-            .contains("5-1440"));
     }
 
     #[test]
@@ -7327,34 +7672,35 @@ mod tests {
         assert_eq!(held.daliuge_state.as_deref(), Some("finished"));
         assert_eq!(held.output_state.as_deref(), Some("pending"));
 
-        let inventory_sha256 = "a".repeat(64);
+        let products = vec![beampipe_project::OutputInventoryProduct {
+            path: "result.bin".into(),
+            bytes: 4,
+            sha256: "b".repeat(64),
+        }];
+        let report = beampipe_project::ExecutionOutputVerificationRequest {
+            execution_id: execution.uuid,
+            execution_attempt: execution.retry_count,
+            schema: "beampipe-output-inventory/v1".into(),
+            patterns: vec!["**/result.bin".into()],
+            pattern_counts: BTreeMap::from([("**/result.bin".into(), 1)]),
+            inventory_sha256: beampipe_project::canonical_products_sha256(&products).unwrap(),
+            products,
+            durable_destination_uri: "file:///durable/neutral/101".into(),
+            publication: beampipe_project::OutputPublicationAcknowledgement {
+                acknowledged: true,
+                publisher: "beampipe-publish".into(),
+                receipt_id: "neutral-1".into(),
+                published_at: Utc::now(),
+            },
+        };
+        let artifact = ExecutionArtifactInput::from(
+            beampipe_project::build_output_inventory_artifact(&report, 4).unwrap(),
+        );
         let (completed, inventory) = repo::verify_execution_outputs(
             &pool,
             execution.uuid,
-            ExecutionArtifactInput {
-                kind: "output_inventory".into(),
-                storage_kind: "remote".into(),
-                uri: Some("file:///durable/neutral/101".into()),
-                inline_json: Some(json!({
-                    "schema": "beampipe-output-inventory/v1",
-                    "products": [{
-                        "path": "result.bin",
-                        "bytes": 4,
-                        "sha256": "b".repeat(64),
-                    }],
-                    "inventory_sha256": inventory_sha256,
-                })),
-                media_type: "application/vnd.beampipe.output-inventory+json".into(),
-                sha256: "c".repeat(64),
-                size_bytes: Some(256),
-                producer_phase: "publication_acknowledged".into(),
-                metadata: json!({
-                    "inventory_schema": "beampipe-output-inventory/v1",
-                    "inventory_sha256": inventory_sha256,
-                    "publication": {"acknowledged": true, "receipt_id": "neutral-1"},
-                }),
-            },
-            "trusted-publisher:neutral-test",
+            artifact,
+            "trusted-retriever:ssh",
             Some("neutral-e2e"),
         )
         .await

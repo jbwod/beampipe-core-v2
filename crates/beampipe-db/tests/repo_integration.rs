@@ -6,6 +6,11 @@ use beampipe_db::{
     repo,
 };
 use beampipe_domain::{ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch, SubmissionState};
+use beampipe_project::{
+    build_output_inventory_artifact, canonical_products_sha256,
+    ExecutionOutputVerificationRequest, OutputInventoryProduct,
+    OutputPublicationAcknowledgement,
+};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -20,6 +25,36 @@ async fn test_pool() -> Option<sqlx::PgPool> {
         .await
         .unwrap_or_else(|error| panic!("DATABASE_URL is set but migrations failed: {error}"));
     Some(pool)
+}
+
+fn output_inventory_artifact(
+    execution_id: Uuid,
+    pattern: &str,
+    path: &str,
+    destination_uri: &str,
+) -> ExecutionArtifactInput {
+    let products = vec![OutputInventoryProduct {
+        path: path.into(),
+        bytes: 42,
+        sha256: "b".repeat(64),
+    }];
+    let report = ExecutionOutputVerificationRequest {
+        execution_id,
+        execution_attempt: 0,
+        schema: "beampipe-output-inventory/v1".into(),
+        patterns: vec![pattern.into()],
+        pattern_counts: BTreeMap::from([(pattern.into(), 1)]),
+        inventory_sha256: canonical_products_sha256(&products).unwrap(),
+        products,
+        durable_destination_uri: destination_uri.into(),
+        publication: OutputPublicationAcknowledgement {
+            acknowledged: true,
+            publisher: "beampipe-publish".into(),
+            receipt_id: format!("receipt:{execution_id}"),
+            published_at: Utc::now(),
+        },
+    };
+    build_output_inventory_artifact(&report, 42).unwrap().into()
 }
 
 async fn install_routing_contract(
@@ -121,40 +156,6 @@ async fn create_running_output_required_execution(
     .unwrap()
 }
 
-fn publisher_inventory_artifact(receipt_id: &str, report_sha256: char) -> ExecutionArtifactInput {
-    ExecutionArtifactInput {
-        kind: "output_inventory".into(),
-        storage_kind: "remote".into(),
-        uri: Some("file:///durable/project/run-publisher".into()),
-        inline_json: Some(json!({
-            "execution_attempt": 0,
-            "schema": "beampipe-output-inventory/v1",
-            "patterns": ["**/result.bin"],
-            "pattern_counts": {"**/result.bin": 1},
-            "products": [{
-                "path": "source/result.bin",
-                "bytes": 42,
-                "sha256": "a".repeat(64)
-            }],
-            "inventory_sha256": "b".repeat(64),
-            "durable_destination_uri": "file:///durable/project/run-publisher",
-            "publication": {
-                "acknowledged": true,
-                "publisher": "test-publisher",
-                "receipt_id": receipt_id,
-                "published_at": Utc::now(),
-            }
-        })),
-        media_type: "application/vnd.beampipe.output-inventory+json".into(),
-        sha256: report_sha256.to_string().repeat(64),
-        size_bytes: Some(512),
-        producer_phase: "publication_acknowledged".into(),
-        metadata: json!({
-            "inventory_schema": "beampipe-output-inventory/v1",
-            "inventory_sha256": "b".repeat(64),
-            "publication": {"acknowledged": true, "receipt_id": receipt_id},
-        }),
-    }
 }
 
 #[tokio::test]
@@ -697,29 +698,12 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
         "the database must reject required, unverified completion"
     );
 
-    let inventory_sha256 = "a".repeat(64);
-    let artifact = ExecutionArtifactInput {
-        kind: "output_inventory".into(),
-        storage_kind: "remote".into(),
-        uri: Some("file:///durable/wallaby/run-1".into()),
-        inline_json: Some(json!({
-            "execution_attempt": 0,
-            "schema": "beampipe-output-inventory/v1",
-            "patterns": ["**/image.fits"],
-            "pattern_counts": {"**/image.fits": 1},
-            "products": [{"path": "image.fits", "bytes": 42, "sha256": "b".repeat(64)}],
-            "inventory_sha256": inventory_sha256,
-        })),
-        media_type: "application/vnd.beampipe.output-inventory+json".into(),
-        sha256: "e".repeat(64),
-        size_bytes: Some(512),
-        producer_phase: "publication_acknowledged".into(),
-        metadata: json!({
-            "inventory_schema": "beampipe-output-inventory/v1",
-            "inventory_sha256": inventory_sha256,
-            "publication": {"acknowledged": true, "receipt_id": "receipt-1"},
-        }),
-    };
+    let artifact = output_inventory_artifact(
+        execution.uuid,
+        "**/image.fits",
+        "image.fits",
+        "file:///durable/wallaby/run-1",
+    );
     let mut wrong_media_type = artifact.clone();
     wrong_media_type.media_type = "application/json".into();
     assert!(matches!(
@@ -727,7 +711,7 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
             &pool,
             execution.uuid,
             wrong_media_type,
-            "trusted-publisher:test",
+            "trusted-retriever:ssh",
             Some("outputs:wrong-media-type"),
         )
         .await,
@@ -738,7 +722,7 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
         &pool,
         execution.uuid,
         artifact.clone(),
-        "trusted-publisher:test",
+        "trusted-retriever:ssh",
         Some("outputs:test"),
     )
     .await
@@ -786,7 +770,7 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
         &pool,
         execution.uuid,
         artifact,
-        "trusted-publisher:test",
+        "trusted-retriever:ssh",
         Some("outputs:replay"),
     )
     .await
@@ -834,484 +818,6 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     );
 }
 
-#[tokio::test]
-async fn publisher_receipt_first_is_bound_idempotent_and_completed_by_later_poll() {
-    let Some(pool) = test_pool().await else {
-        eprintln!("DATABASE_URL not set; skipping integration test");
-        return;
-    };
-    let suffix = Uuid::now_v7().simple().to_string();
-    let module = format!("publisher_first_{}", &suffix[..12]);
-    let source_identifier = "source-1";
-    let execution =
-        create_running_output_required_execution(&pool, &module, source_identifier).await;
-    assert_eq!(execution.status_enum(), Some(ExecutionStatus::Running));
-
-    let user = repo::create_user(
-        &pool,
-        "Publisher Test",
-        &format!("p{}", &suffix[..12]),
-        &format!("{}@publisher.invalid", &suffix[..20]),
-        "unused",
-        true,
-    )
-    .await
-    .unwrap();
-    let credential_id = Uuid::now_v7();
-    let token_hash = "7".repeat(64);
-    let credential = repo::issue_execution_publisher_credential(
-        &pool,
-        execution.uuid,
-        credential_id,
-        &token_hash,
-        Some(user.uuid),
-        &format!("operator:{}", user.uuid),
-        Utc::now() + Duration::hours(1),
-        Some("publisher:first:issue"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(credential.execution_attempt, execution.retry_count);
-    assert_eq!(credential.audience, repo::OUTPUT_PUBLISHER_AUDIENCE);
-    assert_eq!(credential.scope, repo::output_publisher_scope(execution.uuid));
-
-    let artifact = publisher_inventory_artifact("receipt-first", 'c');
-    let credential_use = repo::PublisherCredentialUse {
-        credential_id,
-        token_hash: token_hash.clone(),
-    };
-    let mut wrong_attempt = artifact.clone();
-    wrong_attempt
-        .inline_json
-        .as_mut()
-        .unwrap()["execution_attempt"] = json!(1);
-    assert!(matches!(
-        repo::verify_execution_outputs_with_publisher(
-            &pool,
-            execution.uuid,
-            wrong_attempt,
-            &format!("trusted-publisher:credential:{credential_id}"),
-            Some("publisher:first:wrong-attempt"),
-            credential_use.clone(),
-        )
-        .await,
-        Err(repo::VerifyExecutionOutputsError::Rejected(_))
-    ));
-    let (receipt_first, stored) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact.clone(),
-        &format!("trusted-publisher:credential:{credential_id}"),
-        Some("publisher:first:verify"),
-        credential_use.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(receipt_first.status_enum(), Some(ExecutionStatus::Running));
-    assert_eq!(receipt_first.output_state.as_deref(), Some("verified"));
-    assert!(receipt_first.terminal_outcome.is_none());
-    assert!(receipt_first.completed_at.is_none());
-    let source = repo::get_source_by_identifier(&pool, &module, source_identifier)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(source.workflow_run_pending);
-    assert!(source.last_executed_discovery_signature.is_none());
-
-    let (replayed, replayed_artifact) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact.clone(),
-        &format!("trusted-publisher:credential:{credential_id}"),
-        Some("publisher:first:replay"),
-        credential_use.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(replayed.status_enum(), Some(ExecutionStatus::Running));
-    assert_eq!(replayed_artifact.uuid, stored.uuid);
-
-    let changed = publisher_inventory_artifact("receipt-changed", 'd');
-    assert!(matches!(
-        repo::verify_execution_outputs_with_publisher(
-            &pool,
-            execution.uuid,
-            changed,
-            &format!("trusted-publisher:credential:{credential_id}"),
-            Some("publisher:first:changed"),
-            credential_use.clone(),
-        )
-        .await,
-        Err(repo::VerifyExecutionOutputsError::PublisherCredentialConflict(_))
-    ));
-
-    let completed = repo::apply_execution_state_patch(
-        &pool,
-        execution.uuid,
-        ExecutionStatePatch {
-            daliuge_state: Some(DaliugeState::Finished),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(completed.status_enum(), Some(ExecutionStatus::Completed));
-    assert_eq!(completed.terminal_outcome.as_deref(), Some("succeeded"));
-    let source = repo::get_source_by_identifier(&pool, &module, source_identifier)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!source.workflow_run_pending);
-    assert_eq!(
-        source.last_executed_discovery_signature,
-        source.discovery_signature
-    );
-    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
-        .await
-        .unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.event_type == "execution.outputs_verified")
-            .count(),
-        1
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.event_type == "execution.completed")
-            .count(),
-        1
-    );
-    let (recovered, recovered_artifact) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact,
-        &format!("trusted-publisher:credential:{credential_id}"),
-        Some("publisher:first:lost-response-after-completion"),
-        credential_use,
-    )
-    .await
-    .unwrap();
-    assert_eq!(recovered.status_enum(), Some(ExecutionStatus::Completed));
-    assert_eq!(recovered_artifact.uuid, stored.uuid);
-    assert!(repo::get_active_execution_publisher_credential_by_token_hash(&pool, &token_hash)
-        .await
-        .unwrap()
-        .is_some());
-    let revocation: (Option<DateTime<Utc>>, Option<String>) = sqlx::query_as(
-        "SELECT revoked_at, revoked_reason FROM execution_publisher_credentials WHERE uuid = $1",
-    )
-    .bind(credential_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(revocation.0.is_some());
-    assert_eq!(revocation.1.as_deref(), Some("execution_completed"));
-}
-
-#[tokio::test]
-async fn replacement_publisher_credential_recovers_an_immutable_older_receipt() {
-    let Some(pool) = test_pool().await else {
-        eprintln!("DATABASE_URL not set; skipping integration test");
-        return;
-    };
-    let suffix = Uuid::now_v7().simple().to_string();
-    let module = format!("publisher_recovery_{}", &suffix[..12]);
-    let execution =
-        create_running_output_required_execution(&pool, &module, "source-1").await;
-    let first_id = Uuid::now_v7();
-    let first_hash = "8".repeat(64);
-    repo::issue_execution_publisher_credential(
-        &pool,
-        execution.uuid,
-        first_id,
-        &first_hash,
-        None,
-        "system:execute-worker",
-        Utc::now() + Duration::hours(1),
-        Some("publisher:recovery:first"),
-    )
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE execution_publisher_credentials SET created_at = now() - interval '20 minutes' WHERE uuid = $1",
-    )
-    .bind(first_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let mut artifact = publisher_inventory_artifact("replacement-recovery", '8');
-    artifact.inline_json.as_mut().unwrap()["publication"]["published_at"] =
-        json!(Utc::now() - Duration::minutes(10));
-    let (_, stored) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact.clone(),
-        &format!("trusted-publisher:credential:{first_id}"),
-        Some("publisher:recovery:committed-response-lost"),
-        repo::PublisherCredentialUse {
-            credential_id: first_id,
-            token_hash: first_hash,
-        },
-    )
-    .await
-    .unwrap();
-    repo::revoke_execution_publisher_credentials(
-        &pool,
-        execution.uuid,
-        "publisher_response_recovery",
-    )
-    .await
-    .unwrap();
-
-    let replacement_id = Uuid::now_v7();
-    let replacement_hash = "9".repeat(64);
-    repo::issue_execution_publisher_credential(
-        &pool,
-        execution.uuid,
-        replacement_id,
-        &replacement_hash,
-        None,
-        "operator:recovery",
-        Utc::now() + Duration::hours(1),
-        Some("publisher:recovery:replacement"),
-    )
-    .await
-    .unwrap();
-    let (replayed, replayed_artifact) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact,
-        &format!("trusted-publisher:credential:{replacement_id}"),
-        Some("publisher:recovery:exact-replay"),
-        repo::PublisherCredentialUse {
-            credential_id: replacement_id,
-            token_hash: replacement_hash,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(replayed.status_enum(), Some(ExecutionStatus::Running));
-    assert_eq!(replayed.output_state.as_deref(), Some("verified"));
-    assert_eq!(replayed_artifact.uuid, stored.uuid);
-    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
-        .await
-        .unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.event_type == "execution.outputs_verified")
-            .count(),
-        1
-    );
-
-    let completed = repo::apply_execution_state_patch(
-        &pool,
-        execution.uuid,
-        ExecutionStatePatch {
-            daliuge_state: Some(DaliugeState::Finished),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(completed.status_enum(), Some(ExecutionStatus::Completed));
-    assert!(matches!(
-        repo::issue_execution_publisher_credential(
-            &pool,
-            execution.uuid,
-            Uuid::now_v7(),
-            &"a".repeat(64),
-            None,
-            "operator:too-late",
-            Utc::now() + Duration::hours(1),
-            Some("publisher:recovery:terminal"),
-        )
-        .await,
-        Err(repo::IssueExecutionPublisherCredentialError::Rejected(_))
-    ));
-}
-
-#[tokio::test]
-async fn backend_first_scoped_publisher_completes_and_replays_after_terminal_revocation() {
-    let Some(pool) = test_pool().await else {
-        eprintln!("DATABASE_URL not set; skipping integration test");
-        return;
-    };
-    let suffix = Uuid::now_v7().simple().to_string();
-    let module = format!("publisher_backend_{}", &suffix[..12]);
-    let execution =
-        create_running_output_required_execution(&pool, &module, "source-1").await;
-    let credential_id = Uuid::now_v7();
-    let token_hash = "5".repeat(64);
-    repo::issue_execution_publisher_credential(
-        &pool,
-        execution.uuid,
-        credential_id,
-        &token_hash,
-        None,
-        "system:execute-worker",
-        Utc::now() + Duration::hours(1),
-        Some("publisher:backend-first:issue"),
-    )
-    .await
-    .unwrap();
-    let waiting = repo::apply_execution_state_patch(
-        &pool,
-        execution.uuid,
-        ExecutionStatePatch {
-            daliuge_state: Some(DaliugeState::Finished),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(waiting.status_enum(), Some(ExecutionStatus::Running));
-    assert_eq!(waiting.output_state.as_deref(), Some("pending"));
-
-    let artifact = publisher_inventory_artifact("backend-first", 'e');
-    let credential_use = repo::PublisherCredentialUse {
-        credential_id,
-        token_hash,
-    };
-    let (completed, stored) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact.clone(),
-        &format!("trusted-publisher:credential:{credential_id}"),
-        Some("publisher:backend-first:verify"),
-        credential_use.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(completed.status_enum(), Some(ExecutionStatus::Completed));
-    assert_eq!(completed.output_state.as_deref(), Some("verified"));
-
-    let (replayed, replayed_artifact) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact,
-        &format!("trusted-publisher:credential:{credential_id}"),
-        Some("publisher:backend-first:lost-response"),
-        credential_use,
-    )
-    .await
-    .unwrap();
-    assert_eq!(replayed.status_enum(), Some(ExecutionStatus::Completed));
-    assert_eq!(replayed_artifact.uuid, stored.uuid);
-    let revocation: (Option<DateTime<Utc>>, Option<String>) = sqlx::query_as(
-        "SELECT revoked_at, revoked_reason FROM execution_publisher_credentials WHERE uuid = $1",
-    )
-    .bind(credential_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(revocation.0.is_some());
-    assert_eq!(revocation.1.as_deref(), Some("execution_completed"));
-}
-
-#[tokio::test]
-async fn backend_failure_after_publisher_receipt_wins_without_success_finalization() {
-    let Some(pool) = test_pool().await else {
-        eprintln!("DATABASE_URL not set; skipping integration test");
-        return;
-    };
-    let suffix = Uuid::now_v7().simple().to_string();
-    let module = format!("publisher_fail_{}", &suffix[..12]);
-    let source_identifier = "source-1";
-    let execution =
-        create_running_output_required_execution(&pool, &module, source_identifier).await;
-    let credential_id = Uuid::now_v7();
-    let token_hash = "6".repeat(64);
-    repo::issue_execution_publisher_credential(
-        &pool,
-        execution.uuid,
-        credential_id,
-        &token_hash,
-        None,
-        "system:execute-worker",
-        Utc::now() + Duration::hours(1),
-        Some("publisher:failure:issue"),
-    )
-    .await
-    .unwrap();
-    let artifact = publisher_inventory_artifact("receipt-before-failure", 'f');
-    let credential_use = repo::PublisherCredentialUse {
-        credential_id,
-        token_hash: token_hash.clone(),
-    };
-    let (_, stored) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact.clone(),
-        &format!("trusted-publisher:credential:{credential_id}"),
-        Some("publisher:failure:verify"),
-        credential_use.clone(),
-    )
-    .await
-    .unwrap();
-
-    let failed = repo::apply_execution_state_patch(
-        &pool,
-        execution.uuid,
-        ExecutionStatePatch {
-            daliuge_state: Some(DaliugeState::Failed),
-            failure_class: Some(beampipe_domain::FailureClass::Internal),
-            last_error: Some("graph failed after publication".into()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(failed.status_enum(), Some(ExecutionStatus::Failed));
-    assert_eq!(failed.output_state.as_deref(), Some("verified"));
-    assert_eq!(failed.terminal_outcome.as_deref(), Some("failed"));
-    let artifacts = repo::list_execution_artifacts(&pool, execution.uuid)
-        .await
-        .unwrap();
-    assert!(artifacts
-        .iter()
-        .any(|artifact| artifact.kind == "output_inventory"));
-    let source = repo::get_source_by_identifier(&pool, &module, source_identifier)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(source.workflow_run_pending);
-    assert!(source.last_executed_discovery_signature.is_none());
-    let events = repo::list_provenance_events_for_execution(&pool, execution.uuid, 20)
-        .await
-        .unwrap();
-    assert!(events
-        .iter()
-        .any(|event| event.event_type == "execution.outputs_verified"));
-    assert!(!events
-        .iter()
-        .any(|event| event.event_type == "execution.completed"));
-    let (recovered, recovered_artifact) = repo::verify_execution_outputs_with_publisher(
-        &pool,
-        execution.uuid,
-        artifact,
-        &format!("trusted-publisher:credential:{credential_id}"),
-        Some("publisher:failure:lost-response"),
-        credential_use,
-    )
-    .await
-    .unwrap();
-    assert_eq!(recovered.status_enum(), Some(ExecutionStatus::Failed));
-    assert_eq!(recovered_artifact.uuid, stored.uuid);
-    assert!(repo::get_active_execution_publisher_credential_by_token_hash(&pool, &token_hash)
-        .await
-        .unwrap()
-        .is_some());
-}
-
-#[tokio::test]
 async fn output_verification_preserves_discovery_that_changed_after_admission() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
@@ -1382,31 +888,17 @@ async fn output_verification_preserves_discovery_that_changed_after_admission() 
     .await
     .unwrap();
 
-    let artifact = ExecutionArtifactInput {
-        kind: "output_inventory".into(),
-        storage_kind: "remote".into(),
-        uri: Some("file:///durable/wallaby/run-changed".into()),
-        inline_json: Some(json!({
-            "execution_attempt": 0,
-            "patterns": ["**/result.fits"],
-            "pattern_counts": {"**/result.fits": 1},
-            "products": [{"path": "source/result.fits"}],
-            "inventory_sha256": "5".repeat(64)
-        })),
-        media_type: "application/vnd.beampipe.output-inventory+json".into(),
-        sha256: "6".repeat(64),
-        size_bytes: Some(512),
-        producer_phase: "publication_acknowledged".into(),
-        metadata: json!({
-            "inventory_schema": "beampipe-output-inventory/v1",
-            "inventory_sha256": "5".repeat(64),
-        }),
-    };
+    let artifact = output_inventory_artifact(
+        execution.uuid,
+        "**/result.fits",
+        "source/result.fits",
+        "file:///durable/wallaby/run-changed",
+    );
     let (completed, _) = repo::verify_execution_outputs(
         &pool,
         execution.uuid,
         artifact,
-        "trusted-publisher:test",
+        "trusted-retriever:ssh",
         Some("outputs:changed"),
     )
     .await
@@ -1474,7 +966,7 @@ async fn output_verification_opt_out_cannot_be_marked_verified() {
                 "inventory_sha256": "d".repeat(64)
             }),
         },
-        "trusted-publisher:test",
+        "trusted-retriever:ssh",
         None,
     )
     .await;
@@ -4331,21 +3823,6 @@ async fn failed_pre_submission_execution_retries_atomically_from_submit() {
     )
     .await
     .unwrap();
-    let credential_id = Uuid::now_v7();
-    let credential_hash = "3".repeat(64);
-    let credential = repo::issue_execution_publisher_credential(
-        &pool,
-        execution.uuid,
-        credential_id,
-        &credential_hash,
-        None,
-        "system:execute-worker",
-        Utc::now() + Duration::hours(1),
-        Some("publisher:retry:issue"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(credential.execution_attempt, 0);
     let original = repo::enqueue_job(
         &pool,
         "execute",
@@ -4401,22 +3878,6 @@ async fn failed_pre_submission_execution_retries_atomically_from_submit() {
     );
     assert_eq!(retried.job.payload["do_stage"], false);
     assert_eq!(retried.job.payload["do_submit"], true);
-    assert!(repo::get_active_execution_publisher_credential_by_token_hash(
-        &pool,
-        &credential_hash,
-    )
-    .await
-    .unwrap()
-    .is_none());
-    let revoked: (Option<DateTime<Utc>>, Option<String>) = sqlx::query_as(
-        "SELECT revoked_at, revoked_reason FROM execution_publisher_credentials WHERE uuid = $1",
-    )
-    .bind(credential_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(revoked.0.is_some());
-    assert_eq!(revoked.1.as_deref(), Some("execution_retry"));
 }
 
 #[tokio::test]

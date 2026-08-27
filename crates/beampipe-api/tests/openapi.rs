@@ -341,86 +341,22 @@ fn submission_abandonment_is_a_bearer_authenticated_post() {
 }
 
 #[test]
-fn publisher_capability_endpoints_are_bearer_authenticated_and_typed() {
+fn publisher_callback_and_token_endpoints_are_absent() {
     let spec = beampipe_api::export_openapi_json();
-    let issuance = spec
-        .pointer("/paths/~1api~1v2~1executions~1{id}~1outputs~1publisher-token/post")
-        .expect("publisher-token POST operation");
-    assert_eq!(
-        issuance.pointer("/security/0/BearerAuth"),
-        Some(&serde_json::json!([]))
-    );
-    assert_eq!(
-        issuance.pointer("/requestBody/content/application~1json/schema/$ref"),
-        Some(&serde_json::json!(
-            "#/components/schemas/ExecutionPublisherTokenRequest"
-        ))
-    );
-    assert_eq!(
-        issuance.pointer("/responses/200/content/application~1json/schema/$ref"),
-        Some(&serde_json::json!(
-            "#/components/schemas/ExecutionPublisherTokenResponse"
-        ))
-    );
-
-    let verify = spec
-        .pointer("/paths/~1api~1v2~1executions~1{id}~1outputs~1verify/post")
-        .expect("output verify POST operation");
-    assert_eq!(
-        verify.pointer("/security/0/BearerAuth"),
-        Some(&serde_json::json!([]))
-    );
-    assert!(verify
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|description| description.contains("execution-scoped publisher")));
-    let inventory = spec
-        .pointer("/components/schemas/ExecutionOutputVerificationRequest")
-        .expect("output verification request schema");
-    assert_eq!(
-        inventory.pointer("/properties/execution_attempt/type"),
-        Some(&serde_json::json!("integer"))
-    );
-    assert!(inventory
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|required| required.contains(&serde_json::json!("execution_attempt"))));
-
-    let response = spec
-        .pointer("/components/schemas/ExecutionOutputVerificationResponse")
-        .expect("output verification response schema");
-    assert_eq!(
-        response.pointer("/properties/execution/$ref"),
-        Some(&serde_json::json!(
-            "#/components/schemas/ExecutionOutputVerificationExecutionAck"
-        ))
-    );
-    assert_eq!(
-        response.pointer("/properties/artifact/$ref"),
-        Some(&serde_json::json!(
-            "#/components/schemas/ExecutionOutputVerificationArtifactAck"
-        ))
-    );
-    let execution_properties = spec
-        .pointer("/components/schemas/ExecutionOutputVerificationExecutionAck/properties")
-        .and_then(serde_json::Value::as_object)
-        .expect("minimal execution acknowledgement properties");
-    assert_eq!(
-        execution_properties.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
-        ["output_state", "retry_count", "status", "uuid"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    );
-    let artifact_properties = spec
-        .pointer("/components/schemas/ExecutionOutputVerificationArtifactAck/properties")
-        .and_then(serde_json::Value::as_object)
-        .expect("minimal artifact acknowledgement properties");
-    assert_eq!(
-        artifact_properties.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
-        ["execution_attempt", "kind", "sha256", "uri", "uuid"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    );
+    assert!(spec
+        .pointer("/paths/~1api~1v2~1executions~1{id}~1outputs~1publisher-token")
+        .is_none());
+    assert!(spec
+        .pointer("/paths/~1api~1v2~1executions~1{id}~1outputs~1verify")
+        .is_none());
+    for schema in [
+        "ExecutionPublisherTokenRequest",
+        "ExecutionPublisherTokenResponse",
+        "ExecutionOutputVerificationRequest",
+        "ExecutionOutputVerificationResponse",
+    ] {
+        assert!(spec
+            .pointer(&format!("/components/schemas/{schema}"))
+            .is_none());
+    }
 }

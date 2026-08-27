@@ -1,8 +1,8 @@
 use crate::models::{
     ArchiveMetadataRow, DeploymentProfileRow, ExecutionArtifactInput, ExecutionArtifactRow,
     ExecutionObservationInput, ExecutionObservationRow, ExecutionProvenancePatch,
-    ExecutionPublisherCredentialRow, ExecutionRow, ExecutionStatePatch, JobClaimHistoryRow, JobRow,
-    OperatorOverviewCounts, ProjectConfigRow, SourceRegistryRow, WorkerInstanceRow,
+    ExecutionRow, ExecutionStatePatch, JobClaimHistoryRow, JobRow, OperatorOverviewCounts,
+    ProjectConfigRow, SourceRegistryRow, WorkerInstanceRow,
     WorkerPoolSummary, WorkerRegistration,
 };
 use beampipe_domain::{
@@ -23,8 +23,9 @@ use beampipe_domain::{
     TerminalOutcome,
 };
 use beampipe_project::{
-    is_supported_output_inventory_schema, output_inventory_media_type, ProjectConfig,
-    OutputGlob, SignatureConfig, StagingProvider,
+    build_output_inventory_artifact, is_supported_output_inventory_schema,
+    validate_output_verification_request, ExecutionOutputVerificationRequest, ProjectConfig,
+    SignatureConfig, StagingProvider,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -2315,7 +2316,6 @@ pub async fn retry_execution(
     let retry_count = execution.retry_count.saturating_add(1);
     let phase = plan.stage.as_str();
     let retry_timestamp_key = format!("retry_{retry_count}");
-    revoke_execution_publisher_credentials_in_tx(&mut tx, id, "execution_retry").await?;
     let updated = sqlx::query_as::<_, ExecutionRow>(
         r#"
         UPDATE batch_execution_record
@@ -2616,20 +2616,6 @@ pub async fn apply_execution_state_patch_with_transition(
             &artifact,
             "system:reconciler",
             Some(&correlation),
-        )
-        .await?;
-    }
-    if entered_terminal {
-        revoke_execution_publisher_credentials_in_tx(
-            &mut tx,
-            id,
-            match aggregate_status {
-                ExecutionStatus::Completed => "execution_completed",
-                ExecutionStatus::Failed => "execution_failed",
-                ExecutionStatus::Cancelled => "execution_cancelled",
-                ExecutionStatus::NotSubmitted => "execution_not_submitted",
-                _ => "execution_terminal",
-            },
         )
         .await?;
     }
@@ -4009,12 +3995,6 @@ pub async fn abandon_slurm_submission(
         &abandonment_payload,
     )
     .await?;
-    revoke_execution_publisher_credentials_in_tx(
-        &mut tx,
-        execution_id,
-        "submission_abandoned",
-    )
-    .await?;
     tx.commit().await?;
     Ok(updated)
 }
@@ -4801,289 +4781,24 @@ async fn finalize_verified_execution_side_effects(
     .await
 }
 
-async fn bind_publisher_credential(
-    tx: &mut Transaction<'_, Postgres>,
-    credential: Option<&ExecutionPublisherCredentialRow>,
-    request_sha256: &str,
-    output_artifact_id: Uuid,
-) -> Result<(), VerifyExecutionOutputsError> {
-    let Some(credential) = credential else {
-        return Ok(());
-    };
-    let consumed = sqlx::query(
-        r#"
-        UPDATE execution_publisher_credentials
-        SET consumed_at = now(),
-            request_sha256 = $2,
-            output_artifact_id = $3
-        WHERE uuid = $1 AND consumed_at IS NULL
-        "#,
-    )
-    .bind(credential.uuid)
-    .bind(request_sha256)
-    .bind(output_artifact_id)
-    .execute(&mut **tx)
-    .await?;
-    if consumed.rows_affected() != 1 {
-        return Err(VerifyExecutionOutputsError::PublisherCredentialConflict(
-            "credential was consumed concurrently".into(),
-        ));
-    }
-    Ok(())
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyExecutionOutputsError {
     #[error("execution not found")]
     NotFound,
     #[error("output verification rejected: {0}")]
     Rejected(String),
-    #[error("publisher credential is invalid: {0}")]
-    PublisherCredentialInvalid(String),
-    #[error("publisher credential conflicts with this request: {0}")]
-    PublisherCredentialConflict(String),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
 
-#[derive(Debug, Clone)]
-pub struct PublisherCredentialUse {
-    pub credential_id: Uuid,
-    pub token_hash: String,
-}
-
-pub const OUTPUT_PUBLISHER_AUDIENCE: &str = "beampipe-output-verification";
-pub const MAX_OUTPUT_PUBLISHER_TTL_SECONDS: i64 = 24 * 60 * 60;
-
-pub fn output_publisher_scope(execution_id: Uuid) -> String {
-    format!("execution:{execution_id}:verify_outputs")
-}
-
-async fn revoke_execution_publisher_credentials_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    execution_id: Uuid,
-    reason: &str,
-) -> Result<u64, sqlx::Error> {
-    if reason.trim().is_empty() || reason.len() > 256 {
-        return Err(sqlx::Error::Protocol(
-            "publisher credential revocation reason must contain 1-256 characters".into(),
-        ));
-    }
-    Ok(sqlx::query(
-        r#"
-        UPDATE execution_publisher_credentials
-        SET revoked_at = now(), revoked_reason = $2
-        WHERE execution_id = $1 AND revoked_at IS NULL
-        "#,
-    )
-    .bind(execution_id)
-    .bind(reason)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected())
-}
-
-pub async fn revoke_execution_publisher_credentials(
-    pool: &PgPool,
-    execution_id: Uuid,
-    reason: &str,
-) -> Result<u64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let revoked =
-        revoke_execution_publisher_credentials_in_tx(&mut tx, execution_id, reason).await?;
-    tx.commit().await?;
-    Ok(revoked)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum IssueExecutionPublisherCredentialError {
-    #[error("execution not found")]
-    NotFound,
-    #[error("publisher credential issuance rejected: {0}")]
-    Rejected(String),
-    #[error(transparent)]
-    Database(#[from] sqlx::Error),
-}
-
-/// Persist only the digest and metadata for a newly issued publisher
-/// capability. The API returns the plaintext once and must never pass it here.
-#[allow(clippy::too_many_arguments)]
-pub async fn issue_execution_publisher_credential(
-    pool: &PgPool,
-    execution_id: Uuid,
-    credential_id: Uuid,
-    token_hash: &str,
-    issued_by: Option<Uuid>,
-    issued_by_actor: &str,
-    expires_at: DateTime<Utc>,
-    correlation_id: Option<&str>,
-) -> Result<ExecutionPublisherCredentialRow, IssueExecutionPublisherCredentialError> {
-    if token_hash.len() != 64
-        || !token_hash
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(IssueExecutionPublisherCredentialError::Rejected(
-            "token digest must be a lowercase SHA-256 value".into(),
-        ));
-    }
-    if expires_at <= Utc::now() {
-        return Err(IssueExecutionPublisherCredentialError::Rejected(
-            "publisher credential expiration must be in the future".into(),
-        ));
-    }
-    if expires_at > Utc::now() + chrono::Duration::seconds(MAX_OUTPUT_PUBLISHER_TTL_SECONDS) {
-        return Err(IssueExecutionPublisherCredentialError::Rejected(
-            "publisher credential lifetime exceeds the 24-hour maximum".into(),
-        ));
-    }
-    if issued_by_actor.trim().is_empty() || issued_by_actor.len() > 256 {
-        return Err(IssueExecutionPublisherCredentialError::Rejected(
-            "issuer actor must contain 1-256 characters".into(),
-        ));
-    }
-
-    let mut tx = pool.begin().await?;
-    let execution = sqlx::query_as::<_, ExecutionRow>(
-        "SELECT * FROM batch_execution_record WHERE uuid = $1 FOR UPDATE",
-    )
-    .bind(execution_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(IssueExecutionPublisherCredentialError::NotFound)?;
-    if !execution.output_verification_required {
-        return Err(IssueExecutionPublisherCredentialError::Rejected(
-            "the execution does not require output verification".into(),
-        ));
-    }
-    if execution
-        .status_enum()
-        .is_some_and(ExecutionStatus::is_terminal)
-    {
-        return Err(IssueExecutionPublisherCredentialError::Rejected(
-            "the execution is already terminal".into(),
-        ));
-    }
-
-    let scope = output_publisher_scope(execution_id);
-    let credential = sqlx::query_as::<_, ExecutionPublisherCredentialRow>(
-        r#"
-        INSERT INTO execution_publisher_credentials (
-            uuid, execution_id, token_hash, audience, scope, execution_attempt,
-            issued_by, issued_by_actor, expires_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING *
-        "#,
-    )
-    .bind(credential_id)
-    .bind(execution_id)
-    .bind(token_hash)
-    .bind(OUTPUT_PUBLISHER_AUDIENCE)
-    .bind(&scope)
-    .bind(execution.retry_count)
-    .bind(issued_by)
-    .bind(issued_by_actor)
-    .bind(expires_at)
-    .fetch_one(&mut *tx)
-    .await?;
-    insert_provenance_event(
-        &mut *tx,
-        "execution.publisher_credential_issued",
-        &execution.project_module,
-        None,
-        Some(execution_id),
-        Some(issued_by_actor),
-        correlation_id,
-        &json!({
-            "credential_id": credential_id,
-            "audience": OUTPUT_PUBLISHER_AUDIENCE,
-            "scope": scope,
-            "execution_attempt": execution.retry_count,
-            "expires_at": expires_at,
-        }),
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(credential)
-}
-
-/// Resolve a currently valid publisher capability by digest. A consumed
-/// credential remains resolvable until expiry, even after terminal revocation,
-/// so only its exactly bound request can recover a response lost after commit.
-pub async fn get_active_execution_publisher_credential_by_token_hash(
-    pool: &PgPool,
-    token_hash: &str,
-) -> Result<Option<ExecutionPublisherCredentialRow>, sqlx::Error> {
-    sqlx::query_as::<_, ExecutionPublisherCredentialRow>(
-        r#"
-        SELECT credential.*
-        FROM execution_publisher_credentials credential
-        JOIN batch_execution_record execution
-          ON execution.uuid = credential.execution_id
-        WHERE credential.token_hash = $1
-          AND credential.expires_at > now()
-          AND (credential.revoked_at IS NULL OR credential.consumed_at IS NOT NULL)
-          AND credential.execution_attempt = execution.retry_count
-        "#,
-    )
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await
-}
-
-/// Atomically persist a trusted publication inventory. If external execution
-/// has already succeeded this also releases the completion gate. A scoped
-/// publisher may report while its DALiuGE graph is still active; in that order
-/// only the immutable output evidence is committed and later polling decides
-/// the aggregate terminal result.
+/// Atomically persist an inventory retrieved by Core after external success
+/// and release the completion gate.
 pub async fn verify_execution_outputs(
     pool: &PgPool,
     execution_id: Uuid,
     artifact: ExecutionArtifactInput,
     actor: &str,
     correlation_id: Option<&str>,
-) -> Result<(ExecutionRow, ExecutionArtifactRow), VerifyExecutionOutputsError> {
-    verify_execution_outputs_authorized(
-        pool,
-        execution_id,
-        artifact,
-        actor,
-        correlation_id,
-        None,
-    )
-    .await
-}
-
-/// Verify outputs using an execution-scoped publisher capability. Successful
-/// use binds the capability to the canonical report in the same transaction.
-/// An exact retry returns the committed result; a changed payload is rejected.
-pub async fn verify_execution_outputs_with_publisher(
-    pool: &PgPool,
-    execution_id: Uuid,
-    artifact: ExecutionArtifactInput,
-    actor: &str,
-    correlation_id: Option<&str>,
-    credential: PublisherCredentialUse,
-) -> Result<(ExecutionRow, ExecutionArtifactRow), VerifyExecutionOutputsError> {
-    verify_execution_outputs_authorized(
-        pool,
-        execution_id,
-        artifact,
-        actor,
-        correlation_id,
-        Some(credential),
-    )
-    .await
-}
-
-async fn verify_execution_outputs_authorized(
-    pool: &PgPool,
-    execution_id: Uuid,
-    artifact: ExecutionArtifactInput,
-    actor: &str,
-    correlation_id: Option<&str>,
-    publisher_credential: Option<PublisherCredentialUse>,
 ) -> Result<(ExecutionRow, ExecutionArtifactRow), VerifyExecutionOutputsError> {
     validate_artifact(&artifact)?;
     if artifact.kind != "output_inventory"
@@ -5120,264 +4835,47 @@ async fn verify_execution_outputs_authorized(
     .await?
     .ok_or(VerifyExecutionOutputsError::NotFound)?;
 
-    let locked_publisher_credential = if let Some(credential) = &publisher_credential {
-        let stored = sqlx::query_as::<_, ExecutionPublisherCredentialRow>(
-            r#"
-            SELECT *
-            FROM execution_publisher_credentials
-            WHERE uuid = $1 AND token_hash = $2
-            FOR UPDATE
-            "#,
-        )
-        .bind(credential.credential_id)
-        .bind(&credential.token_hash)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::PublisherCredentialInvalid(
-                "credential is unknown".into(),
-            )
-        })?;
-        if stored.expires_at <= Utc::now() {
-            return Err(VerifyExecutionOutputsError::PublisherCredentialInvalid(
-                "credential has expired".into(),
-            ));
-        }
-        if (stored.revoked_at.is_some() && stored.consumed_at.is_none())
-            || stored.execution_attempt != execution.retry_count
-            || stored.audience != OUTPUT_PUBLISHER_AUDIENCE
-        {
-            return Err(VerifyExecutionOutputsError::PublisherCredentialInvalid(
-                "credential is revoked, belongs to another execution attempt, or has the wrong audience".into(),
-            ));
-        }
-        if stored.execution_id != execution_id
-            || stored.scope != output_publisher_scope(execution_id)
-        {
-            return Err(VerifyExecutionOutputsError::PublisherCredentialInvalid(
-                "credential does not authorize this execution and action".into(),
-            ));
-        }
-        Some(stored)
-    } else {
-        None
-    };
-    let mut artifact = artifact;
-    if let Some(metadata) = artifact.metadata.as_object_mut() {
-        metadata.insert(
-            "execution_attempt".into(),
-            Value::from(execution.retry_count),
-        );
-    } else {
-        return Err(VerifyExecutionOutputsError::Rejected(
-            "verification artifact metadata must be an object".into(),
-        ));
-    }
-    if let Some(credential) = locked_publisher_credential.as_ref() {
-        let published_at = artifact
-            .inline_json
-            .as_ref()
-            .and_then(|report| report.pointer("/publication/published_at"))
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<DateTime<Utc>>().ok())
-            .ok_or_else(|| {
-                VerifyExecutionOutputsError::PublisherCredentialConflict(
-                    "publisher report has no valid publication.published_at timestamp".into(),
-                )
-            })?;
-        let clock_skew = chrono::Duration::minutes(5);
-        // A durable, immutable receipt can legitimately predate a replacement
-        // credential when Core committed the original request but its response
-        // was lost. Execution/attempt binding and the exact stored-artifact
-        // replay check below provide the authorization boundary; rejecting an
-        // older timestamp would make that receipt unrecoverable.
-        if published_at > credential.expires_at + clock_skew {
-            return Err(
-                VerifyExecutionOutputsError::PublisherCredentialConflict(
-                    "publication timestamp is later than this credential's execution-attempt window"
-                        .into(),
-                ),
-            );
-        }
-    }
-    if !execution.output_verification_required {
-        return Err(VerifyExecutionOutputsError::Rejected(
-            "the pinned execution policy explicitly opts out of output verification".into(),
-        ));
-    }
-    let expected_schema = execution
-        .output_verification_policy
-        .get("inventory_schema")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::Rejected(
-                "the pinned output verification policy has no inventory schema".into(),
-            )
-        })?;
-    let reported_schema = artifact
-        .metadata
-        .get("inventory_schema")
-        .and_then(Value::as_str);
-    if reported_schema != Some(expected_schema) {
-        return Err(VerifyExecutionOutputsError::Rejected(format!(
-            "inventory schema does not match pinned policy '{expected_schema}'"
-        )));
-    }
-    let expected_media_type = output_inventory_media_type(expected_schema).ok_or_else(|| {
-        VerifyExecutionOutputsError::Rejected(format!(
-            "pinned output inventory schema '{expected_schema}' is unsupported"
-        ))
-    })?;
-    if artifact.media_type != expected_media_type {
-        return Err(VerifyExecutionOutputsError::Rejected(format!(
-            "output inventory media type '{}' does not match pinned schema '{expected_schema}'",
-            artifact.media_type
-        )));
-    }
-    let expected_patterns = execution
-        .output_verification_policy
-        .get("expected_patterns")
-        .and_then(Value::as_array)
-        .and_then(|patterns| {
-            patterns
-                .iter()
-                .map(Value::as_str)
-                .collect::<Option<Vec<_>>>()
-        })
-        .filter(|patterns| !patterns.is_empty())
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::Rejected(
-                "pinned required output policy has no valid expected_patterns".into(),
-            )
-        })?;
-    let report = artifact.inline_json.as_ref().ok_or_else(|| {
+    // Every caller, including the internal Slurm receipt retriever, crosses
+    // the same project-neutral validation boundary. Do not trust callers to
+    // pair an inline report with matching artifact metadata or digest.
+    let report_value = artifact.inline_json.as_ref().ok_or_else(|| {
         VerifyExecutionOutputsError::Rejected("output inventory report is missing".into())
     })?;
-    let reported_execution_attempt = report
-        .get("execution_attempt")
-        .and_then(Value::as_i64)
-        .and_then(|attempt| i32::try_from(attempt).ok())
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::Rejected(
-                "output inventory has no valid execution_attempt".into(),
-            )
+    let report: ExecutionOutputVerificationRequest =
+        serde_json::from_value(report_value.clone()).map_err(|error| {
+            VerifyExecutionOutputsError::Rejected(format!(
+                "output inventory report is invalid: {error}"
+            ))
         })?;
-    if reported_execution_attempt != execution.retry_count {
-        return Err(VerifyExecutionOutputsError::Rejected(format!(
-            "output inventory execution_attempt {reported_execution_attempt} does not match current attempt {}",
-            execution.retry_count
-        )));
-    }
-    let reported_patterns = report
-        .get("patterns")
-        .and_then(Value::as_array)
-        .and_then(|patterns| {
-            patterns
-                .iter()
-                .map(Value::as_str)
-                .collect::<Option<Vec<_>>>()
-        })
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::Rejected(
-                "output inventory has no valid patterns array".into(),
-            )
-        })?;
-    let pattern_counts = report
-        .get("pattern_counts")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::Rejected(
-                "output inventory has no valid pattern_counts object".into(),
-            )
-        })?;
-    if reported_patterns != expected_patterns
-        || pattern_counts.len() != expected_patterns.len()
-        || expected_patterns.iter().any(|pattern| {
-            pattern_counts
-                .get(*pattern)
-                .and_then(Value::as_u64)
-                .is_none_or(|count| count == 0)
-        })
+    let total_product_bytes = validate_output_verification_request(
+        &report,
+        execution.output_verification_required,
+        &execution.output_verification_policy,
+        execution.uuid,
+        execution.retry_count,
+    )
+    .map_err(|error| VerifyExecutionOutputsError::Rejected(error.to_string()))?;
+    let canonical_artifact = ExecutionArtifactInput::from(
+        build_output_inventory_artifact(&report, total_product_bytes)
+            .map_err(|error| VerifyExecutionOutputsError::Rejected(error.to_string()))?,
+    );
+    if artifact.kind != canonical_artifact.kind
+        || artifact.storage_kind != canonical_artifact.storage_kind
+        || artifact.uri != canonical_artifact.uri
+        || artifact.inline_json != canonical_artifact.inline_json
+        || artifact.media_type != canonical_artifact.media_type
+        || artifact.sha256 != canonical_artifact.sha256
+        || artifact.size_bytes != canonical_artifact.size_bytes
+        || artifact.producer_phase != canonical_artifact.producer_phase
+        || artifact.metadata != canonical_artifact.metadata
     {
         return Err(VerifyExecutionOutputsError::Rejected(
-            "output inventory patterns and positive counts must exactly match the pinned expected_patterns"
-                .into(),
+            "output inventory artifact does not match its canonical report".into(),
         ));
     }
-    let products = report
-        .get("products")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::Rejected(
-                "output inventory has no valid products array".into(),
-            )
-        })?;
-    for pattern in &expected_patterns {
-        let matcher = OutputGlob::compile(pattern).map_err(|_| {
-            VerifyExecutionOutputsError::Rejected(
-                "pinned expected output pattern is invalid".into(),
-            )
-        })?;
-        let actual_count = products
-            .iter()
-            .filter_map(|product| product.get("path").and_then(Value::as_str))
-            .filter(|path| matcher.is_match(path))
-            .count() as u64;
-        let claimed_count = pattern_counts
-            .get(*pattern)
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if actual_count == 0 || claimed_count != actual_count {
-            return Err(VerifyExecutionOutputsError::Rejected(format!(
-                "pattern_counts['{pattern}'] does not equal the positive match count {actual_count} computed from products"
-            )));
-        }
-    }
 
-    if let Some(credential) = locked_publisher_credential
-        .as_ref()
-        .filter(|credential| credential.consumed_at.is_some())
-    {
-        if credential.request_sha256.as_deref() != Some(artifact.sha256.as_str()) {
-            return Err(
-                VerifyExecutionOutputsError::PublisherCredentialConflict(
-                    "credential was already bound to a different output inventory".into(),
-                ),
-            );
-        }
-        let artifact_id = credential.output_artifact_id.ok_or_else(|| {
-            VerifyExecutionOutputsError::PublisherCredentialConflict(
-                "credential consumption record is incomplete".into(),
-            )
-        })?;
-        let existing = sqlx::query_as::<_, ExecutionArtifactRow>(
-            "SELECT * FROM execution_artifacts WHERE uuid = $1 AND execution_id = $2",
-        )
-        .bind(artifact_id)
-        .bind(execution_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| {
-            VerifyExecutionOutputsError::PublisherCredentialConflict(
-                "credential's output inventory artifact is missing".into(),
-            )
-        })?;
-        if execution.output_state.as_deref().and_then(OutputState::parse)
-            != Some(OutputState::Verified)
-            || existing.sha256 != artifact.sha256
-            || existing.uri != artifact.uri
-            || existing.inline_json != artifact.inline_json
-            || existing.metadata != artifact.metadata
-        {
-            return Err(
-                VerifyExecutionOutputsError::PublisherCredentialConflict(
-                    "credential's committed output inventory no longer matches".into(),
-                ),
-            );
-        }
-        tx.commit().await?;
-        return Ok((execution, existing));
-    }
+    let expected_schema = report.schema.as_str();
+
     if execution
         .output_state
         .as_deref()
@@ -5399,13 +4897,6 @@ async fn verify_execution_outputs_authorized(
                 && row.inline_json == artifact.inline_json
                 && row.metadata == artifact.metadata
         }) {
-            bind_publisher_credential(
-                &mut tx,
-                locked_publisher_credential.as_ref(),
-                &artifact.sha256,
-                existing.uuid,
-            )
-            .await?;
             tx.commit().await?;
             return Ok((execution, existing));
         }
@@ -5425,12 +4916,9 @@ async fn verify_execution_outputs_authorized(
     let axes = execution.axes();
     let decision = axes.reconcile();
     let complete_now = decision.next_action == ReconciliationAction::VerifyOutputs;
-    let publisher_is_inside_active_execution = publisher_credential.is_some()
-        && axes.submission == SubmissionState::Submitted
-        && (axes.scheduler.is_active() || axes.daliuge.is_active());
-    if !complete_now && !publisher_is_inside_active_execution {
+    if !complete_now {
         return Err(VerifyExecutionOutputsError::Rejected(
-            "execution is neither waiting for output verification after external success nor actively running with an execution-scoped publisher".into(),
+            "execution is not waiting for output verification after external success".into(),
         ));
     }
     let inserted = sqlx::query_as::<_, ExecutionArtifactRow>(
@@ -5558,21 +5046,6 @@ async fn verify_execution_outputs_authorized(
             &stored,
             actor,
             correlation_id,
-        )
-        .await?;
-    }
-    bind_publisher_credential(
-        &mut tx,
-        locked_publisher_credential.as_ref(),
-        &artifact.sha256,
-        stored.uuid,
-    )
-    .await?;
-    if complete_now {
-        revoke_execution_publisher_credentials_in_tx(
-            &mut tx,
-            execution_id,
-            "execution_completed",
         )
         .await?;
     }
@@ -5992,7 +5465,6 @@ async fn cancel_execution_with_correlation_inner(
         }),
     )
     .await?;
-    revoke_execution_publisher_credentials_in_tx(&mut tx, id, "execution_cancelled").await?;
     tx.commit().await?;
     Ok(Some(row))
 }
@@ -7807,6 +7279,48 @@ pub async fn list_slurm_executions_pending_poll(
           -- nonterminal. Successful compute waiting for output verification
           -- remains excluded from backend re-polling.
           AND COALESCE(execution.scheduler_state, 'unknown') <> 'succeeded'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM jobs AS active_execute
+              WHERE active_execute.execution_id = execution.uuid
+                AND active_execute.kind = 'execute'
+                AND active_execute.status = 'running'
+                AND (
+                    active_execute.lease_expires_at IS NULL
+                    OR active_execute.locked_until IS NULL
+                    OR GREATEST(
+                        active_execute.lease_expires_at,
+                        active_execute.locked_until
+                    ) > now()
+                )
+          )
+        ORDER BY execution.created_at ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Slurm executions whose outer allocation succeeded but whose durable output
+/// inventory has not yet been retrieved from the isolated remote session.
+/// These rows are deliberately separate from scheduler polling: a missing or
+/// transiently unreadable receipt must retry without changing scheduler truth.
+pub async fn list_slurm_executions_pending_output_inventory(
+    pool: &PgPool,
+) -> Result<Vec<crate::models::ExecutionRow>, sqlx::Error> {
+    sqlx::query_as::<_, crate::models::ExecutionRow>(
+        r#"
+        SELECT execution.*
+        FROM batch_execution_record AS execution
+        WHERE execution.scheduler_name = 'slurm'
+          AND execution.scheduler_job_id IS NOT NULL
+          AND execution.remote_session_dir IS NOT NULL
+          AND execution.output_verification_required = TRUE
+          AND execution.scheduler_state = 'succeeded'
+          AND execution.daliuge_state = 'finished'
+          AND COALESCE(execution.output_state, '') NOT IN ('verified', 'failed')
+          AND execution.status IN ('awaiting_scheduler', 'running')
+          AND execution.terminal_outcome IS NULL
           AND NOT EXISTS (
               SELECT 1
               FROM jobs AS active_execute
