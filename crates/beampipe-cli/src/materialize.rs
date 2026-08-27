@@ -260,7 +260,7 @@ mod tests {
         );
         assert_eq!(
             profile["deployment"]["runtime_contract"]["required_python_modules"],
-            serde_json::json!(["wallaby_hires", "beampipe_pallette"])
+            serde_json::json!(["wallaby_hires", "beampipe_pallette.apps"])
         );
         assert_eq!(
             sha256(
@@ -270,7 +270,18 @@ mod tests {
                 )
                 .unwrap()
             ),
-            "54c4251c3bec6ee86bbfd01c7a73bd396fc91a7ff97456126dacddd287e2f48f"
+            "3c5a70283681184cb34a50c28d8c50b2eb789ee16670c7832584dad6c22aedbb"
+        );
+        assert_eq!(
+            sha256(
+                &fs::read(
+                    dir.path().join(
+                        "config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph"
+                    )
+                )
+                .unwrap()
+            ),
+            "e2937ab4180c9ef6cdee3f92edaeebbde0cc1e31dbebbe6a33d4cbbd6de27a7c"
         );
     }
 

@@ -24,7 +24,7 @@
     "venv": "source /software/projects/pawsey0411/jblackwood/venv/bin/activate",
     "runtime_contract": {
       "required_commands": ["wallaby_hires", "beampipe-publish", "singularity"],
-      "required_python_modules": ["wallaby_hires", "beampipe_pallette"],
+      "required_python_modules": ["wallaby_hires", "beampipe_pallette.apps"],
       "required_environment": [
         {
           "name": "BEAMPIPE_ASKAPSOFT_SIF",

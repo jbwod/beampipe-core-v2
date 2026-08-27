@@ -16,7 +16,9 @@ const JOBSUB_CREATED_RE: &str = "Created job submission script";
 const PYTHON_PATH_ENV: &str = "PYTHONPATH";
 const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
 const PUBLISHER_COMMAND: &str = "beampipe-publish";
-const PUBLISHER_PYTHON_MODULE: &str = "beampipe_pallette.publish";
+const BEAMPIPE_APPS_PYTHON_MODULE: &str = "beampipe_pallette.apps";
+const INGEST_APP_CLASS: &str = "BeampipeIngestApp";
+const PUBLISHER_APP_CLASS: &str = "BeampipePublishApp";
 const PUBLISHER_EXECUTION_ID_ENV: &str = "BEAMPIPE_EXECUTION_ID";
 const PUBLISHER_EXECUTION_ATTEMPT_ENV: &str = "BEAMPIPE_EXECUTION_ATTEMPT";
 const PUBLISHER_CORE_URL_ENV: &str = "BEAMPIPE_CORE_URL";
@@ -292,7 +294,7 @@ where
     ));
     let mut python_modules = vec!["dlg.deploy.create_dlg_job"];
     if publication_required {
-        python_modules.push(PUBLISHER_PYTHON_MODULE);
+        python_modules.push(BEAMPIPE_APPS_PYTHON_MODULE);
     }
     for module in &deployment.runtime_contract.required_python_modules {
         if !python_modules.contains(&module.as_str()) {
@@ -301,8 +303,31 @@ where
     }
     let module_list = serde_json::to_string(&python_modules)
         .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
-    let import_script =
+    let mut import_script =
         format!("import importlib; [importlib.import_module(name) for name in {module_list}]");
+    let ingest_required = deployment
+        .runtime_contract
+        .required_python_modules
+        .iter()
+        .any(|module| module == BEAMPIPE_APPS_PYTHON_MODULE);
+    if ingest_required {
+        import_script.push_str(&format!(
+            "; getattr(importlib.import_module({module}), {class_name})",
+            module = serde_json::to_string(BEAMPIPE_APPS_PYTHON_MODULE)
+                .map_err(|error| OrchestrationError::Backend(error.to_string()))?,
+            class_name = serde_json::to_string(INGEST_APP_CLASS)
+                .map_err(|error| OrchestrationError::Backend(error.to_string()))?,
+        ));
+    }
+    if publication_required {
+        import_script.push_str(&format!(
+            "; getattr(importlib.import_module({module}), {class_name})",
+            module = serde_json::to_string(BEAMPIPE_APPS_PYTHON_MODULE)
+                .map_err(|error| OrchestrationError::Backend(error.to_string()))?,
+            class_name = serde_json::to_string(PUBLISHER_APP_CLASS)
+                .map_err(|error| OrchestrationError::Backend(error.to_string()))?,
+        ));
+    }
     lines.push(format!("python3 -c {}", shell_quote(&import_script)));
     for requirement in &deployment.runtime_contract.required_environment {
         if matches!(requirement.kind, SlurmRuntimeEnvironmentKind::ReadableFile) {
@@ -1438,6 +1463,9 @@ mod tests {
     #[test]
     fn publication_preflight_is_standalone_and_project_neutral() {
         let mut dep = deployment();
+        dep.runtime_contract
+            .required_python_modules
+            .push("beampipe_pallette.apps".into());
         dep.publication = Some(PublicationRuntimeConfig {
             core_url_environment: "BEAMPIPE_CORE_URL".into(),
             durable_destination_uri_environment: "BEAMPIPE_OUTPUT_DESTINATION_URI".into(),
@@ -1451,12 +1479,16 @@ mod tests {
         })
         .unwrap();
         assert!(script.contains("command -v beampipe-publish"));
-        assert!(script.contains("beampipe_pallette.publish"));
+        assert!(script.contains("beampipe_pallette.apps"));
+        assert!(script.contains("BeampipeIngestApp"));
+        assert!(script.contains("BeampipePublishApp"));
         assert!(!script.to_ascii_lowercase().contains("wallaby"));
 
         let opt_out = slurm_preflight_script_with(&dep, false, |_| None).unwrap();
         assert!(!opt_out.contains("beampipe-publish"));
-        assert!(!opt_out.contains("beampipe_pallette.publish"));
+        assert!(opt_out.contains("beampipe_pallette.apps"));
+        assert!(opt_out.contains("BeampipeIngestApp"));
+        assert!(!opt_out.contains("BeampipePublishApp"));
     }
 
     #[test]

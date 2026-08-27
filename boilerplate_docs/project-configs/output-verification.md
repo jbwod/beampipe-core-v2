@@ -33,6 +33,25 @@ project filesystem and S3-compatible object storage. The Core report contract
 can also represent future NGAS or HTTPS-backed adapters, but their URI support
 does not imply that the standalone package implements them yet.
 
+`beampipe-publish` is a native DALiuGE barrier application, not a PyFunc with
+runtime details exposed as graph arguments. Its logical-graph contract is kept
+deliberately small:
+
+- one `completion` input DROP, connected to the pipeline's successful terminal
+  marker;
+- one `inventory` output FileDROP containing canonical
+  `beampipe-output-inventory/v1` JSON; and
+- one non-secret project setting, `expected_patterns_json`.
+
+Execution identity, retry generation, output root, durable destination, Core
+callback URL, and publisher capability come from the submission runtime. They
+must not appear as EAGLE fields, graph parameters, or persisted graph values.
+
+The companion `beampipe-ingest` component is native too. Core still injects
+the execution manifest through its stable `manifest_path` setting; the app
+validates and canonicalizes it before exposing the single `manifest_bytes`
+output. Neither component carries executable function source in the graph.
+
 <div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Output publication flows from pipeline products through a terminal publisher and durable storage to the Core verification ledger">
   <div class="bp-flow-node" data-tone="cyan"><span>DALiuGE</span><strong>pipeline products</strong><small>execution workspace</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
@@ -43,15 +62,21 @@ does not imply that the standalone package implements them yet.
   <div class="bp-flow-node" data-tone="green"><span>CORE</span><strong>verified inventory</strong><small>immutable ledger evidence</small></div>
 </div>
 
-The application must:
+The application must, in this order:
 
 1. Upload only the execution's selected output paths.
 2. Re-read, checksum, or otherwise verify every durable object through the
    destination adapter.
-3. Build `beampipe-output-inventory/v1` and emit it as a DALiuGE output DROP.
-4. Send the same report to
+3. Build `beampipe-output-inventory/v1`, atomically write it to the DALiuGE
+   inventory FileDROP, re-read it, and fsync it.
+4. Send the byte-identical report to
    `POST /api/v2/executions/{id}/outputs/verify` with the execution-scoped
    publisher capability.
+
+Only after Core returns the minimal execution/artifact acknowledgement may the
+application finish and allow DALiuGE to complete the inventory DROP. This keeps
+the graph causal without making Core credentials or callback plumbing visible
+in EAGLE.
 
 The output DROP is useful to the graph and its logs, but only Core's committed
 inventory artifact is authoritative ledger evidence.

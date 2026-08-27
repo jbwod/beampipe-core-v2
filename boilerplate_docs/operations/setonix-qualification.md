@@ -115,7 +115,7 @@ The production qualification artifacts are:
 
 | Artifact | Expected evidence |
 |---|---|
-| WALLABY graph | SHA-256 `54c4251c3bec6ee86bbfd01c7a73bd396fc91a7ff97456126dacddd287e2f48f` |
+| WALLABY graph | SHA-256 `3c5a70283681184cb34a50c28d8c50b2eb789ee16670c7832584dad6c22aedbb` |
 | Wallaby package | `wallaby_hires --version` matches the reviewed release |
 | Publisher package | `beampipe-publish --version` matches the reviewed standalone package release |
 | Python wheels | SHA-256 recorded for every exact installed wheel |
@@ -126,6 +126,7 @@ stale:
 ```bash
 wallaby_hires --version
 beampipe-publish --version
+python3 -c 'from beampipe_pallette.apps import BeampipeIngestApp, BeampipePublishApp'
 ```
 
 Set the non-secret publication endpoints in the Core/jobs worker environment,
@@ -165,6 +166,7 @@ command -v python3
 command -v wallaby_hires
 command -v beampipe-publish
 beampipe-publish --version
+python3 -c 'from beampipe_pallette.apps import BeampipeIngestApp, BeampipePublishApp'
 curl -fsS "${BEAMPIPE_CORE_URL%/}/api/v2/health"
 sinfo --version
 python3 -c '<import every runtime_contract.required_python_modules entry>'
@@ -396,10 +398,10 @@ evidence but cannot reopen the terminal ledger, and retry remains blocked.
 
 Slurm `COMPLETED` records compute evidence only. The production project requires
 a non-empty Beampipe output inventory, durable publication, and trusted
-acknowledgement. Its terminal `beampipe-publish` application from standalone
+acknowledgement. Its terminal native `BeampipePublishApp` from standalone
 `beampipe-pallette` uploads only the run's selected paths, re-reads or re-hashes
-the durable objects, emits the inventory DROP, and sends the same report to
-`POST /api/v2/executions/{id}/outputs/verify`.
+the durable objects, atomically writes the inventory FileDROP, and sends the
+same report to `POST /api/v2/executions/{id}/outputs/verify`.
 
 Keep the Core superuser token off Setonix. The publisher receives only the
 short-lived capability scoped to this execution and action, through the
