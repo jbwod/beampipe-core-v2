@@ -2,7 +2,6 @@
 
 use beampipe_adapters::{TapEndpointProbe, TapHealthCache, TapMode};
 use beampipe_db::models::DeploymentProfileRow;
-use beampipe_db::test_modules::is_integration_test_project_module;
 use beampipe_orchestration::cancel::rest_endpoint;
 use beampipe_orchestration::slurm_credentials::SlurmSshCredentials;
 use beampipe_orchestration::slurm_deploy::{probe_slurm_login, resolve_remote_user};
@@ -30,10 +29,6 @@ static LAST_JOB_KIND_KEYS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static LAST_EXECUTION_STATUS_KEYS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
-
-pub fn is_internal_test_module(module: &str) -> bool {
-    is_integration_test_project_module(module)
-}
 
 fn phase_priority(phase: &str) -> u8 {
     match phase {
@@ -507,9 +502,6 @@ pub async fn refresh_gauges_from_pool(pool: &PgPool, tap_health_ttl: Duration) {
     let mut pending_by_module: HashMap<String, i64> = HashMap::new();
     if let Ok(pending) = beampipe_db::repo::workflow_pending_counts_by_module(pool).await {
         for (module, count) in pending {
-            if is_internal_test_module(&module) {
-                continue;
-            }
             pending_by_module.insert(module.clone(), count);
             crate::set_workflow_pending_sources(&module, count);
         }
@@ -518,9 +510,6 @@ pub async fn refresh_gauges_from_pool(pool: &PgPool, tap_health_ttl: Duration) {
     let mut age_by_module: HashMap<String, i64> = HashMap::new();
     if let Ok(ages) = beampipe_db::repo::max_pending_age_by_module(pool).await {
         for (module, age) in ages {
-            if is_internal_test_module(&module) {
-                continue;
-            }
             age_by_module.insert(module.clone(), age);
             crate::set_pending_age_seconds(&module, age);
         }
@@ -528,22 +517,12 @@ pub async fn refresh_gauges_from_pool(pool: &PgPool, tap_health_ttl: Duration) {
 
     if let Ok(modules) = beampipe_db::repo::get_enabled_project_modules(pool).await {
         for module in modules {
-            if is_internal_test_module(&module) {
-                continue;
-            }
             if !pending_by_module.contains_key(&module) {
                 crate::set_workflow_pending_sources(&module, 0);
             }
             if !age_by_module.contains_key(&module) {
                 crate::set_pending_age_seconds(&module, 0);
             }
-        }
-    }
-
-    if let Ok(test_modules) = beampipe_db::repo::list_internal_test_project_modules(pool).await {
-        for module in test_modules {
-            crate::set_workflow_pending_sources(&module, 0);
-            crate::set_pending_age_seconds(&module, 0);
         }
     }
 
@@ -597,9 +576,6 @@ fn aggregate_source_processing(
 ) -> HashMap<(String, String), i64> {
     let mut best: HashMap<(String, String), String> = HashMap::new();
     for (module, source, phase) in rows {
-        if is_internal_test_module(&module) {
-            continue;
-        }
         let key = (module.clone(), source.clone());
         best.entry(key)
             .and_modify(|existing| {
@@ -625,25 +601,13 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn internal_test_modules_filtered() {
-        assert!(is_internal_test_module(
-            "fail_requeue_019e80f2-cd6f-7883-93e1-62b9ccd35cdf"
-        ));
-        assert!(is_internal_test_module(
-            "sig_test_019e80f3-1089-78b3-94d7-e22800f7a751"
-        ));
-        assert!(is_internal_test_module("exec_sig_abc"));
-        assert!(!is_internal_test_module("wallaby_hires"));
-    }
-
-    #[test]
-    fn source_processing_is_aggregated_without_source_labels() {
+    fn source_processing_aggregates_all_project_names_without_source_labels() {
         let counts = aggregate_source_processing(vec![
             ("wallaby".into(), "a".into(), "discovering".into()),
             ("wallaby".into(), "a".into(), "executing".into()),
             ("wallaby".into(), "b".into(), "executing".into()),
             ("wallaby".into(), "c".into(), "admitting".into()),
-            ("exec_sig_test".into(), "hidden".into(), "executing".into()),
+            ("exec_sig_test".into(), "d".into(), "executing".into()),
         ]);
         assert_eq!(
             counts.get(&("wallaby".into(), "executing".into())),
@@ -653,7 +617,11 @@ mod tests {
             counts.get(&("wallaby".into(), "admitting".into())),
             Some(&1)
         );
-        assert_eq!(counts.len(), 2);
+        assert_eq!(
+            counts.get(&("exec_sig_test".into(), "executing".into())),
+            Some(&1)
+        );
+        assert_eq!(counts.len(), 3);
     }
 
     #[test]

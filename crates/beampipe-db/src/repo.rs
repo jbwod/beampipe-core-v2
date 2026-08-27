@@ -7354,19 +7354,11 @@ pub async fn list_sources_currently_processing(
             WHERE enabled = true
               AND discovery_claim_token IS NOT NULL
               AND discovery_claim_expires_at > now()
-              AND project_module NOT LIKE 'fail_requeue_%'
-              AND project_module NOT LIKE 'sig_test_%'
-              AND project_module NOT LIKE 'test_%'
-              AND project_module NOT LIKE 'exec_sig_%'
             UNION ALL
             SELECT project_module, source_identifier, 'admitting'
             FROM source_registry
             WHERE workflow_claim_token IS NOT NULL
               AND workflow_claim_expires_at > now()
-              AND project_module NOT LIKE 'fail_requeue_%'
-              AND project_module NOT LIKE 'sig_test_%'
-              AND project_module NOT LIKE 'test_%'
-              AND project_module NOT LIKE 'exec_sig_%'
             UNION ALL
             SELECT e.project_module,
                    elem->>'source_identifier',
@@ -7375,10 +7367,6 @@ pub async fn list_sources_currently_processing(
             CROSS JOIN LATERAL jsonb_array_elements(e.sources) AS elem
             WHERE e.status IN ('pending', 'running', 'awaiting_scheduler', 'retrying')
               AND elem->>'source_identifier' IS NOT NULL
-              AND e.project_module NOT LIKE 'fail_requeue_%'
-              AND e.project_module NOT LIKE 'sig_test_%'
-              AND e.project_module NOT LIKE 'test_%'
-              AND e.project_module NOT LIKE 'exec_sig_%'
         ) AS active
         "#,
     )
@@ -7396,22 +7384,6 @@ pub async fn delete_all_sources_for_project_module(
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
-}
-
-/// Distinct test modules still present in the DB (for zeroing stale aggregate gauges).
-pub async fn list_internal_test_project_modules(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar(
-        r#"
-        SELECT DISTINCT project_module
-        FROM source_registry
-        WHERE project_module LIKE 'fail_requeue_%'
-           OR project_module LIKE 'sig_test_%'
-           OR project_module LIKE 'test_%'
-           OR project_module LIKE 'exec_sig_%'
-        "#,
-    )
-    .fetch_all(pool)
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]

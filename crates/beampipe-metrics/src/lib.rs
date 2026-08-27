@@ -4,9 +4,8 @@ pub mod server;
 pub mod trace_context;
 pub mod tracing_layer;
 
-pub use beampipe_db::test_modules::INTEGRATION_TEST_MODULE_REGEX as INTERNAL_TEST_MODULE_REGEX;
 pub use otel::init_if_enabled;
-pub use refresh::{is_internal_test_module, refresh_dependencies, refresh_gauges_from_pool};
+pub use refresh::{refresh_dependencies, refresh_gauges_from_pool};
 pub use trace_context::{
     correlation_id_from_payload, correlation_only, extract_parent_context,
     extract_parent_from_traceparent, header_map_from_pairs, inject_current_traceparent,

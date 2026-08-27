@@ -1,7 +1,6 @@
 pub mod models;
 pub mod provenance;
 pub mod repo;
-pub mod test_modules;
 
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
