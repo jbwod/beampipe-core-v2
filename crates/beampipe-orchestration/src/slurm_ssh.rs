@@ -13,9 +13,9 @@ use beampipe_profiles::SlurmRemoteDeploymentConfig;
 use russh::client;
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::ChannelMsg;
+use ssh_key::known_hosts::{HostPatterns, KnownHosts};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::io::BufRead;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -99,47 +99,32 @@ impl KnownHostEntry {
 }
 
 pub fn load_known_host_entries(path: &str) -> Result<Vec<KnownHostEntry>, OrchestrationError> {
-    let file = std::fs::File::open(path)
+    let input = std::fs::read_to_string(path)
         .map_err(|e| OrchestrationError::Backend(format!("open known_hosts {path}: {e}")))?;
     let mut entries = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.map_err(|e| OrchestrationError::Backend(e.to_string()))?;
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let host_field = parts.next();
-        let Some(host_field) = host_field else {
-            continue;
-        };
-        if host_field.starts_with("|1|") {
-            return Err(OrchestrationError::Backend(
-                "hashed known_hosts entries are not supported; provide plain host patterns for Slurm login nodes"
-                    .into(),
-            ));
-        }
-        if host_field.starts_with('@') {
+    for entry in KnownHosts::new(&input) {
+        let entry = entry.map_err(|error| {
+            OrchestrationError::Backend(format!("parse known_hosts {path}: {error}"))
+        })?;
+        if let Some(marker) = entry.marker() {
             return Err(OrchestrationError::Backend(format!(
-                "known_hosts marker {host_field} is not supported; revoked and certificate-authority entries cannot be used as direct Slurm host keys"
+                "known_hosts marker {marker} is not supported; revoked and certificate-authority entries cannot be used as direct Slurm host keys"
             )));
         }
-        let key_type = parts.next();
-        let key_b64 = parts.next();
-        let (Some(key_type), Some(key_b64)) = (key_type, key_b64) else {
-            continue;
-        };
-        let line = format!("{key_type} {key_b64}");
-        if let Ok(key) = line.parse::<ssh_key::PublicKey>() {
-            let patterns = host_field
-                .split(',')
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            if !patterns.is_empty() {
-                entries.push(KnownHostEntry { patterns, key });
+        let patterns = match entry.host_patterns() {
+            HostPatterns::Patterns(patterns) => patterns.clone(),
+            HostPatterns::HashedName { .. } => {
+                return Err(OrchestrationError::Backend(
+                    "hashed known_hosts entries are not supported; provide plain host patterns for Slurm login nodes"
+                        .into(),
+                ));
             }
+        };
+        if !patterns.is_empty() {
+            entries.push(KnownHostEntry {
+                patterns,
+                key: entry.public_key().clone(),
+            });
         }
     }
     if entries.is_empty() {
@@ -1219,12 +1204,14 @@ mod tests {
     }
 
     #[test]
-    fn known_hosts_rejects_revoked_markers_without_parsing_key_material() {
+    fn known_hosts_rejects_revoked_markers() {
         let dir = tempfile::tempdir().unwrap();
+        let pubkey = generate_public_key(&dir);
+        let key = pubkey.split_whitespace().collect::<Vec<_>>();
         let path = dir.path().join("known_hosts");
         std::fs::write(
             &path,
-            "@revoked login-a.example ssh-ed25519 invalid-key-data\n",
+            format!("@revoked login-a.example {} {}\n", key[0], key[1]),
         )
         .unwrap();
         let error = load_known_host_keys(path.to_str().unwrap())
@@ -1232,6 +1219,17 @@ mod tests {
             .to_string();
         assert!(error.contains("@revoked"));
         assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn malformed_known_hosts_entries_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, "login-a.example ssh-ed25519 not-base64\n").unwrap();
+        let error = load_known_host_keys(path.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("parse known_hosts"));
     }
 
     #[test]
