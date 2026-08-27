@@ -798,14 +798,11 @@ impl Default for ExecutionAutomationPolicy {
 
 impl ExecutionAutomationPolicy {
     fn from_spec(spec: &serde_json::Value) -> Self {
-        if let Ok(config) = serde_json::from_value::<ProjectConfig>(spec.clone()) {
-            return Self::from_config(config.automation.execution.unwrap_or_default());
-        }
-        Self::from_legacy_value(
-            spec.get("automation")
-                .and_then(|v| v.get("execution"))
-                .unwrap_or(&serde_json::Value::Null),
-        )
+        serde_json::from_value::<ProjectConfig>(spec.clone())
+            .ok()
+            .and_then(|config| config.automation.execution)
+            .map(Self::from_config)
+            .unwrap_or_default()
     }
 
     fn from_config(raw: ExecutionAutomationConfig) -> Self {
@@ -822,49 +819,6 @@ impl ExecutionAutomationPolicy {
             deployment_profile_name: raw.deployment_profile_name,
         }
     }
-
-    fn from_legacy_value(raw: &serde_json::Value) -> Self {
-        let mut out = Self::default();
-        if !raw.is_object() {
-            return out;
-        }
-        out.enabled = raw
-            .get("enabled")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(out.enabled);
-        out.archive_name = raw
-            .get("archive_name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or(&out.archive_name)
-            .to_string();
-        out.max_sources_per_execution =
-            positive_i64(raw, "max_sources_per_execution").unwrap_or(out.max_sources_per_execution);
-        out.tick_execution_source_limit = positive_i64(raw, "tick_execution_source_limit")
-            .unwrap_or(out.tick_execution_source_limit);
-        out.tick_execution_run_limit =
-            positive_i64(raw, "tick_execution_run_limit").unwrap_or(out.tick_execution_run_limit);
-        out.min_sources_to_trigger =
-            positive_i64(raw, "min_sources_to_trigger").unwrap_or(out.min_sources_to_trigger);
-        out.max_wait_minutes =
-            positive_i64(raw, "max_wait_minutes").unwrap_or(out.max_wait_minutes);
-        out.claim_ttl_minutes =
-            positive_i64(raw, "claim_ttl_minutes").unwrap_or(out.claim_ttl_minutes);
-        out.concurrent_execution_run_limit = positive_i64(raw, "concurrent_execution_run_limit");
-        out.deployment_profile_name = raw
-            .get("deployment_profile_name")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(ToString::to_string);
-        out
-    }
-}
-
-fn positive_i64(raw: &serde_json::Value, key: &str) -> Option<i64> {
-    raw.get(key)
-        .and_then(serde_json::Value::as_i64)
-        .filter(|v| *v > 0)
 }
 
 #[async_trait]
@@ -875,24 +829,6 @@ pub trait DiscoveryRunner: Send + Sync {
         project_module: &str,
         source_identifier: &str,
     ) -> DiscoverySourceResult;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DeterministicDiscoveryRunner;
-
-#[async_trait]
-impl DiscoveryRunner for DeterministicDiscoveryRunner {
-    async fn discover_source(
-        &self,
-        _project_config: Option<&ProjectConfig>,
-        _project_module: &str,
-        source_identifier: &str,
-    ) -> DiscoverySourceResult {
-        DiscoverySourceResult::NoRecords {
-            source_identifier: source_identifier.to_string(),
-            duration_ms: Some(0),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -6009,6 +5945,24 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[derive(Debug, Clone, Copy)]
+    struct TestDiscoveryRunner;
+
+    #[async_trait]
+    impl DiscoveryRunner for TestDiscoveryRunner {
+        async fn discover_source(
+            &self,
+            _project_config: Option<&ProjectConfig>,
+            _project_module: &str,
+            source_identifier: &str,
+        ) -> DiscoverySourceResult {
+            DiscoverySourceResult::NoRecords {
+                source_identifier: source_identifier.to_string(),
+                duration_ms: Some(0),
+            }
+        }
+    }
+
     fn archive_row(source: &str, group_key: &str, records: Vec<Value>) -> ArchiveMetadataRow {
         ArchiveMetadataRow {
             uuid: Uuid::now_v7(),
@@ -7320,22 +7274,23 @@ mod tests {
 
     #[test]
     fn execution_policy_reads_project_config_shape() {
-        let policy = ExecutionAutomationPolicy::from_spec(&json!({
-            "automation": {
-                "execution": {
-                    "enabled": true,
-                    "archive_name": "catalog",
-                    "max_sources_per_execution": 1,
-                    "tick_execution_source_limit": 200,
-                    "tick_execution_run_limit": 5,
-                    "min_sources_to_trigger": 1,
-                    "max_wait_minutes": 1440,
-                    "claim_ttl_minutes": 180,
-                    "concurrent_execution_run_limit": 5,
-                    "deployment_profile_name": "slurm-remote"
-                }
-            }
-        }));
+        let mut config = ProjectConfig::default();
+        config.automation.execution = Some(ExecutionAutomationConfig {
+            enabled: true,
+            archive_name: "catalog".into(),
+            max_sources_per_execution: 1,
+            tick_execution_source_limit: 200,
+            tick_execution_run_limit: 5,
+            min_sources_to_trigger: 1,
+            max_wait_minutes: 1440,
+            claim_ttl_minutes: 180,
+            concurrent_execution_run_limit: Some(5),
+            deployment_profile_name: Some("slurm-remote".into()),
+            ..Default::default()
+        });
+        let policy = ExecutionAutomationPolicy::from_spec(
+            &serde_json::to_value(config).expect("serialize typed project config"),
+        );
         assert!(policy.enabled);
         assert_eq!(policy.archive_name, "catalog");
         assert_eq!(policy.max_sources_per_execution, 1);
@@ -7987,7 +7942,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_sources_parallel_returns_all_results() {
-        let runner = DeterministicDiscoveryRunner;
+        let runner = TestDiscoveryRunner;
         let sources: Vec<String> = (0..8).map(|i| format!("src-{i}")).collect();
         let results = discover_sources_parallel(&runner, None, "mod", sources, 4).await;
         assert_eq!(results.len(), 8);
