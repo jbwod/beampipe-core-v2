@@ -1,5 +1,5 @@
 pub use beampipe_domain::{Diagnostic as ValidationDiagnostic, DiagnosticSeverity};
-use regex::Regex;
+use globset::{GlobBuilder, GlobMatcher};
 use schemars::JsonSchema;
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -22,46 +22,21 @@ const MAX_TAP_ENDPOINTS: usize = 64;
 pub const MAX_OUTPUT_EXPECTED_PATTERNS: usize = 32;
 pub const MAX_OUTPUT_PATTERN_LENGTH: usize = 256;
 
-pub struct OutputGlob(Regex);
+pub struct OutputGlob(GlobMatcher);
 
 impl OutputGlob {
     pub fn compile(pattern: &str) -> Result<Self, String> {
         if !valid_output_glob(pattern) {
             return Err("unsafe or unsupported relative output glob".into());
         }
-        let chars = pattern.chars().collect::<Vec<_>>();
-        let mut expression = String::from("^");
-        let mut index = 0;
-        while index < chars.len() {
-            match chars[index] {
-                '*' if chars.get(index + 1) == Some(&'*')
-                    && chars.get(index + 2) == Some(&'/') =>
-                {
-                    // `**/name` matches both `name` and any directory depth.
-                    expression.push_str("(?:.*/)?");
-                    index += 3;
-                }
-                '*' if chars.get(index + 1) == Some(&'*') => {
-                    expression.push_str(".*");
-                    index += 2;
-                }
-                '*' => {
-                    expression.push_str("[^/]*");
-                    index += 1;
-                }
-                '?' => {
-                    expression.push_str("[^/]");
-                    index += 1;
-                }
-                literal => {
-                    expression.push_str(&regex::escape(&literal.to_string()));
-                    index += 1;
-                }
-            }
-        }
-        expression.push('$');
-        Regex::new(&expression)
-            .map(Self)
+        GlobBuilder::new(pattern)
+            // Output inventory paths are slash-delimited relative paths. Ordinary
+            // wildcards must stay within a component; only a complete `**`
+            // component may cross directory boundaries.
+            .literal_separator(true)
+            .backslash_escape(false)
+            .build()
+            .map(|glob| Self(glob.compile_matcher()))
             .map_err(|error| format!("could not compile output glob: {error}"))
     }
 
@@ -1727,6 +1702,125 @@ automation:
         assert!(OutputGlob::compile("../image.*").is_err());
         assert!(OutputGlob::compile("images/[abc].fits").is_err());
         assert!(OutputGlob::compile(&"x".repeat(MAX_OUTPUT_PATTERN_LENGTH + 1)).is_err());
+    }
+
+    #[test]
+    fn globset_matcher_preserves_the_supported_output_glob_contract() {
+        fn legacy_matcher(pattern: &str) -> regex::Regex {
+            let chars = pattern.chars().collect::<Vec<_>>();
+            let mut expression = String::from("^");
+            let mut index = 0;
+            while index < chars.len() {
+                match chars[index] {
+                    '*' if chars.get(index + 1) == Some(&'*')
+                        && chars.get(index + 2) == Some(&'/') =>
+                    {
+                        expression.push_str("(?:.*/)?");
+                        index += 3;
+                    }
+                    '*' if chars.get(index + 1) == Some(&'*') => {
+                        expression.push_str(".*");
+                        index += 2;
+                    }
+                    '*' => {
+                        expression.push_str("[^/]*");
+                        index += 1;
+                    }
+                    '?' => {
+                        expression.push_str("[^/]");
+                        index += 1;
+                    }
+                    literal => {
+                        expression.push_str(&regex::escape(&literal.to_string()));
+                        index += 1;
+                    }
+                }
+            }
+            expression.push('$');
+            regex::Regex::new(&expression).unwrap()
+        }
+
+        let patterns = [
+            "*",
+            "?.fits",
+            "image.*.fits",
+            "**/image.*.fits",
+            "products/**/result.bin",
+            "products/**",
+            "**",
+            "nested/*/part-??.bin",
+            "mosaïc/*.fits",
+            "**/**",
+            "archive/**/**/result(+).bin",
+            "question-?*.fits",
+        ];
+        let paths = [
+            "result.bin",
+            "a.fits",
+            "ab.fits",
+            "image.source.fits",
+            "source/image.source.fits",
+            "products/result.bin",
+            "products/source/a/result.bin",
+            "products/source/a/other.bin",
+            "products/",
+            "nested/beam/part-01.bin",
+            "nested/beam/deeper/part-01.bin",
+            "mosaïc/résult.fits",
+            "archive/result(+).bin",
+            "archive/a/b/result(+).bin",
+            "question-aβ.fits",
+        ];
+
+        for pattern in patterns {
+            let legacy = legacy_matcher(pattern);
+            let maintained = OutputGlob::compile(pattern).unwrap();
+            for path in paths {
+                assert_eq!(
+                    maintained.is_match(path),
+                    legacy.is_match(path),
+                    "match contract changed for pattern {pattern:?} and path {path:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn output_glob_validation_rejects_ambiguous_or_unsafe_syntax_before_compilation() {
+        let invalid = [
+            "",
+            " result.bin",
+            "result.bin ",
+            "/absolute/result.bin",
+            "\\absolute\\result.bin",
+            "dir\\result.bin",
+            "dir/\n/result.bin",
+            "dir//result.bin",
+            "dir/./result.bin",
+            "dir/../result.bin",
+            "images/[ab].fits",
+            "images/{a,b}.fits",
+            "images/***/result.bin",
+            "images/prefix**/result.bin",
+            "images/**suffix/result.bin",
+        ];
+        for pattern in invalid {
+            assert!(!valid_output_glob(pattern), "accepted {pattern:?}");
+            assert!(OutputGlob::compile(pattern).is_err(), "compiled {pattern:?}");
+        }
+
+        let ascii_limit = "x".repeat(MAX_OUTPUT_PATTERN_LENGTH);
+        assert!(valid_output_glob(&ascii_limit));
+        assert!(OutputGlob::compile(&ascii_limit).is_ok());
+        assert!(!valid_output_glob(&format!("{ascii_limit}x")));
+
+        // The published limit is byte-based, including for project-defined
+        // Unicode names, because it bounds configuration and regex input size.
+        let unicode_limit = "é".repeat(MAX_OUTPUT_PATTERN_LENGTH / 2);
+        assert_eq!(unicode_limit.len(), MAX_OUTPUT_PATTERN_LENGTH);
+        assert!(valid_output_glob(&unicode_limit));
+        assert!(OutputGlob::compile(&unicode_limit).is_ok());
+        assert!(!valid_output_glob(&format!("{unicode_limit}é")));
     }
 
     #[test]
