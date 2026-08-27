@@ -14,7 +14,7 @@ pub fn dim_rest_base(deploy_host: &str, deploy_port: i32, use_https: bool) -> St
 }
 
 pub fn dim_operator_urls_from_base(dim_base: &str, session_id: &str) -> serde_json::Value {
-    let sid = urlencoding_path(session_id);
+    let sid = encode_path_segment(session_id);
     let base = dim_base.trim_end_matches('/');
     serde_json::json!({
         "dim_session_status_url": format!("{base}/api/sessions/{sid}/status"),
@@ -184,22 +184,27 @@ pub fn get_roots(pg_spec: &[Value]) -> Vec<String> {
     roots
 }
 
-fn urlencoding_path(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u8)
-            }
-        })
-        .collect()
+pub(crate) fn encode_path_segment(value: &str) -> String {
+    let mut url = url::Url::parse("http://beampipe.invalid/")
+        .expect("the fixed Beampipe URL used for path encoding is valid");
+    url.path_segments_mut()
+        .expect("the fixed Beampipe URL supports path segments")
+        .push(value);
+    url.path().trim_start_matches('/').to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn path_segment_encoding_handles_utf8_and_reserved_delimiters() {
+        assert_eq!(
+            encode_path_segment("café/東京?#"),
+            "caf%C3%A9%2F%E6%9D%B1%E4%BA%AC%3F%23"
+        );
+    }
 
     #[test]
     fn get_roots_includes_inputless_applications_and_producerless_data() {

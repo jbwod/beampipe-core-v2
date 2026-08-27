@@ -280,7 +280,7 @@ impl DimClient for HttpDimClient {
         pg_spec: &[Value],
         roots: &[String],
     ) -> Result<Value, OrchestrationError> {
-        let sid = urlencoding_path(session_id);
+        let sid = crate::dim::encode_path_segment(session_id);
         let create_endpoint = format!("{}/api/sessions", self.base_url);
         let response = self
             .client
@@ -330,17 +330,17 @@ impl DimClient for HttpDimClient {
         )
         .await?;
 
-        let deploy_body = if roots.is_empty() {
-            String::new()
+        let completed = roots.join(",");
+        let deploy_form = if roots.is_empty() {
+            Vec::new()
         } else {
-            format!("completed={}", roots.join(","))
+            vec![("completed", completed.as_str())]
         };
         let deploy_endpoint = format!("{}/api/sessions/{sid}/deploy", self.base_url);
         let response = self
             .client
             .post(&deploy_endpoint)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(deploy_body)
+            .form(&deploy_form)
             .timeout(Duration::from_secs(DIM_TIMEOUT_DEPLOY_SECS))
             .send()
             .await
@@ -363,7 +363,7 @@ impl DimClient for HttpDimClient {
     }
 
     async fn poll(&self, session_id: &str) -> Result<BackendPoll, OrchestrationError> {
-        let sid = urlencoding_path(session_id);
+        let sid = crate::dim::encode_path_segment(session_id);
         let observation = self.session_observation(session_id).await?;
         let mut status = observation.state.execution_status();
 
@@ -408,7 +408,7 @@ impl DimClient for HttpDimClient {
     }
 
     async fn cancel(&self, session_id: &str) -> Result<(), OrchestrationError> {
-        let sid = urlencoding_path(session_id);
+        let sid = crate::dim::encode_path_segment(session_id);
         let endpoint = format!("{}/api/sessions/{sid}/cancel", self.base_url);
         let response = self.client.post(&endpoint).send().await.map_err(|error| {
             DaliugeClientError::request(
@@ -429,7 +429,7 @@ impl DimClient for HttpDimClient {
     }
 
     async fn destroy_session(&self, session_id: &str) -> Result<(), OrchestrationError> {
-        let sid = urlencoding_path(session_id);
+        let sid = crate::dim::encode_path_segment(session_id);
         let endpoint = format!("{}/api/sessions/{sid}", self.base_url);
         let response = self
             .client
@@ -549,7 +549,7 @@ impl DaliugeManager for HttpDimClient {
         &self,
         session_id: &str,
     ) -> Result<DaliugeSessionObservation, DaliugeClientError> {
-        let sid = urlencoding_path(session_id);
+        let sid = crate::dim::encode_path_segment(session_id);
         let endpoint = format!("{}/api/sessions/{sid}/status", self.base_url);
         let response = self
             .client
@@ -705,16 +705,4 @@ pub fn translate_config_from_profile(
         dim_port: dim_port.unwrap_or(8000),
         slurm_path,
     }
-}
-
-fn urlencoding_path(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u8)
-            }
-        })
-        .collect()
 }
