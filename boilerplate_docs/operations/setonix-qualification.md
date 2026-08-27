@@ -115,9 +115,9 @@ The production qualification artifacts are:
 
 | Artifact | Expected evidence |
 |---|---|
-| WALLABY graph | SHA-256 `3c5a70283681184cb34a50c28d8c50b2eb789ee16670c7832584dad6c22aedbb` |
+| WALLABY graph | SHA-256 `b800492c5a940c9ebc1e9aaacbb723d861ad248d9e3368f4330180ee9345d642` |
 | Wallaby package | `wallaby_hires --version` matches the reviewed release |
-| Publisher package | `beampipe-publish --version` matches the reviewed standalone package release |
+| Publisher package | `python3 -m beampipe_pallette --version` matches the reviewed standalone package release |
 | Python wheels | SHA-256 recorded for every exact installed wheel |
 
 Capture the versions without pinning this runbook to a release that will go
@@ -125,27 +125,27 @@ stale:
 
 ```bash
 wallaby_hires --version
-beampipe-publish --version
+python3 -m beampipe_pallette --version
 python3 -c 'from beampipe_pallette.apps import BeampipeIngestApp, BeampipePublishApp'
 ```
 
-Set the non-secret publication endpoints in the Core/jobs worker environment,
-using a Core URL that Setonix compute nodes can actually reach. The destination
-must select an implemented standalone publisher adapter:
+Set the durable publication destination in the Core/jobs worker environment.
+The destination must select an implemented standalone publisher adapter:
 
 ```bash
-export BEAMPIPE_CORE_URL='https://<reachable-core-host>'
 export BEAMPIPE_OUTPUT_DESTINATION_URI='file:///scratch/<project>/<user>/beampipe-published'
 
-test -n "$BEAMPIPE_CORE_URL"
 test -n "$BEAMPIPE_OUTPUT_DESTINATION_URI"
 beampipe profile validate slurm-remote
 ```
 
-These values are not the publisher capability. The submission worker delivers
-that secret separately through its private execution file. For an S3-compatible
-destination, use its approved `s3://` base URI and configure storage credentials
-through the publisher adapter's secret mechanism, never the profile JSON.
+Setonix does not need to reach Core. The submission runtime gives the publisher
+a fixed inventory-handoff path inside the UUID-scoped remote session. After the
+outer Slurm job succeeds, Core reads the report back over its authenticated
+SSH/SFTP session and performs verification locally. No Core capability or
+superuser credential is copied to Setonix. For an S3-compatible destination,
+use its approved `s3://` base URI and configure storage credentials through the
+publisher adapter's secret mechanism, never the profile JSON.
 
 Installing the package into a local `/daliuge` runtime does not prove that the
 Setonix login environment and compute-node environment contain the same build.
@@ -164,10 +164,8 @@ command -v scontrol
 command -v srun
 command -v python3
 command -v wallaby_hires
-command -v beampipe-publish
-beampipe-publish --version
+python3 -m beampipe_pallette --version
 python3 -c 'from beampipe_pallette.apps import BeampipeIngestApp, BeampipePublishApp'
-curl -fsS "${BEAMPIPE_CORE_URL%/}/api/v2/health"
 sinfo --version
 python3 -c '<import every runtime_contract.required_python_modules entry>'
 test -d '<DLG_ROOT>' && test -w '<DLG_ROOT>'
@@ -400,14 +398,17 @@ Slurm `COMPLETED` records compute evidence only. The production project requires
 a non-empty Beampipe output inventory, durable publication, and trusted
 acknowledgement. Its terminal native `BeampipePublishApp` from standalone
 `beampipe-pallette` uploads only the run's selected paths, re-reads or re-hashes
-the durable objects, atomically writes the inventory FileDROP, and sends the
-same report to `POST /api/v2/executions/{id}/outputs/verify`.
+the durable objects, atomically writes the inventory FileDROP, and leaves the
+byte-identical report at the Core-owned handoff path beneath the remote session.
+Core retrieves it over SFTP only after observing scheduler success, validates it
+against the pinned execution attempt and expected patterns, and commits the
+artifact locally. A failed scheduler job always wins; a transient receipt-read
+failure stays at the output gate and retries without another submission.
 
-Keep the Core superuser token off Setonix. The publisher receives only the
-short-lived capability scoped to this execution and action, through the
-runtime-secret delivery described in
-[Output verification](../project-configs/output-verification.md). Never persist
-its plaintext in the graph, INI, `sbatch` script, artifact, provenance, or log.
+Keep every Core token off Setonix. The pull path described in
+[Output verification](../project-configs/output-verification.md) needs no Core
+callback URL, reverse tunnel, superuser token, or execution capability in the
+graph, INI, `sbatch` script, artifact, provenance, environment, or log.
 
 Expected immutable Core artifacts are `manifest`, `source_graph`,
 `patched_graph`, `physical_graph`, and the output inventory, each with a

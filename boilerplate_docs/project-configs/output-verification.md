@@ -43,9 +43,9 @@ deliberately small:
   `beampipe-output-inventory/v1` JSON; and
 - one non-secret project setting, `expected_patterns_json`.
 
-Execution identity, retry generation, output root, durable destination, Core
-callback URL, and publisher capability come from the submission runtime. They
-must not appear as EAGLE fields, graph parameters, or persisted graph values.
+Execution identity, retry generation, output root, durable destination, and the
+Core-owned receipt-handoff path come from the submission runtime. They must not
+appear as EAGLE fields, graph parameters, or persisted graph values.
 
 The companion `beampipe-ingest` component is native too. Core still injects
 the execution manifest through its stable `manifest_path` setting; the app
@@ -62,92 +62,47 @@ output. Neither component carries executable function source in the graph.
   <div class="bp-flow-node" data-tone="green"><span>CORE</span><strong>verified inventory</strong><small>immutable ledger evidence</small></div>
 </div>
 
-The application must, in this order:
+For a remote Slurm execution, the application must, in this order:
 
 1. Upload only the execution's selected output paths.
 2. Re-read, checksum, or otherwise verify every durable object through the
    destination adapter.
 3. Build `beampipe-output-inventory/v1`, atomically write it to the DALiuGE
    inventory FileDROP, re-read it, and fsync it.
-4. Send the byte-identical report to
-   `POST /api/v2/executions/{id}/outputs/verify` with the execution-scoped
-   publisher capability.
+4. Atomically write the byte-identical report to the fixed, execution-scoped
+   handoff path beneath the remote DALiuGE session and re-read it.
+5. Finish the graph. After Slurm reports `COMPLETED`, Core retrieves the handoff
+   report over the same authenticated SSH/SFTP connection used for scheduler
+   control, validates it, and commits it locally.
 
-Only after Core returns the minimal execution/artifact acknowledgement may the
-application finish and allow DALiuGE to complete the inventory DROP. This keeps
-the graph causal without making Core credentials or callback plumbing visible
-in EAGLE.
+The fixed handoff is
+`.beampipe/publication/attempt-<retry_count>/beampipe-output-inventory.json`
+beneath the recorded `remote_session_dir`. The attempt directory preserves
+immutable evidence when a retry reuses the stable DALiuGE session name. The
+submission runtime supplies its absolute path as
+`BEAMPIPE_OUTPUT_INVENTORY_HANDOFF_PATH`; project graphs cannot choose or
+override it. The output DROP remains useful to the graph and its logs, but only
+Core's committed inventory artifact is authoritative ledger evidence.
 
-The output DROP is useful to the graph and its logs, but only Core's committed
-inventory artifact is authoritative ledger evidence.
+This inverted flow deliberately requires no route from a Setonix compute node
+back to an operator laptop, no reverse tunnel, and no Core credential on the
+remote system. A transient SFTP or filesystem visibility error leaves the
+execution at `output_verification` and is retried by the recurring Slurm
+reconciler. It never resubmits the compute job.
 
-Remote REST deployment is fail-closed unless the worker and DALiuGE runtime
-share a private credential-file path or an approved secret broker. Core does
-not fall back to embedding the capability in graph JSON, translator input, or
-an ordinary environment value when private delivery is unavailable.
-
-## Execution-scoped publisher capability
-
-Never give a graph a Core superuser token. Immediately before submission, a
-superuser or the trusted submission worker issues one publisher capability for
-the current execution attempt. The operator API is:
-
-```http
-POST /api/v2/executions/{execution_id}/outputs/publisher-token
-Authorization: Bearer <SUPERUSER_ACCESS_TOKEN>
-Content-Type: application/json
-
-{"ttl_seconds":21600}
-```
-
-The default lifetime is six hours; the accepted range is five minutes through
-24 hours. Automated submission should derive the lifetime from expected queue
-delay, pinned outer wall time, and a small publication grace period, while
-remaining within that cap.
-
-For automatic Slurm delivery, pin that choice in the deployment profile as
-`publication.credential_ttl_minutes`. Core requires 5–1440 minutes and rejects
-a value shorter than the effective outer wall time plus 30 minutes. The
-remaining allowance is the operator's queue-delay budget; increase it for a
-busy partition instead of relying on a hidden default.
-
-The response returns `access_token` exactly once and includes the credential
-ID, expiry, execution attempt, audience
-`beampipe-output-verification`, and exact scope
-`execution:<uuid>:verify_outputs`. It carries `Cache-Control: no-store` and
-`Pragma: no-cache`. Core stores only the token's SHA-256 digest.
-
-Treat delivery as runtime secret handling:
-
-- write the plaintext only to an execution-scoped, mode-`0600` runtime secret
-  file (or an equivalent non-persisted secret mount);
-- give the publisher the secret path, not the token as a command argument;
-- retain that exact private file while DALiuGE may retry a post-return failure;
-- never put the plaintext in a project config, manifest, logical graph,
-  physical graph, INI, `sbatch` script, artifact, provenance payload, or log.
-
-The token is single-purpose and Core accepts only an exact replay after its
-first successful use. Terminal reconciliation revokes it. A Slurm session can
-therefore retain the private file long enough for DALiuGE retries without
-granting a second publication. Automatic removal on the outer job's `EXIT` is
-not implemented yet; operators should treat stale session secret directories
-as a cleanup residual and remove them under their normal workspace-retention
-policy. Do not add an early graph cleanup node, because DALiuGE can retry the
-publisher after the application has returned.
-
-The capability is bound to the execution UUID, action, audience, and current
-`retry_count`. Retry, cancellation, abandonment, or a terminal transition
-revokes outstanding credentials. A credential from an earlier attempt cannot
-verify a later attempt.
+Deployment is fail-closed unless Core has an authenticated control-plane path
+to retrieve the fixed handoff. Core never embeds a token in graph JSON,
+translator input, scheduler files, or ordinary graph parameters. There is no
+publisher callback endpoint and no publisher capability to deliver.
 
 ## Trusted publication report
 
-The verification endpoint accepts either the matching publisher capability or
-a superuser access token. Production graph code should always use the scoped
-capability. Its JSON body is:
+The SSH pull reconciler passes the report through Core's internal trusted
+verification service. The report JSON is:
 
 ```json
 {
+  "execution_id": "01994d50-1234-7abc-8def-0123456789ab",
   "execution_attempt": 0,
   "schema": "beampipe-output-inventory/v1",
   "patterns": ["**/result.bin"],
@@ -170,9 +125,10 @@ capability. Its JSON body is:
 }
 ```
 
-`execution_attempt` must equal the execution's current `retry_count`; it is
-part of the canonical publication report and prevents a receipt from one retry
-generation being reused by another. `inventory_sha256` is SHA-256 over compact
+`execution_id` must equal the ledger UUID and `execution_attempt` must equal the
+execution's current `retry_count`. Both are part of the canonical publication
+report and prevent a receipt from another run or retry generation being reused.
+`inventory_sha256` is SHA-256 over compact
 JSON for the `products` array with
 object keys sorted (`bytes`, `path`, `sha256`) and array order preserved. The
 request's patterns must exactly equal the pinned `expected_patterns`. Core
@@ -190,32 +146,22 @@ metadata.
 
 ## Ordering and retry behavior
 
-Publication and scheduler observation may arrive in either order:
-
-- **Receipt first:** while DALiuGE or the scheduler is active, a scoped
-  publisher atomically stores the immutable inventory, sets
-  `output_state: verified`, and records verification provenance. The aggregate
-  execution remains non-terminal. A later successful backend poll finalizes
-  sources and completes the execution.
-- **Backend success first:** successful backend observation leaves the execution
-  waiting at the output gate. A valid report then stores the inventory,
-  finalizes sources, and completes the execution in the same transaction.
-
-A later backend failure always wins, even when a receipt arrived first. Core
-retains the output evidence but marks the aggregate execution failed and does
-not finalize successful source signatures.
-
-Capability consumption and report binding happen in the same database
-transaction. If the publisher loses the `200` response, an exact retry with the
-same capability and canonical report returns the already committed artifact
-without another mutation, including after a terminal poll revokes the
-credential. A revoked credential that was never consumed is unusable. Reusing a
-consumed capability with a changed report or a different execution is rejected.
+The pull flow is intentionally backend-first. Scheduler failure wins and
+Core never accepts a handoff as proof of successful computation. Scheduler
+success moves the execution to the output gate; Core then reads the exact
+session-scoped path, rejects symlinks and non-regular files, enforces the
+32 MiB bound while reading, and applies the same schema, attempt, pattern,
+product, digest, and destination checks on every report. Exact re-reads are
+idempotent. A transient transport or read failure preserves scheduler success,
+records a redacted observation, and retries during the next reconciliation
+tick; it cannot cause another submission.
 
 ## Trust boundary
 
 Core validates policy, report shape, canonical inventory digest, destination
-URI, capability authorization, and publication acknowledgement. It deliberately
+URI, execution generation, and publication acknowledgement. It binds retrieval
+trust to the pinned SSH target, verified host key, authenticated remote account,
+recorded UUID-scoped session directory, and exact handoff path. It deliberately
 does not receive project storage credentials and cannot independently re-read
 destination objects. The publisher's post-upload verification is therefore the
 durable-publication trust root. Keep destination credentials inside the
