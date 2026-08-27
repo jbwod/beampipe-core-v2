@@ -150,9 +150,8 @@ pub enum SettingsError {
 impl Settings {
     /// Load defaults, an optional YAML config file, and environment overrides.
     ///
-    /// `BEAMPIPE_CONFIG` (or legacy `BEAMPIPE_CONFIG_FILE`) selects a file. If neither
-    /// is set, `./beampipe.yaml` is loaded when present. Existing environment variable
-    /// names retain highest precedence.
+    /// `BEAMPIPE_CONFIG` selects a file. If it is not set, `./beampipe.yaml` is loaded
+    /// when present. Environment variables retain highest precedence.
     pub fn load() -> Result<SettingsResolution, SettingsError> {
         let _ = dotenvy::dotenv();
         let config_path = configured_path();
@@ -611,7 +610,6 @@ config_section!(IntegrationsFile {
 fn configured_path() -> Option<PathBuf> {
     std::env::var("BEAMPIPE_CONFIG")
         .ok()
-        .or_else(|| std::env::var("BEAMPIPE_CONFIG_FILE").ok())
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
         .or_else(|| {

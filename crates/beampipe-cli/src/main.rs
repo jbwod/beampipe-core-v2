@@ -128,9 +128,6 @@ enum CliCommand {
     /// can start automatically; host mode prints the foreground `beampipe start` command.
     #[command(after_long_help = SETUP_AFTER_LONG_HELP)]
     Setup {
-        #[command(subcommand)]
-        command: Option<SetupCommand>,
-
         /// Run unattended with supplied values and safe defaults; requires --runtime.
         #[arg(long, help_heading = "Setup mode")]
         yes: bool,
@@ -386,8 +383,6 @@ enum CliCommand {
         #[command(subcommand)]
         command: SecurityCommand,
     },
-    /// Export data migration guidance (Python → Rust Postgres).
-    MigrateData,
     /// Measure TAP and discovery latency (requires network).
     Bench {
         #[command(subcommand)]
@@ -715,10 +710,6 @@ enum ProjectCommand {
         #[arg(short, long)]
         file: PathBuf,
     },
-    Upload {
-        #[arg(short, long)]
-        file: PathBuf,
-    },
     Add {
         #[arg(short, long)]
         file: PathBuf,
@@ -731,12 +722,6 @@ enum ProjectCommand {
         #[arg(short, long)]
         file: PathBuf,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum SetupCommand {
-    /// Re-run doctor checks (same as `beampipe doctor`).
-    Check,
 }
 
 #[derive(Debug, Subcommand)]
@@ -930,7 +915,7 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
-            ProjectCommand::Upload { file } | ProjectCommand::Add { file } => {
+            ProjectCommand::Add { file } => {
                 let settings = Settings::from_env()?;
                 let pool = beampipe_db::connect(&settings.database_url).await?;
                 setup::upload_project_config_file(&pool, &file).await?;
@@ -966,7 +951,6 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         CliCommand::Setup {
-            command,
             yes,
             database_url,
             jwt_secret,
@@ -1005,49 +989,45 @@ async fn main() -> anyhow::Result<()> {
             start,
             no_start,
         } => {
-            if matches!(command, Some(SetupCommand::Check)) {
-                setup::run_setup_check(false, None, false).await?;
-            } else {
-                setup::run_setup(setup::SetupOptions {
-                    yes,
-                    database_url,
-                    jwt_secret,
-                    admin_user,
-                    admin_password,
-                    admin_password_file,
-                    admin_email,
-                    project_config,
-                    wallaby_sample: sample.as_deref() == Some("wallaby-hires"),
-                    profile_config,
-                    ssh_slot,
-                    ssh_private_key,
-                    ssh_public_key,
-                    ssh_known_hosts,
-                    ssh_passphrase_file,
-                    ssh_acl,
-                    accept_host_key,
-                    tm_url,
-                    worker_pool,
-                    skip_admin,
-                    skip_upload,
-                    docker,
-                    skip_docker,
-                    runtime,
-                    postgres,
-                    api_port,
-                    postgres_port,
-                    metrics_port,
-                    dashboard,
-                    skip_dashboard,
-                    dash_dir,
-                    dash_repo_url: Some(dash_repo_url),
-                    directory: directory.or(cli.home),
-                    credentials_dir,
-                    start: start && !no_start,
-                    use_real_backends,
-                })
-                .await?;
-            }
+            setup::run_setup(setup::SetupOptions {
+                yes,
+                database_url,
+                jwt_secret,
+                admin_user,
+                admin_password,
+                admin_password_file,
+                admin_email,
+                project_config,
+                wallaby_sample: sample.as_deref() == Some("wallaby-hires"),
+                profile_config,
+                ssh_slot,
+                ssh_private_key,
+                ssh_public_key,
+                ssh_known_hosts,
+                ssh_passphrase_file,
+                ssh_acl,
+                accept_host_key,
+                tm_url,
+                worker_pool,
+                skip_admin,
+                skip_upload,
+                docker,
+                skip_docker,
+                runtime,
+                postgres,
+                api_port,
+                postgres_port,
+                metrics_port,
+                dashboard,
+                skip_dashboard,
+                dash_dir,
+                dash_repo_url: Some(dash_repo_url),
+                directory: directory.or(cli.home),
+                credentials_dir,
+                start: start && !no_start,
+                use_real_backends,
+            })
+            .await?;
         }
         CliCommand::Uninstall {
             yes,
@@ -1316,12 +1296,6 @@ async fn main() -> anyhow::Result<()> {
             if !issues.is_empty() {
                 std::process::exit(1);
             }
-        }
-        CliCommand::MigrateData => {
-            println!("Python → Rust data migration is not automated yet.");
-            println!("Export these tables from Python Postgres and import into Rust schema:");
-            println!("  users, source_registry, archive_metadata, batch_execution_records, daliuge_deployment_profile");
-            println!("Compare ledger snapshots via GET /api/v2/executions/{{id}}/ledger-snapshot");
         }
         CliCommand::Bench { command } => match command {
             BenchCommand::Tap {

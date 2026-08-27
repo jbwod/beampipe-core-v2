@@ -12,7 +12,7 @@
 | Configure | `project`, `profile`, `wasm` |
 | Inspect backends | `scheduler`, `daliuge`, `slurm`, `slurm credentials` |
 | Operate | `status`, `console`, `timeline`, `execution`, `graph` |
-| Maintain | `uninstall`, `openapi export`, `purge-provenance`, `migrate-data` |
+| Maintain | `uninstall`, `openapi export`, `purge-provenance` |
 
 ## Bootstrap
 
