@@ -248,6 +248,19 @@ mod tests {
         let project = fs::read(dir.path().join("config/wallaby_hires.v2.yaml")).unwrap();
         let config = ProjectConfig::from_slice(&project).unwrap();
         assert!(config.validate_report().valid);
+        let no_download_project =
+            fs::read(dir.path().join("config/wallaby_hires_nodownloads.v2.yaml"))
+                .unwrap();
+        let no_download_config = ProjectConfig::from_slice(&no_download_project).unwrap();
+        assert!(no_download_config.validate_report().valid);
+        assert!(no_download_config.output_verification.required);
+        assert_eq!(
+            no_download_config.output_verification.expected_patterns,
+            vec![
+                "**/image*.10arc.final_mosaic.fits".to_string(),
+                "**/weights*.10arc.final_mosaic.fits".to_string(),
+            ]
+        );
         let profile: serde_json::Value = serde_json::from_slice(
             &fs::read(dir.path().join("config/deployment_profile.slurm-remote.json"))
                 .unwrap(),
@@ -270,7 +283,7 @@ mod tests {
                 )
                 .unwrap()
             ),
-            "3c5a70283681184cb34a50c28d8c50b2eb789ee16670c7832584dad6c22aedbb"
+            "b800492c5a940c9ebc1e9aaacbb723d861ad248d9e3368f4330180ee9345d642"
         );
         assert_eq!(
             sha256(
@@ -281,7 +294,7 @@ mod tests {
                 )
                 .unwrap()
             ),
-            "e2937ab4180c9ef6cdee3f92edaeebbde0cc1e31dbebbe6a33d4cbbd6de27a7c"
+            "f2f5db47b7b30c12ab00c7eb0c868a0a14f4000f5706f15a6a27a5ec6e17267a"
         );
     }
 

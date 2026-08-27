@@ -53,9 +53,9 @@ staging:
   provider: none
 
 graph:
-  # Vendored from wallaby-hires-beampipe commit 686c5d40f83490f2696eb3dad898f7eacb314d95.
+  # Vendored from wallaby-hires-beampipe commit 5fb72fdb13f44642fafd0d9b918b79210511ee00.
   path: config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph
-  sha256: e2937ab4180c9ef6cdee3f92edaeebbde0cc1e31dbebbe6a33d4cbbd6de27a7c
+  sha256: f2f5db47b7b30c12ab00c7eb0c868a0a14f4000f5706f15a6a27a5ec6e17267a
 
 discovery:
   queries:
@@ -164,10 +164,13 @@ graph_patches:
     set:
       num_of_copies: "$count(sbids[].datasets[])"
 
-# This test graph intentionally produces no durable downloadable products.
+# This test graph publishes two small synthetic qualification products.
 output_verification:
-  required: false
+  required: true
   inventory_schema: beampipe-output-inventory/v1
+  expected_patterns:
+    - "**/image*.10arc.final_mosaic.fits"
+    - "**/weights*.10arc.final_mosaic.fits"
 
 automation:
   execution:
