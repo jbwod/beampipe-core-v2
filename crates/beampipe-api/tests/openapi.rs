@@ -115,6 +115,83 @@ fn every_success_response_has_content_and_resolvable_schemas() {
 }
 
 #[test]
+fn query_bearing_operations_publish_their_query_contracts() {
+    use std::collections::BTreeSet;
+
+    let spec = beampipe_api::export_openapi_json();
+    let expected: &[(&str, &[&str])] = &[
+        ("/api/v2/diagnostics", &["profile"]),
+        ("/api/v2/workers", &["include_stopped"]),
+        (
+            "/api/v2/workers/leases",
+            &["include_expired", "worker_id"],
+        ),
+        ("/api/v2/scheduler/status", &["profile"]),
+        ("/api/v2/scheduler/jobs", &["limit", "offset"]),
+        ("/api/v2/daliuge/inspect", &["profile"]),
+        ("/api/v2/daliuge/sessions", &["profile"]),
+        (
+            "/api/v2/executions",
+            &["items_per_page", "page", "project_module", "status"],
+        ),
+        (
+            "/api/v2/executions/{id}/ledger-snapshot",
+            &["include_manifest"],
+        ),
+        ("/api/v2/sources", &["limit", "offset", "project_module"]),
+        (
+            "/api/v2/sources/{id}/executions",
+            &["limit", "offset"],
+        ),
+        (
+            "/api/v2/executions/{id}/observations",
+            &["limit", "offset"],
+        ),
+        (
+            "/api/v2/project-configs/{id}/wasm/{sha256}",
+            &["download"],
+        ),
+        ("/api/v2/alert-deliveries", &["limit"]),
+        ("/api/v2/executions/{id}/events", &["limit"]),
+        ("/api/v2/sources/{id}/events", &["limit"]),
+        (
+            "/api/v2/projects/{module}/events",
+            &["limit", "offset"],
+        ),
+    ];
+
+    for (path, expected_names) in expected {
+        let operation = spec
+            .pointer(&format!("/paths/{}/get", path.replace('/', "~1")))
+            .unwrap_or_else(|| panic!("GET {path} operation"));
+        let query_parameters = operation
+            .get("parameters")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|parameter| {
+                parameter.get("in").and_then(serde_json::Value::as_str) == Some("query")
+            })
+            .collect::<Vec<_>>();
+        let actual_names = query_parameters
+            .iter()
+            .filter_map(|parameter| parameter.get("name").and_then(serde_json::Value::as_str))
+            .collect::<BTreeSet<_>>();
+        let expected_names = expected_names.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(actual_names, expected_names, "GET {path} query parameters");
+        assert!(
+            query_parameters.iter().all(|parameter| {
+                parameter
+                    .get("required")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+            }),
+            "GET {path} query parameters must remain optional",
+        );
+    }
+}
+
+#[test]
 fn openapi_uses_http_bearer_auth_for_json_login() {
     let spec = beampipe_api::export_openapi_json();
     assert_eq!(

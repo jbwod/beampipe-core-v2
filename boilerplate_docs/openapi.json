@@ -4705,6 +4705,18 @@
       "get": {
         "description": "Audit log of alert deliveries.",
         "operationId": "list_alert_deliveries",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5004,6 +5016,17 @@
     "/api/v2/daliuge/inspect": {
       "get": {
         "operationId": "daliuge_inspect",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5049,6 +5072,17 @@
     "/api/v2/daliuge/sessions": {
       "get": {
         "operationId": "daliuge_sessions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5399,6 +5433,17 @@
     "/api/v2/diagnostics": {
       "get": {
         "operationId": "diagnostics",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5445,6 +5490,46 @@
       "get": {
         "description": "Filter executions by project module and status.",
         "operationId": "list_executions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_module",
+            "required": false,
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "items_per_page",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5861,6 +5946,26 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -5993,12 +6098,11 @@
         "operationId": "execution_ledger_snapshot",
         "parameters": [
           {
-            "in": "path",
-            "name": "id",
-            "required": true,
+            "in": "query",
+            "name": "include_manifest",
+            "required": false,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "type": "boolean"
             }
           }
         ],
@@ -6053,12 +6157,23 @@
         "operationId": "execution_observations",
         "parameters": [
           {
-            "in": "path",
-            "name": "id",
-            "required": true,
+            "in": "query",
+            "name": "limit",
+            "required": false,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
             }
           }
         ],
@@ -7540,19 +7655,12 @@
         "operationId": "get_project_config_wasm",
         "parameters": [
           {
-            "in": "path",
-            "name": "id",
-            "required": true,
+            "in": "query",
+            "name": "download",
+            "required": false,
             "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "sha256",
-            "required": true,
-            "schema": {
-              "type": "string"
+              "nullable": true,
+              "type": "boolean"
             }
           }
         ],
@@ -7780,6 +7888,46 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -7923,6 +8071,28 @@
     "/api/v2/scheduler/jobs": {
       "get": {
         "operationId": "scheduler_jobs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7971,6 +8141,17 @@
     "/api/v2/scheduler/status": {
       "get": {
         "operationId": "scheduler_status",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -8128,6 +8309,37 @@
       "get": {
         "description": "Paginated source registry for a project module.",
         "operationId": "list_sources",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_module",
+            "required": false,
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -8572,6 +8784,26 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -8626,12 +8858,23 @@
         "operationId": "list_source_executions",
         "parameters": [
           {
-            "in": "path",
-            "name": "id",
-            "required": true,
+            "in": "query",
+            "name": "limit",
+            "required": false,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
             }
           }
         ],
@@ -8849,6 +9092,16 @@
     "/api/v2/workers": {
       "get": {
         "operationId": "list_workers",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_stopped",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -8960,6 +9213,26 @@
     "/api/v2/workers/leases": {
       "get": {
         "operationId": "list_worker_leases",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "worker_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_expired",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -155,10 +155,17 @@ impl From<ProvenanceEventRow> for ProvenanceEventResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ProjectEventsQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LimitQuery {
+    pub limit: Option<i64>,
 }
 
 fn validate_trigger_kind(kind: &str) -> Result<(), ApiError> {
@@ -412,9 +419,7 @@ pub async fn test_notification_channel(
 pub async fn list_alert_rules(
     State(state): State<Arc<crate::AppState>>,
     AuthUser(_user): AuthUser,
-    Query(query): Query<ProjectEventsQuery>,
 ) -> Result<Json<Vec<AlertRuleRow>>, ApiError> {
-    let _ = query;
     Ok(Json(repo::list_alert_rules(&state.pool, None).await?))
 }
 
@@ -510,15 +515,16 @@ pub async fn delete_alert_rule(
     get,
     path = "/api/v2/alert-deliveries",
     tag = "alerts",
+    params(LimitQuery),
     responses((status = 200, body = [AlertDeliveryResponse]))
 )]
 pub async fn list_alert_deliveries(
     State(state): State<Arc<crate::AppState>>,
     AuthUser(_user): AuthUser,
-    Query(query): Query<ProjectEventsQuery>,
+    Query(query): Query<LimitQuery>,
 ) -> Result<Json<Vec<AlertDeliveryResponse>>, ApiError> {
     Ok(Json(
-        repo::list_alert_deliveries(&state.pool, query.limit.unwrap_or(50))
+        repo::list_alert_deliveries(&state.pool, query.limit.unwrap_or(50).clamp(1, 500))
             .await?
             .into_iter()
             .map(AlertDeliveryResponse::from)
@@ -530,20 +536,28 @@ pub async fn list_alert_deliveries(
     get,
     path = "/api/v2/executions/{id}/events",
     tag = "provenance",
-    params(("id" = Uuid, Path, description = "Execution UUID")),
+    params(
+        ("id" = Uuid, Path, description = "Execution UUID"),
+        LimitQuery
+    ),
     responses((status = 200, body = [ProvenanceEventResponse]))
 )]
 pub async fn list_execution_events(
     State(state): State<Arc<crate::AppState>>,
     AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
+    Query(query): Query<LimitQuery>,
 ) -> Result<Json<Vec<ProvenanceEventResponse>>, ApiError> {
     Ok(Json(
-        repo::list_provenance_events_for_execution(&state.pool, id, 100)
-            .await?
-            .into_iter()
-            .map(ProvenanceEventResponse::from)
-            .collect(),
+        repo::list_provenance_events_for_execution(
+            &state.pool,
+            id,
+            query.limit.unwrap_or(100).clamp(1, 500),
+        )
+        .await?
+        .into_iter()
+        .map(ProvenanceEventResponse::from)
+        .collect(),
     ))
 }
 
@@ -551,13 +565,17 @@ pub async fn list_execution_events(
     get,
     path = "/api/v2/sources/{id}/events",
     tag = "provenance",
-    params(("id" = Uuid, Path, description = "Source UUID")),
+    params(
+        ("id" = Uuid, Path, description = "Source UUID"),
+        LimitQuery
+    ),
     responses((status = 200, body = [ProvenanceEventResponse]))
 )]
 pub async fn list_source_events(
     State(state): State<Arc<crate::AppState>>,
     AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
+    Query(query): Query<LimitQuery>,
 ) -> Result<Json<Vec<ProvenanceEventResponse>>, ApiError> {
     let source = repo::get_source(&state.pool, id)
         .await?
@@ -567,7 +585,7 @@ pub async fn list_source_events(
             &state.pool,
             &source.project_module,
             &source.source_identifier,
-            100,
+            query.limit.unwrap_or(100).clamp(1, 500),
         )
         .await?
         .into_iter()
@@ -580,7 +598,10 @@ pub async fn list_source_events(
     get,
     path = "/api/v2/projects/{module}/events",
     tag = "provenance",
-    params(("module" = String, Path, description = "Project module name")),
+    params(
+        ("module" = String, Path, description = "Project module name"),
+        ProjectEventsQuery
+    ),
     responses((status = 200, body = [ProvenanceEventResponse]))
 )]
 pub async fn list_project_events(
@@ -593,8 +614,8 @@ pub async fn list_project_events(
         repo::list_provenance_events_for_project(
             &state.pool,
             &module,
-            query.limit.unwrap_or(50),
-            query.offset.unwrap_or(0),
+            query.limit.unwrap_or(50).clamp(1, 500),
+            query.offset.unwrap_or(0).max(0),
         )
         .await?
         .into_iter()

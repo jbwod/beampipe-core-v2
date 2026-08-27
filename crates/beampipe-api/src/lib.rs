@@ -54,7 +54,7 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
-use utoipa::{OpenApi, ToSchema};
+use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
@@ -978,7 +978,7 @@ pub struct DiagnosticsResponse {
     pub diagnostics: Vec<beampipe_domain::Diagnostic>,
 }
 
-#[utoipa::path(get, path = "/api/v2/diagnostics", tag = "health", responses((status = 200, body = DiagnosticsResponse)))]
+#[utoipa::path(get, path = "/api/v2/diagnostics", tag = "health", params(OperatorProfileQuery), responses((status = 200, body = DiagnosticsResponse)))]
 async fn diagnostics(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -1271,7 +1271,8 @@ async fn operator_overview(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct WorkerListQuery {
     #[serde(default)]
     pub include_stopped: bool,
@@ -1340,7 +1341,7 @@ async fn worker_read(
     })
 }
 
-#[utoipa::path(get, path = "/api/v2/workers", tag = "operators", responses((status = 200, body = [WorkerRead])))]
+#[utoipa::path(get, path = "/api/v2/workers", tag = "operators", params(WorkerListQuery), responses((status = 200, body = [WorkerRead])))]
 async fn list_workers(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -1536,7 +1537,8 @@ async fn list_worker_pools(
     Ok(Json(repo::list_worker_pools(&state.pool).await?))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct WorkerLeaseQuery {
     pub worker_id: Option<Uuid>,
     #[serde(default)]
@@ -1557,7 +1559,7 @@ pub struct WorkerLeaseRead {
     pub heartbeat_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[utoipa::path(get, path = "/api/v2/workers/leases", tag = "operators", responses((status = 200, body = [WorkerLeaseRead])))]
+#[utoipa::path(get, path = "/api/v2/workers/leases", tag = "operators", params(WorkerLeaseQuery), responses((status = 200, body = [WorkerLeaseRead])))]
 async fn list_worker_leases(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -1582,7 +1584,8 @@ async fn list_worker_leases(
     Ok(Json(leases))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct OperatorProfileQuery {
     pub profile: Option<String>,
 }
@@ -1645,7 +1648,7 @@ pub struct SchedulerStatusResponse {
     pub rendered_resource_request: String,
 }
 
-#[utoipa::path(get, path = "/api/v2/scheduler/status", tag = "scheduler", responses((status = 200, body = SchedulerStatusResponse)))]
+#[utoipa::path(get, path = "/api/v2/scheduler/status", tag = "scheduler", params(OperatorProfileQuery), responses((status = 200, body = SchedulerStatusResponse)))]
 async fn scheduler_status(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -1669,8 +1672,9 @@ async fn scheduler_status(
     }))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct OperatorPageQuery {
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PaginationQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -1690,17 +1694,17 @@ pub struct SchedulerJobRead {
     pub last_reconciled_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[utoipa::path(get, path = "/api/v2/scheduler/jobs", tag = "scheduler", responses((status = 200, body = [SchedulerJobRead])))]
+#[utoipa::path(get, path = "/api/v2/scheduler/jobs", tag = "scheduler", params(PaginationQuery), responses((status = 200, body = [SchedulerJobRead])))]
 async fn scheduler_jobs(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
-    Query(query): Query<OperatorPageQuery>,
+    Query(query): Query<PaginationQuery>,
 ) -> Result<Json<Vec<SchedulerJobRead>>, ApiError> {
     let jobs = repo::list_scheduler_executions(
         &state.pool,
         "slurm",
-        query.limit.unwrap_or(100),
-        query.offset.unwrap_or(0),
+        query.limit.unwrap_or(100).clamp(1, 500),
+        query.offset.unwrap_or(0).max(0),
     )
     .await?
     .into_iter()
@@ -1787,7 +1791,7 @@ fn daliuge_endpoints(
     })
 }
 
-#[utoipa::path(get, path = "/api/v2/daliuge/inspect", tag = "daliuge", responses((status = 200, body = DaliugeInspectResponse)))]
+#[utoipa::path(get, path = "/api/v2/daliuge/inspect", tag = "daliuge", params(OperatorProfileQuery), responses((status = 200, body = DaliugeInspectResponse)))]
 async fn daliuge_inspect(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -1809,7 +1813,7 @@ async fn daliuge_inspect(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/daliuge/sessions", tag = "daliuge", responses((status = 200, body = Value)))]
+#[utoipa::path(get, path = "/api/v2/daliuge/sessions", tag = "daliuge", params(OperatorProfileQuery), responses((status = 200, body = Value)))]
 async fn daliuge_sessions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2011,7 +2015,7 @@ fn validate_logout_tokens(
     Ok(validated)
 }
 
-#[utoipa::path(get, path = "/api/v2/executions", tag = "executions", responses((status = 200, body = repo::PaginatedExecutions)))]
+#[utoipa::path(get, path = "/api/v2/executions", tag = "executions", params(ListExecutionsQuery), responses((status = 200, body = repo::PaginatedExecutions)))]
 async fn list_executions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2029,7 +2033,8 @@ async fn list_executions(
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListExecutionsQuery {
     pub project_module: Option<String>,
     pub status: Option<String>,
@@ -2044,7 +2049,8 @@ pub struct ProvenanceSummary {
     pub recent_events: Vec<observability::ProvenanceEventResponse>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct LedgerSnapshotQuery {
     #[serde(default = "default_true")]
     pub include_manifest: bool,
@@ -2072,6 +2078,7 @@ pub struct LedgerSnapshotResponse {
     get,
     path = "/api/v2/executions/{id}/ledger-snapshot",
     tag = "executions",
+    params(LedgerSnapshotQuery),
     responses((status = 200, body = LedgerSnapshotResponse), (status = 404))
 )]
 async fn execution_ledger_snapshot(
@@ -2333,7 +2340,8 @@ pub struct DiscoverTriggerResponse {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListSourcesQuery {
     pub project_module: Option<String>,
     pub limit: Option<i64>,
@@ -2419,7 +2427,7 @@ async fn discover_sources(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/sources", tag = "sources", responses((status = 200, body = [SourceRegistryRow])))]
+#[utoipa::path(get, path = "/api/v2/sources", tag = "sources", params(ListSourcesQuery), responses((status = 200, body = [SourceRegistryRow])))]
 async fn list_sources(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2525,12 +2533,12 @@ async fn get_source_metadata(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/sources/{id}/executions", tag = "sources", responses((status = 200, body = [ExecutionRow]), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/sources/{id}/executions", tag = "sources", params(PaginationQuery), responses((status = 200, body = [ExecutionRow]), (status = 404)))]
 async fn list_source_executions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
-    Query(query): Query<ListSourcesQuery>,
+    Query(query): Query<PaginationQuery>,
 ) -> Result<Json<Vec<ExecutionRow>>, ApiError> {
     let source = repo::get_source(&state.pool, id)
         .await?
@@ -3321,12 +3329,12 @@ async fn execution_summary(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/executions/{id}/observations", tag = "executions", responses((status = 200, body = [ExecutionObservationRow]), (status = 404)))]
+#[utoipa::path(get, path = "/api/v2/executions/{id}/observations", tag = "executions", params(PaginationQuery), responses((status = 200, body = [ExecutionObservationRow]), (status = 404)))]
 async fn execution_observations(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
-    Query(query): Query<ListSourcesQuery>,
+    Query(query): Query<PaginationQuery>,
 ) -> Result<Json<Vec<ExecutionObservationRow>>, ApiError> {
     if repo::get_execution(&state.pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
@@ -3335,8 +3343,8 @@ async fn execution_observations(
         repo::list_execution_observations(
             &state.pool,
             id,
-            query.limit.unwrap_or(100),
-            query.offset.unwrap_or(0),
+            query.limit.unwrap_or(100).clamp(1, 500),
+            query.offset.unwrap_or(0).max(0),
         )
         .await?,
     ))
@@ -4602,6 +4610,7 @@ pub struct WasmBinaryResponse(Vec<u8>);
     get,
     path = "/api/v2/project-configs/{id}/wasm/{sha256}",
     tag = "project-configs",
+    params(WasmGetQuery),
     responses(
         (status = 200, content(
             ("application/json" = WasmMetaResponse),
@@ -4646,7 +4655,8 @@ async fn get_project_config_wasm(
     .into_response())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct WasmGetQuery {
     download: Option<bool>,
 }
