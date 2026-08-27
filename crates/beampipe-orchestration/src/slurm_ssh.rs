@@ -5,7 +5,9 @@ use crate::slurm_batch::{
     SlurmJobPollResult,
 };
 use crate::slurm_credentials::SlurmSshCredentials;
-use crate::slurm_sftp::PrivateSftp;
+use crate::slurm_sftp::{
+    RemoteSftp, PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, SUBMISSION_ARTIFACT_MODE,
+};
 use crate::OrchestrationError;
 use beampipe_profiles::SlurmRemoteDeploymentConfig;
 use russh::client;
@@ -233,12 +235,74 @@ pub struct SlurmSshSession {
     handle: client::Handle<SshClientHandler>,
 }
 
+#[async_trait::async_trait]
+trait AtomicSftpUploader {
+    async fn ensure_private_directory(
+        &mut self,
+        path: &str,
+        mode: u32,
+    ) -> Result<(), OrchestrationError>;
+
+    async fn upload_file_atomic(
+        &mut self,
+        final_path: &str,
+        temporary_path: &str,
+        content: &[u8],
+        mode: u32,
+    ) -> Result<(), OrchestrationError>;
+
+    async fn upload_private_file_atomic(
+        &mut self,
+        final_path: &str,
+        temporary_path: &str,
+        content: &[u8],
+        mode: u32,
+    ) -> Result<(), OrchestrationError>;
+}
+
+#[async_trait::async_trait]
+impl AtomicSftpUploader for RemoteSftp {
+    async fn ensure_private_directory(
+        &mut self,
+        path: &str,
+        mode: u32,
+    ) -> Result<(), OrchestrationError> {
+        RemoteSftp::ensure_private_directory(self, path, mode).await
+    }
+
+    async fn upload_file_atomic(
+        &mut self,
+        final_path: &str,
+        temporary_path: &str,
+        content: &[u8],
+        mode: u32,
+    ) -> Result<(), OrchestrationError> {
+        RemoteSftp::upload_file_atomic(self, final_path, temporary_path, content, mode).await
+    }
+
+    async fn upload_private_file_atomic(
+        &mut self,
+        final_path: &str,
+        temporary_path: &str,
+        content: &[u8],
+        mode: u32,
+    ) -> Result<(), OrchestrationError> {
+        RemoteSftp::upload_private_file_atomic(
+            self,
+            final_path,
+            temporary_path,
+            content,
+            mode,
+        )
+        .await
+    }
+}
+
 fn ssh_client_config() -> client::Config {
     client::Config {
-        // Submission artifacts can be tens of MiB. A healthy remote `tee` is
-        // silent until EOF, so an inbound inactivity deadline can disconnect
-        // a progressing upload. Keepalives detect a dead peer while the
-        // persisted submission deadline bounds the complete operation.
+        // Submission artifacts can be tens of MiB. Keepalives detect a dead
+        // peer while the persisted submission deadline bounds the complete
+        // SFTP transfer and scheduler operation.
         inactivity_timeout: None,
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 3,
@@ -365,73 +429,38 @@ impl SlurmSshSession {
         })
     }
 
-    /// Upload file content via remote `tee` (shell-escaped path).
+    /// Upload text as an owner-only SFTP artifact.
     ///
-    /// Submission artifacts can contain short-lived signed data URLs. Apply a
-    /// restrictive umask in the same remote shell that creates the file so a
-    /// permissive login-node default cannot expose them to group/other users.
+    /// Retained for API compatibility; all artifact writes now use the same
+    /// durable, atomic SFTP path as `upload_text_atomic`.
     pub async fn upload_text(
         &mut self,
         remote_path: &str,
         content: &str,
     ) -> Result<(), OrchestrationError> {
-        let cmd = upload_text_command(remote_path);
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| OrchestrationError::Backend(format!("SSH channel: {e}")))?;
-        channel
-            .exec(false, cmd.as_str())
-            .await
-            .map_err(|e| OrchestrationError::Backend(format!("SSH tee exec: {e}")))?;
-        channel
-            .data(content.as_bytes())
-            .await
-            .map_err(|e| OrchestrationError::Backend(format!("SSH tee write: {e}")))?;
-        channel
-            .eof()
-            .await
-            .map_err(|e| OrchestrationError::Backend(format!("SSH tee eof: {e}")))?;
-
-        let mut exit_status: Option<u32> = None;
-        while let Some(msg) = channel.wait().await {
-            if let ChannelMsg::ExitStatus { exit_status: code } = msg {
-                exit_status = Some(code);
-            }
-        }
-        if exit_status != Some(0) {
-            return Err(OrchestrationError::Backend(format!(
-                "ssh tee failed for {remote_path:?} (exit={exit_status:?})"
-            )));
-        }
-        Ok(())
+        self.upload_text_atomic(remote_path, content).await
     }
 
-    /// Upload through a same-directory temporary file and atomically rename it.
+    /// Upload through an exclusive same-directory SFTP temporary file, sync it,
+    /// verify its size and mode, and atomically rename it.
     pub async fn upload_text_atomic(
         &mut self,
         remote_path: &str,
         content: &str,
     ) -> Result<(), OrchestrationError> {
+        validate_remote_path(remote_path, "submission artifact")?;
         let temporary_path = format!("{remote_path}.tmp-{}", uuid::Uuid::now_v7().simple());
-        self.upload_text(&temporary_path, content).await?;
-        let result = self
-            .run_command(&format!(
-                "mv -- {} {}",
-                shell_escape_single(&temporary_path),
-                shell_escape_single(remote_path)
-            ))
-            .await;
-        if result.is_err() {
-            let _ = self
-                .run_command(&format!(
-                    "rm -f -- {}",
-                    shell_escape_single(&temporary_path)
-                ))
-                .await;
-        }
-        result.map(|_| ())
+        let mut sftp = self.open_sftp().await?;
+        let result = upload_artifact_with(
+            &mut sftp,
+            remote_path,
+            &temporary_path,
+            content.as_bytes(),
+        )
+        .await;
+        let close_result = sftp.shutdown().await;
+        self.finish_atomic_upload(result, close_result, &temporary_path, remote_path)
+            .await
     }
 
     /// Deliver one execution capability through SFTP. Secret bytes are sent
@@ -443,8 +472,8 @@ impl SlurmSshSession {
         remote_path: &str,
         content: &[u8],
     ) -> Result<(), OrchestrationError> {
-        validate_private_remote_path(remote_directory, "publisher secret directory")?;
-        validate_private_remote_path(remote_path, "publisher credential file")?;
+        validate_remote_path(remote_directory, "publisher secret directory")?;
+        validate_remote_path(remote_path, "publisher credential file")?;
         let expected_prefix = format!("{}/", remote_directory.trim_end_matches('/'));
         if !remote_path.starts_with(&expected_prefix) {
             return Err(OrchestrationError::Backend(
@@ -452,51 +481,18 @@ impl SlurmSshSession {
             ));
         }
         let temporary_path = format!("{remote_path}.tmp-{}", uuid::Uuid::now_v7().simple());
-        let channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|error| OrchestrationError::Backend(format!("SSH SFTP channel: {error}")))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|error| {
-                OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}"))
-            })?;
-        let mut sftp = PrivateSftp::connect(channel.into_stream()).await?;
-        let result = async {
-            sftp.ensure_private_directory(remote_directory, 0o700)
-                .await?;
-            sftp.upload_private_file_atomic(remote_path, &temporary_path, content, 0o600)
-                .await
-        }
+        let mut sftp = self.open_sftp().await?;
+        let result = upload_secret_with(
+            &mut sftp,
+            remote_directory,
+            remote_path,
+            &temporary_path,
+            content,
+        )
         .await;
         let close_result = sftp.shutdown().await;
-        match (result, close_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), _) => {
-                // The original subsystem may have died after the server
-                // committed the atomic rename. The failed channel cannot
-                // prove either pathname is absent, so retry both removals on
-                // fresh SFTP channels before reporting a definite
-                // pre-submission failure.
-                for path in
-                    failed_secret_upload_cleanup_paths(false, &temporary_path, remote_path)
-                {
-                    let _ = self.remove_file_sftp(path).await;
-                }
-                Err(error)
-            }
-            (Ok(()), Err(error)) => {
-                // A failed subsystem shutdown occurs before sbatch dispatch.
-                // The final LSTAT already confirmed the file, so open a new
-                // SFTP channel and remove it before reporting failure.
-                for path in failed_secret_upload_cleanup_paths(true, &temporary_path, remote_path) {
-                    let _ = self.remove_file_sftp(path).await;
-                }
-                Err(error)
-            }
-        }
+        self.finish_atomic_upload(result, close_result, &temporary_path, remote_path)
+            .await
     }
 
     /// Best-effort SFTP cleanup used only after a definitely rejected outer
@@ -506,7 +502,11 @@ impl SlurmSshSession {
         &mut self,
         remote_path: &str,
     ) -> Result<(), OrchestrationError> {
-        validate_private_remote_path(remote_path, "publisher credential file")?;
+        self.remove_file_sftp_inner(remote_path, "publisher credential file")
+            .await
+    }
+
+    async fn open_sftp(&mut self) -> Result<RemoteSftp, OrchestrationError> {
         let channel = self
             .handle
             .channel_open_session()
@@ -518,10 +518,51 @@ impl SlurmSshSession {
             .map_err(|error| {
                 OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}"))
             })?;
-        let mut sftp = PrivateSftp::connect(channel.into_stream()).await?;
+        RemoteSftp::connect(channel.into_stream()).await
+    }
+
+    async fn remove_file_sftp_inner(
+        &mut self,
+        remote_path: &str,
+        label: &str,
+    ) -> Result<(), OrchestrationError> {
+        validate_remote_path(remote_path, label)?;
+        let mut sftp = self.open_sftp().await?;
         let result = sftp.remove_file_if_present(remote_path).await;
         let close_result = sftp.shutdown().await;
         result.and(close_result)
+    }
+
+    async fn finish_atomic_upload(
+        &mut self,
+        result: Result<(), OrchestrationError>,
+        close_result: Result<(), OrchestrationError>,
+        temporary_path: &str,
+        final_path: &str,
+    ) -> Result<(), OrchestrationError> {
+        match (result, close_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => {
+                // The original subsystem may have died after the server
+                // committed the atomic rename. The failed channel cannot
+                // prove either pathname is absent, so retry both removals on
+                // fresh SFTP channels before reporting a definite
+                // pre-submission failure.
+                for path in failed_atomic_upload_cleanup_paths(false, temporary_path, final_path) {
+                    let _ = self.remove_file_sftp_inner(path, "failed upload artifact").await;
+                }
+                Err(error)
+            }
+            (Ok(()), Err(error)) => {
+                // A failed subsystem shutdown occurs before sbatch dispatch.
+                // The final LSTAT already confirmed the file, so open a new
+                // SFTP channel and remove it before reporting failure.
+                for path in failed_atomic_upload_cleanup_paths(true, temporary_path, final_path) {
+                    let _ = self.remove_file_sftp_inner(path, "failed upload artifact").await;
+                }
+                Err(error)
+            }
+        }
     }
 
     pub async fn close(self) -> Result<(), OrchestrationError> {
@@ -579,21 +620,43 @@ fn command_stdout(
     ))
 }
 
-fn shell_escape_single(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
-    {
-        format!("'{s}'")
-    } else {
-        format!("'{}'", s.replace('\'', "'\"'\"'"))
-    }
+async fn upload_artifact_with<U: AtomicSftpUploader + Send>(
+    uploader: &mut U,
+    final_path: &str,
+    temporary_path: &str,
+    content: &[u8],
+) -> Result<(), OrchestrationError> {
+    uploader
+        .upload_file_atomic(
+            final_path,
+            temporary_path,
+            content,
+            SUBMISSION_ARTIFACT_MODE,
+        )
+        .await
 }
 
-fn upload_text_command(remote_path: &str) -> String {
-    format!("umask 077 && tee {}", shell_escape_single(remote_path))
+async fn upload_secret_with<U: AtomicSftpUploader + Send>(
+    uploader: &mut U,
+    remote_directory: &str,
+    final_path: &str,
+    temporary_path: &str,
+    content: &[u8],
+) -> Result<(), OrchestrationError> {
+    uploader
+        .ensure_private_directory(remote_directory, PRIVATE_DIRECTORY_MODE)
+        .await?;
+    uploader
+        .upload_private_file_atomic(
+            final_path,
+            temporary_path,
+            content,
+            PRIVATE_FILE_MODE,
+        )
+        .await
 }
 
-fn validate_private_remote_path(path: &str, label: &str) -> Result<(), OrchestrationError> {
+fn validate_remote_path(path: &str, label: &str) -> Result<(), OrchestrationError> {
     if !path.starts_with('/')
         || path.chars().any(char::is_control)
         || path.split('/').any(|part| matches!(part, "." | ".."))
@@ -605,7 +668,7 @@ fn validate_private_remote_path(path: &str, label: &str) -> Result<(), Orchestra
     Ok(())
 }
 
-fn failed_secret_upload_cleanup_paths<'a>(
+fn failed_atomic_upload_cleanup_paths<'a>(
     upload_completed: bool,
     temporary_path: &'a str,
     final_path: &'a str,
@@ -797,14 +860,90 @@ pub fn scancel_command(job_id: &str) -> Result<String, OrchestrationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_stdout, failed_secret_upload_cleanup_paths, is_missing_squeue_job_error,
+        command_stdout, failed_atomic_upload_cleanup_paths, is_missing_squeue_job_error,
         known_host_patterns_match, known_hosts_has_target, load_known_host_keys,
         remote_command_transport_error, sacct_query_command, scancel_command,
-        squeue_query_command, squeue_stdout, ssh_client_config, upload_text_command,
-        validate_slurm_job_id, RemoteCommandKind, RemoteCommandOutput, SlurmSshPool, SlurmTarget,
+        squeue_query_command, squeue_stdout, ssh_client_config, upload_artifact_with,
+        upload_secret_with, validate_remote_path, validate_slurm_job_id, AtomicSftpUploader,
+        RemoteCommandKind, RemoteCommandOutput, SlurmSshPool, SlurmTarget,
+    };
+    use crate::slurm_sftp::{
+        PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, SUBMISSION_ARTIFACT_MODE,
     };
     use crate::OrchestrationError;
     use std::sync::Arc;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum SftpCall {
+        EnsurePrivateDirectory {
+            path: String,
+            mode: u32,
+        },
+        UploadArtifact {
+            final_path: String,
+            temporary_path: String,
+            content: Vec<u8>,
+            mode: u32,
+        },
+        UploadPrivate {
+            final_path: String,
+            temporary_path: String,
+            content: Vec<u8>,
+            mode: u32,
+        },
+    }
+
+    #[derive(Default)]
+    struct ScriptedSftp {
+        calls: Vec<SftpCall>,
+    }
+
+    #[async_trait::async_trait]
+    impl AtomicSftpUploader for ScriptedSftp {
+        async fn ensure_private_directory(
+            &mut self,
+            path: &str,
+            mode: u32,
+        ) -> Result<(), OrchestrationError> {
+            self.calls.push(SftpCall::EnsurePrivateDirectory {
+                path: path.into(),
+                mode,
+            });
+            Ok(())
+        }
+
+        async fn upload_file_atomic(
+            &mut self,
+            final_path: &str,
+            temporary_path: &str,
+            content: &[u8],
+            mode: u32,
+        ) -> Result<(), OrchestrationError> {
+            self.calls.push(SftpCall::UploadArtifact {
+                final_path: final_path.into(),
+                temporary_path: temporary_path.into(),
+                content: content.into(),
+                mode,
+            });
+            Ok(())
+        }
+
+        async fn upload_private_file_atomic(
+            &mut self,
+            final_path: &str,
+            temporary_path: &str,
+            content: &[u8],
+            mode: u32,
+        ) -> Result<(), OrchestrationError> {
+            self.calls.push(SftpCall::UploadPrivate {
+                final_path: final_path.into(),
+                temporary_path: temporary_path.into(),
+                content: content.into(),
+                mode,
+            });
+            Ok(())
+        }
+    }
 
     fn generate_public_key(dir: &tempfile::TempDir) -> String {
         let key_path = dir.path().join("id_test");
@@ -824,25 +963,85 @@ mod tests {
         std::fs::read_to_string(key_path.with_extension("pub")).unwrap()
     }
 
-    #[test]
-    fn uploaded_submission_artifacts_are_created_private() {
-        let command = upload_text_command("/scratch/session graph.pgt");
-        assert!(command.starts_with("umask 077 && tee "));
-        assert!(command.contains("'/scratch/session graph.pgt'"));
+    #[tokio::test]
+    async fn submission_artifacts_use_owner_only_atomic_sftp() {
+        let mut sftp = ScriptedSftp::default();
+        upload_artifact_with(
+            &mut sftp,
+            "/scratch/session graph.pgt",
+            "/scratch/session graph.pgt.tmp-test",
+            b"graph\0bytes",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sftp.calls,
+            vec![SftpCall::UploadArtifact {
+                final_path: "/scratch/session graph.pgt".into(),
+                temporary_path: "/scratch/session graph.pgt.tmp-test".into(),
+                content: b"graph\0bytes".to_vec(),
+                mode: SUBMISSION_ARTIFACT_MODE,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn publisher_secrets_retain_private_directory_and_file_policy() {
+        let mut sftp = ScriptedSftp::default();
+        upload_secret_with(
+            &mut sftp,
+            "/session/.beampipe-secrets",
+            "/session/.beampipe-secrets/publisher.token",
+            "/session/.beampipe-secrets/publisher.token.tmp-test",
+            b"opaque-token",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sftp.calls,
+            vec![
+                SftpCall::EnsurePrivateDirectory {
+                    path: "/session/.beampipe-secrets".into(),
+                    mode: PRIVATE_DIRECTORY_MODE,
+                },
+                SftpCall::UploadPrivate {
+                    final_path: "/session/.beampipe-secrets/publisher.token".into(),
+                    temporary_path: "/session/.beampipe-secrets/publisher.token.tmp-test".into(),
+                    content: b"opaque-token".to_vec(),
+                    mode: PRIVATE_FILE_MODE,
+                },
+            ]
+        );
     }
 
     #[test]
-    fn interrupted_secret_upload_rechecks_both_names_on_fresh_channels() {
+    fn interrupted_atomic_upload_rechecks_both_names_on_fresh_channels() {
         let temporary = "/session/.beampipe-secrets/publisher.token.tmp-test";
         let final_path = "/session/.beampipe-secrets/publisher.token";
         assert_eq!(
-            failed_secret_upload_cleanup_paths(false, temporary, final_path),
+            failed_atomic_upload_cleanup_paths(false, temporary, final_path),
             vec![temporary, final_path]
         );
         assert_eq!(
-            failed_secret_upload_cleanup_paths(true, temporary, final_path),
+            failed_atomic_upload_cleanup_paths(true, temporary, final_path),
             vec![final_path]
         );
+    }
+
+    #[test]
+    fn sftp_paths_must_be_absolute_and_traversal_free() {
+        assert!(validate_remote_path("/scratch/session graph.pgt", "artifact").is_ok());
+        for path in [
+            "relative/file",
+            "/scratch/../secret",
+            "/scratch/./file",
+            "/scratch/file\nname",
+        ] {
+            assert!(
+                validate_remote_path(path, "artifact").is_err(),
+                "accepted {path:?}"
+            );
+        }
     }
 
     #[test]
