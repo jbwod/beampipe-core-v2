@@ -5,13 +5,6 @@ All notable changes to Beampipe Core are documented here. This project follows
 
 ## [Unreleased]
 
-### Changed
-
-- Corrected the standalone DALiuGE package, repository, and Python namespace
-  spelling to `beampipe-palette` / `beampipe_palette`.
-- Re-vendored the Wallaby graphs from `wallaby-hires` 0.1.19 with immutable
-  `beampipe-palette` 0.5.1 component metadata and refreshed graph digests.
-
 ## [0.2.0] - 2026-08-27
 
 Version 0.2.0 is a project-neutral control-plane release. It replaces the
@@ -77,6 +70,10 @@ transport.
 
 ### Changed
 
+- Corrected the standalone DALiuGE package, repository, and Python namespace
+  spelling to `beampipe-palette` / `beampipe_palette`.
+- Re-vendored the Wallaby graphs from `wallaby-hires` 0.1.19 with immutable
+  `beampipe-palette` 0.5.1 component metadata and refreshed graph digests.
 - Discovery and preparation now use `groups` and `records`, with canonical
   non-empty string identities for `source_identifier`, `group_key`, and
   `record_id`.
