@@ -122,67 +122,6 @@ async fn install_routing_contract(
     (profile, config)
 }
 
-async fn create_running_output_required_execution(
-    pool: &sqlx::PgPool,
-    module: &str,
-    source_identifier: &str,
-) -> beampipe_db::models::ExecutionRow {
-    let spec = json!({
-        "apiVersion": "beampipe.dev/v2",
-        "kind": "ProjectConfig",
-        "metadata": {"id": module},
-        "output_verification": {
-            "required": true,
-            "inventory_schema": "beampipe-output-inventory/v1",
-            "expected_patterns": ["**/result.bin"]
-        }
-    });
-    let config = repo::insert_project_config(pool, module, spec, &"9".repeat(64))
-        .await
-        .unwrap();
-    repo::upsert_source(pool, module, source_identifier, true)
-        .await
-        .unwrap();
-    sqlx::query(
-        r#"
-        UPDATE source_registry
-        SET discovery_signature = $3,
-            workflow_run_pending = true,
-            workflow_run_pending_at = now()
-        WHERE project_module = $1 AND source_identifier = $2
-        "#,
-    )
-    .bind(module)
-    .bind(source_identifier)
-    .bind("8".repeat(64))
-    .execute(pool)
-    .await
-    .unwrap();
-    let execution = repo::create_execution(
-        pool,
-        module,
-        json!([{"source_identifier": source_identifier}]),
-        "local",
-        None,
-        Some(config.uuid),
-        None,
-    )
-    .await
-    .unwrap();
-    repo::apply_execution_state_patch(
-        pool,
-        execution.uuid,
-        ExecutionStatePatch {
-            submission_state: Some(SubmissionState::Submitted),
-            daliuge_state: Some(DaliugeState::Running),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap()
-    .unwrap()
-}
-
 #[tokio::test]
 async fn discovery_claim_and_release() {
     let Some(pool) = test_pool().await else {
@@ -817,6 +756,7 @@ async fn required_outputs_hold_success_until_inventory_artifact_commits() {
     );
 }
 
+#[tokio::test]
 async fn output_verification_preserves_discovery_that_changed_after_admission() {
     let Some(pool) = test_pool().await else {
         eprintln!("DATABASE_URL not set; skipping integration test");
