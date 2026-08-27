@@ -8,11 +8,12 @@
 use crate::OrchestrationError;
 use openssh_sftp_client::{
     error::{Error as SftpError, SftpErrorKind},
+    file::File,
     metadata::{MetaData, Permissions},
     Sftp, SftpOptions,
 };
 use std::time::Duration;
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite};
+use tokio::io::{self, AsyncRead, AsyncSeekExt, AsyncWrite};
 
 /// Generated submission artifacts can contain short-lived signed URLs, so the
 /// default remains owner-only even though the generic uploader also supports
@@ -232,7 +233,7 @@ impl RemoteSftp {
             ));
         }
 
-        let content = read_bounded_inventory(&mut file, max_bytes).await?;
+        let content = read_bounded_inventory(&mut file, opened_size).await?;
         if content.len() != opened_size {
             return Err(inventory_rejected(
                 "output inventory size changed while it was being read",
@@ -241,7 +242,7 @@ impl RemoteSftp {
         file.seek(std::io::SeekFrom::Start(0))
             .await
             .map_err(|error| output_inventory_io_error("rewind output inventory", &error))?;
-        let verification = read_bounded_inventory(&mut file, max_bytes).await?;
+        let verification = read_bounded_inventory(&mut file, opened_size).await?;
         if verification != content {
             return Err(inventory_rejected(
                 "output inventory content changed while it was being read",
@@ -307,28 +308,16 @@ impl RemoteSftp {
     }
 }
 
-async fn read_bounded_inventory<R>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> Result<Vec<u8>, OrchestrationError>
-where
-    R: AsyncRead + Unpin,
-{
-    let byte_limit = u64::try_from(max_bytes)
-        .map_err(|_| protocol_error("output inventory byte limit is unsupported"))?
-        .saturating_add(1);
-    let mut content = Vec::new();
-    reader
-        .take(byte_limit)
-        .read_to_end(&mut content)
+async fn read_bounded_inventory(
+    file: &mut File,
+    expected_size: usize,
+) -> Result<Vec<u8>, OrchestrationError> {
+    file.read_all(expected_size, Default::default())
         .await
-        .map_err(|error| output_inventory_io_error("read output inventory", &error))?;
-    if content.len() > max_bytes {
-        return Err(inventory_rejected(
-            "output inventory exceeds the 32 MiB limit",
-        ));
-    }
-    Ok(content)
+        .map(|content| content.to_vec())
+        .map_err(|error| {
+            output_inventory_changed_sftp_error("read output inventory", &error)
+        })
 }
 
 fn ensure_directory_named(
