@@ -4,8 +4,9 @@ This procedure configures project policy, selects an execution backend,
 discovers sources, composes a run, and follows durable evidence through Dash.
 For a provider-neutral contract check, use
 [Project-neutral acceptance](../getting-started/neutral-project.md). The
-[WALLABY local DALiuGE runbook](../getting-started/local-daliuge.md) gives
-provider-specific live values and matching API commands.
+[WALLABY local DALiuGE qualification](../getting-started/local-daliuge.md)
+checks the graph and publisher against direct loopback NM, DIM, and TM services;
+it is intentionally outside this Core/Dash workflow.
 
 <div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Dashboard workflow from source registration, discovery, signed metadata, and pinned intent through a REST or Slurm backend, reconciliation and output verification, to terminal ledger evidence">
   <div class="bp-flow-node" data-tone="cyan"><span>01 / SOURCE</span><strong>registered identity</strong><small>enabled project source</small></div>
@@ -111,7 +112,8 @@ Select same-project sources and choose **Compose run**, or open
 5. Resolve every blocker.
 6. For a full live run, keep **Start immediately** and **Submit backend** on.
 7. Keep **Stage inputs** on for a production staging graph; turn it off only
-   for an explicitly no-download qualification graph.
+   for an explicitly no-download qualification graph. This does not disable
+   that project's output-verification policy.
 8. Select **Create + start**.
 
 Preparation calls Core's authoritative readiness endpoint. Changing a source,
@@ -149,19 +151,18 @@ it into a different run or assume no ledger row was created.
 | Manifest + graph | Structured data exploration and EAGLE links |
 | Ledger | Compact snapshot plus run record, staging, backend merges, scheduler metadata, and timestamps |
 
-For the qualified no-download REST run, these simultaneous values are correct:
+The bundled WALLABY no-download project is not an output-verification opt-out.
+It requires the two synthetic image and weights patterns, and its graph contains
+a mandatory native publisher. Core currently reconciles that handoff only for
+`slurm_remote`, by pulling the attempt-scoped inventory through authenticated
+SSH/SFTP after Slurm completes. A `rest_remote` run with required publication
+fails closed because Core has no trusted handoff retrieval path; **DALiuGE
+finished** alone must not become terminal success.
 
-- control **terminal**;
-- submission **submitted**;
-- scheduler **not submitted** because no Slurm job exists;
-- DALiuGE **finished**;
-- output **not required**, only because the pinned project explicitly opted out;
-- terminal **succeeded**;
-- four artifacts: manifest, source graph, patched graph, and physical graph.
-
-“Not required” is not output verification. A normal production project with
-verification required remains non-terminal until its publisher submits valid
-durable inventory evidence.
+The direct [local DALiuGE qualification](../getting-started/local-daliuge.md)
+proves the graph-side receipt but creates no Core execution or dashboard ledger
+evidence. **Output not required** is valid only for a different pinned project
+whose policy explicitly sets `output_verification.required: false`.
 
 Terminal runs stop automatic detail polling. Use manual refresh when you need
 to re-read evidence after an external operator action.

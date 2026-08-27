@@ -85,13 +85,15 @@ Place operator-owned copies in a private directory if you do not want to edit th
 - Keep TLS verification enabled. Use trusted CA configuration instead of disabling it.
 - Validate the graph application/runtime package versions, not only endpoint health.
 
-These are three network viewpoints, not aliases for one host. For example, the
-qualified local topology used `http://dlg-tm.desk` from Core to TM,
-`dlg-dim:8001` from TM to DIM, and `dlg-dim.desk:80` from Core to DIM through
-Traefik. Direct Docker service names are also valid when all callers share the
-network. Never substitute `127.0.0.1` without checking which process makes the
-connection; container loopback points back to that container. See the complete
-[WALLABY local DALiuGE qualification](../getting-started/local-daliuge.md#proven-topology).
+These are three network viewpoints, not aliases for one host. A containerized
+deployment might use `http://dlg-tm.desk` from Core to TM, `dlg-dim:8001` from
+TM to DIM, and `dlg-dim.desk:80` from Core to DIM through Traefik. Direct Docker
+service names are also valid when all callers share the network. Never
+substitute `127.0.0.1` without checking which process makes the connection;
+container loopback points back to that container. The direct
+[WALLABY local DALiuGE qualification](../getting-started/local-daliuge.md#proven-topology)
+uses one-host loopback deliberately and is not a Core `rest_remote` profile
+qualification.
 
 ```bash
 beampipe doctor --profile local-daliuge
@@ -304,10 +306,12 @@ Inline PEM, home-directory fallback, and disabled host-key checks are developmen
 
 Before raising concurrency, qualify one run and then a paced batch. Watch login-node SSH/SFTP pressure, remote filesystem growth, TM availability, profile caps, and poll duration. Polling is batched by target through pooled SSH sessions, but submission still stages files per execution.
 
-For the explicit WALLABY sample, the local REST path has qualified its pinned graph and application
-package against the local DALiuGE runtime. That does not qualify Setonix or any
-other Slurm facility. The bundled Slurm profile has passed schema, rendering,
-and command tests only; a live qualification still requires the real account,
-SSH slot, paths, runtime modules, and `BEAMPIPE_ASKAPSOFT_SIF`. Pin DALiuGE and
-project application versions in that runtime and record them with every
-facility qualification.
+For the explicit WALLABY sample, a direct runner has qualified the no-download
+graph, application package, publisher, and receipt handoff against loopback
+DALiuGE NM, DIM, and TM services. It does not create or reconcile a Core
+`rest_remote` execution. Required output publication currently has a trusted
+Core retrieval path only on `slurm_remote`, through authenticated SSH/SFTP.
+The bundled Slurm profile has passed schema, rendering, and command tests only;
+a live qualification still requires the real account, SSH slot, paths, runtime
+modules, and `BEAMPIPE_ASKAPSOFT_SIF`. Pin DALiuGE and project application
+versions in that runtime and record them with every facility qualification.

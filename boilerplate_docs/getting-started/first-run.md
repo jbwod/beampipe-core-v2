@@ -195,7 +195,9 @@ curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 
 To submit real work later, install a validated `rest_remote` or `slurm_remote` profile, configure only the credentials required by the project's declared backend capabilities, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. The WALLABY sample declares CASDA staging and Slurm deployment explicitly. Follow [Deployment profiles and SSH](../architecture/deployment-profiles.md); do not reuse a mock profile for live submission.
 
-For a reproducible live submission without CASDA downloads, continue with
-[Local DALiuGE end to end](local-daliuge.md). It uses the explicit no-download
-project, exercises creation and start idempotency, and proves terminal DIM and
-artifact evidence.
+For a reproducible graph-level check without CASDA downloads, continue with
+[Local DALiuGE qualification](local-daliuge.md). The WALLABY runner starts real
+NM, DIM, and TM processes on loopback and verifies the publisher handoff, but it
+does not create or reconcile a Core execution. The bundled no-download project
+requires publication; Core currently retrieves that trusted receipt only for
+`slurm_remote`, so a required-publication `rest_remote` run fails closed.

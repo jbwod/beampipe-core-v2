@@ -193,16 +193,19 @@ Beampipe owns durable intent, preparation artifacts, admission, submission recor
 
 ## Current WALLABY qualification
 
-The explicit WALLABY sample has been exercised through real CASDA/VizieR discovery,
-manifest and graph preparation, idempotent creation and start, DALiuGE
-translation, REST deployment, reconciliation, and terminal success on the
-WALLABY no-download graph. The result retained the pinned project/profile,
-finished DIM observation, and manifest/source/patched/physical graph artifacts.
-The runbook is [Local DALiuGE end to end](getting-started/local-daliuge.md).
+The current WALLABY no-download graph has passed a direct live DALiuGE smoke
+against disposable NM, DIM, and TM processes. The runner exercises translation,
+deployment, synthetic execution, durable file publication, and the atomic
+inventory handoff. It does not contact Core or prove Core reconciliation. See
+[Local DALiuGE qualification](getting-started/local-daliuge.md).
 
-This qualification intentionally skipped CASDA staging and opted out of output
-verification in the pinned no-download project. Setonix/Slurm has passed config
-and command tests but has not run live without its account, SSH, paths, and SIF.
+The bundled no-download project now requires output verification for its two
+synthetic product patterns and its graph contains a mandatory native publisher.
+Core currently trusts the handoff only on `slurm_remote`, where it retrieves the
+receipt over authenticated SSH/SFTP. Required publication on `rest_remote` fails
+closed because there is no trusted receipt retrieval path. Setonix/Slurm has
+passed config and command tests but has not run live without its account, SSH,
+paths, and SIF.
 
 For the provider-neutral Core contract, use the
 [offline PostgreSQL acceptance path](getting-started/neutral-project.md).
