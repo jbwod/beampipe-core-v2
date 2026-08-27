@@ -201,10 +201,8 @@ mod tests {
             Some("EXECUTING")
         );
         assert_eq!(
-            parse_uws_phase(
-                r#"<phase xmlns="http://www.ivoa.net/xml/UWS/v1.1">COMPLETED</phase>"#
-            )
-            .as_deref(),
+            parse_uws_phase(r#"<phase xmlns="http://www.ivoa.net/xml/UWS/v1.1">COMPLETED</phase>"#)
+                .as_deref(),
             Some("COMPLETED")
         );
     }

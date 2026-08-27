@@ -915,7 +915,6 @@ mod tests {
         }))
         .unwrap();
         profile.validate().unwrap();
-
     }
     #[test]
     fn project_runtime_cannot_override_core_publisher_environment() {

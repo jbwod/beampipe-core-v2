@@ -249,8 +249,7 @@ mod tests {
         let config = ProjectConfig::from_slice(&project).unwrap();
         assert!(config.validate_report().valid);
         let no_download_project =
-            fs::read(dir.path().join("config/wallaby_hires_nodownloads.v2.yaml"))
-                .unwrap();
+            fs::read(dir.path().join("config/wallaby_hires_nodownloads.v2.yaml")).unwrap();
         let no_download_config = ProjectConfig::from_slice(&no_download_project).unwrap();
         assert!(no_download_config.validate_report().valid);
         assert!(no_download_config.output_verification.required);
@@ -262,15 +261,15 @@ mod tests {
             ]
         );
         let profile: serde_json::Value = serde_json::from_slice(
-            &fs::read(dir.path().join("config/deployment_profile.slurm-remote.json"))
-                .unwrap(),
+            &fs::read(
+                dir.path()
+                    .join("config/deployment_profile.slurm-remote.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(profile["deployment"]["job_duration_minutes"], 120);
-        assert_eq!(
-            profile["deployment"]["resources"]["wall_time_minutes"],
-            120
-        );
+        assert_eq!(profile["deployment"]["resources"]["wall_time_minutes"], 120);
         assert_eq!(
             profile["deployment"]["runtime_contract"]["required_python_modules"],
             serde_json::json!(["wallaby_hires", "beampipe_pallette.apps"])

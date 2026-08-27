@@ -3572,8 +3572,7 @@ fn ensure_publisher_delivery_supported(
     }
     let deployment = profile
         .ok_or_else(|| {
-            "required output publication needs a pinned slurm_remote deployment profile"
-                .to_string()
+            "required output publication needs a pinned slurm_remote deployment profile".to_string()
         })
         .and_then(|profile| {
             serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
@@ -3694,10 +3693,9 @@ async fn run_submit_phase(
         );
         return Ok(());
     };
-    let publication_execution_attempt = (execution.output_verification_required
-        && use_real
-        && backend_kind == "slurm_remote")
-        .then_some(execution.retry_count);
+    let publication_execution_attempt =
+        (execution.output_verification_required && use_real && backend_kind == "slurm_remote")
+            .then_some(execution.retry_count);
     let backend = execution_backend(
         profile,
         backend_kind,
@@ -4126,7 +4124,10 @@ async fn apply_dim_poll_update(
         if entered_terminal {
             if !(aggregate_status == ExecutionStatus::Completed
                 && reconciled.output_verification_required
-                && reconciled.output_state.as_deref().and_then(OutputState::parse)
+                && reconciled
+                    .output_state
+                    .as_deref()
+                    .and_then(OutputState::parse)
                     == Some(OutputState::Verified))
             {
                 let sources = source_identifiers_from_json(&execution.sources);
@@ -4751,7 +4752,10 @@ async fn apply_slurm_poll_update(
     if entered_terminal {
         if !(aggregate_status == ExecutionStatus::Completed
             && reconciled.output_verification_required
-            && reconciled.output_state.as_deref().and_then(OutputState::parse)
+            && reconciled
+                .output_state
+                .as_deref()
+                .and_then(OutputState::parse)
                 == Some(OutputState::Verified))
         {
             let sources = source_identifiers_from_json(&execution.sources);
@@ -5209,13 +5213,8 @@ impl OutputInventoryRetriever for SlurmSshPool {
         remote_session_dir: &str,
         execution_attempt: i32,
     ) -> Result<Vec<u8>, OrchestrationError> {
-        SlurmSshPool::read_output_inventory(
-            self,
-            target,
-            remote_session_dir,
-            execution_attempt,
-        )
-        .await
+        SlurmSshPool::read_output_inventory(self, target, remote_session_dir, execution_attempt)
+            .await
     }
 }
 
@@ -6117,7 +6116,10 @@ mod tests {
     }
 
     impl FakeOutputInventoryRetriever {
-        fn new(outcome: FakeOutputInventoryOutcome, execution: &beampipe_db::models::ExecutionRow) -> Self {
+        fn new(
+            outcome: FakeOutputInventoryOutcome,
+            execution: &beampipe_db::models::ExecutionRow,
+        ) -> Self {
             Self {
                 outcome,
                 calls: AtomicUsize::new(0),
@@ -6270,10 +6272,8 @@ mod tests {
             return;
         };
         let execution = slurm_output_inventory_execution(&pool, "not-ready").await;
-        let retriever = FakeOutputInventoryRetriever::new(
-            FakeOutputInventoryOutcome::NotReady,
-            &execution,
-        );
+        let retriever =
+            FakeOutputInventoryRetriever::new(FakeOutputInventoryOutcome::NotReady, &execution);
 
         retrieve_slurm_output_inventories_with(&pool, true, &retriever)
             .await
@@ -6304,10 +6304,8 @@ mod tests {
             return;
         };
         let execution = slurm_output_inventory_execution(&pool, "rejected").await;
-        let retriever = FakeOutputInventoryRetriever::new(
-            FakeOutputInventoryOutcome::Rejected,
-            &execution,
-        );
+        let retriever =
+            FakeOutputInventoryRetriever::new(FakeOutputInventoryOutcome::Rejected, &execution);
 
         retrieve_slurm_output_inventories_with(&pool, true, &retriever)
             .await
@@ -6383,36 +6381,20 @@ mod tests {
             "kind": "rest_remote",
             "deploy_host": "dim.example.org"
         }));
-        let error = ensure_publisher_delivery_supported(
-            true,
-            true,
-            true,
-            "rest_remote",
-            Some(&rest),
-        )
-        .unwrap_err();
+        let error =
+            ensure_publisher_delivery_supported(true, true, true, "rest_remote", Some(&rest))
+                .unwrap_err();
         assert!(error.contains("trusted handoff retrieval contract"));
 
         let missing = pinned_slurm_profile(false);
-        let error = ensure_publisher_delivery_supported(
-            true,
-            true,
-            true,
-            "slurm_remote",
-            Some(&missing),
-        )
-        .unwrap_err();
+        let error =
+            ensure_publisher_delivery_supported(true, true, true, "slurm_remote", Some(&missing))
+                .unwrap_err();
         assert!(error.contains("no pinned deployment publication contract"));
 
         let supported = pinned_slurm_profile(true);
-        ensure_publisher_delivery_supported(
-            true,
-            true,
-            true,
-            "slurm_remote",
-            Some(&supported),
-        )
-        .unwrap();
+        ensure_publisher_delivery_supported(true, true, true, "slurm_remote", Some(&supported))
+            .unwrap();
     }
 
     #[test]

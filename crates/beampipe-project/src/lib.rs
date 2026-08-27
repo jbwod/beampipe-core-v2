@@ -19,8 +19,8 @@ pub use output_inventory::{
     parse_canonical_output_inventory, validate_output_verification_request,
     validate_output_verification_request_at, ExecutionOutputVerificationRequest,
     OutputInventoryArtifactDescriptor, OutputInventoryProduct, OutputInventoryValidationError,
-    OutputInventoryValidationKind,
-    OutputPublicationAcknowledgement, MAX_OUTPUT_INVENTORY_BYTES, MAX_OUTPUT_PRODUCTS,
+    OutputInventoryValidationKind, OutputPublicationAcknowledgement, MAX_OUTPUT_INVENTORY_BYTES,
+    MAX_OUTPUT_PRODUCTS,
 };
 
 /// Project-neutral output inventory used by new project configurations.
@@ -1717,7 +1717,10 @@ automation:
         ];
         for pattern in invalid {
             assert!(!valid_output_glob(pattern), "accepted {pattern:?}");
-            assert!(OutputGlob::compile(pattern).is_err(), "compiled {pattern:?}");
+            assert!(
+                OutputGlob::compile(pattern).is_err(),
+                "compiled {pattern:?}"
+            );
         }
 
         let ascii_limit = "x".repeat(MAX_OUTPUT_PATTERN_LENGTH);

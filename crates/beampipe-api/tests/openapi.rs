@@ -67,9 +67,7 @@ fn every_success_response_has_content_and_resolvable_schemas() {
                 let content = response
                     .get("content")
                     .and_then(serde_json::Value::as_object)
-                    .unwrap_or_else(|| {
-                        panic!("{operation_name} {status} has no response content")
-                    });
+                    .unwrap_or_else(|| panic!("{operation_name} {status} has no response content"));
                 assert!(
                     !content.is_empty(),
                     "{operation_name} {status} has empty response content"
@@ -122,10 +120,7 @@ fn query_bearing_operations_publish_their_query_contracts() {
     let expected: &[(&str, &[&str])] = &[
         ("/api/v2/diagnostics", &["profile"]),
         ("/api/v2/workers", &["include_stopped"]),
-        (
-            "/api/v2/workers/leases",
-            &["include_expired", "worker_id"],
-        ),
+        ("/api/v2/workers/leases", &["include_expired", "worker_id"]),
         ("/api/v2/scheduler/status", &["profile"]),
         ("/api/v2/scheduler/jobs", &["limit", "offset"]),
         ("/api/v2/daliuge/inspect", &["profile"]),
@@ -139,25 +134,13 @@ fn query_bearing_operations_publish_their_query_contracts() {
             &["include_manifest"],
         ),
         ("/api/v2/sources", &["limit", "offset", "project_module"]),
-        (
-            "/api/v2/sources/{id}/executions",
-            &["limit", "offset"],
-        ),
-        (
-            "/api/v2/executions/{id}/observations",
-            &["limit", "offset"],
-        ),
-        (
-            "/api/v2/project-configs/{id}/wasm/{sha256}",
-            &["download"],
-        ),
+        ("/api/v2/sources/{id}/executions", &["limit", "offset"]),
+        ("/api/v2/executions/{id}/observations", &["limit", "offset"]),
+        ("/api/v2/project-configs/{id}/wasm/{sha256}", &["download"]),
         ("/api/v2/alert-deliveries", &["limit"]),
         ("/api/v2/executions/{id}/events", &["limit"]),
         ("/api/v2/sources/{id}/events", &["limit"]),
-        (
-            "/api/v2/projects/{module}/events",
-            &["limit", "offset"],
-        ),
+        ("/api/v2/projects/{module}/events", &["limit", "offset"]),
     ];
 
     for (path, expected_names) in expected {
@@ -249,7 +232,9 @@ fn operation_parameters_are_unique_and_cover_path_placeholders() {
                 "{operation_name} path parameters must match route placeholders",
             );
             assert!(
-                path_parameters.values().all(|required| *required == Some(true)),
+                path_parameters
+                    .values()
+                    .all(|required| *required == Some(true)),
                 "{operation_name} path parameters must be required",
             );
         }
@@ -276,7 +261,10 @@ fn execution_prepare_source_preview_has_a_concrete_contract() {
         .and_then(serde_json::Value::as_object)
         .expect("preview properties");
     assert_eq!(
-        properties.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        properties
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
         ["source_identifier", "group_count", "record_count"]
             .into_iter()
             .collect(),

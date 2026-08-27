@@ -7,9 +7,8 @@ use beampipe_db::{
 };
 use beampipe_domain::{ControlPhase, DaliugeState, ExecutionStatus, LedgerPatch, SubmissionState};
 use beampipe_project::{
-    build_output_inventory_artifact, canonical_products_sha256,
-    ExecutionOutputVerificationRequest, OutputInventoryProduct,
-    OutputPublicationAcknowledgement,
+    build_output_inventory_artifact, canonical_products_sha256, ExecutionOutputVerificationRequest,
+    OutputInventoryProduct, OutputPublicationAcknowledgement,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
@@ -182,8 +181,6 @@ async fn create_running_output_required_execution(
     .await
     .unwrap()
     .unwrap()
-}
-
 }
 
 #[tokio::test]

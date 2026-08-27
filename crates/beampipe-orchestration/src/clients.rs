@@ -47,7 +47,6 @@ impl HttpTranslatorClient {
             client: build_http_client(&options),
         }
     }
-
 }
 
 #[async_trait]

@@ -160,11 +160,12 @@ pub fn parse_canonical_output_inventory(
             "output inventory receipt must contain 1-{MAX_OUTPUT_INVENTORY_BYTES} bytes"
         )));
     }
-    let report: ExecutionOutputVerificationRequest = serde_json::from_slice(bytes).map_err(|error| {
-        OutputInventoryValidationError::invalid(format!(
-            "remote output inventory is not valid JSON: {error}"
-        ))
-    })?;
+    let report: ExecutionOutputVerificationRequest =
+        serde_json::from_slice(bytes).map_err(|error| {
+            OutputInventoryValidationError::invalid(format!(
+                "remote output inventory is not valid JSON: {error}"
+            ))
+        })?;
     let value = serde_json::to_value(&report)
         .map_err(|error| OutputInventoryValidationError::invalid(error.to_string()))?;
     let canonical = canonical_json_bytes(&value)
@@ -221,9 +222,7 @@ pub fn build_output_inventory_artifact(
 
 fn validate_durable_destination_uri(value: &str) -> Result<(), OutputInventoryValidationError> {
     let parsed = url::Url::parse(value).map_err(|_| {
-        OutputInventoryValidationError::invalid(
-            "durable_destination_uri must be an absolute URI",
-        )
+        OutputInventoryValidationError::invalid("durable_destination_uri must be an absolute URI")
     })?;
     if parsed.query().is_some()
         || parsed.fragment().is_some()
@@ -291,7 +290,12 @@ pub fn validate_output_verification_request_at(
     let expected_patterns = output_verification_policy
         .get("expected_patterns")
         .and_then(Value::as_array)
-        .and_then(|patterns| patterns.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+        .and_then(|patterns| {
+            patterns
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()
+        })
         .ok_or_else(|| {
             OutputInventoryValidationError::conflict(
                 "pinned output policy has no valid expected_patterns",
@@ -302,7 +306,13 @@ pub fn validate_output_verification_request_at(
             "required output policy has no expected patterns",
         ));
     }
-    if request.patterns.iter().map(String::as_str).collect::<Vec<_>>() != expected_patterns {
+    if request
+        .patterns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        != expected_patterns
+    {
         return Err(OutputInventoryValidationError::conflict(
             "inventory patterns do not exactly match the execution's pinned expected_patterns",
         ));
@@ -366,9 +376,7 @@ pub fn validate_output_verification_request_at(
     }
     for pattern in &expected_patterns {
         let matcher = OutputGlob::compile(pattern).map_err(|_| {
-            OutputInventoryValidationError::conflict(
-                "pinned output policy has an invalid glob",
-            )
+            OutputInventoryValidationError::conflict("pinned output policy has an invalid glob")
         })?;
         let actual_count = request
             .products
@@ -401,7 +409,10 @@ pub fn validate_output_verification_request_at(
         ));
     }
     for (field, value) in [
-        ("publication.publisher", request.publication.publisher.as_str()),
+        (
+            "publication.publisher",
+            request.publication.publisher.as_str(),
+        ),
         (
             "publication.receipt_id",
             request.publication.receipt_id.as_str(),
@@ -517,7 +528,12 @@ mod tests {
     fn remote_handoff_rejects_noncanonical_json() {
         let report = valid_report();
         let canonical = canonical_json_bytes(&serde_json::to_value(&report).unwrap()).unwrap();
-        assert_eq!(parse_canonical_output_inventory(&canonical).unwrap().execution_id, report.execution_id);
+        assert_eq!(
+            parse_canonical_output_inventory(&canonical)
+                .unwrap()
+                .execution_id,
+            report.execution_id
+        );
 
         let mut with_newline = canonical;
         with_newline.push(b'\n');

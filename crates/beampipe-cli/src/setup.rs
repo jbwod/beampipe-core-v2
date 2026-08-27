@@ -173,7 +173,9 @@ fn print_banner(start: bool, yes: bool) {
     if yes {
         print_hint("Automatic mode: supplied values and safe defaults will be used (--yes).");
     } else if interactive {
-        print_hint("Press Enter to accept the highlighted default. Live backends stay off by default.");
+        print_hint(
+            "Press Enter to accept the highlighted default. Live backends stay off by default.",
+        );
     }
 }
 
@@ -248,12 +250,7 @@ fn print_choice_items(items: &[ChoiceItem], default_index: usize) {
         let default = index == default_index;
         let marker = if default { " (default)" } else { "" };
         if color_enabled() && default {
-            println!(
-                "  {}) {}{}",
-                index + 1,
-                item.label.bold(),
-                marker.cyan()
-            );
+            println!("  {}) {}{}", index + 1, item.label.bold(), marker.cyan());
         } else {
             println!("  {}) {}{marker}", index + 1, item.label);
         }
@@ -549,15 +546,9 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     print_step(step, total_steps, "Network");
     step += 1;
     let host_ports = resolve_host_ports(&opts, runtime, postgres)?;
-    print_status(
-        "API",
-        format!("http://127.0.0.1:{}/api/v2", host_ports.api),
-    );
+    print_status("API", format!("http://127.0.0.1:{}/api/v2", host_ports.api));
     if postgres == PostgresKind::Compose {
-        print_status(
-            "PostgreSQL",
-            format!("127.0.0.1:{}", host_ports.postgres),
-        );
+        print_status("PostgreSQL", format!("127.0.0.1:{}", host_ports.postgres));
     }
     if runtime == RuntimeKind::Docker {
         print_status("Metrics", format!("127.0.0.1:{}", host_ports.metrics));
@@ -679,7 +670,10 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
     if !env_path.exists() {
         seed_env_file(&root, &env_path)?;
     } else if !opts.yes
-        && !prompt_yes_no("Update Beampipe-managed settings in the existing `.env`?", true)?
+        && !prompt_yes_no(
+            "Update Beampipe-managed settings in the existing `.env`?",
+            true,
+        )?
     {
         bail!("setup aborted");
     }
@@ -1962,8 +1956,7 @@ fn write_private_file_atomic(path: &Path, contents: &str) -> Result<()> {
         file.sync_all()?;
         set_private_file_permissions(&temporary)?;
         drop(file);
-        std::fs::rename(&temporary, path)
-            .with_context(|| format!("replace {}", path.display()))?;
+        std::fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
         Ok(())
     })();
     if result.is_err() {
@@ -2014,9 +2007,7 @@ fn env_file_value(path: &Path, key: &str) -> Option<String> {
     dotenvy::from_path_iter(path)
         .ok()?
         .filter_map(|entry| entry.ok())
-        .find_map(|(candidate, value)| {
-            (candidate == key && !value.is_empty()).then_some(value)
-        })
+        .find_map(|(candidate, value)| (candidate == key && !value.is_empty()).then_some(value))
 }
 
 fn ensure_beampipe_version(root: &Path, env_path: &Path) -> Result<()> {
@@ -2177,10 +2168,7 @@ fn decide_dashboard(opts: &SetupOptions, docker: bool) -> Option<bool> {
 fn resolve_prepare_dashboard(opts: &SetupOptions, docker: bool) -> Result<bool> {
     match decide_dashboard(opts, docker) {
         Some(value) => Ok(value),
-        None => prompt_yes_no(
-            "Install Beampipe Dash?",
-            DEFAULT_INTERACTIVE_DASHBOARD,
-        ),
+        None => prompt_yes_no("Install Beampipe Dash?", DEFAULT_INTERACTIVE_DASHBOARD),
     }
 }
 
@@ -3055,9 +3043,10 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
     print_hint("Enable live backends only after `beampipe doctor --profile NAME` passes.");
 
     loop {
-        let slurm_profile = ctx.prepared_profile.as_ref().is_some_and(|profile| {
-            matches!(profile.deployment, DeploymentConfig::SlurmRemote(_))
-        });
+        let slurm_profile = ctx
+            .prepared_profile
+            .as_ref()
+            .is_some_and(|profile| matches!(profile.deployment, DeploymentConfig::SlurmRemote(_)));
         let items = next_action_choices(slurm_profile, *ctx.casda_staging);
         let default_index = items.len() - 1;
         let choice = prompt_choice("Next action", &items, default_index)?;
@@ -3137,8 +3126,7 @@ async fn next_action_project(ctx: &mut NextActions<'_>) -> Result<()> {
     upload_project_config(pool, &selected.config, &selected.spec_sha256).await?;
     println!("Uploaded project config '{}'.", selected.config.metadata.id);
 
-    let backend = env_file_value(ctx.env_path, "BEAMPIPE_BACKEND_CAPABILITIES")
-        .unwrap_or_default();
+    let backend = env_file_value(ctx.env_path, "BEAMPIPE_BACKEND_CAPABILITIES").unwrap_or_default();
     let worker = env_file_value(ctx.env_path, "BEAMPIPE_WORKER_CAPABILITIES")
         .unwrap_or_else(|| DEFAULT_WORKER_CAPABILITIES.into());
     let backend = with_project_staging_capabilities(&backend, Some(&selected.config));
@@ -3190,9 +3178,8 @@ async fn enable_live_backends(
         return Ok(());
     }
     print_hint("Workers will submit to real TM/DIM or Slurm instead of completing locally.");
-    let profile = profile.ok_or_else(|| {
-        anyhow::anyhow!("add a deployment profile before enabling live backends")
-    })?;
+    let profile = profile
+        .ok_or_else(|| anyhow::anyhow!("add a deployment profile before enabling live backends"))?;
     let pool = pool.ok_or_else(|| {
         anyhow::anyhow!("PostgreSQL must be reachable before enabling live backends")
     })?;
@@ -3607,10 +3594,7 @@ fn next_steps_lines(steps: &SetupNextSteps) -> Vec<String> {
                 ));
             }
         }
-        lines.push(beampipe_recipe_command(
-            steps.core_home.as_deref(),
-            "start",
-        ));
+        lines.push(beampipe_recipe_command(steps.core_home.as_deref(), "start"));
     }
     lines
 }
@@ -4425,13 +4409,7 @@ staging:
     fn explicit_admin_identity_values_win_in_guided_and_unattended_modes() {
         for unattended in [false, true] {
             assert_eq!(
-                select_admin_text(
-                    Some("operator"),
-                    unattended,
-                    "Admin username",
-                    "admin"
-                )
-                .unwrap(),
+                select_admin_text(Some("operator"), unattended, "Admin username", "admin").unwrap(),
                 "operator"
             );
             assert_eq!(
@@ -4618,7 +4596,12 @@ staging:
         prepare_docker_env(root.path(), &env).unwrap();
         assert_eq!(
             env_file_value(&env, "BEAMPIPE_SSH_CREDENTIALS_HOST").as_deref(),
-            Some(root.path().join("credentials/ssh").to_string_lossy().as_ref())
+            Some(
+                root.path()
+                    .join("credentials/ssh")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
         assert_eq!(env_file_value(&env, "BEAMPIPE_SSH_CREDENTIALS_DIR"), None);
     }
@@ -4964,7 +4947,10 @@ staging:
             RuntimeKind::Host,
         )
         .unwrap();
-        assert_eq!(env_file_value(&env, "BEAMPIPE_API_PORT").as_deref(), Some("18181"));
+        assert_eq!(
+            env_file_value(&env, "BEAMPIPE_API_PORT").as_deref(),
+            Some("18181")
+        );
         assert_eq!(
             env_file_value(&env, "BEAMPIPE_POSTGRES_PORT").as_deref(),
             Some("15432")

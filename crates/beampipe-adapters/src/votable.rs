@@ -12,8 +12,8 @@ pub fn parse_votable_xml(xml: &str) -> Result<Vec<TapRow>, AdapterError> {
     // TAP errors are frequently valid VOTables with no TABLE. Check the status first so
     // callers retain the service-provided diagnostic instead of a generic shape error.
     reject_tap_query_error(xml)?;
-    let mut table_rows = SimpleVOTableRowIterator::from_reader(xml.as_bytes())
-        .map_err(votable_shape_error)?;
+    let mut table_rows =
+        SimpleVOTableRowIterator::from_reader(xml.as_bytes()).map_err(votable_shape_error)?;
     if !matches!(table_rows.data_type(), TableOrBinOrBin2::TableData) {
         return Err(AdapterError::InvalidRowShape(
             "VOTable result does not use TABLEDATA".into(),

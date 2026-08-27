@@ -202,15 +202,12 @@ where
     if publication_required {
         let publication = deployment.publication.as_ref().ok_or_else(|| {
             OrchestrationError::Backend(
-                "required output publication has no pinned deployment publication contract"
-                    .into(),
+                "required output publication has no pinned deployment publication contract".into(),
             )
         })?;
         resolve_publication_inputs_with(publication, |name| read_environment(name))?;
     }
-    let mut lines = vec![env_prelude_with(deployment, |name| {
-        read_environment(name)
-    })?];
+    let mut lines = vec![env_prelude_with(deployment, |name| read_environment(name))?];
     let mut commands = vec![
         "sbatch", "squeue", "sacct", "scancel", "scontrol", "srun", "python3",
     ];
@@ -1282,9 +1279,7 @@ mod tests {
             durable_destination_uri_environment: "SETONIX_BEAMPIPE_OUTPUT_DESTINATION".into(),
         };
         let resolved = resolve_publication_inputs_with(&publication, |name| match name {
-            "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => {
-                Some("s3://science-products/beampipe/".into())
-            }
+            "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => Some("s3://science-products/beampipe/".into()),
             _ => None,
         })
         .unwrap();
@@ -1299,13 +1294,15 @@ mod tests {
             "s3://science-products/output?token=secret",
             "file:///",
         ] {
-            assert!(resolve_publication_inputs_with(&publication, |name| match name {
-                "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => {
-                    Some(destination.into())
-                }
-                _ => None,
-            })
-            .is_err());
+            assert!(
+                resolve_publication_inputs_with(&publication, |name| match name {
+                    "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => {
+                        Some(destination.into())
+                    }
+                    _ => None,
+                })
+                .is_err()
+            );
         }
         assert!(resolve_publication_inputs_with(&publication, |_| None).is_err());
     }

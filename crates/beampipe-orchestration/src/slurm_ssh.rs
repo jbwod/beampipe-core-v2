@@ -66,8 +66,7 @@ pub(crate) fn output_inventory_remote_paths(
             Component::Normal(part) => normalized.push(part),
             Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
                 return Err(OrchestrationError::OutputInventoryRejected(
-                    "remote DALiuGE session directory must not contain traversal components"
-                        .into(),
+                    "remote DALiuGE session directory must not contain traversal components".into(),
                 ));
             }
         }
@@ -123,7 +122,6 @@ impl SlurmTarget {
                 .map(str::to_string),
         }
     }
-
 }
 
 struct SshClientHandler {
@@ -499,13 +497,8 @@ impl SlurmSshSession {
         validate_remote_path(remote_path, "submission artifact")?;
         let temporary_path = format!("{remote_path}.tmp-{}", uuid::Uuid::now_v7().simple());
         let mut sftp = self.open_sftp().await?;
-        let result = upload_artifact_with(
-            &mut sftp,
-            remote_path,
-            &temporary_path,
-            content.as_bytes(),
-        )
-        .await;
+        let result =
+            upload_artifact_with(&mut sftp, remote_path, &temporary_path, content.as_bytes()).await;
         let close_result = sftp.shutdown().await;
         self.finish_atomic_upload(result, close_result, &temporary_path, remote_path)
             .await
@@ -530,25 +523,21 @@ impl SlurmSshSession {
         let close_result = sftp.shutdown().await;
         match (result, close_result) {
             (Ok(content), Ok(())) => Ok(content),
-            (Ok(_), Err(error)) | (Err(OrchestrationError::OutputInventoryNotReady), Err(error)) => {
-                Err(error)
-            }
+            (Ok(_), Err(error))
+            | (Err(OrchestrationError::OutputInventoryNotReady), Err(error)) => Err(error),
             (Err(error), _) => Err(error),
         }
     }
 
     async fn open_sftp(&mut self) -> Result<RemoteSftp, OrchestrationError> {
-        let channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|error| OrchestrationError::Backend(format!("SSH SFTP channel: {error}")))?;
+        let channel =
+            self.handle.channel_open_session().await.map_err(|error| {
+                OrchestrationError::Backend(format!("SSH SFTP channel: {error}"))
+            })?;
         channel
             .request_subsystem(true, "sftp")
             .await
-            .map_err(|error| {
-                OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}"))
-            })?;
+            .map_err(|error| OrchestrationError::Backend(format!("SSH SFTP subsystem: {error}")))?;
         RemoteSftp::connect(channel.into_stream()).await
     }
 
@@ -580,7 +569,9 @@ impl SlurmSshSession {
                 // fresh SFTP channels before reporting a definite
                 // pre-submission failure.
                 for path in failed_atomic_upload_cleanup_paths(false, temporary_path, final_path) {
-                    let _ = self.remove_file_sftp_inner(path, "failed upload artifact").await;
+                    let _ = self
+                        .remove_file_sftp_inner(path, "failed upload artifact")
+                        .await;
                 }
                 Err(error)
             }
@@ -589,7 +580,9 @@ impl SlurmSshSession {
                 // The final LSTAT already confirmed the file, so open a new
                 // SFTP channel and remove it before reporting failure.
                 for path in failed_atomic_upload_cleanup_paths(true, temporary_path, final_path) {
-                    let _ = self.remove_file_sftp_inner(path, "failed upload artifact").await;
+                    let _ = self
+                        .remove_file_sftp_inner(path, "failed upload artifact")
+                        .await;
                 }
                 Err(error)
             }
@@ -806,9 +799,7 @@ impl SlurmSshPool {
             .session
             .read_output_inventory(remote_session_dir, execution_attempt)
             .await;
-        if result.is_err()
-            && !matches!(&result, Err(OrchestrationError::OutputInventoryNotReady))
-        {
+        if result.is_err() && !matches!(&result, Err(OrchestrationError::OutputInventoryNotReady)) {
             if let Some(failed) = state.entry.take() {
                 let _ = failed.session.close().await;
             }
@@ -921,12 +912,12 @@ mod tests {
     use super::{
         command_stdout, failed_atomic_upload_cleanup_paths, is_missing_squeue_job_error,
         known_host_patterns_match, known_hosts_has_target, load_known_host_keys,
-        output_inventory_remote_paths, read_output_inventory_with,
-        remote_command_transport_error, sacct_query_command, scancel_command, squeue_query_command,
-        squeue_stdout, ssh_client_config, upload_artifact_with, validate_remote_path,
-        validate_slurm_job_id, AtomicSftpUploader, OutputInventoryReader,
-        OutputInventoryRemotePaths, RemoteCommandKind, RemoteCommandOutput, SlurmSshPool,
-        SlurmTarget, MAX_OUTPUT_INVENTORY_BYTES, SLURM_OUTPUT_INVENTORY_RELATIVE_DIRECTORY,
+        output_inventory_remote_paths, read_output_inventory_with, remote_command_transport_error,
+        sacct_query_command, scancel_command, squeue_query_command, squeue_stdout,
+        ssh_client_config, upload_artifact_with, validate_remote_path, validate_slurm_job_id,
+        AtomicSftpUploader, OutputInventoryReader, OutputInventoryRemotePaths, RemoteCommandKind,
+        RemoteCommandOutput, SlurmSshPool, SlurmTarget, MAX_OUTPUT_INVENTORY_BYTES,
+        SLURM_OUTPUT_INVENTORY_RELATIVE_DIRECTORY,
     };
     use crate::slurm_sftp::SUBMISSION_ARTIFACT_MODE;
     use crate::OrchestrationError;
@@ -964,7 +955,6 @@ mod tests {
             });
             Ok(())
         }
-
     }
 
     #[derive(Default)]
@@ -1028,14 +1018,10 @@ mod tests {
     async fn output_inventory_reader_owns_the_fixed_descendant_and_byte_limit() {
         let mut reader = ScriptedInventoryReader::default();
         let session = "/scratch/project/dlg/workspace/BeampipeExecution-uuid";
-        let content = read_output_inventory_with(
-            &mut reader,
-            session,
-            0,
-            MAX_OUTPUT_INVENTORY_BYTES,
-        )
-        .await
-        .unwrap();
+        let content =
+            read_output_inventory_with(&mut reader, session, 0, MAX_OUTPUT_INVENTORY_BYTES)
+                .await
+                .unwrap();
         assert!(content.starts_with(b"{"));
         assert_eq!(reader.calls.len(), 1);
         let (paths, limit) = &reader.calls[0];
@@ -1070,14 +1056,10 @@ mod tests {
             "/scratch/session\nname",
         ] {
             let mut reader = ScriptedInventoryReader::default();
-            let error = read_output_inventory_with(
-                &mut reader,
-                session,
-                0,
-                MAX_OUTPUT_INVENTORY_BYTES,
-            )
-            .await
-            .unwrap_err();
+            let error =
+                read_output_inventory_with(&mut reader, session, 0, MAX_OUTPUT_INVENTORY_BYTES)
+                    .await
+                    .unwrap_err();
             assert!(
                 matches!(error, OrchestrationError::OutputInventoryRejected(_)),
                 "unexpected error for {session:?}: {error}"

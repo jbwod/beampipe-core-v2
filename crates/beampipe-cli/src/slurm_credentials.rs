@@ -789,9 +789,7 @@ fn scan_known_hosts(
         );
     }
     if !accept_host_key {
-        let prompt = format!(
-            "Run ssh-keyscan against {host}:{port} to retrieve its SSH host key?"
-        );
+        let prompt = format!("Run ssh-keyscan against {host}:{port} to retrieve its SSH host key?");
         if !operations.confirm(&prompt, false)? {
             bail!("ssh-keyscan was not authorized; no credentials were written");
         }
@@ -1255,12 +1253,9 @@ mod tests {
         fs::write(&source, "private-key-for-test").unwrap();
         let mut commands = FakeHostKeyOperations::default();
 
-        let error = import_with_host_key_operations(
-            import_opts(&source, &target),
-            &mut commands,
-        )
-        .unwrap_err()
-        .to_string();
+        let error = import_with_host_key_operations(import_opts(&source, &target), &mut commands)
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("reviewed --known-hosts/--ssh-known-hosts"));
         assert_eq!(commands.external_command_calls(), 0);

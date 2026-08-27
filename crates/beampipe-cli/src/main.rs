@@ -181,11 +181,7 @@ enum CliCommand {
         no_start: bool,
 
         /// Prepare Beampipe Dash and include it when the Docker stack starts.
-        #[arg(
-            long,
-            conflicts_with = "skip_dashboard",
-            help_heading = "Dashboard"
-        )]
+        #[arg(long, conflicts_with = "skip_dashboard", help_heading = "Dashboard")]
         dashboard: bool,
         /// Do not prepare Beampipe Dash or offer it in guided setup.
         #[arg(long, help_heading = "Dashboard")]
@@ -246,46 +242,22 @@ enum CliCommand {
         #[arg(long, help_heading = "Slurm credentials")]
         ssh_slot: Option<String>,
         /// Import this private key into the selected Slurm profile's credential slot.
-        #[arg(
-            long,
-            requires = "profile_config",
-            help_heading = "Slurm credentials"
-        )]
+        #[arg(long, requires = "profile_config", help_heading = "Slurm credentials")]
         ssh_private_key: Option<PathBuf>,
         /// Import the matching public key alongside --ssh-private-key.
-        #[arg(
-            long,
-            requires = "ssh_private_key",
-            help_heading = "Slurm credentials"
-        )]
+        #[arg(long, requires = "ssh_private_key", help_heading = "Slurm credentials")]
         ssh_public_key: Option<PathBuf>,
         /// Import a reviewed known_hosts file alongside --ssh-private-key.
-        #[arg(
-            long,
-            requires = "ssh_private_key",
-            help_heading = "Slurm credentials"
-        )]
+        #[arg(long, requires = "ssh_private_key", help_heading = "Slurm credentials")]
         ssh_known_hosts: Option<PathBuf>,
         /// Read the imported private key's passphrase from a file.
-        #[arg(
-            long,
-            requires = "ssh_private_key",
-            help_heading = "Slurm credentials"
-        )]
+        #[arg(long, requires = "ssh_private_key", help_heading = "Slurm credentials")]
         ssh_passphrase_file: Option<PathBuf>,
         /// Grant container-compatible ACL access to the imported key on supported hosts.
-        #[arg(
-            long,
-            requires = "ssh_private_key",
-            help_heading = "Slurm credentials"
-        )]
+        #[arg(long, requires = "ssh_private_key", help_heading = "Slurm credentials")]
         ssh_acl: bool,
         /// Accept the login-node host key discovered while importing the SSH key.
-        #[arg(
-            long,
-            requires = "ssh_private_key",
-            help_heading = "Slurm credentials"
-        )]
+        #[arg(long, requires = "ssh_private_key", help_heading = "Slurm credentials")]
         accept_host_key: bool,
         /// Canonical host directory containing managed per-profile SSH credential slots.
         #[arg(long, help_heading = "Slurm credentials")]
@@ -1206,9 +1178,7 @@ async fn main() -> anyhow::Result<()> {
                     acl,
                     force,
                     accept_host_key,
-                    non_interactive: !std::io::IsTerminal::is_terminal(
-                        &std::io::stdin(),
-                    ),
+                    non_interactive: !std::io::IsTerminal::is_terminal(&std::io::stdin()),
                 })?;
                 slurm_credentials::print_init_next_steps(&result);
             }
@@ -1514,7 +1484,10 @@ mod cli_help_tests {
             "--no-start",
             "BEAMPIPE_HOME",
         ] {
-            assert!(help.contains(expected), "setup help omitted {expected:?}\n{help}");
+            assert!(
+                help.contains(expected),
+                "setup help omitted {expected:?}\n{help}"
+            );
         }
     }
 }

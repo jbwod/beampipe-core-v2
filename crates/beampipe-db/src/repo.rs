@@ -1,9 +1,8 @@
 use crate::models::{
     ArchiveMetadataRow, DeploymentProfileRow, ExecutionArtifactInput, ExecutionArtifactRow,
-    ExecutionObservationInput, ExecutionObservationRow, ExecutionProvenancePatch,
-    ExecutionRow, ExecutionStatePatch, JobRow, OperatorOverviewCounts,
-    ProjectConfigRow, SourceRegistryRow, WorkerInstanceRow,
-    WorkerPoolSummary, WorkerRegistration,
+    ExecutionObservationInput, ExecutionObservationRow, ExecutionProvenancePatch, ExecutionRow,
+    ExecutionStatePatch, JobRow, OperatorOverviewCounts, ProjectConfigRow, SourceRegistryRow,
+    WorkerInstanceRow, WorkerPoolSummary, WorkerRegistration,
 };
 use beampipe_domain::{
     discovery::{
@@ -2557,9 +2556,7 @@ pub async fn apply_execution_state_patch_with_transition(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
-            sqlx::Error::Protocol(
-                "verified output state has no output_inventory artifact".into(),
-            )
+            sqlx::Error::Protocol("verified output state has no output_inventory artifact".into())
         })?;
         let correlation = id.to_string();
         finalize_verified_execution_side_effects(
@@ -4793,12 +4790,12 @@ pub async fn verify_execution_outputs(
     let report_value = artifact.inline_json.as_ref().ok_or_else(|| {
         VerifyExecutionOutputsError::Rejected("output inventory report is missing".into())
     })?;
-    let report: ExecutionOutputVerificationRequest =
-        serde_json::from_value(report_value.clone()).map_err(|error| {
-            VerifyExecutionOutputsError::Rejected(format!(
-                "output inventory report is invalid: {error}"
-            ))
-        })?;
+    let report: ExecutionOutputVerificationRequest = serde_json::from_value(report_value.clone())
+        .map_err(|error| {
+        VerifyExecutionOutputsError::Rejected(format!(
+            "output inventory report is invalid: {error}"
+        ))
+    })?;
     let total_product_bytes = validate_output_verification_request(
         &report,
         execution.output_verification_required,
@@ -4992,14 +4989,8 @@ pub async fn verify_execution_outputs(
     )
     .await?;
     if complete_now {
-        finalize_verified_execution_side_effects(
-            &mut tx,
-            &updated,
-            &stored,
-            actor,
-            correlation_id,
-        )
-        .await?;
+        finalize_verified_execution_side_effects(&mut tx, &updated, &stored, actor, correlation_id)
+            .await?;
     }
     tx.commit().await?;
     Ok((updated, stored))

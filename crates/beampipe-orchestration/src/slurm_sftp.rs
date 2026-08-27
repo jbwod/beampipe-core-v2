@@ -122,12 +122,7 @@ impl RemoteSftp {
 
         file.set_permissions(permissions)
             .await
-            .map_err(|error| {
-                sftp_error(
-                    &format!("set {temporary_label} permissions"),
-                    &error,
-                )
-            })?;
+            .map_err(|error| sftp_error(&format!("set {temporary_label} permissions"), &error))?;
         file.write_all(content)
             .await
             .map_err(|error| sftp_error(&format!("write {temporary_label}"), &error))?;
@@ -185,7 +180,9 @@ impl RemoteSftp {
         max_bytes: usize,
     ) -> Result<Vec<u8>, OrchestrationError> {
         if max_bytes == 0 {
-            return Err(protocol_error("output inventory byte limit must be positive"));
+            return Err(protocol_error(
+                "output inventory byte limit must be positive",
+            ));
         }
 
         let mut fs = self.client.fs();
@@ -197,10 +194,9 @@ impl RemoteSftp {
             ),
             (attempt_directory, "output inventory attempt directory"),
         ] {
-            let metadata = fs
-                .symlink_metadata(path)
-                .await
-                .map_err(|error| output_inventory_sftp_error("inspect handoff directory", &error))?;
+            let metadata = fs.symlink_metadata(path).await.map_err(|error| {
+                output_inventory_sftp_error("inspect handoff directory", &error)
+            })?;
             ensure_directory_named(&metadata, label)?;
         }
         let path_metadata = fs
@@ -217,13 +213,12 @@ impl RemoteSftp {
             .read(true)
             .open(inventory_path)
             .await
-            .map_err(|error| output_inventory_changed_sftp_error("open output inventory", &error))?;
-        let opened_metadata = file
-            .metadata()
-            .await
             .map_err(|error| {
-                output_inventory_changed_sftp_error("inspect opened output inventory", &error)
+                output_inventory_changed_sftp_error("open output inventory", &error)
             })?;
+        let opened_metadata = file.metadata().await.map_err(|error| {
+            output_inventory_changed_sftp_error("inspect opened output inventory", &error)
+        })?;
         ensure_output_inventory_file(&opened_metadata, "opened output inventory")?;
         let opened_size =
             bounded_non_empty_size(&opened_metadata, max_bytes, "opened output inventory")?;
@@ -248,23 +243,18 @@ impl RemoteSftp {
                 "output inventory content changed while it was being read",
             ));
         }
-        let final_metadata = file
-            .metadata()
-            .await
-            .map_err(|error| {
-                output_inventory_changed_sftp_error("reinspect output inventory", &error)
-            })?;
+        let final_metadata = file.metadata().await.map_err(|error| {
+            output_inventory_changed_sftp_error("reinspect output inventory", &error)
+        })?;
         ensure_output_inventory_file(&final_metadata, "output inventory")?;
         if bounded_non_empty_size(&final_metadata, max_bytes, "output inventory")? != opened_size {
             return Err(inventory_rejected(
                 "output inventory size changed while it was being read",
             ));
         }
-        file.close()
-            .await
-            .map_err(|error| {
-                output_inventory_changed_sftp_error("close output inventory", &error)
-            })?;
+        file.close().await.map_err(|error| {
+            output_inventory_changed_sftp_error("close output inventory", &error)
+        })?;
 
         let mut fs = self.client.fs();
         for (path, label) in [
@@ -275,20 +265,14 @@ impl RemoteSftp {
             ),
             (attempt_directory, "output inventory attempt directory"),
         ] {
-            let metadata = fs
-                .symlink_metadata(path)
-                .await
-                .map_err(|error| {
-                    output_inventory_changed_sftp_error("reinspect handoff directory", &error)
-                })?;
+            let metadata = fs.symlink_metadata(path).await.map_err(|error| {
+                output_inventory_changed_sftp_error("reinspect handoff directory", &error)
+            })?;
             ensure_directory_named(&metadata, label)?;
         }
-        let final_path_metadata = fs
-            .symlink_metadata(inventory_path)
-            .await
-            .map_err(|error| {
-                output_inventory_changed_sftp_error("reinspect output inventory path", &error)
-            })?;
+        let final_path_metadata = fs.symlink_metadata(inventory_path).await.map_err(|error| {
+            output_inventory_changed_sftp_error("reinspect output inventory path", &error)
+        })?;
         ensure_output_inventory_file(&final_path_metadata, "output inventory")?;
         if bounded_non_empty_size(&final_path_metadata, max_bytes, "output inventory")?
             != opened_size
@@ -315,18 +299,15 @@ async fn read_bounded_inventory(
     file.read_all(expected_size, Default::default())
         .await
         .map(|content| content.to_vec())
-        .map_err(|error| {
-            output_inventory_changed_sftp_error("read output inventory", &error)
-        })
+        .map_err(|error| output_inventory_changed_sftp_error("read output inventory", &error))
 }
 
-fn ensure_directory_named(
-    metadata: &MetaData,
-    label: &str,
-) -> Result<(), OrchestrationError> {
+fn ensure_directory_named(metadata: &MetaData, label: &str) -> Result<(), OrchestrationError> {
     match metadata.file_type() {
         Some(file_type) if file_type.is_dir() => ensure_output_mode(
-            metadata.permissions().map(|permissions| permissions.as_raw().bits()),
+            metadata
+                .permissions()
+                .map(|permissions| permissions.as_raw().bits()),
             OUTPUT_HANDOFF_DIRECTORY_MODE,
             label,
         ),
@@ -349,8 +330,8 @@ fn validate_output_size(
     max_bytes: usize,
     label: &str,
 ) -> Result<usize, OrchestrationError> {
-    let observed = observed
-        .ok_or_else(|| inventory_rejected("SFTP server omitted output inventory size"))?;
+    let observed =
+        observed.ok_or_else(|| inventory_rejected("SFTP server omitted output inventory size"))?;
     let max_bytes = u64::try_from(max_bytes)
         .map_err(|_| protocol_error("output inventory byte limit is unsupported"))?;
     if observed == 0 {
@@ -380,7 +361,9 @@ fn ensure_output_inventory_file(
 ) -> Result<(), OrchestrationError> {
     match metadata.file_type() {
         Some(file_type) if file_type.is_file() => ensure_output_mode(
-            metadata.permissions().map(|permissions| permissions.as_raw().bits()),
+            metadata
+                .permissions()
+                .map(|permissions| permissions.as_raw().bits()),
             OUTPUT_INVENTORY_FILE_MODE,
             label,
         ),
@@ -428,8 +411,8 @@ fn ensure_size(
     expected: usize,
     label: &str,
 ) -> Result<(), OrchestrationError> {
-    let expected = u64::try_from(expected)
-        .map_err(|_| protocol_error("file exceeds the supported size"))?;
+    let expected =
+        u64::try_from(expected).map_err(|_| protocol_error("file exceeds the supported size"))?;
     match metadata.len() {
         Some(observed) if observed == expected => Ok(()),
         Some(_) => Err(protocol_error(&format!(
@@ -506,9 +489,7 @@ fn output_inventory_changed_sftp_error(operation: &str, error: &SftpError) -> Or
 }
 
 fn output_inventory_io_error(operation: &str, _error: &std::io::Error) -> OrchestrationError {
-    OrchestrationError::Backend(format!(
-        "SFTP transfer: {operation}: SFTP transport failed"
-    ))
+    OrchestrationError::Backend(format!("SFTP transfer: {operation}: SFTP transport failed"))
 }
 
 fn protocol_error(message: &str) -> OrchestrationError {
@@ -530,11 +511,7 @@ mod tests {
     fn handoff_metadata_policy_and_artifact_modes_fail_closed() {
         assert!(ensure_output_mode(Some(0o700), 0o700, "directory").is_ok());
         assert!(ensure_output_mode(Some(0o600), 0o600, "file").is_ok());
-        for (observed, expected) in [
-            (Some(0o750), 0o700),
-            (Some(0o640), 0o600),
-            (None, 0o600),
-        ] {
+        for (observed, expected) in [(Some(0o750), 0o700), (Some(0o640), 0o600), (None, 0o600)] {
             assert!(matches!(
                 ensure_output_mode(observed, expected, "handoff"),
                 Err(OrchestrationError::OutputInventoryRejected(_))
@@ -666,7 +643,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, OrchestrationError::OutputInventoryRejected(_)));
+        assert!(matches!(
+            error,
+            OrchestrationError::OutputInventoryRejected(_)
+        ));
         std::fs::set_permissions(
             &publication_directory,
             std::fs::Permissions::from_mode(OUTPUT_HANDOFF_DIRECTORY_MODE),
@@ -685,15 +665,17 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, OrchestrationError::OutputInventoryRejected(_)));
+        assert!(matches!(
+            error,
+            OrchestrationError::OutputInventoryRejected(_)
+        ));
         std::fs::set_permissions(
             &attempt_directory,
             std::fs::Permissions::from_mode(OUTPUT_HANDOFF_DIRECTORY_MODE),
         )
         .unwrap();
 
-        std::fs::set_permissions(&inventory_path, std::fs::Permissions::from_mode(0o640))
-            .unwrap();
+        std::fs::set_permissions(&inventory_path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let error = sftp
             .read_output_inventory(
                 control_directory.to_str().unwrap(),
@@ -704,7 +686,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, OrchestrationError::OutputInventoryRejected(_)));
+        assert!(matches!(
+            error,
+            OrchestrationError::OutputInventoryRejected(_)
+        ));
         std::fs::set_permissions(
             &inventory_path,
             std::fs::Permissions::from_mode(OUTPUT_INVENTORY_FILE_MODE),
@@ -723,7 +708,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, OrchestrationError::OutputInventoryRejected(_)));
+        assert!(matches!(
+            error,
+            OrchestrationError::OutputInventoryRejected(_)
+        ));
         std::fs::remove_file(&inventory_path).unwrap();
 
         let error = sftp
@@ -754,7 +742,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, OrchestrationError::OutputInventoryRejected(_)));
+        assert!(matches!(
+            error,
+            OrchestrationError::OutputInventoryRejected(_)
+        ));
 
         let oversized = std::fs::OpenOptions::new()
             .write(true)
@@ -771,7 +762,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, OrchestrationError::OutputInventoryRejected(_)));
+        assert!(matches!(
+            error,
+            OrchestrationError::OutputInventoryRejected(_)
+        ));
 
         sftp.shutdown().await.unwrap();
         let status = tokio::time::timeout(Duration::from_secs(5), child.wait())

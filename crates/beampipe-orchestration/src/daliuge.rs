@@ -482,18 +482,12 @@ mod tests {
             (json!("CANCELLED"), DaliugeSessionState::Cancelled),
             (json!("ERROR"), DaliugeSessionState::Failed),
             (json!({"status": "Running"}), DaliugeSessionState::Running),
-            (
-                json!({"nm-a": 4, "nm-b": 4}),
-                DaliugeSessionState::Finished,
-            ),
+            (json!({"nm-a": 4, "nm-b": 4}), DaliugeSessionState::Finished),
             (
                 json!({"nm-a": 5, "nm-b": 5}),
                 DaliugeSessionState::Cancelled,
             ),
-            (
-                json!({"nm-a": 2, "nm-b": 4}),
-                DaliugeSessionState::Running,
-            ),
+            (json!({"nm-a": 2, "nm-b": 4}), DaliugeSessionState::Running),
         ] {
             assert_eq!(DaliugeSessionState::from_raw(&raw), expected);
         }
