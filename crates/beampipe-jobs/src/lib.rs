@@ -6137,8 +6137,10 @@ mod tests {
             remote_session_dir: &str,
             execution_attempt: i32,
         ) -> Result<Vec<u8>, OrchestrationError> {
+            if remote_session_dir != self.expected_session_dir {
+                return Err(OrchestrationError::OutputInventoryNotReady);
+            }
             self.calls.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(remote_session_dir, self.expected_session_dir);
             assert_eq!(execution_attempt, self.expected_attempt);
             match &self.outcome {
                 FakeOutputInventoryOutcome::Receipt(bytes) => Ok(bytes.clone()),
@@ -6158,6 +6160,7 @@ mod tests {
     ) -> beampipe_db::models::ExecutionRow {
         let unique = Uuid::now_v7().simple().to_string();
         let module = format!("jobs_output_pull_{suffix}_{}", &unique[..16]);
+        let remote_session_dir = format!("/scratch/project/dlg/session-{}", &unique[..16]);
         let template = pinned_slurm_profile(true);
         let profile = repo::create_deployment_profile(
             pool,
@@ -6193,7 +6196,7 @@ mod tests {
                 scheduler_state = 'succeeded',
                 daliuge_session_id = 'session-output-pull',
                 daliuge_state = 'finished',
-                remote_session_dir = '/scratch/project/dlg/session-output-pull',
+                remote_session_dir = $2,
                 output_verification_required = true,
                 output_verification_policy = '{"required":true,"inventory_schema":"beampipe-output-inventory/v1","expected_patterns":["**/result.bin"]}'::jsonb,
                 output_state = 'pending',
@@ -6202,6 +6205,7 @@ mod tests {
             "#,
         )
         .bind(execution.uuid)
+        .bind(remote_session_dir)
         .execute(pool)
         .await
         .unwrap();
