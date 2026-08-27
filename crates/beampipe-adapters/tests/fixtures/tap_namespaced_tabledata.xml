@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vot:VOTABLE xmlns:vot="http://www.ivoa.net/xml/VOTable/v1.4" version="1.4">
+  <vot:RESOURCE type="results">
+    <vot:INFO name="QUERY_STATUS" value="OK"/>
+    <vot:TABLE>
+      <vot:FIELD name="obs_id" datatype="char" arraysize="*"/>
+      <vot:FIELD name="s_ra" datatype="double"/>
+      <vot:FIELD name="s_dec" datatype="double"/>
+      <vot:DATA>
+        <vot:TABLEDATA>
+          <vot:TR>
+            <vot:TD>ASKAP-72962</vot:TD>
+            <vot:TD>198.39</vot:TD>
+            <vot:TD>-15.45</vot:TD>
+          </vot:TR>
+          <vot:TR>
+            <vot:TD>ASKAP-72963 &amp; <![CDATA[follow-up]]></vot:TD>
+            <vot:TD/>
+            <vot:TD>-16.00</vot:TD>
+          </vot:TR>
+        </vot:TABLEDATA>
+      </vot:DATA>
+    </vot:TABLE>
+  </vot:RESOURCE>
+</vot:VOTABLE>

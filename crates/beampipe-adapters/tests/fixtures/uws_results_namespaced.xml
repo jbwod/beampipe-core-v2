@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jobs:results xmlns:jobs="http://www.ivoa.net/xml/UWS/v1.1"
+              xmlns:link="http://www.w3.org/1999/xlink">
+  <jobs:result id="visibility-105174">
+    <jobs:reference>https://example/a</jobs:reference>
+  </jobs:result>
+  <jobs:result id="visibility-105174.checksum" link:href="https://example/cs"/>
+</jobs:results>

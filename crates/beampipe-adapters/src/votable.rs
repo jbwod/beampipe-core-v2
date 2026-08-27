@@ -2,15 +2,60 @@ use crate::{AdapterError, TapRow};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde_json::{Map, Value};
+use votable::data::TableOrBinOrBin2;
+use votable::iter::strings::RowStringIterator;
+use votable::iter::SimpleVOTableRowIterator;
+use votable::table::TableElem;
 
-/// Parse a minimal VOTable TABLE/DATA/TABLEDATA response into row maps.
+/// Parse the first result table in a VOTable response into TAP row maps.
 pub fn parse_votable_xml(xml: &str) -> Result<Vec<TapRow>, AdapterError> {
+    // TAP errors are frequently valid VOTables with no TABLE. Check the status first so
+    // callers retain the service-provided diagnostic instead of a generic shape error.
     reject_tap_query_error(xml)?;
-    let fields = extract_field_names(xml);
+    let mut table_rows = SimpleVOTableRowIterator::from_reader(xml.as_bytes())
+        .map_err(votable_shape_error)?;
+    if !matches!(table_rows.data_type(), TableOrBinOrBin2::TableData) {
+        return Err(AdapterError::InvalidRowShape(
+            "VOTable result does not use TABLEDATA".into(),
+        ));
+    }
+    let fields = table_rows
+        .votable()
+        .get_first_table()
+        .into_iter()
+        .flat_map(|table| table.elems.iter())
+        .filter_map(|element| match element {
+            TableElem::Field(field) => Some(field.name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     if fields.is_empty() {
         return Ok(Vec::new());
     }
-    extract_table_rows(xml, &fields)
+    let rows = {
+        let (reader, buffer) = table_rows.borrow_mut_reader_and_buff();
+        RowStringIterator::new(reader, buffer)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(votable_shape_error)?
+    };
+
+    Ok(rows
+        .iter()
+        .map(|cells| {
+            let mut row = Map::new();
+            for (index, field) in fields.iter().enumerate() {
+                row.insert(
+                    field.clone(),
+                    Value::String(cells.get(index).cloned().unwrap_or_default()),
+                );
+            }
+            row
+        })
+        .collect())
+}
+
+fn votable_shape_error(error: votable::VOTableError) -> AdapterError {
+    AdapterError::InvalidRowShape(format!("VOTable parse error: {error}"))
 }
 
 fn reject_tap_query_error(xml: &str) -> Result<(), AdapterError> {
@@ -105,121 +150,21 @@ fn tap_query_error(message: Option<&str>) -> AdapterError {
     AdapterError::Permanent(message)
 }
 
-fn attr_value(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
-    e.attributes()
-        .filter_map(|a| a.ok())
-        .find(|a| a.key.as_ref() == key)
-        .and_then(|a| String::from_utf8(a.value.into_owned()).ok())
-}
-
-fn extract_field_names(xml: &str) -> Vec<String> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut names = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) if e.name().as_ref() == b"FIELD" => {
-                if let Some(name) = attr_value(&e, b"name").or_else(|| attr_value(&e, b"ID")) {
-                    names.push(name);
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                tracing::warn!(error = %e, "event=votable_field_parse_error");
-                break;
-            }
-            _ => {}
-        }
-        buf.clear();
-    }
-    names
-}
-
-fn extract_table_rows(xml: &str, fields: &[String]) -> Result<Vec<TapRow>, AdapterError> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut rows = Vec::new();
-    let mut in_tr = false;
-    let mut in_td = false;
-    let mut cells = Vec::new();
-    let mut current_cell = String::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) if e.name().as_ref() == b"TR" => {
-                in_tr = true;
-                cells.clear();
-            }
-            Ok(Event::End(e)) if e.name().as_ref() == b"TR" && in_tr => {
-                let mut row = Map::new();
-                for (i, field) in fields.iter().enumerate() {
-                    row.insert(
-                        field.clone(),
-                        Value::String(cells.get(i).cloned().unwrap_or_default()),
-                    );
-                }
-                rows.push(row);
-                in_tr = false;
-            }
-            Ok(Event::Start(e)) if e.name().as_ref() == b"TD" && in_tr => {
-                in_td = true;
-                current_cell.clear();
-            }
-            Ok(Event::End(e)) if e.name().as_ref() == b"TD" && in_tr => {
-                cells.push(std::mem::take(&mut current_cell));
-                in_td = false;
-            }
-            Ok(Event::Empty(e)) if in_tr && e.name().as_ref() == b"TD" => {
-                cells.push(String::new());
-            }
-            Ok(Event::Text(e)) if in_td => {
-                if let Ok(text) = e.unescape() {
-                    current_cell.push_str(&text);
-                }
-            }
-            Ok(Event::CData(e)) if in_td => {
-                current_cell.push_str(&String::from_utf8_lossy(e.as_ref()));
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(AdapterError::InvalidRowShape(format!(
-                    "VOTable row parse error: {e}"
-                )));
-            }
-            _ => {}
-        }
-        buf.clear();
-    }
-    Ok(rows)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_casda_style_votable_with_non_empty_fields() {
-        let xml = r#"<?xml version="1.0"?><VOTABLE><RESOURCE><TABLE>
-<FIELD name="obs_id"/><FIELD name="s_ra"/><FIELD name="s_dec"/>
-<DATA><TABLEDATA><TR><TD>ASKAP-72962</TD><TD>198.39</TD><TD>-15.45</TD></TR></TABLEDATA></DATA>
-</TABLE></RESOURCE></VOTABLE>"#;
+    fn parses_namespaced_tabledata_golden() {
+        let xml = include_str!("../tests/fixtures/tap_namespaced_tabledata.xml");
         let rows = parse_votable_xml(xml).unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["obs_id"], "ASKAP-72962");
         assert_eq!(rows[0]["s_ra"], "198.39");
         assert_eq!(rows[0]["s_dec"], "-15.45");
-    }
-
-    #[test]
-    fn empty_td_cells_preserve_column_alignment() {
-        let xml = r#"<?xml version="1.0"?><VOTABLE><RESOURCE><TABLE>
-<FIELD name="a"/><FIELD name="b"/>
-<DATA><TABLEDATA><TR><TD>1</TD><TD></TD></TR></TABLEDATA></DATA>
-</TABLE></RESOURCE></VOTABLE>"#;
-        let rows = parse_votable_xml(xml).unwrap();
-        assert_eq!(rows[0]["a"], "1");
-        assert_eq!(rows[0]["b"], "");
+        assert_eq!(rows[1]["obs_id"], "ASKAP-72963 & follow-up");
+        assert_eq!(rows[1]["s_ra"], "");
+        assert_eq!(rows[1]["s_dec"], "-16.00");
     }
 
     #[test]
@@ -240,11 +185,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_tap_query_status_error_info() {
-        let xml = r#"<?xml version="1.0"?><VOTABLE><RESOURCE><INFO name="QUERY_STATUS" value="ERROR"/></RESOURCE></VOTABLE>"#;
+    fn rejects_empty_namespaced_tap_query_status_error_info() {
+        let xml = r#"<?xml version="1.0"?><v:VOTABLE xmlns:v="http://www.ivoa.net/xml/VOTable/v1.4"><v:RESOURCE><v:INFO name="QUERY_STATUS" value="ERROR"/></v:RESOURCE></v:VOTABLE>"#;
 
         let error = parse_votable_xml(xml).unwrap_err();
         assert!(matches!(&error, AdapterError::Permanent(_)));
         assert!(error.to_string().contains("QUERY_STATUS=ERROR"));
+    }
+
+    #[test]
+    fn reports_invalid_votable_shape_without_panicking() {
+        let xml = r#"<VOTABLE version="1.4"><RESOURCE><TABLE><FIELD name="missing_datatype"/></TABLE></RESOURCE></VOTABLE>"#;
+        let error = parse_votable_xml(xml).unwrap_err();
+        assert!(matches!(error, AdapterError::InvalidRowShape(_)));
     }
 }

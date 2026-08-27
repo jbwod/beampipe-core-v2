@@ -1,179 +1,62 @@
-use std::collections::HashMap;
+use serde::Deserialize;
+use serde_json::Value;
 
-/// Parse a CASDA datalink VOTable and return the SODA async URL plus ID tokens for `service_name`.
+#[derive(Debug, Deserialize)]
+struct DataLinkDocument {
+    #[serde(default, rename = "RESOURCE")]
+    resources: Vec<DataLinkResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataLinkResource {
+    #[serde(default, rename = "@ID")]
+    id: Option<String>,
+    #[serde(default, rename = "PARAM")]
+    parameters: Vec<DataLinkParameter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataLinkParameter {
+    #[serde(default, rename = "@name")]
+    name: String,
+    #[serde(default, rename = "@value")]
+    value: Option<String>,
+}
+
+/// Parse a CASDA DataLink VOTable and return the SODA async URL plus ID token for
+/// `service_name`.
 pub fn parse_casda_datalink(xml: &str, service_name: &str) -> Option<(String, String)> {
-    let fields = extract_field_names(xml);
-    if fields.is_empty() {
-        return None;
-    }
     let soda_url = extract_soda_access_url(xml, service_name)?;
-    for row in extract_table_rows(&fields, xml) {
-        let service = row.get("service_def").map(String::as_str).unwrap_or("");
+    for row in crate::votable::parse_votable_xml(xml).ok()? {
+        let service = row.get("service_def").and_then(Value::as_str).unwrap_or("");
         if service != service_name {
             continue;
         }
         let token = row
             .get("authenticated_id_token")
-            .filter(|t| !t.trim().is_empty())
-            .cloned();
+            .and_then(Value::as_str)
+            .filter(|token| !token.trim().is_empty());
         if let Some(token) = token {
-            return Some((soda_url, token));
+            return Some((soda_url, token.to_owned()));
         }
     }
     None
 }
 
-pub fn extract_field_names(xml: &str) -> Vec<String> {
-    let mut reader = quick_xml::Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut names = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Empty(e)) | Ok(quick_xml::events::Event::Start(e))
-                if e.name().local_name().as_ref() == b"FIELD" =>
-            {
-                for attr in e.attributes().flatten() {
-                    if attr.key.local_name().as_ref() == b"name" {
-                        names.push(String::from_utf8_lossy(&attr.value).to_string());
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    names
-}
-
+// Real CASDA DataLink documents contain input PARAM elements without `value`, which the full
+// standards model correctly rejects. A deliberately narrow typed projection keeps those optional
+// while all FIELD and TABLEDATA parsing remains delegated to the `votable` crate above.
 fn extract_soda_access_url(xml: &str, service_name: &str) -> Option<String> {
-    let mut reader = quick_xml::Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut in_target_resource = false;
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) => {
-                let name = e.name().local_name();
-                if name.as_ref() == b"RESOURCE" {
-                    in_target_resource = e.attributes().flatten().any(|a| {
-                        a.key.local_name().as_ref() == b"ID" && {
-                            String::from_utf8_lossy(&a.value) == service_name
-                        }
-                    });
-                } else if in_target_resource && name.as_ref() == b"PARAM" {
-                    let mut param_name = None;
-                    let mut param_value = None;
-                    for attr in e.attributes().flatten() {
-                        match attr.key.local_name().as_ref() {
-                            b"name" => {
-                                param_name = Some(String::from_utf8_lossy(&attr.value).to_string())
-                            }
-                            b"value" => {
-                                param_value = Some(String::from_utf8_lossy(&attr.value).to_string())
-                            }
-                            _ => {}
-                        }
-                    }
-                    if param_name.as_deref() == Some("accessURL") {
-                        if let Some(value) = param_value.filter(|v| !v.trim().is_empty()) {
-                            return Some(value);
-                        }
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::Empty(e))
-                if in_target_resource && e.name().local_name().as_ref() == b"PARAM" =>
-            {
-                let mut param_name = None;
-                let mut param_value = None;
-                for attr in e.attributes().flatten() {
-                    match attr.key.local_name().as_ref() {
-                        b"name" => {
-                            param_name = Some(String::from_utf8_lossy(&attr.value).to_string())
-                        }
-                        b"value" => {
-                            param_value = Some(String::from_utf8_lossy(&attr.value).to_string())
-                        }
-                        _ => {}
-                    }
-                }
-                if param_name.as_deref() == Some("accessURL") {
-                    if let Some(value) = param_value.filter(|v| !v.trim().is_empty()) {
-                        return Some(value);
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::End(e))
-                if e.name().local_name().as_ref() == b"RESOURCE" =>
-            {
-                in_target_resource = false;
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    None
-}
-
-fn extract_table_rows(fields: &[String], xml: &str) -> Vec<HashMap<String, String>> {
-    let mut reader = quick_xml::Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut rows = Vec::new();
-    let mut in_tr = false;
-    let mut in_td = false;
-    let mut cells = Vec::new();
-    let mut current_cell = String::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) if e.name().local_name().as_ref() == b"TR" => {
-                in_tr = true;
-                cells.clear();
-            }
-            Ok(quick_xml::events::Event::End(e))
-                if e.name().local_name().as_ref() == b"TR" && in_tr =>
-            {
-                let mut row = HashMap::new();
-                for (i, field) in fields.iter().enumerate() {
-                    row.insert(field.clone(), cells.get(i).cloned().unwrap_or_default());
-                }
-                rows.push(row);
-                in_tr = false;
-            }
-            Ok(quick_xml::events::Event::Start(e))
-                if e.name().local_name().as_ref() == b"TD" && in_tr =>
-            {
-                in_td = true;
-                current_cell.clear();
-            }
-            Ok(quick_xml::events::Event::End(e))
-                if e.name().local_name().as_ref() == b"TD" && in_tr =>
-            {
-                cells.push(std::mem::take(&mut current_cell));
-                in_td = false;
-            }
-            Ok(quick_xml::events::Event::Empty(e))
-                if in_tr && e.name().local_name().as_ref() == b"TD" =>
-            {
-                cells.push(String::new());
-            }
-            Ok(quick_xml::events::Event::Text(e)) if in_td => {
-                if let Ok(text) = e.unescape() {
-                    current_cell.push_str(&text);
-                }
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    rows
+    let document = quick_xml::de::from_str::<DataLinkDocument>(xml).ok()?;
+    document
+        .resources
+        .into_iter()
+        .find(|resource| resource.id.as_deref() == Some(service_name))?
+        .parameters
+        .into_iter()
+        .find(|parameter| parameter.name == "accessURL")?
+        .value
+        .filter(|url| !url.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -181,7 +64,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_casda_datalink_fixture() {
+    fn parses_casda_datalink_golden() {
         let xml = include_str!("../tests/fixtures/casda_datalink.xml");
         let (soda_url, token) = parse_casda_datalink(xml, "async_service").unwrap();
         assert_eq!(
@@ -189,5 +72,35 @@ mod tests {
             "https://casda.csiro.au/casda_data_access/data/async"
         );
         assert_eq!(token, "cube-244");
+    }
+
+    #[test]
+    fn selects_only_an_authenticated_row_for_the_requested_service() {
+        let xml = r#"<?xml version="1.0"?>
+<v:VOTABLE xmlns:v="http://www.ivoa.net/xml/VOTable/v1.4" version="1.4">
+  <v:RESOURCE type="results"><v:TABLE>
+    <v:FIELD datatype="char" arraysize="*" name="service_def"/>
+    <v:FIELD datatype="char" arraysize="*" name="authenticated_id_token"/>
+    <v:DATA><v:TABLEDATA>
+      <v:TR><v:TD>other_service</v:TD><v:TD>wrong-service</v:TD></v:TR>
+      <v:TR><v:TD>async_service</v:TD><v:TD/></v:TR>
+      <v:TR><v:TD>async_service</v:TD><v:TD>right-token</v:TD></v:TR>
+    </v:TABLEDATA></v:DATA>
+  </v:TABLE></v:RESOURCE>
+  <v:RESOURCE ID="other_service" type="meta">
+    <v:PARAM name="accessURL" datatype="char" arraysize="*" value="https://example.test/wrong"/>
+  </v:RESOURCE>
+  <v:RESOURCE ID="async_service" type="meta">
+    <v:PARAM name="accessURL" datatype="char" arraysize="*" value="https://example.test/right"/>
+  </v:RESOURCE>
+</v:VOTABLE>"#;
+
+        assert_eq!(
+            parse_casda_datalink(xml, "async_service"),
+            Some((
+                "https://example.test/right".to_owned(),
+                "right-token".to_owned()
+            ))
+        );
     }
 }

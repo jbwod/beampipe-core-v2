@@ -145,7 +145,12 @@ async fn fetch_phase(client: &reqwest::Client, job_url: &str) -> Result<String, 
             .await
         {
             Ok(response) => match response.error_for_status() {
-                Ok(resp) => return Ok(resp.text().await?.trim().to_string()),
+                Ok(resp) => {
+                    let body = resp.text().await?;
+                    return crate::casda_staging::parse_uws_phase(&body).ok_or_else(|| {
+                        AdapterError::InvalidRowShape("empty or invalid UWS phase response".into())
+                    });
+                }
                 Err(err) => last_error = Some(AdapterError::Http(err)),
             },
             Err(err) if err.is_timeout() => last_error = Some(AdapterError::Timeout),

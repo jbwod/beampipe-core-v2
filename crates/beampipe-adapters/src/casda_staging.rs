@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use serde::Deserialize;
+
 pub fn parse_job_results(xml_text: &str) -> (HashMap<String, String>, HashMap<String, String>) {
     let mut data_url_by_scan_id = HashMap::new();
     let mut checksum_url_by_scan_id = HashMap::new();
@@ -83,78 +85,73 @@ fn hex_digit(value: u8) -> Option<u8> {
     }
 }
 
-fn result_attributes(
-    element: &quick_xml::events::BytesStart<'_>,
-    decoder: quick_xml::encoding::Decoder,
-) -> (String, Option<String>) {
-    let mut result_id = String::new();
-    let mut href = None;
-    for attribute in element.attributes().flatten() {
-        let key = attribute.key.local_name();
-        let Ok(value) = attribute.decode_and_unescape_value(decoder) else {
-            continue;
-        };
-        if key.as_ref() == b"id" {
-            result_id = value.into_owned();
-        } else if key.as_ref() == b"href" {
-            href = Some(value.into_owned());
-        }
-    }
-    (result_id, href)
+#[derive(Debug, Deserialize)]
+struct UwsResults {
+    #[serde(default, rename = "result")]
+    results: Vec<UwsResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UwsResult {
+    #[serde(default, rename = "@id")]
+    id: String,
+    #[serde(default, rename = "@href")]
+    href: Option<String>,
+    #[serde(default)]
+    reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UwsJob {
+    #[serde(default)]
+    phase: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UwsPhase {
+    #[serde(default, rename = "$text")]
+    value: String,
 }
 
 pub fn iter_uws_results(xml_text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut reader = quick_xml::Reader::from_str(xml_text);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut current_id = String::new();
-    let mut in_reference = false;
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) => {
-                let name = e.name().local_name();
-                if name.as_ref() == b"result" {
-                    let (result_id, href) = result_attributes(&e, reader.decoder());
-                    current_id = result_id;
-                    if let Some(href) = href.filter(|value| !value.is_empty()) {
-                        if !current_id.is_empty() {
-                            out.push((current_id.clone(), href));
-                        }
-                    }
-                }
-                if name.as_ref() == b"reference" {
-                    in_reference = true;
-                }
+    let Ok(results) = quick_xml::de::from_str::<UwsResults>(xml_text) else {
+        tracing::warn!("event=uws_results_parse_error");
+        return Vec::new();
+    };
+    results
+        .results
+        .into_iter()
+        .filter_map(|result| {
+            let id = result.id.trim();
+            let url = result.href.or(result.reference)?;
+            let url = url.trim();
+            if id.is_empty() || url.is_empty() {
+                None
+            } else {
+                Some((id.to_owned(), url.to_owned()))
             }
-            Ok(quick_xml::events::Event::Empty(e))
-                if e.name().local_name().as_ref() == b"result" =>
-            {
-                let (result_id, href) = result_attributes(&e, reader.decoder());
-                if let Some(href) = href.filter(|value| !value.is_empty()) {
-                    if !result_id.is_empty() {
-                        out.push((result_id, href));
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::Text(e)) if in_reference => {
-                let url = e.unescape().unwrap_or_default().to_string();
-                if !current_id.is_empty() && !url.is_empty() {
-                    out.push((current_id.clone(), url));
-                }
-                in_reference = false;
-            }
-            Ok(quick_xml::events::Event::End(e)) if e.name().local_name().as_ref() == b"result" => {
-                current_id.clear();
-                in_reference = false;
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
+        })
+        .collect()
+}
+
+pub(crate) fn parse_uws_phase(xml_text: &str) -> Option<String> {
+    let trimmed = xml_text.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    out
+    if !trimmed.starts_with('<') {
+        return Some(trimmed.to_owned());
+    }
+    quick_xml::de::from_str::<UwsJob>(trimmed)
+        .ok()
+        .and_then(|job| job.phase)
+        .or_else(|| {
+            quick_xml::de::from_str::<UwsPhase>(trimmed)
+                .ok()
+                .map(|phase| phase.value)
+        })
+        .map(|phase| phase.trim().to_owned())
+        .filter(|phase| !phase.is_empty())
 }
 
 #[cfg(test)]
@@ -163,11 +160,7 @@ mod tests {
 
     #[test]
     fn parse_visibility_scan_ids() {
-        let xml = r#"<?xml version="1.0"?>
-        <uws:results xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0">
-          <uws:result id="visibility-105174"><uws:reference>https://example/a</uws:reference></uws:result>
-          <uws:result id="visibility-105174.checksum"><uws:reference>https://example/cs</uws:reference></uws:result>
-        </uws:results>"#;
+        let xml = include_str!("../tests/fixtures/uws_results_namespaced.xml");
         let (data, checksum) = parse_job_results(xml);
         assert_eq!(data.get("105174").unwrap(), "https://example/a");
         assert_eq!(checksum.get("105174").unwrap(), "https://example/cs");
@@ -193,5 +186,24 @@ mod tests {
         assert!(checksums[filename].contains(".checksum"));
         let (visibilities, _) = parse_job_results(xml);
         assert!(visibilities["644741"].contains("HIPASSJ1317-16"));
+    }
+
+    #[test]
+    fn parses_plain_and_namespaced_uws_phases() {
+        assert_eq!(parse_uws_phase(" COMPLETED ").as_deref(), Some("COMPLETED"));
+        assert_eq!(
+            parse_uws_phase(
+                r#"<u:job xmlns:u="http://www.ivoa.net/xml/UWS/v1.1"><u:phase>EXECUTING</u:phase></u:job>"#
+            )
+            .as_deref(),
+            Some("EXECUTING")
+        );
+        assert_eq!(
+            parse_uws_phase(
+                r#"<phase xmlns="http://www.ivoa.net/xml/UWS/v1.1">COMPLETED</phase>"#
+            )
+            .as_deref(),
+            Some("COMPLETED")
+        );
     }
 }
