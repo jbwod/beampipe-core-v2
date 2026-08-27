@@ -40,9 +40,8 @@ pub use manifest::{
 };
 pub use scheduler::{
     SchedulerAdapter, SchedulerAdapterError, SchedulerCapacity, SchedulerConnectivity,
-    SchedulerErrorKind, SchedulerJobObservation, SchedulerKind, SchedulerLogLocations,
-    SchedulerNameLookup, SchedulerNameLookupSourceCompletion, SchedulerQueueInfo,
-    SchedulerResourceRequest, SchedulerSubmission, SchedulerSubmissionRequest,
+    SchedulerErrorKind, SchedulerJobObservation, SchedulerKind, SchedulerNameLookup,
+    SchedulerNameLookupSourceCompletion, SchedulerQueueInfo, SchedulerResourceRequest,
 };
 pub use security::{collect_security_issues, validate_security};
 pub use slurm_batch::SlurmJobPollResult;
@@ -57,17 +56,17 @@ pub use slurm_ssh::{
 };
 pub use staging::{casda_password_from_env, CasdaStagingClient};
 pub use tm_health::{
-    dim_unreachable_message, format_service_request_error, probe_dim_reachable, probe_tm_reachable,
-    tm_unreachable_message, TmProbeResult,
+    dim_unreachable_message, probe_dim_reachable, probe_tm_reachable, tm_unreachable_message,
+    TmProbeResult,
 };
 pub use translator::{partitioned_pgt_for_dlg_deploy, pgt_filename_from_lg_name};
 
-pub const ACTIVE_CONFIG_KEY: &str = "activeGraphConfigId";
-pub const GRAPH_CONFIGS: &str = "graphConfigurations";
-pub const GRAPH_NODES: &str = "nodeDataArray";
-pub const GRAPH_FIELDS: &str = "fields";
-pub const BEAMPIPE_INGEST_NODE_NAME: &str = "beampipe-ingest";
-pub const MANIFEST_PATH_FIELD_NAME: &str = "manifest_path";
+const ACTIVE_CONFIG_KEY: &str = "activeGraphConfigId";
+const GRAPH_CONFIGS: &str = "graphConfigurations";
+const GRAPH_NODES: &str = "nodeDataArray";
+const GRAPH_FIELDS: &str = "fields";
+const BEAMPIPE_INGEST_NODE_NAME: &str = "beampipe-ingest";
+const MANIFEST_PATH_FIELD_NAME: &str = "manifest_path";
 
 #[derive(Debug, Error)]
 pub enum OrchestrationError {
@@ -119,34 +118,6 @@ impl StagingClient for PassThroughStagingClient {
             staged_count: metadata.len(),
             ..Default::default()
         })
-    }
-}
-
-pub trait ManifestBuilder: Send + Sync {
-    fn build_manifest(&self, metadata: &[Value]) -> Result<Value, OrchestrationError>;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GenericManifestBuilder;
-
-impl ManifestBuilder for GenericManifestBuilder {
-    fn build_manifest(&self, metadata: &[Value]) -> Result<Value, OrchestrationError> {
-        build_generic_manifest(metadata)
-    }
-}
-
-pub trait GraphResolver: Send + Sync {
-    fn resolve_graph(&self) -> Result<Value, OrchestrationError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct StaticGraphResolver {
-    pub graph: Value,
-}
-
-impl GraphResolver for StaticGraphResolver {
-    fn resolve_graph(&self) -> Result<Value, OrchestrationError> {
-        Ok(self.graph.clone())
     }
 }
 
@@ -205,8 +176,6 @@ pub trait SlurmClient: Send + Sync {
         session_id: &str,
         pgt_json: Value,
     ) -> Result<SlurmSubmitReceipt, OrchestrationError>;
-    async fn poll(&self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError>;
-    async fn cancel(&self, scheduler_job_id: &str) -> Result<(), OrchestrationError>;
 }
 
 #[async_trait]
@@ -288,28 +257,12 @@ impl SlurmClient for MockSlurmClient {
             staging_root: "/tmp/beampipe/outputs".into(),
         })
     }
-
-    async fn poll(&self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError> {
-        Ok(BackendPoll {
-            status: ExecutionStatus::Completed,
-            poll_summary: serde_json::json!({
-                "scheduler_job_id": scheduler_job_id,
-                "normalized_state": slurm::normalize_state("COMPLETED"),
-            }),
-        })
-    }
-
-    async fn cancel(&self, _scheduler_job_id: &str) -> Result<(), OrchestrationError> {
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct RestExecutionBackend<T = MockTranslatorClient, D = MockDimClient> {
     pub translator: T,
     pub dim: D,
-    pub profile_name: Option<String>,
-    pub tm_url: Option<String>,
     pub dim_endpoint: Option<String>,
     pub translate_config: clients::TranslateConfig,
     pub session_created_at: DateTime<Utc>,
@@ -320,8 +273,6 @@ impl Default for RestExecutionBackend {
         Self {
             translator: MockTranslatorClient,
             dim: MockDimClient,
-            profile_name: None,
-            tm_url: None,
             dim_endpoint: None,
             translate_config: clients::TranslateConfig::default(),
             session_created_at: Utc::now(),
@@ -389,11 +340,8 @@ where
 pub struct SlurmExecutionBackend<T = MockTranslatorClient, S = MockSlurmClient> {
     pub translator: T,
     pub slurm: S,
-    pub profile_name: Option<String>,
-    pub session_dir: String,
     pub login_node: Option<String>,
     pub remote_user: Option<String>,
-    pub account: Option<String>,
     pub translate_config: clients::TranslateConfig,
     pub session_created_at: DateTime<Utc>,
 }
@@ -403,11 +351,8 @@ impl Default for SlurmExecutionBackend {
         Self {
             translator: MockTranslatorClient,
             slurm: MockSlurmClient,
-            profile_name: None,
-            session_dir: "/tmp/beampipe".into(),
             login_node: None,
             remote_user: None,
-            account: None,
             translate_config: clients::TranslateConfig {
                 slurm_path: true,
                 ..Default::default()
@@ -575,7 +520,7 @@ pub fn build_generic_manifest(metadata: &[Value]) -> Result<Value, Orchestration
     Ok(serde_json::json!({"inputs": {}, "sources": sources}))
 }
 
-pub fn resolve_beampipe_ingest_uuids(graph: &Value) -> Option<(String, String)> {
+fn resolve_beampipe_ingest_uuids(graph: &Value) -> Option<(String, String)> {
     let nodes = graph.get(GRAPH_NODES)?.as_array()?;
     for node in nodes.iter().filter_map(Value::as_object) {
         if node.get("name").and_then(Value::as_str) != Some(BEAMPIPE_INGEST_NODE_NAME) {

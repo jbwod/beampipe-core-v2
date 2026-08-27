@@ -77,8 +77,6 @@ async fn hello_universe_translates_deploys_and_finishes() {
     let backend = RestExecutionBackend {
         translator,
         dim: dim.clone(),
-        profile_name: Some("live-hello-universe".into()),
-        tm_url: Some(tm_url.clone()),
         dim_endpoint: Some(dim_url.clone()),
         translate_config: TranslateConfig {
             algo: "metis".into(),

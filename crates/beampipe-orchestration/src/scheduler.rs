@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::clients::SshSlurmClient;
-use crate::slurm_deploy::{resolve_remote_user, submit_slurm_session, SlurmSubmitParams};
+use crate::slurm_deploy::resolve_remote_user;
 use crate::slurm_ssh::{
     query_slurm_states_batch, validate_slurm_job_id, SlurmSshSession, SlurmTarget,
 };
@@ -30,8 +30,6 @@ pub enum SchedulerErrorKind {
     Timeout,
     Command,
     InvalidResponse,
-    NotFound,
-    SubmissionUncertain,
     Internal,
 }
 
@@ -65,13 +63,7 @@ impl SchedulerAdapterError {
         let detail = bounded_detail(&error.to_string());
         let lower = detail.to_ascii_lowercase();
         let (kind, retryable, message) =
-            if matches!(&error, OrchestrationError::SubmissionUncertain(_)) {
-                (
-                    SchedulerErrorKind::SubmissionUncertain,
-                    false,
-                    "scheduler submission outcome is uncertain",
-                )
-            } else if lower.contains("host key") || lower.contains("known_hosts") {
+            if lower.contains("host key") || lower.contains("known_hosts") {
                 (
                     SchedulerErrorKind::HostVerification,
                     false,
@@ -139,8 +131,6 @@ impl SchedulerAdapterError {
             SchedulerErrorKind::Authentication => FailureClass::Authentication,
             SchedulerErrorKind::HostVerification => FailureClass::Authorization,
             SchedulerErrorKind::Timeout => FailureClass::Timeout,
-            SchedulerErrorKind::NotFound => FailureClass::NotFound,
-            SchedulerErrorKind::SubmissionUncertain => FailureClass::InconsistentState,
             SchedulerErrorKind::Command
             | SchedulerErrorKind::InvalidResponse
             | SchedulerErrorKind::Internal => FailureClass::DependencyUnavailable,
@@ -171,9 +161,6 @@ impl SchedulerAdapterError {
             SchedulerErrorKind::Authentication => {
                 "verify the configured SSH identity and scheduler account access"
             }
-            SchedulerErrorKind::SubmissionUncertain => {
-                "reconcile scheduler jobs for the execution before retrying submission"
-            }
             _ => "run `beampipe doctor --profile <profile>` for scheduler diagnostics",
         })
     }
@@ -181,23 +168,6 @@ impl SchedulerAdapterError {
 
 fn bounded_detail(value: &str) -> String {
     value.chars().take(2048).collect()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchedulerSubmissionRequest {
-    pub execution_id: String,
-    pub daliuge_session_id: String,
-    pub physical_graph: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchedulerSubmission {
-    pub scheduler: SchedulerKind,
-    pub external_job_id: String,
-    pub remote_session_dir: Option<String>,
-    pub submitted_at: DateTime<Utc>,
-    #[serde(default)]
-    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,13 +209,6 @@ pub struct SchedulerConnectivity {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SchedulerLogLocations {
-    pub stdout: Option<String>,
-    pub stderr: Option<String>,
-    pub scheduler_log: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SchedulerQueueInfo {
     pub partition: Option<String>,
     pub states: BTreeMap<String, u64>,
@@ -274,7 +237,6 @@ pub struct SchedulerResourceRequest {
     pub constraint: Option<String>,
     pub quality_of_service: Option<String>,
     pub modules: Vec<String>,
-    pub container_runtime: Option<String>,
     pub environment_setup: Vec<String>,
 }
 
@@ -291,7 +253,6 @@ impl SchedulerResourceRequest {
             constraint: profile.resources.constraint.clone(),
             quality_of_service: profile.resources.quality_of_service.clone(),
             modules: profile.modules.as_deref().map(lines).unwrap_or_default(),
-            container_runtime: profile.container_runtime.clone(),
             environment_setup: profile
                 .environment_setup
                 .as_deref()
@@ -341,17 +302,8 @@ fn lines(value: &str) -> Vec<String> {
 
 #[async_trait]
 pub trait SchedulerAdapter: Send + Sync {
-    fn kind(&self) -> SchedulerKind;
     fn resource_request(&self) -> Result<SchedulerResourceRequest, SchedulerAdapterError>;
     async fn test_connectivity(&self) -> Result<SchedulerConnectivity, SchedulerAdapterError>;
-    async fn submit(
-        &self,
-        request: SchedulerSubmissionRequest,
-    ) -> Result<SchedulerSubmission, SchedulerAdapterError>;
-    async fn status(
-        &self,
-        external_job_id: &str,
-    ) -> Result<SchedulerJobObservation, SchedulerAdapterError>;
     async fn status_batch(
         &self,
         external_job_ids: &[String],
@@ -361,15 +313,6 @@ pub trait SchedulerAdapter: Send + Sync {
         job_name: &str,
         not_before: DateTime<Utc>,
     ) -> Result<SchedulerNameLookup, SchedulerAdapterError>;
-    async fn accounting(
-        &self,
-        external_job_id: &str,
-    ) -> Result<SchedulerJobObservation, SchedulerAdapterError>;
-    async fn cancel(&self, external_job_id: &str) -> Result<(), SchedulerAdapterError>;
-    async fn log_locations(
-        &self,
-        external_job_id: &str,
-    ) -> Result<SchedulerLogLocations, SchedulerAdapterError>;
     async fn queue(&self) -> Result<SchedulerQueueInfo, SchedulerAdapterError>;
     async fn capacity(&self) -> Result<SchedulerCapacity, SchedulerAdapterError>;
 }
@@ -401,10 +344,6 @@ impl SshSlurmClient {
 
 #[async_trait]
 impl SchedulerAdapter for SshSlurmClient {
-    fn kind(&self) -> SchedulerKind {
-        SchedulerKind::SlurmRemote
-    }
-
     fn resource_request(&self) -> Result<SchedulerResourceRequest, SchedulerAdapterError> {
         Ok(SchedulerResourceRequest::from_slurm_profile(
             self.scheduler_profile("render_resources")?,
@@ -458,54 +397,6 @@ impl SchedulerAdapter for SshSlurmClient {
             scheduler_version,
             commands,
             checked_at: Utc::now(),
-        })
-    }
-
-    async fn submit(
-        &self,
-        request: SchedulerSubmissionRequest,
-    ) -> Result<SchedulerSubmission, SchedulerAdapterError> {
-        let profile = self.scheduler_profile("submit")?.clone();
-        let username = self
-            .remote_user
-            .clone()
-            .unwrap_or_else(|| resolve_remote_user(&profile));
-        let target = format!("{}@{}:{}", username, profile.login_node, profile.ssh_port);
-        let result = submit_slurm_session(SlurmSubmitParams {
-            execution_id: request.execution_id,
-            session_id: request.daliuge_session_id,
-            pgt_json: request.physical_graph,
-            deployment: profile,
-            username,
-            publication_execution_attempt: self.publication_execution_attempt,
-        })
-        .await
-        .map_err(|error| SchedulerAdapterError::backend("submit", &target, error))?;
-        Ok(SchedulerSubmission {
-            scheduler: SchedulerKind::SlurmRemote,
-            external_job_id: result.slurm_job_id,
-            remote_session_dir: Some(result.session_dir),
-            submitted_at: Utc::now(),
-            metadata: serde_json::json!({
-                "legacy_composite_job_id": result.composite_scheduler_job_id,
-                "staging_root": result.staging_root,
-            }),
-        })
-    }
-
-    async fn status(
-        &self,
-        external_job_id: &str,
-    ) -> Result<SchedulerJobObservation, SchedulerAdapterError> {
-        let mut values = self.status_batch(&[external_job_id.to_string()]).await?;
-        values.pop().ok_or_else(|| SchedulerAdapterError {
-            scheduler: SchedulerKind::SlurmRemote,
-            operation: "status".into(),
-            target: self.login_node.clone(),
-            kind: SchedulerErrorKind::NotFound,
-            message: "scheduler job was not returned by status lookup".into(),
-            retryable: true,
-            detail: Some(external_job_id.into()),
         })
     }
 
@@ -597,49 +488,6 @@ impl SchedulerAdapter for SshSlurmClient {
         )
         .map_err(|error| {
             SchedulerAdapterError::invalid_response("find_by_name", &display, error.to_string())
-        })
-    }
-
-    async fn accounting(
-        &self,
-        external_job_id: &str,
-    ) -> Result<SchedulerJobObservation, SchedulerAdapterError> {
-        self.status(external_job_id).await
-    }
-
-    async fn cancel(&self, external_job_id: &str) -> Result<(), SchedulerAdapterError> {
-        let parsed = beampipe_domain::slurm::parse_scheduler_job_id(external_job_id);
-        validate_job_id(&parsed.slurm_job_id)?;
-        let (target, display) = self.scheduler_target("cancel")?;
-        let mut session = SlurmSshSession::connect(&target)
-            .await
-            .map_err(|error| SchedulerAdapterError::backend("cancel", &display, error))?;
-        session
-            .run_command(&format!("scancel -- {}", parsed.slurm_job_id))
-            .await
-            .map_err(|error| SchedulerAdapterError::backend("cancel", &display, error))?;
-        let _ = session.close().await;
-        Ok(())
-    }
-
-    async fn log_locations(
-        &self,
-        external_job_id: &str,
-    ) -> Result<SchedulerLogLocations, SchedulerAdapterError> {
-        let parsed = beampipe_domain::slurm::parse_scheduler_job_id(external_job_id);
-        validate_job_id(&parsed.slurm_job_id)?;
-        let root = parsed.session_dir.or_else(|| {
-            self.deployment
-                .as_ref()
-                .map(|profile| profile.log_dir.clone())
-        });
-        Ok(match root {
-            Some(root) => SchedulerLogLocations {
-                stdout: Some(format!("{root}/slurm-{}.out", parsed.slurm_job_id)),
-                stderr: Some(format!("{root}/slurm-{}.err", parsed.slurm_job_id)),
-                scheduler_log: Some(root),
-            },
-            None => SchedulerLogLocations::default(),
         })
     }
 
@@ -909,9 +757,6 @@ mod tests {
             verbose_level: 1,
             max_threads: 0,
             all_nics: false,
-            zerorun: false,
-            sleepncopy: false,
-            check_with_session: false,
             verify_ssl: None,
             slurm_template: None,
             resources: SlurmResourceConfig {
@@ -925,7 +770,6 @@ mod tests {
                 quality_of_service: Some("normal".into()),
             },
             manager_topology: DaliugeManagerTopologyConfig::default(),
-            container_runtime: Some("singularity".into()),
             environment_setup: None,
             runtime_contract: Default::default(),
             publication: None,
@@ -959,19 +803,6 @@ mod tests {
         assert!(command.contains("--name='BeampipeExecution-abc'"));
         assert!(command.contains("--starttime='2026-08-22T10:00:00'"));
         assert!(!command.contains("now-7days"));
-    }
-
-    #[test]
-    fn submission_uncertainty_is_preserved_by_scheduler_adapter() {
-        let error = SchedulerAdapterError::backend(
-            "submit",
-            "operator@login.example:22",
-            OrchestrationError::SubmissionUncertain("response lost after dispatch".into()),
-        );
-
-        assert_eq!(error.kind, SchedulerErrorKind::SubmissionUncertain);
-        assert!(!error.retryable);
-        assert_eq!(error.failure_class(), FailureClass::InconsistentState);
     }
 
     #[test]

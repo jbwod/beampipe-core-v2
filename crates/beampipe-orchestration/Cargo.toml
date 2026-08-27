@@ -14,7 +14,6 @@ beampipe-profiles = { path = "../beampipe-profiles" }
 beampipe-project = { path = "../beampipe-project" }
 beampipe-security = { path = "../beampipe-security" }
 chrono.workspace = true
-quick-xml.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

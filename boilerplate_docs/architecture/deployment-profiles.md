@@ -142,9 +142,7 @@ under `resources`; manager placement belongs under `manager_topology`.
     "wall_time_minutes": 60
   },
   "manager_topology": {
-    "nodes": 1,
-    "islands": 1,
-    "co_host_dim": false
+    "islands": 1
   }
 }
 ```

@@ -67,23 +67,6 @@ pub fn describe_http_connect_error(base_url: &str, err: &reqwest::Error) -> Stri
     }
 }
 
-pub fn format_service_request_error(
-    service: &str,
-    base_url: &str,
-    path: &str,
-    err: reqwest::Error,
-) -> String {
-    let endpoint = format!("{base_url}{path}");
-    if err.is_connect() || err.is_timeout() {
-        format!(
-            "{service} request failed ({}) — is the service running and reachable at {base_url}?",
-            describe_http_connect_error(&endpoint, &err)
-        )
-    } else {
-        format!("{service} request failed for {endpoint}: {err}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

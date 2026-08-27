@@ -12,7 +12,6 @@ use thiserror::Error;
 pub enum DaliugeComponent {
     Translator,
     DataIslandManager,
-    NodeManager,
 }
 
 impl DaliugeComponent {
@@ -20,7 +19,6 @@ impl DaliugeComponent {
         match self {
             Self::Translator => "daliuge_translator",
             Self::DataIslandManager => "daliuge_dim",
-            Self::NodeManager => "daliuge_node_manager",
         }
     }
 }

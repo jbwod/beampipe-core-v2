@@ -443,7 +443,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 1.0.69",
- "tokio",
  "uuid",
 ]
 
@@ -494,7 +493,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -585,7 +583,6 @@ dependencies = [
  "async-trait",
  "beampipe-adapters",
  "beampipe-alerts",
- "beampipe-auth",
  "beampipe-config",
  "beampipe-db",
  "beampipe-domain",
@@ -646,7 +643,6 @@ dependencies = [
  "chrono",
  "libc",
  "openssh-sftp-client",
- "quick-xml 0.37.5",
  "reqwest",
  "russh",
  "serde",
@@ -679,6 +675,7 @@ name = "beampipe-project"
 version = "0.1.6"
 dependencies = [
  "beampipe-domain",
+ "chrono",
  "globset",
  "jsonschema",
  "regex",
@@ -689,7 +686,9 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "thiserror 1.0.69",
+ "url",
  "utoipa",
+ "uuid",
  "wasmtime",
 ]
 
@@ -814,12 +813,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bstringify"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd769563b4ea2953e2825c9e6b7470a5f55f67e0be00030bf3e390a2a6071f64"
-
-[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -828,6 +821,12 @@ dependencies = [
  "memchr",
  "serde_core",
 ]
+
+[[package]]
+name = "bstringify"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd769563b4ea2953e2825c9e6b7470a5f55f67e0be00030bf3e390a2a6071f64"
 
 [[package]]
 name = "bumpalo"

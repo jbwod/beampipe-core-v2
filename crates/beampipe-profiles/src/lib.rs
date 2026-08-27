@@ -115,11 +115,7 @@ pub struct SlurmResourceConfig {
 #[serde(deny_unknown_fields)]
 pub struct DaliugeManagerTopologyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nodes: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub islands: Option<i32>,
-    #[serde(default)]
-    pub co_host_dim: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -223,12 +219,6 @@ pub struct SlurmRemoteDeploymentConfig {
     pub max_threads: i32,
     #[serde(default)]
     pub all_nics: bool,
-    #[serde(default)]
-    pub zerorun: bool,
-    #[serde(default)]
-    pub sleepncopy: bool,
-    #[serde(default)]
-    pub check_with_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_ssl: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,8 +227,6 @@ pub struct SlurmRemoteDeploymentConfig {
     pub resources: SlurmResourceConfig,
     #[serde(default)]
     pub manager_topology: DaliugeManagerTopologyConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_setup: Option<String>,
     /// Typed, project-specific runtime requirements. This field is required so
@@ -412,9 +400,6 @@ impl DeploymentProfile {
                     dep.resources.quality_of_service.as_deref(),
                     "deployment.resources.quality_of_service",
                 )?;
-                if let Some(nodes) = dep.manager_topology.nodes {
-                    validate_positive(nodes, "deployment.manager_topology.nodes")?;
-                }
                 dep.runtime_contract.validate()?;
                 if let Some(publication) = dep.publication.as_ref() {
                     publication.validate()?;

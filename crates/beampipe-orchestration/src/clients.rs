@@ -6,13 +6,10 @@ use crate::daliuge::{
 use crate::dim::{get_roots, prepare_physical_graph};
 use crate::http_client::{build_http_client, HttpClientOptions};
 use crate::slurm_deploy::{resolve_remote_user, submit_slurm_session, SlurmSubmitParams};
-use crate::slurm_ssh::{
-    query_slurm_states_batch, scancel_command, validate_slurm_job_id, SlurmSshSession, SlurmTarget,
-};
 use crate::translator::{default_lg_name, partitioned_pgt_for_dlg_deploy};
 use crate::{BackendPoll, DimClient, OrchestrationError, SlurmClient, TranslatorClient};
 use async_trait::async_trait;
-use beampipe_domain::{slurm, ExecutionStatus};
+use beampipe_domain::ExecutionStatus;
 use beampipe_profiles::{DaliugeTranslationConfig, SlurmRemoteDeploymentConfig};
 use serde::Deserialize;
 use serde_json::Value;
@@ -575,12 +572,7 @@ impl DaliugeManager for HttpDimClient {
 
 #[derive(Debug, Clone)]
 pub struct SshSlurmClient {
-    pub login_node: String,
     pub remote_user: Option<String>,
-    pub session_dir: String,
-    pub account: Option<String>,
-    pub ssh_port: i32,
-    pub dlg_root: String,
     pub deployment: Option<SlurmRemoteDeploymentConfig>,
     pub publication_execution_attempt: Option<i32>,
 }
@@ -613,75 +605,6 @@ impl SlurmClient for SshSlurmClient {
                 OrchestrationError::Backend("Slurm submission did not return an output root".into())
             })?,
         })
-    }
-
-    async fn poll(&self, scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError> {
-        let parsed = slurm::parse_scheduler_job_id(scheduler_job_id);
-        let slurm_id = if parsed.slurm_job_id.is_empty() {
-            scheduler_job_id
-                .rsplit(':')
-                .next()
-                .unwrap_or(scheduler_job_id)
-                .to_string()
-        } else {
-            parsed.slurm_job_id
-        };
-        validate_slurm_job_id(&slurm_id)?;
-        let deployment = self.deployment.clone().ok_or_else(|| {
-            OrchestrationError::Backend("slurm deployment config required".into())
-        })?;
-        let username = resolve_remote_user(&deployment);
-        let target = SlurmTarget::from_deployment(&deployment, &username);
-        let mut session = SlurmSshSession::connect(&target).await?;
-        let results =
-            query_slurm_states_batch(&mut session, std::slice::from_ref(&slurm_id)).await?;
-        let _ = session.close().await;
-        let result = results.get(&slurm_id).cloned().ok_or_else(|| {
-            OrchestrationError::Backend(format!("no poll result for slurm job {slurm_id}"))
-        })?;
-        let normalized = result.normalized_state.clone();
-        let status = match normalized.as_str() {
-            "COMPLETED" => ExecutionStatus::Completed,
-            "FAILED" | "TIMEOUT" => ExecutionStatus::Failed,
-            "CANCELLED" => ExecutionStatus::Cancelled,
-            "RUNNING" => ExecutionStatus::Running,
-            "PENDING" => ExecutionStatus::AwaitingScheduler,
-            _ => ExecutionStatus::AwaitingScheduler,
-        };
-        Ok(BackendPoll {
-            status,
-            poll_summary: serde_json::json!({
-                "scheduler_job_id": scheduler_job_id,
-                "normalized_state": normalized,
-                "raw_state": result.raw_state,
-                "slurm_job_id": slurm_id,
-                "source": result.source,
-                "exit_code": result.exit_code,
-            }),
-        })
-    }
-
-    async fn cancel(&self, scheduler_job_id: &str) -> Result<(), OrchestrationError> {
-        let parsed = slurm::parse_scheduler_job_id(scheduler_job_id);
-        let slurm_id = if parsed.slurm_job_id.is_empty() {
-            scheduler_job_id
-                .rsplit(':')
-                .next()
-                .unwrap_or(scheduler_job_id)
-                .to_string()
-        } else {
-            parsed.slurm_job_id
-        };
-        validate_slurm_job_id(&slurm_id)?;
-        let deployment = self.deployment.clone().ok_or_else(|| {
-            OrchestrationError::Backend("slurm deployment config required".into())
-        })?;
-        let username = resolve_remote_user(&deployment);
-        let target = SlurmTarget::from_deployment(&deployment, &username);
-        let mut session = SlurmSshSession::connect(&target).await?;
-        session.run_command(&scancel_command(&slurm_id)?).await?;
-        let _ = session.close().await;
-        Ok(())
     }
 }
 

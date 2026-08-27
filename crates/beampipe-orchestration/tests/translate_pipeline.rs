@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use beampipe_orchestration::{
     clients::{TranslateConfig, TranslatedGraph},
-    prepare_graph_for_manifest, BackendPoll, ExecutionBackend, MockSlurmClient, OrchestrationError,
-    SlurmClient, SlurmExecutionBackend, SlurmSubmitReceipt, TranslatorClient,
+    prepare_graph_for_manifest, ExecutionBackend, MockSlurmClient, OrchestrationError, SlurmClient,
+    SlurmExecutionBackend, SlurmSubmitReceipt, TranslatorClient,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -51,14 +51,6 @@ impl SlurmClient for CapturingSlurmClient {
             staging_root: format!("{remote_session_dir}/science-products"),
             remote_session_dir,
         })
-    }
-
-    async fn poll(&self, _scheduler_job_id: &str) -> Result<BackendPoll, OrchestrationError> {
-        Err(OrchestrationError::Backend("not used by this test".into()))
-    }
-
-    async fn cancel(&self, _scheduler_job_id: &str) -> Result<(), OrchestrationError> {
-        Err(OrchestrationError::Backend("not used by this test".into()))
     }
 }
 
@@ -130,11 +122,8 @@ async fn slurm_submit_passes_prepared_graph_to_translator() {
     let backend = SlurmExecutionBackend {
         translator: translator.clone(),
         slurm: MockSlurmClient,
-        profile_name: Some("slurm-remote".into()),
-        session_dir: "/tmp/beampipe".into(),
         login_node: Some("login".into()),
         remote_user: Some("user".into()),
-        account: Some("acct".into()),
         translate_config: TranslateConfig {
             slurm_path: true,
             ..Default::default()
@@ -168,11 +157,8 @@ async fn slurm_receipt_physical_graph_matches_the_dispatched_payload() {
     let backend = SlurmExecutionBackend {
         translator: FixedPgtTranslator(json!(["translator-name.pgt.graph", {"oid": "a"}])),
         slurm,
-        profile_name: Some("slurm-remote".into()),
-        session_dir: "/dlg".into(),
         login_node: Some("login".into()),
         remote_user: Some("user".into()),
-        account: Some("acct".into()),
         translate_config: TranslateConfig {
             slurm_path: true,
             ..Default::default()

@@ -904,12 +904,7 @@ async fn check_profile(
                 }
             }
             let client = SshSlurmClient {
-                login_node: slurm.login_node.clone(),
                 remote_user: slurm.remote_user.clone(),
-                session_dir: slurm.log_dir.clone(),
-                account: Some(slurm.account.clone()),
-                ssh_port: slurm.ssh_port,
-                dlg_root: slurm.dlg_root.clone(),
                 deployment: Some(slurm.clone()),
                 publication_execution_attempt: None,
             };
