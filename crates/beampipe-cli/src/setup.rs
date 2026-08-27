@@ -2595,7 +2595,7 @@ fn load_project_config(project_path: &Path) -> Result<SelectedProjectConfig> {
         );
     }
     let bytes =
-        std::fs::read(&project_path).with_context(|| format!("read {}", project_path.display()))?;
+        std::fs::read(project_path).with_context(|| format!("read {}", project_path.display()))?;
     let config = ProjectConfig::from_slice(&bytes)?;
     let report = config.validate_report();
     if !report.valid {

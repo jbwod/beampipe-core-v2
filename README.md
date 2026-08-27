@@ -193,6 +193,7 @@ Install a deployment profile with `beampipe profile add`, run `beampipe doctor -
 
 | Task | Page |
 |---|---|
+| Review release changes and upgrade notes | [Changelog](CHANGELOG.md) |
 | Install and reach a healthy system | [Quick start](https://beampipe.jackblackwood.com/getting-started/) |
 | Prove the project-neutral Core contract offline | [Project-neutral acceptance](https://beampipe.jackblackwood.com/getting-started/neutral-project/) |
 | Run WALLABY discovery and graph preparation | [WALLABY first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) |

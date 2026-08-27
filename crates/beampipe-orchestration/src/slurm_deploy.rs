@@ -365,19 +365,31 @@ fn slurm_preflight_script(
     })
 }
 
+struct SbatchCommandContext<'a> {
+    session_id: &'a str,
+    jobsub_path: &'a str,
+    staging_root: &'a str,
+    cache_root: &'a str,
+    python_path: &'a str,
+    publisher: Option<&'a ResolvedPublisherRuntime>,
+}
+
 fn sbatch_command_with<F>(
     deployment: &SlurmRemoteDeploymentConfig,
-    session_id: &str,
-    jobsub_path: &str,
-    staging_root: &str,
-    cache_root: &str,
-    python_path: &str,
-    publisher: Option<&ResolvedPublisherRuntime>,
+    context: SbatchCommandContext<'_>,
     read_environment: F,
 ) -> Result<String, OrchestrationError>
 where
     F: FnMut(&str) -> Option<String>,
 {
+    let SbatchCommandContext {
+        session_id,
+        jobsub_path,
+        staging_root,
+        cache_root,
+        python_path,
+        publisher,
+    } = context;
     deployment
         .runtime_contract
         .validate()
@@ -530,12 +542,14 @@ fn sbatch_command(
 ) -> Result<String, OrchestrationError> {
     sbatch_command_with(
         deployment,
-        session_id,
-        jobsub_path,
-        staging_root,
-        cache_root,
-        python_path,
-        publisher,
+        SbatchCommandContext {
+            session_id,
+            jobsub_path,
+            staging_root,
+            cache_root,
+            python_path,
+            publisher,
+        },
         |name| std::env::var(name).ok(),
     )
 }
@@ -1042,12 +1056,14 @@ mod tests {
 
         let command = sbatch_command_with(
             &dep,
-            "execution-a",
-            "/dlg root/sessions/execution-a/job sub.sh",
-            &output_a,
-            &cache_a,
-            "/dlg root/sessions/execution-a/.beampipe-python",
-            None,
+            SbatchCommandContext {
+                session_id: "execution-a",
+                jobsub_path: "/dlg root/sessions/execution-a/job sub.sh",
+                staging_root: &output_a,
+                cache_root: &cache_a,
+                python_path: "/dlg root/sessions/execution-a/.beampipe-python",
+                publisher: None,
+            },
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap.sif".into()),
         )
         .unwrap();
@@ -1181,12 +1197,14 @@ mod tests {
         dep.resources.quality_of_service = Some("normal".into());
         let command = sbatch_command_with(
             &dep,
-            "session id",
-            "/dlg/job sub.sh",
-            "/dlg/wallaby_staging_data",
-            "/dlg/shared-cache",
-            "/dlg/.beampipe-python",
-            None,
+            SbatchCommandContext {
+                session_id: "session id",
+                jobsub_path: "/dlg/job sub.sh",
+                staging_root: "/dlg/wallaby_staging_data",
+                cache_root: "/dlg/shared-cache",
+                python_path: "/dlg/.beampipe-python",
+                publisher: None,
+            },
             |name| (name == "BEAMPIPE_ASKAPSOFT_SIF").then(|| "/images/askap soft.sif".into()),
         )
         .unwrap();
@@ -1227,12 +1245,14 @@ mod tests {
         dep.resources.wall_time_minutes = Some(1);
         let command = sbatch_command_with(
             &dep,
-            "session-id",
-            "/dlg/jobsub.sh",
-            "/dlg/wallaby_staging_data",
-            "/dlg/shared-cache",
-            "/dlg/.beampipe-python",
-            None,
+            SbatchCommandContext {
+                session_id: "session-id",
+                jobsub_path: "/dlg/jobsub.sh",
+                staging_root: "/dlg/wallaby_staging_data",
+                cache_root: "/dlg/shared-cache",
+                python_path: "/dlg/.beampipe-python",
+                publisher: None,
+            },
             |_| None,
         )
         .unwrap();
@@ -1259,12 +1279,14 @@ mod tests {
 
         let command = sbatch_command_with(
             &dep,
-            "execution-a",
-            "/dlg/sessions/execution-a/jobsub.sh",
-            &output_root,
-            &shared_root,
-            "/dlg/sessions/execution-a/.beampipe-python",
-            None,
+            SbatchCommandContext {
+                session_id: "execution-a",
+                jobsub_path: "/dlg/sessions/execution-a/jobsub.sh",
+                staging_root: &output_root,
+                cache_root: &shared_root,
+                python_path: "/dlg/sessions/execution-a/.beampipe-python",
+                publisher: None,
+            },
             |_| None,
         )
         .unwrap();
@@ -1347,12 +1369,14 @@ mod tests {
         let dep = deployment();
         let command = sbatch_command_with(
             &dep,
-            "execution-a",
-            "/dlg/sessions/execution-a/jobsub.sh",
-            "/dlg/sessions/execution-a/outputs",
-            "/dlg/shared_staging",
-            "/dlg/sessions/execution-a/.beampipe-python",
-            Some(&runtime),
+            SbatchCommandContext {
+                session_id: "execution-a",
+                jobsub_path: "/dlg/sessions/execution-a/jobsub.sh",
+                staging_root: "/dlg/sessions/execution-a/outputs",
+                cache_root: "/dlg/shared_staging",
+                python_path: "/dlg/sessions/execution-a/.beampipe-python",
+                publisher: Some(&runtime),
+            },
             |_| None,
         )
         .unwrap();
@@ -1387,12 +1411,14 @@ mod tests {
         };
         let retry_command = sbatch_command_with(
             &dep,
-            "execution-a",
-            "/dlg/sessions/execution-a/jobsub.sh",
-            "/dlg/sessions/execution-a/outputs",
-            "/dlg/shared_staging",
-            "/dlg/sessions/execution-a/.beampipe-python",
-            Some(&retry_runtime),
+            SbatchCommandContext {
+                session_id: "execution-a",
+                jobsub_path: "/dlg/sessions/execution-a/jobsub.sh",
+                staging_root: "/dlg/sessions/execution-a/outputs",
+                cache_root: "/dlg/shared_staging",
+                python_path: "/dlg/sessions/execution-a/.beampipe-python",
+                publisher: Some(&retry_runtime),
+            },
             |_| None,
         )
         .unwrap();

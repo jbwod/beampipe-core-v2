@@ -45,6 +45,7 @@ jobs:
           mkdir "beampipe-${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/beampipe" "beampipe-${{ matrix.target }}/"
           cp README.md "beampipe-${{ matrix.target }}/"
+          cp CHANGELOG.md "beampipe-${{ matrix.target }}/"
           tar -czf "beampipe-${{ matrix.target }}.tar.gz" "beampipe-${{ matrix.target }}"
       - uses: actions/upload-artifact@v4
         with:
