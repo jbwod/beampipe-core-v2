@@ -36,6 +36,3 @@ utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 uuid.workspace = true
 url.workspace = true
-
-[dev-dependencies]
-utoipa.workspace = true

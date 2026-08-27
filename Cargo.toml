@@ -25,7 +25,6 @@ authors = ["Jack Blackwood <23326698@student.uwa.edu.au>"]
 
 [workspace.dependencies]
 anyhow = "1"
-argon2 = "0.5"
 async-trait = "0.1"
 axum = { version = "0.7", features = ["macros"] }
 bcrypt = "0.15"
@@ -42,7 +41,6 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
 thiserror = "1"
-time = { version = "0.3", features = ["serde", "formatting"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tracing = "0.1"
@@ -58,7 +56,6 @@ ipnet = "2"
 russh = "0.61"
 openssh-sftp-client = { version = "=0.15.7", default-features = false }
 ssh-key = "0.7.0-rc.10"
-axum-test = "15"
 libc = "0.2"
 zeroize = "1"
 

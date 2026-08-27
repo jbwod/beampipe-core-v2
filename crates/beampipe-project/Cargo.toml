@@ -22,5 +22,3 @@ utoipa.workspace = true
 url.workspace = true
 uuid.workspace = true
 wasmtime = "28"
-
-[dev-dependencies]
