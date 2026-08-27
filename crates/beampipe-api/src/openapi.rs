@@ -1,4 +1,4 @@
-//! OpenAPI metadata and post-processing to match the legacy Beampipe Core spec.
+//! OpenAPI metadata and JSON polish for the Beampipe Core v2 contract.
 
 use serde_json::{json, Value};
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
@@ -85,7 +85,7 @@ fn polish_json(spec: &mut Value) {
         .insert("x-tagGroups".into(), tag_groups());
 
     inject_error_response_schema(spec);
-    alias_observability_schemas(spec);
+    normalize_schema_refs(spec);
     apply_operation_docs(spec);
     apply_security(spec);
     enrich_error_responses(spec);
@@ -173,43 +173,42 @@ fn apply_security(spec: &mut Value) {
     }
 }
 
-fn alias_observability_schemas(spec: &mut Value) {
-    let Some(schemas) = spec
+const SCHEMA_REFERENCE_ALIASES: &[(&str, &str)] = &[("ValidationDiagnostic", "Diagnostic")];
+
+fn normalize_schema_refs(spec: &mut Value) {
+    fn visit(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                if let Some(Value::String(reference)) = object.get_mut("$ref") {
+                    if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                        if let Some((_, canonical)) = SCHEMA_REFERENCE_ALIASES
+                            .iter()
+                            .find(|(alias, _)| *alias == name)
+                        {
+                            *reference = format!("#/components/schemas/{canonical}");
+                        }
+                    }
+                }
+                for child in object.values_mut() {
+                    visit(child);
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    visit(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    visit(spec);
+    if let Some(schemas) = spec
         .pointer_mut("/components/schemas")
         .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    if !schemas.contains_key("ValidationDiagnostic") {
-        if let Some(schema) = schemas.get("Diagnostic").cloned() {
-            schemas.insert("ValidationDiagnostic".into(), schema);
-        }
-    }
-    if !schemas.contains_key("beampipe_domain.ExecutionRetryStage") {
-        if let Some(schema) = schemas.get("ExecutionRetryStage").cloned() {
-            schemas.insert("beampipe_domain.ExecutionRetryStage".into(), schema);
-        }
-    }
-    if !schemas.contains_key("beampipe_domain.Diagnostic") {
-        if let Some(schema) = schemas.get("Diagnostic").cloned() {
-            schemas.insert("beampipe_domain.Diagnostic".into(), schema);
-        }
-    }
-    for name in [
-        "NotificationChannelResponse",
-        "AlertDeliveryResponse",
-        "ProvenanceEventResponse",
-    ] {
-        let qualified = format!("observability.{name}");
-        if !schemas.contains_key(name) {
-            if let Some(schema) = schemas.get(&qualified).cloned() {
-                schemas.insert(name.into(), schema);
-            }
-        }
-        if !schemas.contains_key(&qualified) {
-            if let Some(schema) = schemas.get(name).cloned() {
-                schemas.insert(qualified, schema);
-            }
+    {
+        for (alias, _) in SCHEMA_REFERENCE_ALIASES {
+            schemas.remove(*alias);
         }
     }
 }
@@ -297,70 +296,89 @@ fn default_description_for_code(code: &str) -> &'static str {
     }
 }
 
-fn apply_operation_docs(spec: &mut Value) {
-    static DOCS: &[(&str, &str, &str, &str)] = &[
-        ("get", "/api/v2/health", "Liveness probe", "Return process liveness. Does not check external dependencies."),
-        ("get", "/api/v2/ready", "Readiness probe", "Check PostgreSQL and archive TAP connectivity. Returns HTTP 503 when Postgres is down."),
-        ("get", "/api/v2/health/tap", "Archive TAP probe", "Probe configured archive TAP endpoints used by discovery."),
-        ("get", "/api/v2/metrics", "Prometheus metrics", "DB-refreshed gauges and process counters (may require auth unless BEAMPIPE_METRICS_PUBLIC=true)."),
-        ("post", "/api/v2/login", "Login for access token", "OAuth2 password flow; returns JWT bearer access token."),
-        ("post", "/api/v2/refresh", "Refresh access token", "Exchange a valid refresh token for a new access token."),
-        ("post", "/api/v2/logout", "Logout", "Revoke the current access token."),
-        ("get", "/api/v2/user/me", "Read current user", "Return the authenticated user profile."),
-        ("get", "/api/v2/projects", "List projects", "Registered project modules with active configuration."),
-        ("get", "/api/v2/projects/contracts", "List project contracts", "Discovery contract validation status per module."),
-        ("get", "/api/v2/projects/contracts/{id}", "Get project contract", "Contract validation detail for one project module."),
-        ("get", "/api/v2/sources", "List sources", "Paginated source registry for a project module."),
-        ("post", "/api/v2/sources", "Register source", "Register or upsert a single astronomical source."),
-        ("post", "/api/v2/sources/bulk", "Bulk register sources", "Register many sources in one request."),
-        ("post", "/api/v2/sources/discover", "Trigger discovery", "Mark sources for async archive discovery jobs."),
-        ("get", "/api/v2/sources/{id}", "Get source", "Fetch one source registry row."),
-        ("patch", "/api/v2/sources/{id}", "Update source", "Patch enabled flag or registry fields."),
-        ("delete", "/api/v2/sources/{id}", "Delete source", "Remove a source from the registry."),
-        ("get", "/api/v2/sources/{id}/status", "Source execution status", "Readiness and blockers for execution scheduling."),
-        ("get", "/api/v2/sources/{id}/metadata", "Source archive metadata", "Persisted discovery metadata for a source."),
-        ("get", "/api/v2/sources/{id}/executions", "List executions for source", "Executions that include this source."),
-        ("post", "/api/v2/executions/prepare", "Prepare execution", "Validate sources and preview discovered records without creating a ledger row."),
-        ("post", "/api/v2/executions", "Create execution", "Create a batch execution ledger record."),
-        ("get", "/api/v2/executions", "List executions", "Filter executions by project module and status."),
-        ("get", "/api/v2/executions/{id}", "Get execution", "Full execution record including manifest and scheduler fields."),
-        ("patch", "/api/v2/executions/{id}", "Update execution", "Patch status or scheduler metadata; cancel when permitted."),
-        ("post", "/api/v2/executions/{id}/execute", "Execute execution", "Enqueue staging/submit work on the Postgres job queue."),
-        ("get", "/api/v2/executions/{id}/status", "Get execution status", "Status-focused execution view."),
-        ("get", "/api/v2/executions/{id}/summary", "Get execution summary", "Progress summary for operators."),
-        ("get", "/api/v2/executions/{id}/ledger-snapshot", "Get ledger snapshot", "Compact operator snapshot with provenance summary."),
-        ("get", "/api/v2/deployment-profiles", "List deployment profiles", "DALiuGE deployment profiles for a project module."),
-        ("post", "/api/v2/deployment-profiles", "Create deployment profile", "Create a translation + deployment profile."),
-        ("get", "/api/v2/deployment-profiles/{id}", "Get deployment profile", "Fetch one deployment profile."),
-        ("patch", "/api/v2/deployment-profiles/{id}", "Update deployment profile", "Patch profile translation or deployment settings."),
-        ("delete", "/api/v2/deployment-profiles/{id}", "Delete deployment profile", "Remove a deployment profile."),
-        ("get", "/api/v2/slurm/credentials", "List Slurm SSH credential slots", "Names and file presence for slots under BEAMPIPE_SSH_CREDENTIALS_DIR. Never returns key material."),
-        ("get", "/api/v2/slurm/credentials/{slot}", "Get Slurm SSH credential slot", "File presence for one installed credential slot. 404 if the slot directory is not listed."),
-        ("post", "/api/v2/project-configs", "Upload project config", "Upload and validate a versioned survey YAML/JSON config."),
-        ("get", "/api/v2/project-configs/{id}", "Get project config", "Fetch active or historical project configuration."),
-        ("get", "/api/v2/project-configs/{id}/versions", "List config versions", "Version history for a project module."),
-        ("post", "/api/v2/project-configs/{id}/wasm", "Upload WASM module", "Attach optional WASM hooks to a config version."),
-        ("get", "/api/v2/project-configs/{id}/wasm", "Get WASM module", "Download WASM bytes for a config version."),
-        ("post", "/api/v2/jobs", "Enqueue job", "Enqueue a Postgres-backed background job (operator/debug)."),
-        ("get", "/api/v2/notification-channels", "List notification channels", "Alert delivery channels (webhook, email)."),
-        ("post", "/api/v2/notification-channels", "Create notification channel", "Register a webhook or SMTP channel."),
-        ("patch", "/api/v2/notification-channels/{id}", "Update notification channel", "Patch channel configuration."),
-        ("delete", "/api/v2/notification-channels/{id}", "Delete notification channel", "Remove a notification channel."),
-        ("post", "/api/v2/notification-channels/{id}/test", "Test notification channel", "Send a test alert delivery."),
-        ("get", "/api/v2/alert-rules", "List alert rules", "Configured alert rules."),
-        ("post", "/api/v2/alert-rules", "Create alert rule", "Create a new alert rule."),
-        ("patch", "/api/v2/alert-rules/{id}", "Update alert rule", "Patch alert rule name, trigger, severity, or channels."),
-        ("delete", "/api/v2/alert-rules/{id}", "Delete alert rule", "Remove an alert rule."),
-        ("get", "/api/v2/alert-deliveries", "List alert deliveries", "Audit log of alert deliveries."),
-        ("get", "/api/v2/executions/{id}/events", "List execution events", "Provenance timeline for one execution."),
-        ("get", "/api/v2/sources/{id}/events", "List source events", "Discovery and execution history for a source."),
-        ("get", "/api/v2/projects/{module}/events", "List project events", "Paginated provenance feed for a project module."),
-    ];
+const OPERATION_DOCS: &[(&str, &str, &str, &str)] = &[
+    ("get", "/api/v2/health", "Liveness probe", "Return process liveness. Does not check external dependencies."),
+    ("get", "/api/v2/ready", "Readiness probe", "Check PostgreSQL and archive TAP connectivity. Returns HTTP 503 when Postgres is down."),
+    ("get", "/api/v2/health/tap", "Archive TAP probe", "Probe configured archive TAP endpoints used by discovery."),
+    ("get", "/api/v2/metrics", "Prometheus metrics", "DB-refreshed gauges and process counters (may require auth unless BEAMPIPE_METRICS_PUBLIC=true)."),
+    ("post", "/api/v2/login", "Login for access token", "OAuth2 password flow; returns JWT bearer access token."),
+    ("post", "/api/v2/refresh", "Refresh access token", "Exchange a valid refresh token for a new access token."),
+    ("post", "/api/v2/logout", "Logout", "Revoke the current access token."),
+    ("get", "/api/v2/user/me", "Read current user", "Return the authenticated user profile."),
+    ("get", "/api/v2/overview", "Get operator overview", "Summarise execution, worker, and queue state for the operator dashboard."),
+    ("get", "/api/v2/diagnostics", "Get deployment diagnostics", "Inspect configuration and connectivity diagnostics for a deployment profile."),
+    ("get", "/api/v2/workers", "List workers", "List registered control-plane workers."),
+    ("post", "/api/v2/workers", "Register worker", "Register a control-plane worker and its capabilities."),
+    ("get", "/api/v2/workers/{id}", "Get worker", "Fetch one registered worker."),
+    ("post", "/api/v2/workers/{id}/heartbeat", "Record worker heartbeat", "Refresh a worker lease and publish its current state."),
+    ("post", "/api/v2/workers/{id}/drain", "Drain worker", "Prevent a worker from accepting new jobs."),
+    ("post", "/api/v2/workers/{id}/resume", "Resume worker", "Allow a drained worker to accept jobs again."),
+    ("get", "/api/v2/workers/leases", "List worker leases", "Inspect active and expired worker leases."),
+    ("get", "/api/v2/workers/pools", "List worker pools", "Summarise registered workers by pool."),
+    ("get", "/api/v2/scheduler/status", "Get scheduler status", "Inspect scheduler connectivity, capacity, and queue state for a deployment profile."),
+    ("get", "/api/v2/scheduler/jobs", "List scheduler jobs", "List scheduler jobs visible through the configured deployment profile."),
+    ("get", "/api/v2/daliuge/inspect", "Inspect DALiuGE", "Inspect DALiuGE manager connectivity and runtime state for a deployment profile."),
+    ("get", "/api/v2/daliuge/sessions", "List DALiuGE sessions", "List DALiuGE sessions for a deployment profile."),
+    ("get", "/api/v2/projects", "List projects", "Registered project modules with active configuration."),
+    ("get", "/api/v2/projects/contracts", "List project contracts", "Discovery contract validation status per module."),
+    ("get", "/api/v2/projects/contracts/{id}", "Get project contract", "Contract validation detail for one project module."),
+    ("get", "/api/v2/sources", "List sources", "Paginated source registry for a project module."),
+    ("post", "/api/v2/sources", "Register source", "Register or upsert a single astronomical source."),
+    ("post", "/api/v2/sources/bulk", "Bulk register sources", "Register many sources in one request."),
+    ("post", "/api/v2/sources/discover", "Trigger discovery", "Mark sources for async archive discovery jobs."),
+    ("get", "/api/v2/sources/{id}", "Get source", "Fetch one source registry row."),
+    ("patch", "/api/v2/sources/{id}", "Update source", "Patch enabled flag or registry fields."),
+    ("delete", "/api/v2/sources/{id}", "Delete source", "Remove a source from the registry."),
+    ("get", "/api/v2/sources/{id}/status", "Source execution status", "Readiness and blockers for execution scheduling."),
+    ("get", "/api/v2/sources/{id}/metadata", "Source archive metadata", "Persisted discovery metadata for a source."),
+    ("get", "/api/v2/sources/{id}/executions", "List executions for source", "Executions that include this source."),
+    ("post", "/api/v2/executions/prepare", "Prepare execution", "Validate sources and preview discovered records without creating a ledger row."),
+    ("post", "/api/v2/executions", "Create execution", "Create a batch execution ledger record."),
+    ("get", "/api/v2/executions", "List executions", "Filter executions by project module and status."),
+    ("get", "/api/v2/executions/{id}", "Get execution", "Full execution record including manifest and scheduler fields."),
+    ("patch", "/api/v2/executions/{id}", "Update execution", "Patch status or scheduler metadata; cancel when permitted."),
+    ("post", "/api/v2/executions/{id}/execute", "Execute execution", "Enqueue staging/submit work on the Postgres job queue."),
+    ("get", "/api/v2/executions/{id}/status", "Get execution status", "Status-focused execution view."),
+    ("get", "/api/v2/executions/{id}/summary", "Get execution summary", "Progress summary for operators."),
+    ("get", "/api/v2/executions/{id}/ledger-snapshot", "Get ledger snapshot", "Compact operator snapshot with provenance summary."),
+    ("get", "/api/v2/executions/{id}/observations", "List execution observations", "List persisted observations associated with an execution."),
+    ("get", "/api/v2/executions/{id}/artifacts", "List execution artifacts", "List execution artifacts recorded by the control plane."),
+    ("post", "/api/v2/executions/{id}/retry", "Retry execution", "Retry an eligible failed execution from its safe recovery stage."),
+    ("post", "/api/v2/executions/{id}/submission/abandon", "Abandon submission", "Record that an indeterminate remote submission was abandoned after operator verification."),
+    ("post", "/api/v2/graphs/prepare", "Prepare graph", "Validate and prepare a DALiuGE graph for an execution."),
+    ("get", "/api/v2/deployment-profiles", "List deployment profiles", "DALiuGE deployment profiles for a project module."),
+    ("post", "/api/v2/deployment-profiles", "Create deployment profile", "Create a translation + deployment profile."),
+    ("get", "/api/v2/deployment-profiles/{id}", "Get deployment profile", "Fetch one deployment profile."),
+    ("patch", "/api/v2/deployment-profiles/{id}", "Update deployment profile", "Patch profile translation or deployment settings."),
+    ("delete", "/api/v2/deployment-profiles/{id}", "Delete deployment profile", "Remove a deployment profile."),
+    ("get", "/api/v2/slurm/credentials", "List Slurm SSH credential slots", "Names and file presence for slots under BEAMPIPE_SSH_CREDENTIALS_DIR. Never returns key material."),
+    ("get", "/api/v2/slurm/credentials/{slot}", "Get Slurm SSH credential slot", "File presence for one installed credential slot. 404 if the slot directory is not listed."),
+    ("post", "/api/v2/project-configs", "Upload project config", "Upload and validate a versioned survey YAML/JSON config."),
+    ("get", "/api/v2/project-configs/{id}", "Get project config", "Fetch active or historical project configuration."),
+    ("get", "/api/v2/project-configs/{id}/versions", "List config versions", "Version history for a project module."),
+    ("post", "/api/v2/project-configs/{id}/wasm", "Upload WASM module", "Attach optional WASM hooks to a config version."),
+    ("get", "/api/v2/project-configs/{id}/wasm/{sha256}", "Download WASM module", "Download a specific WASM module by content digest."),
+    ("post", "/api/v2/jobs", "Enqueue job", "Enqueue a Postgres-backed background job (operator/debug)."),
+    ("get", "/api/v2/notification-channels", "List notification channels", "Alert delivery channels (webhook, email)."),
+    ("post", "/api/v2/notification-channels", "Create notification channel", "Register a webhook or SMTP channel."),
+    ("patch", "/api/v2/notification-channels/{id}", "Update notification channel", "Patch channel configuration."),
+    ("delete", "/api/v2/notification-channels/{id}", "Delete notification channel", "Remove a notification channel."),
+    ("post", "/api/v2/notification-channels/{id}/test", "Test notification channel", "Send a test alert delivery."),
+    ("get", "/api/v2/alert-rules", "List alert rules", "Configured alert rules."),
+    ("post", "/api/v2/alert-rules", "Create alert rule", "Create a new alert rule."),
+    ("patch", "/api/v2/alert-rules/{id}", "Update alert rule", "Patch alert rule name, trigger, severity, or channels."),
+    ("delete", "/api/v2/alert-rules/{id}", "Delete alert rule", "Remove an alert rule."),
+    ("get", "/api/v2/alert-deliveries", "List alert deliveries", "Audit log of alert deliveries."),
+    ("get", "/api/v2/executions/{id}/events", "List execution events", "Provenance timeline for one execution."),
+    ("get", "/api/v2/sources/{id}/events", "List source events", "Discovery and execution history for a source."),
+    ("get", "/api/v2/projects/{module}/events", "List project events", "Paginated provenance feed for a project module."),
+];
 
+fn apply_operation_docs(spec: &mut Value) {
     let Some(paths) = spec.get_mut("paths").and_then(Value::as_object_mut) else {
         return;
     };
-    for (method, path, summary, description) in DOCS {
+    for (method, path, summary, description) in OPERATION_DOCS {
         let Some(op) = paths
             .get_mut(*path)
             .and_then(|p| p.get_mut(*method))
@@ -441,5 +459,75 @@ mod tests {
         assert!(spec["paths"]["/api/v2/slurm/credentials/{slot}"]["get"].is_object());
         assert!(spec["components"]["schemas"]["SlurmCredentialSlot"].is_object());
         assert!(spec["components"]["schemas"]["SlurmCredentialListResponse"].is_object());
+    }
+
+    #[test]
+    fn operation_docs_cover_every_live_operation() {
+        const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+        let spec = export_openapi_json();
+        let documented = OPERATION_DOCS
+            .iter()
+            .map(|(method, path, _, _)| format!("{method} {path}"))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            documented.len(),
+            OPERATION_DOCS.len(),
+            "operation documentation entries must be unique"
+        );
+
+        let mut operations = HashSet::new();
+        for (path, path_item) in spec["paths"].as_object().expect("paths object") {
+            for method in HTTP_METHODS {
+                let Some(operation) = path_item.get(*method) else {
+                    continue;
+                };
+                operations.insert(format!("{method} {path}"));
+                assert!(
+                    operation
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .is_some_and(|summary| !summary.is_empty()),
+                    "{method} {path} is missing a summary"
+                );
+                assert!(
+                    operation
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .is_some_and(|description| !description.is_empty()),
+                    "{method} {path} is missing a description"
+                );
+            }
+        }
+
+        assert_eq!(documented, operations, "operation documentation is stale");
+    }
+
+    #[test]
+    fn polished_openapi_has_one_canonical_schema_name_per_type() {
+        let spec = export_openapi_json();
+        let schemas = spec["components"]["schemas"]
+            .as_object()
+            .expect("components.schemas object");
+
+        for canonical in [
+            "Diagnostic",
+            "ExecutionRetryStage",
+            "NotificationChannelResponse",
+            "AlertDeliveryResponse",
+            "ProvenanceEventResponse",
+        ] {
+            assert!(schemas.contains_key(canonical), "missing schema {canonical}");
+        }
+        for alias in [
+            "ValidationDiagnostic",
+            "beampipe_domain.Diagnostic",
+            "beampipe_domain.ExecutionRetryStage",
+            "observability.NotificationChannelResponse",
+            "observability.AlertDeliveryResponse",
+            "observability.ProvenanceEventResponse",
+        ] {
+            assert!(!schemas.contains_key(alias), "duplicate schema alias {alias}");
+        }
     }
 }

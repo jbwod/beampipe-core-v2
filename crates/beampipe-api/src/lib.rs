@@ -21,8 +21,8 @@ use beampipe_domain::{
         parsed_source_readiness_error, source_execution_status, ArchiveMetadataReadiness,
         RegisteredSourceReadiness, SourceExecutionStatus,
     },
-    DaliugeState, ExecutionStatus, Failure, FailureClass, RetryDisposition, SchedulerState,
-    SubmissionState,
+    DaliugeState, Diagnostic, ExecutionRetryStage, ExecutionStatus, Failure, FailureClass,
+    RetryDisposition, SchedulerState, SubmissionState,
 };
 use beampipe_jobs::{spawn_workers, WorkerConfig};
 use beampipe_metrics as metrics;
@@ -38,6 +38,7 @@ use beampipe_project::{
 };
 use beampipe_security::{redact_string, redact_value, unsafe_inline_secret_paths, SecretPolicy};
 use chrono::Utc;
+use observability::ProvenanceEventResponse;
 use rate_limit::{check_rate_limit, RateLimitError, RateLimiter};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -108,12 +109,12 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         GraphPrepareRequest, GraphPrepareResponse,
         ExecutionStatus,
         JobCreate, JobResponse, WasmUploadResponse,
-        ProjectConfig, ValidationReport, ValidationDiagnostic, DiagnosticSeverity,
+        ProjectConfig, ValidationReport, DiagnosticSeverity,
         ApiErrorResponse, beampipe_domain::Failure,
-        beampipe_domain::Diagnostic,
+        Diagnostic,
         beampipe_domain::FailureClass,
         beampipe_domain::RetryDisposition,
-        beampipe_domain::ExecutionRetryStage,
+        ExecutionRetryStage,
         beampipe_project::ProjectMetadata,
         beampipe_project::AdapterConfig,
         beampipe_project::TapEndpointConfig,
@@ -882,7 +883,7 @@ async fn ready(
 pub struct DiagnosticsResponse {
     pub healthy: bool,
     pub generated_at: chrono::DateTime<Utc>,
-    pub diagnostics: Vec<beampipe_domain::Diagnostic>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[utoipa::path(get, path = "/api/v2/diagnostics", tag = "health", params(OperatorProfileQuery), responses((status = 200, body = DiagnosticsResponse)))]
@@ -1948,7 +1949,7 @@ pub struct ListExecutionsQuery {
 pub struct ProvenanceSummary {
     pub config_version: Option<i32>,
     pub discovery_signature: Option<String>,
-    pub recent_events: Vec<observability::ProvenanceEventResponse>,
+    pub recent_events: Vec<ProvenanceEventResponse>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -3598,7 +3599,7 @@ pub struct ExecutionRetryResponse {
     pub execution_id: Uuid,
     pub job_id: Uuid,
     pub retry_count: i32,
-    pub stage: beampipe_domain::ExecutionRetryStage,
+    pub stage: ExecutionRetryStage,
     pub do_stage: bool,
     pub do_submit: bool,
 }

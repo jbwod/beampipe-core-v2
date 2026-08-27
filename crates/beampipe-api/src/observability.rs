@@ -32,7 +32,6 @@ pub struct NotificationChannelUpdate {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[schema(as = observability::NotificationChannelResponse)]
 pub struct NotificationChannelResponse {
     pub uuid: Uuid,
     pub name: String,
@@ -100,7 +99,6 @@ pub struct AlertRuleUpdate {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[schema(as = observability::AlertDeliveryResponse)]
 pub struct AlertDeliveryResponse {
     pub uuid: Uuid,
     pub rule_id: Option<Uuid>,
@@ -126,7 +124,6 @@ impl From<AlertDeliveryRow> for AlertDeliveryResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[schema(as = observability::ProvenanceEventResponse)]
 pub struct ProvenanceEventResponse {
     pub id: Uuid,
     pub occurred_at: chrono::DateTime<chrono::Utc>,
