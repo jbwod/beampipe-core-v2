@@ -134,7 +134,9 @@ pub fn iter_uws_results(xml_text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-pub(crate) fn parse_uws_phase(xml_text: &str) -> Option<String> {
+/// Parse either a UWS job document, a namespaced phase element, or the plain
+/// phase response used by some TAP services.
+pub fn parse_uws_phase(xml_text: &str) -> Option<String> {
     let trimmed = xml_text.trim();
     if trimmed.is_empty() {
         return None;

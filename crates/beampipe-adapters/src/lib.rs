@@ -9,7 +9,9 @@ pub mod tap_async;
 pub mod tap_health;
 pub mod votable;
 pub use casda_datalink::parse_casda_datalink;
-pub use casda_staging::{extract_scan_id, parse_eval_job_results, parse_job_results};
+pub use casda_staging::{
+    extract_scan_id, parse_eval_job_results, parse_job_results, parse_uws_phase,
+};
 pub use tap_health::{
     all_reachable, probe_tap_health, unreachable_adapters, TapEndpointProbe, TapEndpointStatus,
     TapHealthCache, TapHealthReport,

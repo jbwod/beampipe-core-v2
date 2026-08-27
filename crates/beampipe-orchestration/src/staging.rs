@@ -2,6 +2,7 @@ use crate::{OrchestrationError, StageOutcome, StagingClient};
 use async_trait::async_trait;
 use beampipe_adapters::{
     extract_scan_id, parse_casda_datalink, parse_eval_job_results, parse_job_results,
+    parse_uws_phase,
 };
 use beampipe_security::{resolve_secret, SecretPolicy, SecretRef};
 use reqwest::Client;
@@ -297,7 +298,7 @@ impl CasdaStagingClient {
                 .map_err(|e| e.to_string())?;
             ensure_casda_http_status(poll.status(), "poll staging job")?;
             let body = poll.text().await.map_err(|e| e.to_string())?;
-            match read_job_phase(&body) {
+            match parse_uws_phase(&body) {
                 Some(phase) if phase == "COMPLETED" => {
                     let results_url = format!("{job_url}/results");
                     let results = self
@@ -400,33 +401,6 @@ fn collect_access_urls(records: &[Value], fields: &[&str]) -> Vec<String> {
         }
     }
     out
-}
-
-fn read_job_phase(xml: &str) -> Option<String> {
-    let mut reader = quick_xml::Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut in_phase = false;
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e))
-                if e.name().local_name().as_ref() == b"phase" =>
-            {
-                in_phase = true;
-            }
-            Ok(quick_xml::events::Event::Text(e)) if in_phase => {
-                return Some(e.unescape().unwrap_or_default().trim().to_string());
-            }
-            Ok(quick_xml::events::Event::End(e)) if e.name().local_name().as_ref() == b"phase" => {
-                in_phase = false;
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    None
 }
 
 fn apply_url_maps(
@@ -541,7 +515,7 @@ mod tests {
     #[test]
     fn read_completed_job_phase() {
         let xml = r#"<?xml version="1.0"?><uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"><uws:phase>COMPLETED</uws:phase></uws:job>"#;
-        assert_eq!(read_job_phase(xml).as_deref(), Some("COMPLETED"));
+        assert_eq!(parse_uws_phase(xml).as_deref(), Some("COMPLETED"));
     }
 
     #[test]
