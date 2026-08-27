@@ -90,6 +90,24 @@ fn polish_json(spec: &mut Value) {
     apply_security(spec);
     enrich_error_responses(spec);
     default_success_descriptions(spec);
+    sort_json_objects(spec);
+}
+
+fn sort_json_objects(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for child in object.values_mut() {
+                sort_json_objects(child);
+            }
+            object.sort_keys();
+        }
+        Value::Array(array) => {
+            for child in array {
+                sort_json_objects(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn tag_groups() -> Value {
@@ -517,7 +535,10 @@ mod tests {
             "AlertDeliveryResponse",
             "ProvenanceEventResponse",
         ] {
-            assert!(schemas.contains_key(canonical), "missing schema {canonical}");
+            assert!(
+                schemas.contains_key(canonical),
+                "missing schema {canonical}"
+            );
         }
         for alias in [
             "ValidationDiagnostic",
@@ -527,7 +548,10 @@ mod tests {
             "observability.AlertDeliveryResponse",
             "observability.ProvenanceEventResponse",
         ] {
-            assert!(!schemas.contains_key(alias), "duplicate schema alias {alias}");
+            assert!(
+                !schemas.contains_key(alias),
+                "duplicate schema alias {alias}"
+            );
         }
     }
 }

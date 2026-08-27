@@ -98,11 +98,18 @@ fn every_success_response_has_content_and_resolvable_schemas() {
         );
     }
 
-    assert_eq!(
-        spec.pointer(
+    let wasm_schema = spec
+        .pointer(
             "/paths/~1api~1v2~1project-configs~1{id}~1wasm~1{sha256}/get/responses/200/content/application~1wasm/schema",
-        ),
-        Some(&serde_json::json!({"type": "string", "format": "binary"})),
+        )
+        .expect("WASM download schema");
+    assert_eq!(wasm_schema.get("type"), Some(&serde_json::json!("string")));
+    assert_eq!(
+        wasm_schema.get("format"),
+        Some(&serde_json::json!("binary"))
+    );
+    assert!(
+        wasm_schema.get("$ref").is_none(),
         "WASM downloads must not reuse the JSON metadata schema",
     );
 }

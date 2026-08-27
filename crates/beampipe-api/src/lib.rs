@@ -15,7 +15,7 @@ use axum::{
 };
 use beampipe_adapters::{TapEndpointProbe, TapEndpointStatus, TapHealthCache, TapMode};
 use beampipe_config::Settings;
-use beampipe_db::{models::*, repo};
+use beampipe_db::{models::*, repo, repo::PaginatedExecutions};
 use beampipe_domain::{
     readiness::{
         parsed_source_readiness_error, source_execution_status, ArchiveMetadataReadiness,
@@ -178,7 +178,7 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         SchedulerStatusResponse, SchedulerJobRead, DaliugeInspectResponse,
         WorkerInstanceRow, WorkerPoolSummary, ExecutionObservationRow,
         ExecutionArtifactRow, OperatorOverviewCounts, DiagnosticsResponse,
-        ExecutionRow, ProjectConfigRow, repo::PaginatedExecutions, WasmMetaResponse,
+        ExecutionRow, ProjectConfigRow, PaginatedExecutions, WasmMetaResponse,
     )),
     tags(
         (name = "health", description = "Liveness, readiness, and configured project TAP connectivity probes."),
@@ -1918,12 +1918,12 @@ fn validate_logout_tokens(
     Ok(validated)
 }
 
-#[utoipa::path(get, path = "/api/v2/executions", tag = "executions", params(ListExecutionsQuery), responses((status = 200, body = repo::PaginatedExecutions)))]
+#[utoipa::path(get, path = "/api/v2/executions", tag = "executions", params(ListExecutionsQuery), responses((status = 200, body = PaginatedExecutions)))]
 async fn list_executions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
     Query(query): Query<ListExecutionsQuery>,
-) -> Result<Json<repo::PaginatedExecutions>, ApiError> {
+) -> Result<Json<PaginatedExecutions>, ApiError> {
     Ok(Json(
         repo::list_executions(
             &state.pool,
@@ -3986,7 +3986,7 @@ pub struct WasmMetaResponse {
 /// OpenAPI-only representation of the raw WASM download response.
 #[derive(Debug, ToSchema)]
 #[schema(value_type = String, format = Binary)]
-pub struct WasmBinaryResponse(Vec<u8>);
+pub struct WasmBinaryResponse(pub Vec<u8>);
 
 #[utoipa::path(
     get,

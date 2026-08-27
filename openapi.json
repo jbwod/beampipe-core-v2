@@ -414,15 +414,7 @@
       "DaliugeManagerTopologyConfig": {
         "additionalProperties": false,
         "properties": {
-          "co_host_dim": {
-            "type": "boolean"
-          },
           "islands": {
-            "format": "int32",
-            "nullable": true,
-            "type": "integer"
-          },
-          "nodes": {
             "format": "int32",
             "nullable": true,
             "type": "integer"
@@ -642,7 +634,7 @@
         "properties": {
           "diagnostics": {
             "items": {
-              "$ref": "#/components/schemas/beampipe_domain.Diagnostic"
+              "$ref": "#/components/schemas/Diagnostic"
             },
             "type": "array"
           },
@@ -1359,7 +1351,7 @@
             "type": "integer"
           },
           "stage": {
-            "$ref": "#/components/schemas/beampipe_domain.ExecutionRetryStage"
+            "$ref": "#/components/schemas/ExecutionRetryStage"
           },
           "status": {
             "type": "string"
@@ -1570,7 +1562,6 @@
           "sources",
           "archive_name",
           "output_verification_required",
-          "output_verification_policy",
           "phase_timestamps",
           "status",
           "retry_count",
@@ -2854,7 +2845,7 @@
           },
           "recent_events": {
             "items": {
-              "$ref": "#/components/schemas/observability.ProvenanceEventResponse"
+              "$ref": "#/components/schemas/ProvenanceEventResponse"
             },
             "type": "array"
           }
@@ -3166,13 +3157,6 @@
           "all_nics": {
             "type": "boolean"
           },
-          "check_with_session": {
-            "type": "boolean"
-          },
-          "container_runtime": {
-            "nullable": true,
-            "type": "string"
-          },
           "dlg_root": {
             "type": "string"
           },
@@ -3236,9 +3220,6 @@
           "runtime_contract": {
             "$ref": "#/components/schemas/SlurmRuntimeContractConfig"
           },
-          "sleepncopy": {
-            "type": "boolean"
-          },
           "slurm_template": {
             "nullable": true,
             "type": "string"
@@ -3262,9 +3243,6 @@
           },
           "verify_ssl": {
             "nullable": true,
-            "type": "boolean"
-          },
-          "zerorun": {
             "type": "boolean"
           }
         },
@@ -3853,38 +3831,11 @@
         ],
         "type": "object"
       },
-      "ValidationDiagnostic": {
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "hint": {
-            "nullable": true,
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          },
-          "severity": {
-            "$ref": "#/components/schemas/DiagnosticSeverity"
-          }
-        },
-        "required": [
-          "path",
-          "severity",
-          "code",
-          "message"
-        ],
-        "type": "object"
-      },
       "ValidationReport": {
         "properties": {
           "errors": {
             "items": {
-              "$ref": "#/components/schemas/ValidationDiagnostic"
+              "$ref": "#/components/schemas/Diagnostic"
             },
             "type": "array"
           },
@@ -3899,7 +3850,7 @@
           },
           "warnings": {
             "items": {
-              "$ref": "#/components/schemas/ValidationDiagnostic"
+              "$ref": "#/components/schemas/Diagnostic"
             },
             "type": "array"
           }
@@ -4282,171 +4233,6 @@
           "version"
         ],
         "type": "object"
-      },
-      "beampipe_domain.Diagnostic": {
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "hint": {
-            "nullable": true,
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          },
-          "severity": {
-            "$ref": "#/components/schemas/DiagnosticSeverity"
-          }
-        },
-        "required": [
-          "path",
-          "severity",
-          "code",
-          "message"
-        ],
-        "type": "object"
-      },
-      "beampipe_domain.ExecutionRetryStage": {
-        "enum": [
-          "stage_and_manifest",
-          "submit"
-        ],
-        "type": "string"
-      },
-      "observability.AlertDeliveryResponse": {
-        "properties": {
-          "channel_id": {
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "error": {
-            "nullable": true,
-            "type": "string"
-          },
-          "payload": {},
-          "rule_id": {
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
-          },
-          "status": {
-            "type": "string"
-          },
-          "uuid": {
-            "format": "uuid",
-            "type": "string"
-          }
-        },
-        "required": [
-          "uuid",
-          "status",
-          "payload",
-          "created_at"
-        ],
-        "type": "object"
-      },
-      "observability.NotificationChannelResponse": {
-        "properties": {
-          "config": {},
-          "configured_fields": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "secret_fields": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "nullable": true,
-            "type": "string"
-          },
-          "uuid": {
-            "format": "uuid",
-            "type": "string"
-          }
-        },
-        "required": [
-          "uuid",
-          "name",
-          "kind",
-          "config",
-          "secret_fields",
-          "configured_fields",
-          "enabled",
-          "created_at"
-        ],
-        "type": "object"
-      },
-      "observability.ProvenanceEventResponse": {
-        "properties": {
-          "actor": {
-            "nullable": true,
-            "type": "string"
-          },
-          "correlation_id": {
-            "nullable": true,
-            "type": "string"
-          },
-          "event_type": {
-            "type": "string"
-          },
-          "execution_id": {
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
-          },
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "occurred_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "payload": {},
-          "project_module": {
-            "type": "string"
-          },
-          "source_identifier": {
-            "nullable": true,
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "occurred_at",
-          "event_type",
-          "project_module",
-          "payload"
-        ],
-        "type": "object"
       }
     },
     "securitySchemes": {
@@ -4784,6 +4570,7 @@
     },
     "/api/v2/daliuge/inspect": {
       "get": {
+        "description": "Inspect DALiuGE manager connectivity and runtime state for a deployment profile.",
         "operationId": "daliuge_inspect",
         "parameters": [
           {
@@ -4833,6 +4620,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Inspect DALiuGE",
         "tags": [
           "daliuge"
         ]
@@ -4840,6 +4628,7 @@
     },
     "/api/v2/daliuge/sessions": {
       "get": {
+        "description": "List DALiuGE sessions for a deployment profile.",
         "operationId": "daliuge_sessions",
         "parameters": [
           {
@@ -4887,6 +4676,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "List DALiuGE sessions",
         "tags": [
           "daliuge"
         ]
@@ -5201,6 +4991,7 @@
     },
     "/api/v2/diagnostics": {
       "get": {
+        "description": "Inspect configuration and connectivity diagnostics for a deployment profile.",
         "operationId": "diagnostics",
         "parameters": [
           {
@@ -5250,6 +5041,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Get deployment diagnostics",
         "tags": [
           "health"
         ]
@@ -5641,6 +5433,7 @@
     },
     "/api/v2/executions/{id}/artifacts": {
       "get": {
+        "description": "List execution artifacts recorded by the control plane.",
         "operationId": "execution_artifacts",
         "parameters": [
           {
@@ -5696,6 +5489,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "List execution artifacts",
         "tags": [
           "executions"
         ]
@@ -5923,6 +5717,7 @@
     },
     "/api/v2/executions/{id}/observations": {
       "get": {
+        "description": "List persisted observations associated with an execution.",
         "operationId": "execution_observations",
         "parameters": [
           {
@@ -5999,6 +5794,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "List execution observations",
         "tags": [
           "executions"
         ]
@@ -6006,6 +5802,7 @@
     },
     "/api/v2/executions/{id}/retry": {
       "post": {
+        "description": "Retry an eligible failed execution from its safe recovery stage.",
         "operationId": "retry_execution",
         "parameters": [
           {
@@ -6088,6 +5885,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Retry execution",
         "tags": [
           "executions"
         ]
@@ -6156,6 +5954,7 @@
     },
     "/api/v2/executions/{id}/submission/abandon": {
       "post": {
+        "description": "Record that an indeterminate remote submission was abandoned after operator verification.",
         "operationId": "abandon_execution_submission",
         "parameters": [
           {
@@ -6265,6 +6064,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Abandon submission",
         "tags": [
           "executions"
         ]
@@ -6333,6 +6133,7 @@
     },
     "/api/v2/graphs/prepare": {
       "post": {
+        "description": "Validate and prepare a DALiuGE graph for an execution.",
         "operationId": "prepare_graph",
         "requestBody": {
           "content": {
@@ -6384,6 +6185,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Prepare graph",
         "tags": [
           "graphs"
         ]
@@ -6931,6 +6733,7 @@
     },
     "/api/v2/overview": {
       "get": {
+        "description": "Summarise execution, worker, and queue state for the operator dashboard.",
         "operationId": "operator_overview",
         "responses": {
           "200": {
@@ -6969,6 +6772,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Get operator overview",
         "tags": [
           "operators"
         ]
@@ -7235,6 +7039,7 @@
     },
     "/api/v2/project-configs/{id}/wasm/{sha256}": {
       "get": {
+        "description": "Download a specific WASM module by content digest.",
         "operationId": "get_project_config_wasm",
         "parameters": [
           {
@@ -7275,6 +7080,7 @@
               },
               "application/wasm": {
                 "schema": {
+                  "description": "OpenAPI-only representation of the raw WASM download response.",
                   "format": "binary",
                   "type": "string"
                 }
@@ -7311,6 +7117,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Download WASM module",
         "tags": [
           "project-configs"
         ]
@@ -7651,6 +7458,7 @@
     },
     "/api/v2/scheduler/jobs": {
       "get": {
+        "description": "List scheduler jobs visible through the configured deployment profile.",
         "operationId": "scheduler_jobs",
         "parameters": [
           {
@@ -7714,6 +7522,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "List scheduler jobs",
         "tags": [
           "scheduler"
         ]
@@ -7721,6 +7530,7 @@
     },
     "/api/v2/scheduler/status": {
       "get": {
+        "description": "Inspect scheduler connectivity, capacity, and queue state for a deployment profile.",
         "operationId": "scheduler_status",
         "parameters": [
           {
@@ -7770,6 +7580,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Get scheduler status",
         "tags": [
           "scheduler"
         ]
@@ -8672,6 +8483,7 @@
     },
     "/api/v2/workers": {
       "get": {
+        "description": "List registered control-plane workers.",
         "operationId": "list_workers",
         "parameters": [
           {
@@ -8723,11 +8535,13 @@
             "BearerAuth": []
           }
         ],
+        "summary": "List workers",
         "tags": [
           "operators"
         ]
       },
       "post": {
+        "description": "Register a control-plane worker and its capabilities.",
         "operationId": "register_worker",
         "requestBody": {
           "content": {
@@ -8786,6 +8600,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Register worker",
         "tags": [
           "operators"
         ]
@@ -8793,6 +8608,7 @@
     },
     "/api/v2/workers/leases": {
       "get": {
+        "description": "Inspect active and expired worker leases.",
         "operationId": "list_worker_leases",
         "parameters": [
           {
@@ -8854,6 +8670,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "List worker leases",
         "tags": [
           "operators"
         ]
@@ -8861,6 +8678,7 @@
     },
     "/api/v2/workers/pools": {
       "get": {
+        "description": "Summarise registered workers by pool.",
         "operationId": "list_worker_pools",
         "responses": {
           "200": {
@@ -8902,6 +8720,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "List worker pools",
         "tags": [
           "operators"
         ]
@@ -8909,6 +8728,7 @@
     },
     "/api/v2/workers/{id}": {
       "get": {
+        "description": "Fetch one registered worker.",
         "operationId": "get_worker",
         "parameters": [
           {
@@ -8961,6 +8781,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Get worker",
         "tags": [
           "operators"
         ]
@@ -8968,6 +8789,7 @@
     },
     "/api/v2/workers/{id}/drain": {
       "post": {
+        "description": "Prevent a worker from accepting new jobs.",
         "operationId": "drain_worker",
         "parameters": [
           {
@@ -9020,6 +8842,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Drain worker",
         "tags": [
           "operators"
         ]
@@ -9027,6 +8850,7 @@
     },
     "/api/v2/workers/{id}/heartbeat": {
       "post": {
+        "description": "Refresh a worker lease and publish its current state.",
         "operationId": "heartbeat_worker",
         "parameters": [
           {
@@ -9079,6 +8903,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Record worker heartbeat",
         "tags": [
           "operators"
         ]
@@ -9086,6 +8911,7 @@
     },
     "/api/v2/workers/{id}/resume": {
       "post": {
+        "description": "Allow a drained worker to accept jobs again.",
         "operationId": "resume_worker",
         "parameters": [
           {
@@ -9138,6 +8964,7 @@
             "BearerAuth": []
           }
         ],
+        "summary": "Resume worker",
         "tags": [
           "operators"
         ]
