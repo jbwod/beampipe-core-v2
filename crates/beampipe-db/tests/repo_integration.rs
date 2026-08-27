@@ -3349,14 +3349,14 @@ async fn expired_job_lease_is_recovered_with_new_fence() {
     assert_eq!(recovered.lease_owner, Some(second));
     assert_ne!(recovered.lease_token, original.lease_token);
     assert_eq!(recovered.attempts, original.attempts + 1);
-    let history = repo::list_job_claim_history(&pool, job.uuid).await.unwrap();
-    assert_eq!(
-        history
-            .iter()
-            .map(|event| event.event.as_str())
-            .collect::<Vec<_>>(),
-        vec!["claimed", "recovered"]
-    );
+    let history = sqlx::query_scalar::<_, String>(
+        "SELECT event FROM job_claim_history WHERE job_id = $1 ORDER BY occurred_at, uuid",
+    )
+    .bind(job.uuid)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(history, vec!["claimed", "recovered"]);
     assert!(
         repo::complete_job_with_lease(&pool, job.uuid, second, recovered.lease_token.unwrap(),)
             .await

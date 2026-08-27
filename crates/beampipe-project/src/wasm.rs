@@ -24,15 +24,6 @@ impl HookKind {
             Self::GraphPatches => "graph_patches",
         }
     }
-
-    pub fn from_hook_name(name: &str) -> Option<Self> {
-        match name {
-            "prepare_metadata" => Some(Self::PrepareMetadata),
-            "manifest" => Some(Self::Manifest),
-            "graph_patches" => Some(Self::GraphPatches),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Error)]
@@ -63,16 +54,6 @@ impl WasmHost {
         }
         let _module = Module::new(&self.engine, bytes)?;
         Ok(())
-    }
-
-    pub fn instantiate(&self, bytes: &[u8]) -> Result<Store<()>, WasmHostError> {
-        if bytes.is_empty() {
-            return Err(WasmHostError::EmptyModule);
-        }
-        let module = Module::new(&self.engine, bytes)?;
-        let mut store = Store::new(&self.engine, ());
-        let _instance = Instance::new(&mut store, &module, &[])?;
-        Ok(store)
     }
 
     pub fn call_hook(
@@ -171,11 +152,9 @@ mod tests {
     }
 
     #[test]
-    fn hook_kind_names() {
+    fn hook_kind_export_names() {
         assert_eq!(HookKind::PrepareMetadata.export_name(), "prepare_metadata");
-        assert_eq!(
-            HookKind::from_hook_name("manifest"),
-            Some(HookKind::Manifest)
-        );
+        assert_eq!(HookKind::Manifest.export_name(), "manifest");
+        assert_eq!(HookKind::GraphPatches.export_name(), "graph_patches");
     }
 }

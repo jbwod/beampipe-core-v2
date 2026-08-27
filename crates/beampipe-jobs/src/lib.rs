@@ -5941,9 +5941,41 @@ fn merge_poll_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beampipe_adapters::MockTapClient;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Clone, Default)]
+    struct MockTapClient {
+        rows_by_query_name: BTreeMap<String, Vec<TapRow>>,
+    }
+
+    impl MockTapClient {
+        fn with_rows(query_name: impl Into<String>, rows: Vec<Value>) -> Self {
+            let mut client = Self::default();
+            client.insert_rows(query_name, rows);
+            client
+        }
+
+        fn insert_rows(&mut self, query_name: impl Into<String>, rows: Vec<Value>) {
+            self.rows_by_query_name.insert(
+                query_name.into(),
+                rows.into_iter()
+                    .filter_map(|value| value.as_object().cloned())
+                    .collect(),
+            );
+        }
+    }
+
+    #[async_trait]
+    impl TapClient for MockTapClient {
+        async fn query_rows(&self, adql: &str) -> Result<Vec<TapRow>, AdapterError> {
+            Ok(self
+                .rows_by_query_name
+                .iter()
+                .find_map(|(name, rows)| adql.contains(name).then(|| rows.clone()))
+                .unwrap_or_default())
+        }
+    }
 
     #[derive(Debug, Clone, Copy)]
     struct TestDiscoveryRunner;

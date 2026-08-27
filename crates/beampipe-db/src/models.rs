@@ -318,17 +318,6 @@ pub struct OperatorOverviewCounts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
-pub struct JobClaimHistoryRow {
-    pub uuid: Uuid,
-    pub job_id: Uuid,
-    pub worker_id: Option<Uuid>,
-    pub lease_token: Option<Uuid>,
-    pub event: String,
-    pub occurred_at: DateTime<Utc>,
-    pub details: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct ExecutionObservationRow {
     pub uuid: Uuid,
     pub execution_id: Uuid,

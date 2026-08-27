@@ -157,19 +157,6 @@ pub fn set_span_parent_from_payload(span: &Span, payload: &Value) {
     }
 }
 
-/// Worker role label for span attributes (`api`, `scheduler`, or `worker`).
-pub fn worker_role_from_env() -> &'static str {
-    match std::env::var("BEAMPIPE_PROCESS_ROLE")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "api" => "api",
-        "scheduler" => "scheduler",
-        _ => "worker",
-    }
-}
-
 /// Cap source list for span attribute size.
 pub fn sources_attr_value(sources: &[String]) -> String {
     const MAX: usize = 8;

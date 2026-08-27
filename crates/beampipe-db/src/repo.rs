@@ -1,7 +1,7 @@
 use crate::models::{
     ArchiveMetadataRow, DeploymentProfileRow, ExecutionArtifactInput, ExecutionArtifactRow,
     ExecutionObservationInput, ExecutionObservationRow, ExecutionProvenancePatch,
-    ExecutionRow, ExecutionStatePatch, JobClaimHistoryRow, JobRow, OperatorOverviewCounts,
+    ExecutionRow, ExecutionStatePatch, JobRow, OperatorOverviewCounts,
     ProjectConfigRow, SourceRegistryRow, WorkerInstanceRow,
     WorkerPoolSummary, WorkerRegistration,
 };
@@ -6643,22 +6643,6 @@ pub async fn list_scheduler_executions(
     .bind(scheduler_name)
     .bind(limit.clamp(1, 500))
     .bind(offset.max(0))
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn list_job_claim_history(
-    pool: &PgPool,
-    job_id: Uuid,
-) -> Result<Vec<JobClaimHistoryRow>, sqlx::Error> {
-    sqlx::query_as::<_, JobClaimHistoryRow>(
-        r#"
-        SELECT * FROM job_claim_history
-        WHERE job_id = $1
-        ORDER BY occurred_at, uuid
-        "#,
-    )
-    .bind(job_id)
     .fetch_all(pool)
     .await
 }

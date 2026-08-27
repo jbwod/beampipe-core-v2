@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{Map, Value};
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 use thiserror::Error;
 
 pub mod casda_datalink;
@@ -34,8 +34,6 @@ pub enum AdapterError {
     InvalidRowShape(String),
     #[error("TAP timeout")]
     Timeout,
-    #[error("adapter not implemented: {0}")]
-    NotImplemented(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +73,6 @@ pub trait TapClient: Send + Sync {
     async fn health(&self) -> Result<(), AdapterError> {
         Ok(())
     }
-}
-
-#[async_trait]
-pub trait TapAdapter: Send + Sync {
-    async fn query(&self, adql: &str) -> Result<Value, AdapterError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,58 +293,6 @@ impl TapClient for HttpTapAdapter {
     }
 }
 
-#[async_trait]
-impl TapAdapter for HttpTapAdapter {
-    async fn query(&self, adql: &str) -> Result<Value, AdapterError> {
-        Ok(Value::Array(
-            self.query_rows(adql)
-                .await?
-                .into_iter()
-                .map(Value::Object)
-                .collect(),
-        ))
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct MockTapClient {
-    rows_by_query_name: BTreeMap<String, Vec<TapRow>>,
-}
-
-impl MockTapClient {
-    pub fn with_rows(query_name: impl Into<String>, rows: Vec<Value>) -> Self {
-        let mut rows_by_query_name = BTreeMap::new();
-        rows_by_query_name.insert(
-            query_name.into(),
-            rows.into_iter()
-                .filter_map(|v| v.as_object().cloned())
-                .collect(),
-        );
-        Self { rows_by_query_name }
-    }
-
-    pub fn insert_rows(&mut self, query_name: impl Into<String>, rows: Vec<Value>) {
-        self.rows_by_query_name.insert(
-            query_name.into(),
-            rows.into_iter()
-                .filter_map(|v| v.as_object().cloned())
-                .collect(),
-        );
-    }
-}
-
-#[async_trait]
-impl TapClient for MockTapClient {
-    async fn query_rows(&self, adql: &str) -> Result<Vec<TapRow>, AdapterError> {
-        for (name, rows) in &self.rows_by_query_name {
-            if adql.contains(name) {
-                return Ok(rows.clone());
-            }
-        }
-        Ok(Vec::new())
-    }
-}
-
 pub fn rows_from_json(value: Value) -> Result<Vec<TapRow>, AdapterError> {
     match value {
         Value::Array(items) => items
@@ -422,12 +363,5 @@ mod tests {
             rows_from_json(json!({"rows": [{"a": 1}]})).unwrap().len(),
             1
         );
-    }
-
-    #[tokio::test]
-    async fn mock_tap_matches_query_fragments() {
-        let tap = MockTapClient::with_rows("ivoa.obscore", vec![serde_json::json!({"a": 1})]);
-        let rows = tap.query_rows("SELECT * FROM ivoa.obscore").await.unwrap();
-        assert_eq!(rows[0]["a"], 1);
     }
 }
