@@ -30,51 +30,6 @@ fn rr_mut(base: &mut Map<String, Value>) -> Map<String, Value> {
     object(base.remove(BEAMPIPE_RUN_RECORD_KEY))
 }
 
-pub fn merge_execution_request_into_run_record(
-    existing: Option<Value>,
-    sources: &[Value],
-) -> Value {
-    let mut base = object(existing);
-    let mut rr = rr_mut(&mut base);
-    let captured: Vec<Value> = sources
-        .iter()
-        .filter_map(|spec| {
-            let obj = spec.as_object()?;
-            let sid = obj.get("source_identifier")?.as_str()?;
-            let mut entry = Map::new();
-            entry.insert("source_identifier".into(), Value::String(sid.to_string()));
-            if let Some(Value::Array(groups)) = obj.get("groups") {
-                if !groups.is_empty() {
-                    entry.insert(
-                        "groups".into(),
-                        Value::Array(
-                            groups
-                                .iter()
-                                .map(|s| Value::String(s.to_string().trim_matches('"').to_string()))
-                                .collect(),
-                        ),
-                    );
-                }
-            }
-            Some(Value::Object(entry))
-        })
-        .collect();
-    let ids: Vec<Value> = captured
-        .iter()
-        .filter_map(|v| v.get("source_identifier").cloned())
-        .collect();
-    rr.insert(
-        "requested_sources".into(),
-        json!({
-            "count": captured.len(),
-            "source_identifiers": ids,
-            "sources": captured,
-        }),
-    );
-    base.insert(BEAMPIPE_RUN_RECORD_KEY.into(), Value::Object(rr));
-    Value::Object(base)
-}
-
 pub fn merge_slurm_submit_into_manifest(
     existing: Option<Value>,
     session_id: &str,
@@ -427,18 +382,6 @@ pub fn dim_logs_url(dim_base: &str, session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn requested_sources_are_captured() {
-        let out = merge_execution_request_into_run_record(
-            None,
-            &[json!({"source_identifier": "example-source", "groups": ["1"]})],
-        );
-        assert_eq!(
-            out["beampipe_run_record"]["requested_sources"]["source_identifiers"][0],
-            "example-source"
-        );
-    }
 
     #[test]
     fn slurm_poll_terminal_freeze_preserves_first_terminal() {

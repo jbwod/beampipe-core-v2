@@ -11,7 +11,7 @@ pub mod slurm;
 
 pub use admission::{
     can_admit_by_in_flight, discovery_admission_budget, execute_admission_budget,
-    AdmissionDecision, SchedulerTickResult, SkipReason,
+    SchedulerTickResult, SkipReason,
 };
 pub use diagnostics::{Diagnostic, DiagnosticSeverity, Failure, FailureClass, RetryDisposition};
 pub use execution::{

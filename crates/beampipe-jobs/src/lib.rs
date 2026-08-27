@@ -1164,7 +1164,7 @@ impl ConfigDiscoveryRunner {
             return Err(ConfigDiscoveryError::NoQueries);
         };
         let registry = TransformRegistry::from_config(config);
-        let mut context = build_template_context(source_identifier, config);
+        let context = build_template_context(source_identifier, config);
 
         let rows = self
             .query_configured(
@@ -1180,14 +1180,6 @@ impl ConfigDiscoveryRunner {
         let mut enrichments = Map::new();
         for query in config.discovery.queries.iter().skip(1) {
             let name = query.name.clone();
-            if config.source_identity.is_none() {
-                if let Some(transform) = query.source_id_transform.as_deref() {
-                    if let Some(value) = registry.apply_named(transform, &json!(source_identifier))
-                    {
-                        context.insert("source_name".into(), value);
-                    }
-                }
-            }
             let rendered = render_template(&query.template, &context);
             match self
                 .query_configured(config, &query.adapter, &rendered)
@@ -5919,8 +5911,6 @@ fn rest_backend_from_profile(
                 HttpClientOptions::dim_default().with_verify_ssl(dim_verify),
             )
         },
-        profile_name: profile.map(|p| p.name.clone()),
-        tm_url,
         dim_endpoint,
         translate_config,
         session_created_at: created_at,
@@ -5933,10 +5923,8 @@ fn slurm_backend_from_profile(
     created_at: chrono::DateTime<chrono::Utc>,
     publication_execution_attempt: Option<i32>,
 ) -> SlurmExecutionBackend<HttpTranslatorClient, SshSlurmClient> {
-    let mut session_dir = "/tmp/beampipe".to_string();
     let mut login = "localhost".to_string();
     let mut remote_user = None;
-    let mut account = None;
     let mut slurm_dep: Option<SlurmRemoteDeploymentConfig> = None;
     let translation = profile.and_then(|p| {
         serde_json::from_value::<beampipe_profiles::DaliugeTranslationConfig>(p.translation.clone())
@@ -5947,14 +5935,8 @@ fn slurm_backend_from_profile(
         if let Ok(DeploymentConfig::SlurmRemote(slurm)) =
             serde_json::from_value::<DeploymentConfig>(profile.deployment.clone())
         {
-            session_dir = format!(
-                "{}/beampipe/{}",
-                slurm.log_dir.trim_end_matches('/'),
-                chrono::Utc::now().format("%Y%m%d")
-            );
             login = slurm.login_node.clone();
             remote_user = Some(resolve_remote_user(&slurm));
-            account = Some(slurm.account.clone());
             slurm_dep = Some(slurm);
         }
     }
@@ -5978,23 +5960,12 @@ fn slurm_backend_from_profile(
             tm_http_options(profile),
         ),
         slurm: SshSlurmClient {
-            login_node: login.clone(),
             remote_user: remote_user.clone(),
-            session_dir: session_dir.clone(),
-            account: account.clone(),
-            ssh_port: slurm_dep.as_ref().map(|s| s.ssh_port).unwrap_or(22),
-            dlg_root: slurm_dep
-                .as_ref()
-                .map(|s| s.dlg_root.clone())
-                .unwrap_or_else(|| "/tmp".into()),
             deployment: slurm_dep,
             publication_execution_attempt,
         },
-        profile_name: profile.map(|p| p.name.clone()),
-        session_dir,
         login_node: Some(login),
         remote_user,
-        account,
         translate_config,
         session_created_at: created_at,
     }

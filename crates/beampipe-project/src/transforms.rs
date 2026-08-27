@@ -128,11 +128,11 @@ pub fn build_template_context(
     source_identifier: &str,
     config: &ProjectConfig,
 ) -> Map<String, Value> {
-    let registry = TransformRegistry::from_config(config);
     let mut context = Map::new();
 
-    if let Some(_identity) = &config.source_identity {
-        for (var_name, spec) in &_identity.template_vars {
+    if let Some(identity) = &config.source_identity {
+        let registry = TransformRegistry::from_config(config);
+        for (var_name, spec) in &identity.template_vars {
             let base = template_var_base(source_identifier, spec);
             let value = if let Some(transform_name) = spec.transform.as_deref() {
                 registry.apply_named(transform_name, &base).unwrap_or(base)
@@ -148,16 +148,7 @@ pub fn build_template_context(
     }
 
     context.insert("source_identifier".into(), json!(source_identifier));
-    let legacy_transform = config
-        .discovery
-        .queries
-        .first()
-        .and_then(|q| q.source_id_transform.as_deref());
-    let source_name = legacy_transform
-        .and_then(|name| registry.apply_named(name, &json!(source_identifier)))
-        .and_then(|v| value_string(Some(&v)))
-        .unwrap_or_else(|| source_identifier.to_string());
-    context.insert("source_name".into(), json!(source_name));
+    context.insert("source_name".into(), json!(source_identifier));
     context
 }
 
@@ -231,17 +222,6 @@ pub fn validate_transform_refs(config: &ProjectConfig) -> Vec<ValidationDiagnost
                     &format!("source_identity.template_vars.{var_name}.transform"),
                 );
             }
-        }
-    }
-
-    for (i, query) in config.discovery.queries.iter().enumerate() {
-        if let Some(name) = query.source_id_transform.as_deref() {
-            check(
-                &registry,
-                &mut errors,
-                name,
-                &format!("discovery.queries[{i}].source_id_transform"),
-            );
         }
     }
 
@@ -811,6 +791,13 @@ source_identity:
         let ctx = build_template_context("HIPASSJ1313-15", &config);
         assert_eq!(ctx["source_identifier"], json!("HIPASSJ1313-15"));
         assert_eq!(ctx["source_name"], json!("J1313-15"));
+    }
+
+    #[test]
+    fn build_template_context_without_source_identity_uses_canonical_defaults() {
+        let ctx = build_template_context("survey-source-1", &ProjectConfig::default());
+        assert_eq!(ctx["source_identifier"], json!("survey-source-1"));
+        assert_eq!(ctx["source_name"], json!("survey-source-1"));
     }
 
     #[test]

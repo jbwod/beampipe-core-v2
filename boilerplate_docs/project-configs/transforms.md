@@ -72,7 +72,6 @@ policy, or project extension—not in a hidden Core transform.
 Transforms can be referenced from:
 
 - `source_identity.template_vars.*.transform`;
-- `discovery.queries[].source_id_transform`;
 - `discovery.prepare_metadata.field_map.*.transform`;
 - `discovery.prepare_metadata.discovery_flags.*.transform`.
 

@@ -1536,12 +1536,7 @@ fn scheduler_client_from_profile(
         )));
     };
     Ok(SshSlurmClient {
-        login_node: slurm.login_node.clone(),
         remote_user: slurm.remote_user.clone(),
-        session_dir: slurm.log_dir.clone(),
-        account: Some(slurm.account.clone()),
-        ssh_port: slurm.ssh_port,
-        dlg_root: slurm.dlg_root.clone(),
         deployment: Some(slurm),
         publication_execution_attempt: None,
     })
@@ -4491,32 +4486,6 @@ mod security_tests {
         assert_eq!(failure.class, FailureClass::DependencyUnavailable);
         assert!(!failure.message.contains("password"));
         assert_eq!(failure.retry, RetryDisposition::Safe);
-    }
-
-    #[test]
-    fn legacy_project_upload_failure_contains_conversion_diagnostic() {
-        let config = ProjectConfig::from_slice(
-            br#"
-apiVersion: beampipe.dev/v1
-kind: ProjectConfig
-metadata:
-  id: legacy
-adapters:
-  required: [casda]
-"#,
-        )
-        .unwrap();
-        let report = config.validate_report();
-        let failure = api_failure(&ApiError::Validation(report));
-
-        assert_eq!(failure.code, "project_config_validation_failed");
-        let diagnostic = failure
-            .diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.code == "legacy_api_version")
-            .expect("legacy diagnostic");
-        assert_eq!(diagnostic.path, "apiVersion");
-        assert!(diagnostic.hint.as_deref().unwrap().contains("convert"));
     }
 
     #[test]

@@ -6,7 +6,6 @@
 
 use crate::ExtensionHook;
 use serde_json::Value;
-use std::sync::Arc;
 use thiserror::Error;
 use wasmtime::{Engine, Instance, Linker, Module, Store};
 
@@ -159,10 +158,6 @@ fn invoke_string_hook(
         .read(&mut *store, out_ptr as usize, &mut buf)
         .map_err(|e| WasmHostError::Engine(e.into()))?;
     Ok(buf)
-}
-
-pub fn shared_host() -> Arc<WasmHost> {
-    Arc::new(WasmHost::default())
 }
 
 #[cfg(test)]

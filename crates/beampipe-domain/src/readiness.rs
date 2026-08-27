@@ -5,13 +5,6 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
-pub struct SourceSpec {
-    pub source_identifier: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub groups: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 pub struct RegisteredSourceReadiness {
     pub enabled: bool,
     pub last_checked_at_present: bool,

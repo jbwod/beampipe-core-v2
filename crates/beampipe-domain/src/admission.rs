@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
-    Disabled,
     QueueFull,
     TapUnreachable,
     InFlightCap,
@@ -21,7 +20,6 @@ pub enum SkipReason {
 impl SkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Disabled => "disabled",
             Self::QueueFull => "queue_full",
             Self::TapUnreachable => "tap_unreachable",
             Self::InFlightCap => "in_flight_cap",
@@ -34,12 +32,6 @@ impl SkipReason {
             Self::NoPendingSources => "no_pending_sources",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmissionDecision {
-    Admit,
-    Skip(SkipReason),
 }
 
 /// Aggregated outcome of a scheduler tick for structured telemetry.

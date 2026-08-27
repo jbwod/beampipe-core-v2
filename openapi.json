@@ -799,10 +799,6 @@
           "result": {
             "$ref": "#/components/schemas/QueryResultPolicy"
           },
-          "source_id_transform": {
-            "nullable": true,
-            "type": "string"
-          },
           "template": {
             "type": "string"
           }

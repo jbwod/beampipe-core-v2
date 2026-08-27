@@ -89,7 +89,7 @@ pub use transforms::{
     apply_field_transform, apply_transform_spec, build_template_context, validate_transform_refs,
     TransformRegistry,
 };
-pub use wasm::{shared_host, HookKind, WasmHost, WasmHostError};
+pub use wasm::{HookKind, WasmHost, WasmHostError};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -435,8 +435,6 @@ pub struct DiscoveryQuery {
     pub adapter: String,
     pub template: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id_transform: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_each: Option<QueryIteration>,
     #[serde(default)]
     pub result: QueryResultPolicy,
@@ -777,19 +775,6 @@ impl ProjectConfig {
     pub fn from_slice(bytes: &[u8]) -> Result<Self, ProjectConfigError> {
         let yaml_value: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
         let value = serde_json::to_value(yaml_value)?;
-        match value.get("apiVersion").and_then(Value::as_str) {
-            Some("beampipe.dev/v2") => Self::from_v2_value(value),
-            Some("beampipe.dev/v1") => Self::from_v1_compat_value(value),
-            _ => Self::from_v2_value(value),
-        }
-    }
-
-    fn from_v2_value(value: Value) -> Result<Self, ProjectConfigError> {
-        deserialize_config_value(value)
-    }
-
-    fn from_v1_compat_value(value: Value) -> Result<Self, ProjectConfigError> {
-        // v1 remains parse-only compatibility input; validation always reports it as legacy.
         deserialize_config_value(value)
     }
 
@@ -803,15 +788,14 @@ impl ProjectConfig {
             errors.extend(schema_errors);
         }
         if self.api_version != "beampipe.dev/v2" {
-            let mut diag = ValidationDiagnostic::error(
-                "apiVersion",
-                "legacy_api_version",
-                "apiVersion must be beampipe.dev/v2",
+            errors.push(
+                ValidationDiagnostic::error(
+                    "apiVersion",
+                    "invalid_api_version",
+                    "apiVersion must be beampipe.dev/v2",
+                )
+                .with_hint("set apiVersion to beampipe.dev/v2"),
             );
-            if self.api_version == "beampipe.dev/v1" {
-                diag = diag.with_hint("v1 project configs are legacy; convert the document to the v2 typed shape before upload");
-            }
-            errors.push(diag);
         }
         if self.kind != "ProjectConfig" {
             errors.push(ValidationDiagnostic::error(
@@ -1493,26 +1477,25 @@ mod config_golden_tests {
     }
 
     #[test]
-    fn legacy_v1_config_parses_but_does_not_validate() {
+    fn non_v2_api_version_does_not_validate() {
         let yaml = r#"
-apiVersion: beampipe.dev/v1
+apiVersion: beampipe.dev/v3
 kind: ProjectConfig
 metadata:
-  id: legacy
+  id: unsupported-version
 adapters:
   required: [catalog]
-discovery:
-  prepare_metadata:
-    field_map:
-      group_key:
-        from: collection_id
-      record_id:
-        from: object_id
+  endpoints:
+    catalog:
+      url: https://catalog.example.test/tap
 "#;
         let config = ProjectConfig::from_slice(yaml.as_bytes()).unwrap();
         let report = config.validate_report();
         assert!(!report.valid);
-        assert!(report.errors.iter().any(|e| e.code == "legacy_api_version"));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.code == "invalid_api_version"));
     }
 
     #[test]
@@ -1582,7 +1565,6 @@ discovery:
             name: "catalog".into(),
             adapter: "catalog".into(),
             template: "SELECT 1".into(),
-            source_id_transform: None,
             for_each: None,
             result: QueryResultPolicy::Many,
             required: false,
@@ -1712,87 +1694,6 @@ automation:
         assert!(OutputGlob::compile("../image.*").is_err());
         assert!(OutputGlob::compile("images/[abc].fits").is_err());
         assert!(OutputGlob::compile(&"x".repeat(MAX_OUTPUT_PATTERN_LENGTH + 1)).is_err());
-    }
-
-    #[test]
-    fn globset_matcher_preserves_the_supported_output_glob_contract() {
-        fn legacy_matcher(pattern: &str) -> regex::Regex {
-            let chars = pattern.chars().collect::<Vec<_>>();
-            let mut expression = String::from("^");
-            let mut index = 0;
-            while index < chars.len() {
-                match chars[index] {
-                    '*' if chars.get(index + 1) == Some(&'*')
-                        && chars.get(index + 2) == Some(&'/') =>
-                    {
-                        expression.push_str("(?:.*/)?");
-                        index += 3;
-                    }
-                    '*' if chars.get(index + 1) == Some(&'*') => {
-                        expression.push_str(".*");
-                        index += 2;
-                    }
-                    '*' => {
-                        expression.push_str("[^/]*");
-                        index += 1;
-                    }
-                    '?' => {
-                        expression.push_str("[^/]");
-                        index += 1;
-                    }
-                    literal => {
-                        expression.push_str(&regex::escape(&literal.to_string()));
-                        index += 1;
-                    }
-                }
-            }
-            expression.push('$');
-            regex::Regex::new(&expression).unwrap()
-        }
-
-        let patterns = [
-            "*",
-            "?.fits",
-            "image.*.fits",
-            "**/image.*.fits",
-            "products/**/result.bin",
-            "products/**",
-            "**",
-            "nested/*/part-??.bin",
-            "mosaïc/*.fits",
-            "**/**",
-            "archive/**/**/result(+).bin",
-            "question-?*.fits",
-        ];
-        let paths = [
-            "result.bin",
-            "a.fits",
-            "ab.fits",
-            "image.source.fits",
-            "source/image.source.fits",
-            "products/result.bin",
-            "products/source/a/result.bin",
-            "products/source/a/other.bin",
-            "products/",
-            "nested/beam/part-01.bin",
-            "nested/beam/deeper/part-01.bin",
-            "mosaïc/résult.fits",
-            "archive/result(+).bin",
-            "archive/a/b/result(+).bin",
-            "question-aβ.fits",
-        ];
-
-        for pattern in patterns {
-            let legacy = legacy_matcher(pattern);
-            let maintained = OutputGlob::compile(pattern).unwrap();
-            for path in paths {
-                assert_eq!(
-                    maintained.is_match(path),
-                    legacy.is_match(path),
-                    "match contract changed for pattern {pattern:?} and path {path:?}"
-                );
-            }
-        }
     }
 
     #[test]
