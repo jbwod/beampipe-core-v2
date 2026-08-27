@@ -23,7 +23,7 @@
     "modules": "module load singularity/4.1.0-askap && module load py-numpy/1.26.4 && module use /group/askap/modulefiles",
     "venv": "source /software/projects/pawsey0411/jblackwood/venv/bin/activate",
     "runtime_contract": {
-      "required_commands": ["wallaby_hires", "beampipe-publish", "singularity"],
+      "required_commands": ["wallaby_hires", "singularity"],
       "required_python_modules": ["wallaby_hires", "beampipe_pallette.apps"],
       "required_environment": [
         {
@@ -37,9 +37,7 @@
       "shared_staging_environment_variable": "WALLABY_HIRES_CACHE_ROOT"
     },
     "publication": {
-      "core_url_environment": "BEAMPIPE_CORE_URL",
-      "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
-      "credential_ttl_minutes": 720
+      "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI"
     },
     "exec_prefix": "srun -l",
     "job_duration_minutes": 120,

@@ -5,16 +5,14 @@ use std::path::{Component, Path};
 use thiserror::Error;
 use utoipa::ToSchema;
 
-const RESERVED_SLURM_RUNTIME_ENVIRONMENT: [&str; 9] = [
+const RESERVED_SLURM_RUNTIME_ENVIRONMENT: [&str; 7] = [
     "BEAMPIPE_SLURM_ACCOUNT",
     "PYTHONPATH",
     "BEAMPIPE_EXECUTION_ID",
     "BEAMPIPE_EXECUTION_ATTEMPT",
-    "BEAMPIPE_CORE_URL",
     "BEAMPIPE_OUTPUT_DESTINATION_URI",
     "BEAMPIPE_OUTPUT_ROOT",
-    "BEAMPIPE_PUBLISHER_TOKEN",
-    "BEAMPIPE_PUBLISHER_TOKEN_FILE",
+    "BEAMPIPE_OUTPUT_INVENTORY_HANDOFF_PATH",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -77,46 +75,20 @@ pub struct RestRemoteDeploymentConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationRuntimeConfig {
-    /// Worker environment variable containing the reachable Core base URL.
-    pub core_url_environment: String,
     /// Worker environment variable containing the durable destination base
     /// URI. The publisher adds its execution/attempt namespace.
     pub durable_destination_uri_environment: String,
-    /// Development-only HTTP escape hatch. Runtime validation still permits
-    /// HTTP only for a loopback Core endpoint.
-    #[serde(default)]
-    pub allow_insecure_core_http: bool,
-    /// Lifetime of the execution-scoped publisher capability. This includes
-    /// scheduler queueing, the complete outer allocation, and publication.
-    /// Operators must size the queue-delay allowance for their facility.
-    pub credential_ttl_minutes: i32,
 }
 
 impl PublicationRuntimeConfig {
     pub fn validate(&self) -> Result<(), ProfileValidationError> {
         validate_publication_environment_name(
-            &self.core_url_environment,
-            "deployment.publication.core_url_environment",
-        )?;
-        validate_publication_environment_name(
             &self.durable_destination_uri_environment,
             "deployment.publication.durable_destination_uri_environment",
         )?;
-        if self.core_url_environment == self.durable_destination_uri_environment {
-            return Err(ProfileValidationError::Message(
-                "deployment.publication environment variables must differ".into(),
-            ));
-        }
-        if !(5..=24 * 60).contains(&self.credential_ttl_minutes) {
-            return Err(ProfileValidationError::Message(
-                "deployment.publication.credential_ttl_minutes must be 5-1440".into(),
-            ));
-        }
         Ok(())
     }
 }
-
-const PUBLISHER_COMPLETION_GRACE_MINUTES: i32 = 30;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -272,8 +244,9 @@ pub struct SlurmRemoteDeploymentConfig {
     /// Typed, project-specific runtime requirements. This field is required so
     /// a Slurm profile cannot silently inherit a bundled project's runtime.
     pub runtime_contract: SlurmRuntimeContractConfig,
-    /// Non-secret runtime inputs for the terminal output publisher. The
-    /// execution-scoped credential is issued and delivered separately.
+    /// Non-secret runtime inputs for the terminal output publisher. Slurm
+    /// publishers hand their canonical receipt back through the authenticated
+    /// SSH/SFTP control plane; no Core callback credential enters the graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<PublicationRuntimeConfig>,
 }
@@ -445,19 +418,6 @@ impl DeploymentProfile {
                 dep.runtime_contract.validate()?;
                 if let Some(publication) = dep.publication.as_ref() {
                     publication.validate()?;
-                    let minimum_ttl = dep
-                        .effective_wall_time_minutes()
-                        .checked_add(PUBLISHER_COMPLETION_GRACE_MINUTES)
-                        .ok_or_else(|| {
-                            ProfileValidationError::Message(
-                                "deployment publication lifetime overflowed".into(),
-                            )
-                        })?;
-                    if publication.credential_ttl_minutes < minimum_ttl {
-                        return Err(ProfileValidationError::Message(format!(
-                            "deployment.publication.credential_ttl_minutes must be at least the effective outer wall time plus {PUBLISHER_COMPLETION_GRACE_MINUTES} minutes ({minimum_ttl} minutes for this profile); scheduler queue delay is an additional operator allowance"
-                        )));
-                    }
                 }
             }
         }
@@ -677,14 +637,6 @@ fn validate_publication_environment_name(
             "{name} must be a POSIX environment variable name"
         )));
     }
-    if matches!(
-        value,
-        "BEAMPIPE_PUBLISHER_TOKEN" | "BEAMPIPE_PUBLISHER_TOKEN_FILE"
-    ) {
-        return Err(ProfileValidationError::Message(format!(
-            "{name} must name a non-secret runtime value"
-        )));
-    }
     Ok(())
 }
 
@@ -771,9 +723,7 @@ mod tests {
                 "kind": "rest_remote",
                 "deploy_host": "dim.example.org",
                 "publication": {
-                    "core_url_environment": "BEAMPIPE_CORE_URL",
-                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
-                    "credential_ttl_minutes": 720
+                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI"
                 }
             }
         }))
@@ -957,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_contract_names_only_non_secret_runtime_inputs() {
+    fn publication_contract_names_only_the_non_secret_destination_input() {
         let profile: DeploymentProfile = serde_json::from_value(json!({
             "name": "generic-slurm",
             "translation": {"num_par": 1},
@@ -974,45 +924,18 @@ mod tests {
                     "shared_staging_subdirectory": "archive-cache"
                 },
                 "publication": {
-                    "core_url_environment": "BEAMPIPE_CORE_URL",
-                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
-                    "credential_ttl_minutes": 720
+                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI"
                 }
             }
         }))
         .unwrap();
         profile.validate().unwrap();
 
-        let DeploymentConfig::SlurmRemote(mut deployment) = profile.deployment else {
-            panic!("expected Slurm profile");
-        };
-        deployment
-            .publication
-            .as_mut()
-            .unwrap()
-            .core_url_environment = "BEAMPIPE_PUBLISHER_TOKEN_FILE".into();
-        assert!(deployment
-            .publication
-            .as_ref()
-            .unwrap()
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("non-secret"));
-
-        let mut publication = deployment.publication.unwrap();
-        publication.core_url_environment = "BEAMPIPE_CORE_URL".into();
-        publication.credential_ttl_minutes = 4;
-        assert!(publication
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("5-1440"));
     }
 
     #[test]
-    fn slurm_publication_lifetime_covers_outer_wall_time_and_grace() {
-        let mut profile: DeploymentProfile = serde_json::from_value(json!({
+    fn slurm_publication_rejects_removed_callback_settings() {
+        let error = serde_json::from_value::<DeploymentProfile>(json!({
             "name": "generic-slurm",
             "translation": {"num_par": 1},
             "deployment": {
@@ -1030,32 +953,21 @@ mod tests {
                 },
                 "publication": {
                     "core_url_environment": "BEAMPIPE_CORE_URL",
-                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI",
-                    "credential_ttl_minutes": 149
+                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI"
                 }
             }
         }))
-        .unwrap();
-        assert!(profile
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("at least the effective outer wall time plus 30 minutes"));
-
-        let DeploymentConfig::SlurmRemote(deployment) = &mut profile.deployment else {
-            panic!("expected Slurm profile");
-        };
-        deployment
-            .publication
-            .as_mut()
-            .unwrap()
-            .credential_ttl_minutes = 150;
-        profile.validate().unwrap();
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `core_url_environment`"));
     }
 
     #[test]
     fn project_runtime_cannot_override_core_publisher_environment() {
-        for name in ["BEAMPIPE_CORE_URL", "BEAMPIPE_PUBLISHER_TOKEN"] {
+        for name in [
+            "BEAMPIPE_EXECUTION_ID",
+            "BEAMPIPE_OUTPUT_DESTINATION_URI",
+            "BEAMPIPE_OUTPUT_INVENTORY_HANDOFF_PATH",
+        ] {
             let contract = SlurmRuntimeContractConfig {
                 required_environment: vec![SlurmRuntimeEnvironmentRequirement {
                     name: name.into(),

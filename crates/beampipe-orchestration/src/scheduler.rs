@@ -477,7 +477,7 @@ impl SchedulerAdapter for SshSlurmClient {
             pgt_json: request.physical_graph,
             deployment: profile,
             username,
-            publisher_credential: self.publisher_credential.clone(),
+            publication_execution_attempt: self.publication_execution_attempt,
         })
         .await
         .map_err(|error| SchedulerAdapterError::backend("submit", &target, error))?;

@@ -5,9 +5,7 @@ use crate::slurm_batch::{
     SlurmJobPollResult,
 };
 use crate::slurm_credentials::SlurmSshCredentials;
-use crate::slurm_sftp::{
-    RemoteSftp, PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, SUBMISSION_ARTIFACT_MODE,
-};
+use crate::slurm_sftp::{RemoteSftp, SUBMISSION_ARTIFACT_MODE};
 use crate::OrchestrationError;
 use beampipe_profiles::SlurmRemoteDeploymentConfig;
 use russh::client;
@@ -16,12 +14,91 @@ use russh::ChannelMsg;
 use ssh_key::known_hosts::{HostPatterns, KnownHosts};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 const SQUEUE_FORMAT: &str = "%i|%T|%R";
 const SACCT_FORMAT: &str = "JobID,State,ExitCode";
+
+/// Core-owned, fixed receipt location beneath each UUID-scoped remote DALiuGE
+/// session directory. Jobs never accept or construct an arbitrary remote
+/// receipt path.
+pub const SLURM_OUTPUT_INVENTORY_RELATIVE_DIRECTORY: &str = ".beampipe/publication";
+pub const MAX_OUTPUT_INVENTORY_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputInventoryRemotePaths {
+    pub(crate) control_directory: String,
+    pub(crate) publication_directory: String,
+    pub(crate) attempt_directory: String,
+    pub(crate) inventory_path: String,
+}
+
+pub(crate) fn output_inventory_remote_paths(
+    remote_session_dir: &str,
+    execution_attempt: i32,
+) -> Result<OutputInventoryRemotePaths, OrchestrationError> {
+    if !(0..i32::MAX).contains(&execution_attempt) {
+        return Err(OrchestrationError::OutputInventoryRejected(
+            "output inventory execution attempt must be non-negative and leave retry headroom"
+                .into(),
+        ));
+    }
+    if remote_session_dir.is_empty()
+        || remote_session_dir != remote_session_dir.trim()
+        || remote_session_dir.chars().any(char::is_control)
+    {
+        return Err(OrchestrationError::OutputInventoryRejected(
+            "remote DALiuGE session directory must be a normalized absolute path".into(),
+        ));
+    }
+    let path = Path::new(remote_session_dir);
+    if !path.is_absolute() {
+        return Err(OrchestrationError::OutputInventoryRejected(
+            "remote DALiuGE session directory must be a normalized absolute path".into(),
+        ));
+    }
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(OrchestrationError::OutputInventoryRejected(
+                    "remote DALiuGE session directory must not contain traversal components"
+                        .into(),
+                ));
+            }
+        }
+    }
+    if normalized == Path::new("/") || normalized.to_string_lossy() != remote_session_dir {
+        return Err(OrchestrationError::OutputInventoryRejected(
+            "remote DALiuGE session directory must be a normalized dedicated directory".into(),
+        ));
+    }
+
+    let control_directory = normalized.join(".beampipe");
+    let publication_directory = control_directory.join("publication");
+    let attempt_directory = publication_directory.join(format!("attempt-{execution_attempt}"));
+    let inventory_path = attempt_directory.join("beampipe-output-inventory.json");
+    if inventory_path.parent() != Some(attempt_directory.as_path())
+        || !attempt_directory.starts_with(&publication_directory)
+        || !inventory_path.starts_with(&normalized)
+        || inventory_path == normalized
+    {
+        return Err(OrchestrationError::OutputInventoryRejected(
+            "output inventory handoff path escaped the remote session directory".into(),
+        ));
+    }
+    Ok(OutputInventoryRemotePaths {
+        control_directory: control_directory.to_string_lossy().into_owned(),
+        publication_directory: publication_directory.to_string_lossy().into_owned(),
+        attempt_directory: attempt_directory.to_string_lossy().into_owned(),
+        inventory_path: inventory_path.to_string_lossy().into_owned(),
+    })
+}
 
 /// Hashable SSH target for session pooling. Credential slot is part of the key
 /// so two profiles that share a login node but use different keys stay isolated.
@@ -222,21 +299,7 @@ pub struct SlurmSshSession {
 
 #[async_trait::async_trait]
 trait AtomicSftpUploader {
-    async fn ensure_private_directory(
-        &mut self,
-        path: &str,
-        mode: u32,
-    ) -> Result<(), OrchestrationError>;
-
     async fn upload_file_atomic(
-        &mut self,
-        final_path: &str,
-        temporary_path: &str,
-        content: &[u8],
-        mode: u32,
-    ) -> Result<(), OrchestrationError>;
-
-    async fn upload_private_file_atomic(
         &mut self,
         final_path: &str,
         temporary_path: &str,
@@ -246,15 +309,50 @@ trait AtomicSftpUploader {
 }
 
 #[async_trait::async_trait]
-impl AtomicSftpUploader for RemoteSftp {
-    async fn ensure_private_directory(
+trait OutputInventoryReader {
+    async fn read_output_inventory(
         &mut self,
-        path: &str,
-        mode: u32,
-    ) -> Result<(), OrchestrationError> {
-        RemoteSftp::ensure_private_directory(self, path, mode).await
-    }
+        paths: &OutputInventoryRemotePaths,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, OrchestrationError>;
+}
 
+#[async_trait::async_trait]
+impl OutputInventoryReader for RemoteSftp {
+    async fn read_output_inventory(
+        &mut self,
+        paths: &OutputInventoryRemotePaths,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, OrchestrationError> {
+        RemoteSftp::read_output_inventory(
+            self,
+            &paths.control_directory,
+            &paths.publication_directory,
+            &paths.attempt_directory,
+            &paths.inventory_path,
+            max_bytes,
+        )
+        .await
+    }
+}
+
+async fn read_output_inventory_with<R: OutputInventoryReader + Send>(
+    reader: &mut R,
+    remote_session_dir: &str,
+    execution_attempt: i32,
+    max_bytes: usize,
+) -> Result<Vec<u8>, OrchestrationError> {
+    if max_bytes == 0 || max_bytes > MAX_OUTPUT_INVENTORY_BYTES {
+        return Err(OrchestrationError::Backend(format!(
+            "output inventory read limit must be 1-{MAX_OUTPUT_INVENTORY_BYTES} bytes"
+        )));
+    }
+    let paths = output_inventory_remote_paths(remote_session_dir, execution_attempt)?;
+    reader.read_output_inventory(&paths, max_bytes).await
+}
+
+#[async_trait::async_trait]
+impl AtomicSftpUploader for RemoteSftp {
     async fn upload_file_atomic(
         &mut self,
         final_path: &str,
@@ -263,23 +361,6 @@ impl AtomicSftpUploader for RemoteSftp {
         mode: u32,
     ) -> Result<(), OrchestrationError> {
         RemoteSftp::upload_file_atomic(self, final_path, temporary_path, content, mode).await
-    }
-
-    async fn upload_private_file_atomic(
-        &mut self,
-        final_path: &str,
-        temporary_path: &str,
-        content: &[u8],
-        mode: u32,
-    ) -> Result<(), OrchestrationError> {
-        RemoteSftp::upload_private_file_atomic(
-            self,
-            final_path,
-            temporary_path,
-            content,
-            mode,
-        )
-        .await
     }
 }
 
@@ -448,47 +529,30 @@ impl SlurmSshSession {
             .await
     }
 
-    /// Deliver one execution capability through SFTP. Secret bytes are sent
-    /// only as binary channel data; remote commands contain paths and modes,
-    /// never credential content.
-    pub async fn upload_secret_atomic(
+    /// Retrieve the canonical publisher handoff from the fixed descendant of
+    /// a recorded remote session directory. The SFTP policy performs lstat,
+    /// handle metadata, size, and bounded-read checks.
+    pub async fn read_output_inventory(
         &mut self,
-        remote_directory: &str,
-        remote_path: &str,
-        content: &[u8],
-    ) -> Result<(), OrchestrationError> {
-        validate_remote_path(remote_directory, "publisher secret directory")?;
-        validate_remote_path(remote_path, "publisher credential file")?;
-        let expected_prefix = format!("{}/", remote_directory.trim_end_matches('/'));
-        if !remote_path.starts_with(&expected_prefix) {
-            return Err(OrchestrationError::Backend(
-                "publisher credential file must be inside its private directory".into(),
-            ));
-        }
-        let temporary_path = format!("{remote_path}.tmp-{}", uuid::Uuid::now_v7().simple());
+        remote_session_dir: &str,
+        execution_attempt: i32,
+    ) -> Result<Vec<u8>, OrchestrationError> {
         let mut sftp = self.open_sftp().await?;
-        let result = upload_secret_with(
+        let result = read_output_inventory_with(
             &mut sftp,
-            remote_directory,
-            remote_path,
-            &temporary_path,
-            content,
+            remote_session_dir,
+            execution_attempt,
+            MAX_OUTPUT_INVENTORY_BYTES,
         )
         .await;
         let close_result = sftp.shutdown().await;
-        self.finish_atomic_upload(result, close_result, &temporary_path, remote_path)
-            .await
-    }
-
-    /// Best-effort SFTP cleanup used only after a definitely rejected outer
-    /// submission. An uncertain submission retains the credential for the
-    /// possibly running allocation.
-    pub async fn remove_file_sftp(
-        &mut self,
-        remote_path: &str,
-    ) -> Result<(), OrchestrationError> {
-        self.remove_file_sftp_inner(remote_path, "publisher credential file")
-            .await
+        match (result, close_result) {
+            (Ok(content), Ok(())) => Ok(content),
+            (Ok(_), Err(error)) | (Err(OrchestrationError::OutputInventoryNotReady), Err(error)) => {
+                Err(error)
+            }
+            (Err(error), _) => Err(error),
+        }
     }
 
     async fn open_sftp(&mut self) -> Result<RemoteSftp, OrchestrationError> {
@@ -621,26 +685,6 @@ async fn upload_artifact_with<U: AtomicSftpUploader + Send>(
         .await
 }
 
-async fn upload_secret_with<U: AtomicSftpUploader + Send>(
-    uploader: &mut U,
-    remote_directory: &str,
-    final_path: &str,
-    temporary_path: &str,
-    content: &[u8],
-) -> Result<(), OrchestrationError> {
-    uploader
-        .ensure_private_directory(remote_directory, PRIVATE_DIRECTORY_MODE)
-        .await?;
-    uploader
-        .upload_private_file_atomic(
-            final_path,
-            temporary_path,
-            content,
-            PRIVATE_FILE_MODE,
-        )
-        .await
-}
-
 fn validate_remote_path(path: &str, label: &str) -> Result<(), OrchestrationError> {
     if !path.starts_with('/')
         || path.chars().any(char::is_control)
@@ -735,6 +779,54 @@ impl SlurmSshPool {
         entry.last_used = Instant::now();
         let result = query_slurm_states_batch(&mut entry.session, job_ids).await;
         if result.is_err() {
+            if let Some(failed) = state.entry.take() {
+                let _ = failed.session.close().await;
+            }
+        }
+        result
+    }
+
+    /// Pull the remote publisher receipt over the same authenticated SSH
+    /// target used for scheduler polling. A missing fixed handoff file is a
+    /// typed not-ready result and does not poison the pooled SSH session.
+    pub async fn read_output_inventory(
+        &self,
+        target: &SlurmTarget,
+        remote_session_dir: &str,
+        execution_attempt: i32,
+    ) -> Result<Vec<u8>, OrchestrationError> {
+        // Reject an untrusted recorded path before resolving credentials or
+        // opening a network connection.
+        output_inventory_remote_paths(remote_session_dir, execution_attempt)?;
+
+        let target_state = self.target_state(target).await;
+        let mut state = target_state.lock().await;
+        let idle = Duration::from_secs(self.idle_seconds);
+        if state
+            .entry
+            .as_ref()
+            .is_some_and(|entry| entry.last_used.elapsed() > idle)
+        {
+            if let Some(stale) = state.entry.take() {
+                let _ = stale.session.close().await;
+            }
+        }
+        if state.entry.is_none() {
+            let session = SlurmSshSession::connect(target).await?;
+            state.entry = Some(PooledEntry {
+                session,
+                last_used: Instant::now(),
+            });
+        }
+        let entry = state.entry.as_mut().expect("session inserted above");
+        entry.last_used = Instant::now();
+        let result = entry
+            .session
+            .read_output_inventory(remote_session_dir, execution_attempt)
+            .await;
+        if result.is_err()
+            && !matches!(&result, Err(OrchestrationError::OutputInventoryNotReady))
+        {
             if let Some(failed) = state.entry.take() {
                 let _ = failed.session.close().await;
             }
@@ -847,30 +939,20 @@ mod tests {
     use super::{
         command_stdout, failed_atomic_upload_cleanup_paths, is_missing_squeue_job_error,
         known_host_patterns_match, known_hosts_has_target, load_known_host_keys,
-        remote_command_transport_error, sacct_query_command, scancel_command,
-        squeue_query_command, squeue_stdout, ssh_client_config, upload_artifact_with,
-        upload_secret_with, validate_remote_path, validate_slurm_job_id, AtomicSftpUploader,
-        RemoteCommandKind, RemoteCommandOutput, SlurmSshPool, SlurmTarget,
+        output_inventory_remote_paths, read_output_inventory_with,
+        remote_command_transport_error, sacct_query_command, scancel_command, squeue_query_command,
+        squeue_stdout, ssh_client_config, upload_artifact_with, validate_remote_path,
+        validate_slurm_job_id, AtomicSftpUploader, OutputInventoryReader,
+        OutputInventoryRemotePaths, RemoteCommandKind, RemoteCommandOutput, SlurmSshPool,
+        SlurmTarget, MAX_OUTPUT_INVENTORY_BYTES, SLURM_OUTPUT_INVENTORY_RELATIVE_DIRECTORY,
     };
-    use crate::slurm_sftp::{
-        PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, SUBMISSION_ARTIFACT_MODE,
-    };
+    use crate::slurm_sftp::SUBMISSION_ARTIFACT_MODE;
     use crate::OrchestrationError;
     use std::sync::Arc;
 
     #[derive(Debug, PartialEq, Eq)]
     enum SftpCall {
-        EnsurePrivateDirectory {
-            path: String,
-            mode: u32,
-        },
         UploadArtifact {
-            final_path: String,
-            temporary_path: String,
-            content: Vec<u8>,
-            mode: u32,
-        },
-        UploadPrivate {
             final_path: String,
             temporary_path: String,
             content: Vec<u8>,
@@ -885,18 +967,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AtomicSftpUploader for ScriptedSftp {
-        async fn ensure_private_directory(
-            &mut self,
-            path: &str,
-            mode: u32,
-        ) -> Result<(), OrchestrationError> {
-            self.calls.push(SftpCall::EnsurePrivateDirectory {
-                path: path.into(),
-                mode,
-            });
-            Ok(())
-        }
-
         async fn upload_file_atomic(
             &mut self,
             final_path: &str,
@@ -913,20 +983,22 @@ mod tests {
             Ok(())
         }
 
-        async fn upload_private_file_atomic(
+    }
+
+    #[derive(Default)]
+    struct ScriptedInventoryReader {
+        calls: Vec<(OutputInventoryRemotePaths, usize)>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutputInventoryReader for ScriptedInventoryReader {
+        async fn read_output_inventory(
             &mut self,
-            final_path: &str,
-            temporary_path: &str,
-            content: &[u8],
-            mode: u32,
-        ) -> Result<(), OrchestrationError> {
-            self.calls.push(SftpCall::UploadPrivate {
-                final_path: final_path.into(),
-                temporary_path: temporary_path.into(),
-                content: content.into(),
-                mode,
-            });
-            Ok(())
+            paths: &OutputInventoryRemotePaths,
+            max_bytes: usize,
+        ) -> Result<Vec<u8>, OrchestrationError> {
+            self.calls.push((paths.clone(), max_bytes));
+            Ok(br#"{"schema":"beampipe-output-inventory/v1"}"#.to_vec())
         }
     }
 
@@ -971,38 +1043,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publisher_secrets_retain_private_directory_and_file_policy() {
-        let mut sftp = ScriptedSftp::default();
-        upload_secret_with(
-            &mut sftp,
-            "/session/.beampipe-secrets",
-            "/session/.beampipe-secrets/publisher.token",
-            "/session/.beampipe-secrets/publisher.token.tmp-test",
-            b"opaque-token",
+    async fn output_inventory_reader_owns_the_fixed_descendant_and_byte_limit() {
+        let mut reader = ScriptedInventoryReader::default();
+        let session = "/scratch/project/dlg/workspace/BeampipeExecution-uuid";
+        let content = read_output_inventory_with(
+            &mut reader,
+            session,
+            0,
+            MAX_OUTPUT_INVENTORY_BYTES,
         )
         .await
         .unwrap();
+        assert!(content.starts_with(b"{"));
+        assert_eq!(reader.calls.len(), 1);
+        let (paths, limit) = &reader.calls[0];
+        assert_eq!(*limit, MAX_OUTPUT_INVENTORY_BYTES);
+        assert_eq!(paths.control_directory, format!("{session}/.beampipe"));
         assert_eq!(
-            sftp.calls,
-            vec![
-                SftpCall::EnsurePrivateDirectory {
-                    path: "/session/.beampipe-secrets".into(),
-                    mode: PRIVATE_DIRECTORY_MODE,
-                },
-                SftpCall::UploadPrivate {
-                    final_path: "/session/.beampipe-secrets/publisher.token".into(),
-                    temporary_path: "/session/.beampipe-secrets/publisher.token.tmp-test".into(),
-                    content: b"opaque-token".to_vec(),
-                    mode: PRIVATE_FILE_MODE,
-                },
-            ]
+            paths.publication_directory,
+            format!("{session}/.beampipe/publication")
         );
+        assert_eq!(
+            paths.attempt_directory,
+            format!("{session}/.beampipe/publication/attempt-0")
+        );
+        assert_eq!(
+            paths.inventory_path,
+            format!(
+                "{session}/{SLURM_OUTPUT_INVENTORY_RELATIVE_DIRECTORY}/attempt-0/beampipe-output-inventory.json"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn output_inventory_reader_rejects_untrusted_session_paths_before_io() {
+        for session in [
+            "",
+            "/",
+            "relative/session",
+            "/scratch/../secret",
+            "/scratch/./session",
+            "/scratch//session",
+            "/scratch/session/",
+            "/scratch/session\nname",
+        ] {
+            let mut reader = ScriptedInventoryReader::default();
+            let error = read_output_inventory_with(
+                &mut reader,
+                session,
+                0,
+                MAX_OUTPUT_INVENTORY_BYTES,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(error, OrchestrationError::OutputInventoryRejected(_)),
+                "unexpected error for {session:?}: {error}"
+            );
+            assert!(reader.calls.is_empty());
+        }
+        let attempt_zero = output_inventory_remote_paths("/scratch/session", 0).unwrap();
+        let attempt_one = output_inventory_remote_paths("/scratch/session", 1).unwrap();
+        assert_ne!(attempt_zero.inventory_path, attempt_one.inventory_path);
+        assert!(attempt_zero.inventory_path.starts_with("/scratch/session/"));
+        assert!(attempt_one.inventory_path.starts_with("/scratch/session/"));
+        for attempt in [-1, i32::MAX] {
+            assert!(matches!(
+                output_inventory_remote_paths("/scratch/session", attempt),
+                Err(OrchestrationError::OutputInventoryRejected(_))
+            ));
+        }
     }
 
     #[test]
     fn interrupted_atomic_upload_rechecks_both_names_on_fresh_channels() {
-        let temporary = "/session/.beampipe-secrets/publisher.token.tmp-test";
-        let final_path = "/session/.beampipe-secrets/publisher.token";
+        let temporary = "/session/submission.graph.tmp-test";
+        let final_path = "/session/submission.graph";
         assert_eq!(
             failed_atomic_upload_cleanup_paths(false, temporary, final_path),
             vec![temporary, final_path]

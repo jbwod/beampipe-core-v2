@@ -911,7 +911,7 @@ async fn check_profile(
                 ssh_port: slurm.ssh_port,
                 dlg_root: slurm.dlg_root.clone(),
                 deployment: Some(slurm.clone()),
-                publisher_credential: None,
+                publication_execution_attempt: None,
             };
             match client.test_connectivity().await {
                 Ok(info) => checks.push(success(

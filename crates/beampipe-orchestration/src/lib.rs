@@ -51,8 +51,10 @@ pub use slurm_credentials::{
     list_credential_slots, ssh_credentials_dir, SlotPresence, SlurmSshCredentials,
 };
 pub use slurm_deploy::probe_slurm_login;
-pub use slurm_deploy::PublisherRuntimeCredential;
-pub use slurm_ssh::{query_slurm_states_batch, SlurmSshPool, SlurmSshSession, SlurmTarget};
+pub use slurm_ssh::{
+    query_slurm_states_batch, SlurmSshPool, SlurmSshSession, SlurmTarget,
+    MAX_OUTPUT_INVENTORY_BYTES, SLURM_OUTPUT_INVENTORY_RELATIVE_DIRECTORY,
+};
 pub use staging::{casda_password_from_env, CasdaStagingClient};
 pub use tm_health::{
     dim_unreachable_message, format_service_request_error, probe_dim_reachable, probe_tm_reachable,
@@ -81,6 +83,10 @@ pub enum OrchestrationError {
     Backend(String),
     #[error("submission outcome is uncertain: {0}")]
     SubmissionUncertain(String),
+    #[error("remote output inventory is not ready")]
+    OutputInventoryNotReady,
+    #[error("remote output inventory was rejected: {0}")]
+    OutputInventoryRejected(String),
     #[error(transparent)]
     Daliuge(#[from] DaliugeClientError),
 }

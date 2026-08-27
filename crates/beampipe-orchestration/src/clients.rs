@@ -585,7 +585,7 @@ pub struct SshSlurmClient {
     pub ssh_port: i32,
     pub dlg_root: String,
     pub deployment: Option<SlurmRemoteDeploymentConfig>,
-    pub publisher_credential: Option<crate::slurm_deploy::PublisherRuntimeCredential>,
+    pub publication_execution_attempt: Option<i32>,
 }
 
 #[async_trait]
@@ -606,7 +606,7 @@ impl SlurmClient for SshSlurmClient {
             pgt_json,
             deployment,
             username,
-            publisher_credential: self.publisher_credential.clone(),
+            publication_execution_attempt: self.publication_execution_attempt,
         })
         .await?;
         Ok(crate::SlurmSubmitReceipt {

@@ -1,5 +1,5 @@
 use crate::scheduler::SchedulerResourceRequest;
-use crate::slurm_ssh::{SlurmSshSession, SlurmTarget};
+use crate::slurm_ssh::{output_inventory_remote_paths, SlurmSshSession, SlurmTarget};
 use crate::OrchestrationError;
 use beampipe_profiles::{
     DaliugeAlgo, PublicationRuntimeConfig, SlurmRemoteDeploymentConfig,
@@ -8,25 +8,19 @@ use beampipe_profiles::{
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use url::Url;
-use zeroize::Zeroizing;
 
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
 const PYTHON_PATH_ENV: &str = "PYTHONPATH";
 const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
-const PUBLISHER_COMMAND: &str = "beampipe-publish";
 const BEAMPIPE_APPS_PYTHON_MODULE: &str = "beampipe_pallette.apps";
 const INGEST_APP_CLASS: &str = "BeampipeIngestApp";
 const PUBLISHER_APP_CLASS: &str = "BeampipePublishApp";
 const PUBLISHER_EXECUTION_ID_ENV: &str = "BEAMPIPE_EXECUTION_ID";
 const PUBLISHER_EXECUTION_ATTEMPT_ENV: &str = "BEAMPIPE_EXECUTION_ATTEMPT";
-const PUBLISHER_CORE_URL_ENV: &str = "BEAMPIPE_CORE_URL";
 const PUBLISHER_DESTINATION_URI_ENV: &str = "BEAMPIPE_OUTPUT_DESTINATION_URI";
 const PUBLISHER_OUTPUT_ROOT_ENV: &str = "BEAMPIPE_OUTPUT_ROOT";
-const PUBLISHER_TOKEN_FILE_ENV: &str = "BEAMPIPE_PUBLISHER_TOKEN_FILE";
-const PUBLISHER_SECRETS_DIRECTORY: &str = ".beampipe-secrets";
-const PUBLISHER_TOKEN_FILENAME: &str = "publisher.token";
+const PUBLISHER_HANDOFF_PATH_ENV: &str = "BEAMPIPE_OUTPUT_INVENTORY_HANDOFF_PATH";
 const DALIUGE_FAILED_SESSION_SITECUSTOMIZE: &str = r#"# Beampipe compatibility shim for DALiuGE deploy.common.
 from dlg.deploy import common as _beampipe_common
 from dlg.manager.session import SessionStates as _beampipe_session_states
@@ -50,73 +44,20 @@ pub struct SlurmSubmitParams {
     pub pgt_json: Value,
     pub deployment: SlurmRemoteDeploymentConfig,
     pub username: String,
-    pub publisher_credential: Option<PublisherRuntimeCredential>,
-}
-
-struct PublisherToken(Zeroizing<Vec<u8>>);
-
-/// Execution-scoped capability delivered outside every persisted graph and
-/// manifest. Debug output is intentionally redacted and clones share one
-/// zeroizing allocation rather than duplicating plaintext bytes.
-#[derive(Clone)]
-pub struct PublisherRuntimeCredential {
-    execution_attempt: i32,
-    token: Arc<PublisherToken>,
-}
-
-impl std::fmt::Debug for PublisherRuntimeCredential {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PublisherRuntimeCredential")
-            .field("execution_attempt", &self.execution_attempt)
-            .field("token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl PublisherRuntimeCredential {
-    pub fn new(
-        execution_attempt: i32,
-        token: impl Into<Vec<u8>>,
-    ) -> Result<Self, OrchestrationError> {
-        if execution_attempt < 0 {
-            return Err(OrchestrationError::Backend(
-                "publisher execution attempt must be non-negative".into(),
-            ));
-        }
-        let token = Zeroizing::new(token.into());
-        if token.len() < 32
-            || token.len() > 1024
-            || !token
-                .iter()
-                .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
-        {
-            return Err(OrchestrationError::Backend(
-                "publisher credential is not a valid opaque token".into(),
-            ));
-        }
-        Ok(Self {
-            execution_attempt,
-            token: Arc::new(PublisherToken(token)),
-        })
-    }
-
-    pub fn execution_attempt(&self) -> i32 {
-        self.execution_attempt
-    }
-
-    fn token_bytes(&self) -> &[u8] {
-        self.token.0.as_slice()
-    }
+    /// `Some(attempt)` enables the remote publication contract for this
+    /// execution. It is non-secret and is used to namespace durable output.
+    pub publication_execution_attempt: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedPublisherRuntime {
     execution_id: String,
     execution_attempt: i32,
-    core_url: String,
     durable_destination_uri: String,
-    token_file: String,
+    handoff_control_directory: String,
+    handoff_directory: String,
+    handoff_attempt_directory: String,
+    handoff_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,9 +214,6 @@ where
     let mut commands = vec![
         "sbatch", "squeue", "sacct", "scancel", "scontrol", "srun", "python3",
     ];
-    if publication_required {
-        commands.push(PUBLISHER_COMMAND);
-    }
     for command in &deployment.runtime_contract.required_commands {
         if !commands.contains(&command.as_str()) {
             commands.push(command);
@@ -346,7 +284,6 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedPublicationInputs {
-    core_url: String,
     durable_destination_uri: String,
 }
 
@@ -360,14 +297,6 @@ where
     publication
         .validate()
         .map_err(|error| OrchestrationError::Backend(error.to_string()))?;
-    let core_url = read_environment(&publication.core_url_environment)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            OrchestrationError::Backend(format!(
-                "deployment publication requires non-empty {}",
-                publication.core_url_environment
-            ))
-        })?;
     let durable_destination_uri =
         read_environment(&publication.durable_destination_uri_environment)
             .filter(|value| !value.trim().is_empty())
@@ -377,53 +306,10 @@ where
                     publication.durable_destination_uri_environment
                 ))
             })?;
-    let core_url = validated_core_url(&core_url, publication.allow_insecure_core_http)?;
     let durable_destination_uri = validated_destination_uri(&durable_destination_uri)?;
     Ok(ResolvedPublicationInputs {
-        core_url,
         durable_destination_uri,
     })
-}
-
-fn validated_core_url(
-    raw: &str,
-    allow_insecure_core_http: bool,
-) -> Result<String, OrchestrationError> {
-    let mut url = Url::parse(raw).map_err(|_| {
-        OrchestrationError::Backend(
-            "publisher Core URL must be an absolute HTTPS URL".into(),
-        )
-    })?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        return Err(OrchestrationError::Backend(
-            "publisher Core URL must not contain credentials, a query, or a fragment".into(),
-        ));
-    }
-    match url.scheme() {
-        "https" => {}
-        "http"
-            if allow_insecure_core_http
-                && !crate::slurm_credentials::is_production_env()
-                && url.host_str().is_some_and(is_loopback_host) => {}
-        _ => {
-            return Err(OrchestrationError::Backend(
-                "publisher Core URL must use HTTPS; loopback HTTP requires the profile development override"
-                    .into(),
-            ));
-        }
-    }
-    if url.path() == "/" {
-        url.set_path("");
-    } else {
-        let normalized = url.path().trim_end_matches('/').to_string();
-        url.set_path(&normalized);
-    }
-    Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
 fn validated_destination_uri(raw: &str) -> Result<String, OrchestrationError> {
@@ -520,10 +406,9 @@ where
             [
                 PUBLISHER_EXECUTION_ID_ENV,
                 PUBLISHER_EXECUTION_ATTEMPT_ENV,
-                PUBLISHER_CORE_URL_ENV,
                 PUBLISHER_DESTINATION_URI_ENV,
                 PUBLISHER_OUTPUT_ROOT_ENV,
-                PUBLISHER_TOKEN_FILE_ENV,
+                PUBLISHER_HANDOFF_PATH_ENV,
             ]
             .into_iter()
             .map(str::to_string),
@@ -589,16 +474,24 @@ where
     if let Some(publisher) = publisher {
         inner.extend([
             format!(
+                "mkdir -p -- {} {} {}",
+                shell_quote(&publisher.handoff_control_directory),
+                shell_quote(&publisher.handoff_directory),
+                shell_quote(&publisher.handoff_attempt_directory),
+            ),
+            format!(
+                "chmod 0700 -- {} {} {}",
+                shell_quote(&publisher.handoff_control_directory),
+                shell_quote(&publisher.handoff_directory),
+                shell_quote(&publisher.handoff_attempt_directory),
+            ),
+            format!(
                 "export {PUBLISHER_EXECUTION_ID_ENV}={}",
                 shell_quote(&publisher.execution_id)
             ),
             format!(
                 "export {PUBLISHER_EXECUTION_ATTEMPT_ENV}={}",
                 publisher.execution_attempt
-            ),
-            format!(
-                "export {PUBLISHER_CORE_URL_ENV}={}",
-                shell_quote(&publisher.core_url)
             ),
             format!(
                 "export {PUBLISHER_DESTINATION_URI_ENV}={}",
@@ -609,8 +502,8 @@ where
                 shell_quote(&staging_root)
             ),
             format!(
-                "export {PUBLISHER_TOKEN_FILE_ENV}={}",
-                shell_quote(&publisher.token_file)
+                "export {PUBLISHER_HANDOFF_PATH_ENV}={}",
+                shell_quote(&publisher.handoff_path)
             ),
         ]);
     }
@@ -813,16 +706,6 @@ fn derive_session_paths(
     ))
 }
 
-fn publisher_secret_paths(session_dir: &str) -> Result<(String, String), OrchestrationError> {
-    let session_dir = normalized_remote_absolute_path(session_dir, "DALiuGE session directory")?;
-    let directory = session_dir.join(PUBLISHER_SECRETS_DIRECTORY);
-    let token_file = directory.join(PUBLISHER_TOKEN_FILENAME);
-    Ok((
-        directory.to_string_lossy().into_owned(),
-        token_file.to_string_lossy().into_owned(),
-    ))
-}
-
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
@@ -844,10 +727,16 @@ pub async fn submit_slurm_session(
         mut pgt_json,
         deployment,
         username,
-        publisher_credential,
+        publication_execution_attempt,
     } = params;
-    let publication_inputs = match publisher_credential.as_ref() {
-        Some(_) => {
+    let publication_inputs = match publication_execution_attempt {
+        Some(attempt) => {
+            if !(0..i32::MAX).contains(&attempt) {
+                return Err(OrchestrationError::Backend(
+                    "publication execution attempt must be non-negative and leave retry headroom"
+                        .into(),
+                ));
+            }
             let publication = deployment.publication.as_ref().ok_or_else(|| {
                 OrchestrationError::Backend(
                     "required output publication has no pinned deployment publication contract"
@@ -931,19 +820,18 @@ pub async fn submit_slurm_session(
             DALIUGE_FAILED_SESSION_SITECUSTOMIZE,
         )
         .await?;
-    let publisher_runtime = match (publisher_credential.as_ref(), publication_inputs) {
-        (Some(credential), Some(inputs)) => {
-            let (secrets_directory, token_file) = publisher_secret_paths(&session_dir)?;
-            Some((
-                ResolvedPublisherRuntime {
-                    execution_id: execution_id.clone(),
-                    execution_attempt: credential.execution_attempt(),
-                    core_url: inputs.core_url,
-                    durable_destination_uri: inputs.durable_destination_uri,
-                    token_file,
-                },
-                secrets_directory,
-            ))
+    let publisher_runtime = match (publication_execution_attempt, publication_inputs) {
+        (Some(execution_attempt), Some(inputs)) => {
+            let paths = output_inventory_remote_paths(&session_dir, execution_attempt)?;
+            Some(ResolvedPublisherRuntime {
+                execution_id: execution_id.clone(),
+                execution_attempt,
+                durable_destination_uri: inputs.durable_destination_uri,
+                handoff_control_directory: paths.control_directory,
+                handoff_directory: paths.publication_directory,
+                handoff_attempt_directory: paths.attempt_directory,
+                handoff_path: paths.inventory_path,
+            })
         }
         (None, None) => None,
         _ => {
@@ -959,27 +847,11 @@ pub async fn submit_slurm_session(
         &staging_root,
         &cache_root,
         &python_shim_dir,
-        publisher_runtime.as_ref().map(|(runtime, _)| runtime),
+        publisher_runtime.as_ref(),
     )?;
-    if let (Some(credential), Some((runtime, secrets_directory))) =
-        (publisher_credential.as_ref(), publisher_runtime.as_ref())
-    {
-        session
-            .upload_secret_atomic(
-                secrets_directory,
-                &runtime.token_file,
-                credential.token_bytes(),
-            )
-            .await?;
-    }
     let sbatch_out = match session.run_submission_command(&sbatch).await {
         Ok(output) => output,
         Err(error) => {
-            if !matches!(error, OrchestrationError::SubmissionUncertain(_)) {
-                if let Some((runtime, _)) = publisher_runtime.as_ref() {
-                    let _ = session.remove_file_sftp(&runtime.token_file).await;
-                }
-            }
             let _ = session.close().await;
             return Err(error);
         }
@@ -1011,9 +883,9 @@ pub async fn probe_slurm_login(
     username: &str,
     publication_required: bool,
 ) -> Result<(), String> {
-    // Resolve all local, non-secret publication inputs before opening an SSH
-    // connection. A missing or insecure callback/destination is a local
-    // configuration failure, not a remote probe.
+    // Resolve the local, non-secret destination before opening an SSH
+    // connection. A missing or unsafe destination is a local configuration
+    // failure, not a remote probe.
     let preflight = slurm_preflight_script(deployment, publication_required)
         .map_err(|error| error.to_string())?;
     let target = SlurmTarget::from_deployment(deployment, username);
@@ -1414,34 +1286,29 @@ mod tests {
     #[test]
     fn publication_runtime_is_resolved_and_validated_before_remote_use() {
         let publication = PublicationRuntimeConfig {
-            core_url_environment: "SETONIX_BEAMPIPE_CORE_URL".into(),
             durable_destination_uri_environment: "SETONIX_BEAMPIPE_OUTPUT_DESTINATION".into(),
-            allow_insecure_core_http: false,
-            credential_ttl_minutes: 720,
         };
         let resolved = resolve_publication_inputs_with(&publication, |name| match name {
-            "SETONIX_BEAMPIPE_CORE_URL" => Some("https://core.example.org/".into()),
             "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => {
                 Some("s3://science-products/beampipe/".into())
             }
             _ => None,
         })
         .unwrap();
-        assert_eq!(resolved.core_url, "https://core.example.org");
         assert_eq!(
             resolved.durable_destination_uri,
             "s3://science-products/beampipe"
         );
 
-        for core_url in [
-            "http://core.example.org",
-            "https://user:password@core.example.org",
-            "https://core.example.org?token=secret",
+        for destination in [
+            "https://storage.example.org/output",
+            "file://user:password@localhost/durable",
+            "s3://science-products/output?token=secret",
+            "file:///",
         ] {
             assert!(resolve_publication_inputs_with(&publication, |name| match name {
-                "SETONIX_BEAMPIPE_CORE_URL" => Some(core_url.into()),
                 "SETONIX_BEAMPIPE_OUTPUT_DESTINATION" => {
-                    Some("file:///durable/beampipe".into())
+                    Some(destination.into())
                 }
                 _ => None,
             })
@@ -1451,66 +1318,41 @@ mod tests {
     }
 
     #[test]
-    fn loopback_http_requires_an_explicit_development_override() {
-        assert!(validated_core_url("http://127.0.0.1:18080", false).is_err());
-        assert_eq!(
-            validated_core_url("http://127.0.0.1:18080/", true).unwrap(),
-            "http://127.0.0.1:18080"
-        );
-        assert!(validated_core_url("http://core.internal:18080", true).is_err());
-    }
-
-    #[test]
     fn publication_preflight_is_standalone_and_project_neutral() {
         let mut dep = deployment();
         dep.runtime_contract
             .required_python_modules
             .push("beampipe_pallette.apps".into());
         dep.publication = Some(PublicationRuntimeConfig {
-            core_url_environment: "BEAMPIPE_CORE_URL".into(),
             durable_destination_uri_environment: "BEAMPIPE_OUTPUT_DESTINATION_URI".into(),
-            allow_insecure_core_http: false,
-            credential_ttl_minutes: 720,
         });
         let script = slurm_preflight_script_with(&dep, true, |name| match name {
-            "BEAMPIPE_CORE_URL" => Some("https://core.example.org".into()),
             "BEAMPIPE_OUTPUT_DESTINATION_URI" => Some("file:///durable/beampipe".into()),
             _ => None,
         })
         .unwrap();
-        assert!(script.contains("command -v beampipe-publish"));
         assert!(script.contains("beampipe_pallette.apps"));
         assert!(script.contains("BeampipeIngestApp"));
         assert!(script.contains("BeampipePublishApp"));
         assert!(!script.to_ascii_lowercase().contains("wallaby"));
 
         let opt_out = slurm_preflight_script_with(&dep, false, |_| None).unwrap();
-        assert!(!opt_out.contains("beampipe-publish"));
         assert!(opt_out.contains("beampipe_pallette.apps"));
         assert!(opt_out.contains("BeampipeIngestApp"));
         assert!(!opt_out.contains("BeampipePublishApp"));
     }
 
     #[test]
-    fn publisher_command_exports_paths_but_never_the_capability() {
-        let token = "bpp_this-secret-must-never-enter-a-command-0123456789";
-        let credential = PublisherRuntimeCredential::new(0, token.as_bytes().to_vec()).unwrap();
-        let (secrets_directory, token_file) =
-            publisher_secret_paths("/dlg/sessions/execution-a").unwrap();
-        assert_eq!(
-            secrets_directory,
-            "/dlg/sessions/execution-a/.beampipe-secrets"
-        );
-        assert_eq!(
-            token_file,
-            "/dlg/sessions/execution-a/.beampipe-secrets/publisher.token"
-        );
+    fn publisher_command_exports_pull_handoff_without_a_callback_capability() {
+        let paths = output_inventory_remote_paths("/dlg/sessions/execution-a", 0).unwrap();
         let runtime = ResolvedPublisherRuntime {
             execution_id: "018f0000-0000-7000-8000-000000000001".into(),
-            execution_attempt: credential.execution_attempt(),
-            core_url: "https://core.example.org".into(),
+            execution_attempt: 0,
             durable_destination_uri: "s3://science-products/beampipe".into(),
-            token_file,
+            handoff_control_directory: paths.control_directory,
+            handoff_directory: paths.publication_directory,
+            handoff_attempt_directory: paths.attempt_directory,
+            handoff_path: paths.inventory_path,
         };
         let dep = deployment();
         let command = sbatch_command_with(
@@ -1527,13 +1369,13 @@ mod tests {
         for expected in [
             "BEAMPIPE_EXECUTION_ID",
             "BEAMPIPE_EXECUTION_ATTEMPT",
-            "BEAMPIPE_CORE_URL",
             "BEAMPIPE_OUTPUT_DESTINATION_URI",
             "BEAMPIPE_OUTPUT_ROOT",
-            "BEAMPIPE_PUBLISHER_TOKEN_FILE",
+            "BEAMPIPE_OUTPUT_INVENTORY_HANDOFF_PATH",
             "export BEAMPIPE_EXECUTION_ATTEMPT=0",
-            "/dlg/sessions/execution-a/.beampipe-secrets/publisher.token",
-            "https://core.example.org",
+            "mkdir -p -- /dlg/sessions/execution-a/.beampipe /dlg/sessions/execution-a/.beampipe/publication /dlg/sessions/execution-a/.beampipe/publication/attempt-0",
+            "chmod 0700 -- /dlg/sessions/execution-a/.beampipe /dlg/sessions/execution-a/.beampipe/publication /dlg/sessions/execution-a/.beampipe/publication/attempt-0",
+            "/dlg/sessions/execution-a/.beampipe/publication/attempt-0/beampipe-output-inventory.json",
             "s3://science-products/beampipe",
         ] {
             assert!(
@@ -1541,18 +1383,32 @@ mod tests {
                 "missing {expected:?} in {command}"
             );
         }
-        let physical_graph = serde_json::json!(["execution-a.pgt.graph", {"oid": "drop"}]);
-        let receipt = SlurmSubmitResult {
-            slurm_job_id: "42".into(),
-            session_dir: "/dlg/sessions/execution-a".into(),
-            staging_root: Some("/dlg/sessions/execution-a/outputs".into()),
-            composite_scheduler_job_id: "execution-a:42".into(),
+        assert!(!command.contains("BEAMPIPE_CORE_URL"));
+
+        let retry_paths = output_inventory_remote_paths("/dlg/sessions/execution-a", 1).unwrap();
+        let retry_runtime = ResolvedPublisherRuntime {
+            execution_id: runtime.execution_id.clone(),
+            execution_attempt: 1,
+            durable_destination_uri: runtime.durable_destination_uri.clone(),
+            handoff_control_directory: retry_paths.control_directory,
+            handoff_directory: retry_paths.publication_directory,
+            handoff_attempt_directory: retry_paths.attempt_directory,
+            handoff_path: retry_paths.inventory_path,
         };
-        let observable = format!(
-            "{command}\n{physical_graph}\n{receipt:?}\n{credential:?}"
-        );
-        assert!(!observable.contains(token));
-        assert!(observable.contains("[REDACTED]"));
+        let retry_command = sbatch_command_with(
+            &dep,
+            "execution-a",
+            "/dlg/sessions/execution-a/jobsub.sh",
+            "/dlg/sessions/execution-a/outputs",
+            "/dlg/shared_staging",
+            "/dlg/sessions/execution-a/.beampipe-python",
+            Some(&retry_runtime),
+            |_| None,
+        )
+        .unwrap();
+        assert!(retry_command.contains("/publication/attempt-1/"));
+        assert!(!retry_command.contains("/publication/attempt-0/"));
+        assert!(!retry_command.contains("rm "));
     }
 
     fn wallaby_runtime_contract() -> SlurmRuntimeContractConfig {
