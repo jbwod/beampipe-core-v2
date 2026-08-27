@@ -175,6 +175,7 @@ static API_TAP_HEALTH_CACHE: LazyLock<TapHealthCache> = LazyLock::new(TapHealthC
         OperatorOverviewResponse, UnroutableJobResponse,
         WorkerRead, WorkerRegisterRequest, WorkerHeartbeatResponse,
         WorkerLeaseRead, ExecutionRead, ExecutionDebugUrls, ExecutionPrepareResponse,
+        ExecutionPrepareSourcePreview,
         ExecutionStatusResponse, ExecutionSummaryResponse, ExecuteResponse,
         LedgerSnapshotResponse, ProjectListItem,
         SchedulerStatusResponse, SchedulerJobRead, DaliugeInspectResponse,
@@ -2078,7 +2079,10 @@ pub struct LedgerSnapshotResponse {
     get,
     path = "/api/v2/executions/{id}/ledger-snapshot",
     tag = "executions",
-    params(LedgerSnapshotQuery),
+    params(
+        ("id" = Uuid, Path, description = "Execution UUID"),
+        LedgerSnapshotQuery
+    ),
     responses((status = 200, body = LedgerSnapshotResponse), (status = 404))
 )]
 async fn execution_ledger_snapshot(
@@ -2533,7 +2537,16 @@ async fn get_source_metadata(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/sources/{id}/executions", tag = "sources", params(PaginationQuery), responses((status = 200, body = [ExecutionRow]), (status = 404)))]
+#[utoipa::path(
+    get,
+    path = "/api/v2/sources/{id}/executions",
+    tag = "sources",
+    params(
+        ("id" = Uuid, Path, description = "Source UUID"),
+        PaginationQuery
+    ),
+    responses((status = 200, body = [ExecutionRow]), (status = 404))
+)]
 async fn list_source_executions(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -2639,12 +2652,19 @@ pub struct ExecuteResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionPrepareSourcePreview {
+    pub source_identifier: String,
+    pub group_count: usize,
+    pub record_count: usize,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ExecutionPrepareResponse {
     pub project_module: String,
     pub valid: bool,
     pub errors: Vec<String>,
     pub total_records: usize,
-    pub sources_preview: Vec<Value>,
+    pub sources_preview: Vec<ExecutionPrepareSourcePreview>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -2966,11 +2986,11 @@ async fn validate_execution_admission(
             .map(record_count_from_metadata_json)
             .sum::<usize>();
         total_records += record_count;
-        preview.push(json!({
-            "source_identifier": sid,
-            "group_count": metadata.len(),
-            "record_count": record_count,
-        }));
+        preview.push(ExecutionPrepareSourcePreview {
+            source_identifier: sid.to_string(),
+            group_count: metadata.len(),
+            record_count,
+        });
     }
 
     Ok(ExecutionAdmission {
@@ -3329,7 +3349,16 @@ async fn execution_summary(
     }))
 }
 
-#[utoipa::path(get, path = "/api/v2/executions/{id}/observations", tag = "executions", params(PaginationQuery), responses((status = 200, body = [ExecutionObservationRow]), (status = 404)))]
+#[utoipa::path(
+    get,
+    path = "/api/v2/executions/{id}/observations",
+    tag = "executions",
+    params(
+        ("id" = Uuid, Path, description = "Execution UUID"),
+        PaginationQuery
+    ),
+    responses((status = 200, body = [ExecutionObservationRow]), (status = 404))
+)]
 async fn execution_observations(
     State(state): State<Arc<AppState>>,
     AuthUser(_user): AuthUser,
@@ -4610,7 +4639,11 @@ pub struct WasmBinaryResponse(Vec<u8>);
     get,
     path = "/api/v2/project-configs/{id}/wasm/{sha256}",
     tag = "project-configs",
-    params(WasmGetQuery),
+    params(
+        ("id" = String, Path, description = "Project module identifier"),
+        ("sha256" = String, Path, description = "WASM SHA-256 digest"),
+        WasmGetQuery
+    ),
     responses(
         (status = 200, content(
             ("application/json" = WasmMetaResponse),

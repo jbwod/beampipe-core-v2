@@ -1226,7 +1226,9 @@
             "type": "string"
           },
           "sources_preview": {
-            "items": {},
+            "items": {
+              "$ref": "#/components/schemas/ExecutionPrepareSourcePreview"
+            },
             "type": "array"
           },
           "total_records": {
@@ -1243,6 +1245,27 @@
           "errors",
           "total_records",
           "sources_preview"
+        ],
+        "type": "object"
+      },
+      "ExecutionPrepareSourcePreview": {
+        "properties": {
+          "group_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "record_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_identifier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_identifier",
+          "group_count",
+          "record_count"
         ],
         "type": "object"
       },
@@ -5956,16 +5979,6 @@
               "nullable": true,
               "type": "integer"
             }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "nullable": true,
-              "type": "integer"
-            }
           }
         ],
         "responses": {
@@ -6098,6 +6111,16 @@
         "operationId": "execution_ledger_snapshot",
         "parameters": [
           {
+            "description": "Execution UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
             "in": "query",
             "name": "include_manifest",
             "required": false,
@@ -6156,6 +6179,16 @@
       "get": {
         "operationId": "execution_observations",
         "parameters": [
+          {
+            "description": "Execution UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
           {
             "in": "query",
             "name": "limit",
@@ -7655,6 +7688,24 @@
         "operationId": "get_project_config_wasm",
         "parameters": [
           {
+            "description": "Project module identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "WASM SHA-256 digest",
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "in": "query",
             "name": "download",
             "required": false,
@@ -7887,26 +7938,6 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "nullable": true,
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "offset",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "nullable": true,
-              "type": "integer"
             }
           },
           {
@@ -8794,16 +8825,6 @@
               "nullable": true,
               "type": "integer"
             }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "nullable": true,
-              "type": "integer"
-            }
           }
         ],
         "responses": {
@@ -8857,6 +8878,16 @@
         "description": "Executions that include this source.",
         "operationId": "list_source_executions",
         "parameters": [
+          {
+            "description": "Source UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
           {
             "in": "query",
             "name": "limit",

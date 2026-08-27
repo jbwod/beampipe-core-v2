@@ -192,6 +192,110 @@ fn query_bearing_operations_publish_their_query_contracts() {
 }
 
 #[test]
+fn operation_parameters_are_unique_and_cover_path_placeholders() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
+    let spec = beampipe_api::export_openapi_json();
+    let paths = spec
+        .get("paths")
+        .and_then(serde_json::Value::as_object)
+        .expect("paths");
+
+    for (path, path_item) in paths {
+        let placeholders = path
+            .split('/')
+            .filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}'))
+            .collect::<BTreeSet<_>>();
+        let operations = path_item.as_object().expect("path item");
+        for method in HTTP_METHODS {
+            let Some(operation) = operations.get(*method) else {
+                continue;
+            };
+            let operation_name = format!("{} {}", method.to_uppercase(), path);
+            let parameters = operation
+                .get("parameters")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let mut unique = BTreeSet::new();
+            let mut path_parameters = BTreeMap::new();
+            for parameter in parameters {
+                let parameter_in = parameter
+                    .get("in")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("parameter.in");
+                let name = parameter
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("parameter.name");
+                assert!(
+                    unique.insert((parameter_in, name)),
+                    "{operation_name} duplicates {parameter_in} parameter {name}",
+                );
+                if parameter_in == "path" {
+                    path_parameters.insert(
+                        name,
+                        parameter
+                            .get("required")
+                            .and_then(serde_json::Value::as_bool),
+                    );
+                }
+            }
+
+            assert_eq!(
+                path_parameters.keys().copied().collect::<BTreeSet<_>>(),
+                placeholders,
+                "{operation_name} path parameters must match route placeholders",
+            );
+            assert!(
+                path_parameters.values().all(|required| *required == Some(true)),
+                "{operation_name} path parameters must be required",
+            );
+        }
+    }
+}
+
+#[test]
+fn execution_prepare_source_preview_has_a_concrete_contract() {
+    use std::collections::BTreeSet;
+
+    let spec = beampipe_api::export_openapi_json();
+    assert_eq!(
+        spec.pointer(
+            "/components/schemas/ExecutionPrepareResponse/properties/sources_preview/items/$ref",
+        )
+        .and_then(serde_json::Value::as_str),
+        Some("#/components/schemas/ExecutionPrepareSourcePreview"),
+    );
+    let preview = spec
+        .pointer("/components/schemas/ExecutionPrepareSourcePreview")
+        .expect("ExecutionPrepareSourcePreview schema");
+    let properties = preview
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("preview properties");
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        ["source_identifier", "group_count", "record_count"]
+            .into_iter()
+            .collect(),
+    );
+    assert_eq!(
+        preview
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>(),
+        ["source_identifier", "group_count", "record_count"]
+            .into_iter()
+            .collect(),
+    );
+}
+
+#[test]
 fn openapi_uses_http_bearer_auth_for_json_login() {
     let spec = beampipe_api::export_openapi_json();
     assert_eq!(
