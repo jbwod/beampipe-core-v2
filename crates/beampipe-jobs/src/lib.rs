@@ -3,6 +3,7 @@ use beampipe_adapters::{
     all_reachable, unreachable_adapters, HttpTapAdapter, TapClient, TapEndpointProbe,
     TapHealthCache, TapMode,
 };
+#[cfg(test)]
 use beampipe_adapters::{AdapterError, TapRow};
 use beampipe_config::Settings;
 use beampipe_db::{
