@@ -98,10 +98,6 @@ pub struct SettingsResolution {
 }
 
 impl SettingsResolution {
-    pub fn source_for(&self, key: &str) -> Option<&ConfigSource> {
-        self.sources.get(key)
-    }
-
     pub fn explain(&self) -> Vec<ResolvedSetting> {
         let values = serde_json::to_value(&self.settings).unwrap_or_default();
         self.sources

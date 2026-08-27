@@ -24,19 +24,6 @@ pub fn pgt_filename_from_lg_name(lg_name: &str) -> String {
     }
 }
 
-pub fn pgt_handle_from_partitioned_payload(pgt_json: &Value, fallback_lg_name: &str) -> String {
-    if let Value::Array(arr) = pgt_json {
-        if let Some(Value::String(name)) = arr.first() {
-            return name.clone();
-        }
-    }
-    fallback_lg_name
-        .rsplit('/')
-        .next()
-        .unwrap_or(fallback_lg_name)
-        .to_string()
-}
-
 pub fn default_lg_name() -> &'static str {
     DEFAULT_LG_NAME
 }

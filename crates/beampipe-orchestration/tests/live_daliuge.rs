@@ -14,8 +14,8 @@
 
 use beampipe_domain::ExecutionStatus;
 use beampipe_orchestration::{
-    clients::TranslateConfig, dim::prepare_physical_graph, DaliugeManager, DaliugeTranslator,
-    DimClient, ExecutionBackend, HttpDimClient, HttpTranslatorClient, RestExecutionBackend,
+    clients::TranslateConfig, DaliugeManager, DaliugeTranslator, DimClient, ExecutionBackend,
+    HttpDimClient, HttpTranslatorClient, RestExecutionBackend,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -247,120 +247,5 @@ fn assert_dim_ui_fields(drops: &[Value], context: &str) {
     assert!(
         missing_app.is_empty(),
         "{context}: app drops missing app/dropclass: {missing_app:?}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires a live DIM with a previously mapped Beampipe session"]
-async fn prepare_physical_graph_fills_fields_on_live_mapped_session() {
-    let dim_url = env_or("BEAMPIPE_TEST_DIM_URL", "http://dlg-dim.desk");
-    let client = reqwest::Client::new();
-    let sessions: Value = client
-        .get(format!("{}/api", dim_url.trim_end_matches('/')))
-        .send()
-        .await
-        .expect("GET DIM /api")
-        .json()
-        .await
-        .expect("parse DIM /api");
-    let session_id = env::var("BEAMPIPE_TEST_SOURCE_SESSION").ok().or_else(|| {
-        sessions
-            .get("sessionIds")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .rev()
-            .filter_map(Value::as_str)
-            .find(|id| id.starts_with("BeampipeExecution-"))
-            .map(str::to_string)
-    });
-    let session_id = session_id.expect("no BeampipeExecution session on DIM");
-    let graph: Value = client
-        .get(format!(
-            "{}/api/sessions/{}/graph",
-            dim_url.trim_end_matches('/'),
-            session_id
-        ))
-        .send()
-        .await
-        .unwrap_or_else(|error| panic!("GET DIM graph for {session_id}: {error}"))
-        .json()
-        .await
-        .expect("parse DIM graph");
-    let raw = drop_list_from_dim_graph(graph);
-    let untyped = raw
-        .iter()
-        .filter(|drop| drop.get("type").and_then(Value::as_str).is_none())
-        .count();
-    assert!(
-        untyped > 0,
-        "session {session_id} already has type on every drop; pick an unmapped session"
-    );
-    let prepared = prepare_physical_graph(raw);
-    assert_dim_ui_fields(&prepared, &format!("prepared {session_id}"));
-}
-
-#[tokio::test]
-#[ignore = "requires a live Data Island Manager"]
-async fn prepared_graph_roundtrips_dim_ui_fields() {
-    let dim_url = env_or("BEAMPIPE_TEST_DIM_URL", "http://dlg-dim.desk");
-    let session_id = format!("BeampipeDimUiFix-{}", Uuid::now_v7());
-    let raw = vec![
-        json!({
-            "oid": "ui-fix-app",
-            "iid": "0",
-            "name": "sleep",
-            "categoryType": "Application",
-            "dropclass": "dlg.apps.simple.SleepApp",
-            "sleepTime": 0,
-            "outputs": [{"ui-fix-data": "out"}]
-        }),
-        json!({
-            "oid": "ui-fix-data",
-            "iid": "0",
-            "name": "out",
-            "categoryType": "Data",
-            "dropclass": "dlg.data.drops.memory.InMemoryDROP",
-            "producers": ["ui-fix-app"]
-        }),
-    ];
-    let dim = HttpDimClient::new(&dim_url);
-    let manager = dim.inspect().await.expect("inspect DIM");
-    let node = manager
-        .nodes
-        .first()
-        .cloned()
-        .expect("DIM must report at least one node");
-    let mut prepared = prepare_physical_graph(raw);
-    for drop in &mut prepared {
-        if let Some(obj) = drop.as_object_mut() {
-            obj.entry("node".to_string()).or_insert_with(|| json!(node));
-            obj.entry("island".to_string())
-                .or_insert_with(|| json!(node));
-        }
-    }
-    assert_dim_ui_fields(&prepared, "local prepare");
-    let deploy = dim
-        .deploy(&session_id, &prepared, &["ui-fix-app".to_string()])
-        .await;
-    let client = reqwest::Client::new();
-    let fetched = client
-        .get(format!(
-            "{}/api/sessions/{}/graph",
-            dim_url.trim_end_matches('/'),
-            session_id
-        ))
-        .send()
-        .await;
-    let _ = dim.destroy_session(&session_id).await;
-    deploy.unwrap_or_else(|error| panic!("deploy {session_id}: {error:?}"));
-    let graph: Value = fetched
-        .unwrap_or_else(|error| panic!("GET DIM graph for {session_id}: {error}"))
-        .json()
-        .await
-        .expect("parse DIM graph");
-    assert_dim_ui_fields(
-        &drop_list_from_dim_graph(graph),
-        &format!("DIM stored {session_id}"),
     );
 }

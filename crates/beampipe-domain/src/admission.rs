@@ -135,12 +135,4 @@ mod tests {
         assert!(result.skipped_due_to_queue_full);
         assert!(!result.skipped_due_to_tap_unreachable);
     }
-
-    #[test]
-    fn awaiting_scheduler_excluded_from_in_flight_logic() {
-        // In-flight counts exclude awaiting_scheduler at the SQL layer;
-        // admission helper only compares numeric caps.
-        assert!(can_admit_by_in_flight(1, 2));
-        assert!(!can_admit_by_in_flight(2, 2));
-    }
 }

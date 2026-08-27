@@ -486,30 +486,6 @@ pub async fn mark_sources_pending_workflow_run(
     Ok(result.rows_affected())
 }
 
-pub async fn set_last_executed_discovery_signature_for_sources(
-    pool: &PgPool,
-    project_module: &str,
-    source_identifiers: &[String],
-) -> Result<u64, sqlx::Error> {
-    if source_identifiers.is_empty() {
-        return Ok(0);
-    }
-    let result = sqlx::query(
-        r#"
-        UPDATE source_registry
-        SET last_executed_discovery_signature = discovery_signature
-        WHERE project_module = $1
-          AND source_identifier = ANY($2)
-          AND discovery_signature IS NOT NULL
-        "#,
-    )
-    .bind(project_module)
-    .bind(source_identifiers)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
-}
-
 pub async fn queue_depth(pool: &PgPool) -> Result<i64, sqlx::Error> {
     runnable_queue_depth(pool).await
 }
@@ -6098,28 +6074,6 @@ pub async fn enqueue_recurring_job_with_options(
     .await
 }
 
-pub async fn fail_job_permanently(pool: &PgPool, id: Uuid, error: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        UPDATE jobs
-        SET status = 'failed',
-            locked_until = NULL,
-            lease_owner = NULL,
-            lease_token = NULL,
-            lease_expires_at = NULL,
-            heartbeat_at = NULL,
-            last_error = $2,
-            updated_at = now()
-        WHERE uuid = $1
-        "#,
-    )
-    .bind(id)
-    .bind(error)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 pub async fn blacklist_token(
     pool: &PgPool,
     token_hash: &str,
@@ -7195,74 +7149,6 @@ pub async fn fail_or_retry_job_with_lease(
     Ok(status.is_some())
 }
 
-#[deprecated(note = "use claim_next_job_for_worker for owner-fenced leases")]
-pub async fn claim_next_job(
-    pool: &PgPool,
-    lock_seconds: i64,
-) -> Result<Option<JobRow>, sqlx::Error> {
-    sqlx::query_as::<_, JobRow>(
-        r#"
-        WITH candidate AS (
-            SELECT uuid
-            FROM jobs
-            WHERE status = 'queued'
-              AND next_run_at <= now()
-              AND (locked_until IS NULL OR locked_until <= now())
-            ORDER BY next_run_at ASC, created_at ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-        )
-        UPDATE jobs
-        SET status = 'running',
-            attempts = attempts + 1,
-            locked_until = now() + ($1::text || ' seconds')::interval,
-            updated_at = now()
-        WHERE uuid IN (SELECT uuid FROM candidate)
-        RETURNING *
-        "#,
-    )
-    .bind(lock_seconds)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn complete_job(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE jobs SET status = 'completed', locked_until = NULL, lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL, updated_at = now() WHERE uuid = $1")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Re-queue a recurring job after a successful tick (keeps same row, sets `next_run_at`).
-pub async fn reschedule_recurring_job(
-    pool: &PgPool,
-    id: Uuid,
-    delay_secs: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        UPDATE jobs
-        SET status = 'queued',
-            next_run_at = now() + ($2::text || ' seconds')::interval,
-            locked_until = NULL,
-            lease_owner = NULL,
-            lease_token = NULL,
-            lease_expires_at = NULL,
-            heartbeat_at = NULL,
-            attempts = 0,
-            last_error = NULL,
-            updated_at = now()
-        WHERE uuid = $1
-        "#,
-    )
-    .bind(id)
-    .bind(delay_secs.max(1))
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 /// Active Slurm executions that need remote scheduler polling.
 pub async fn list_slurm_executions_pending_poll(
     pool: &PgPool,
@@ -7416,30 +7302,6 @@ pub async fn list_rest_executions_pending_poll(
     )
     .fetch_all(pool)
     .await
-}
-
-pub async fn fail_or_retry_job(pool: &PgPool, id: Uuid, error: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        UPDATE jobs
-        SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
-            next_run_at = now() + ($2::text || ' seconds')::interval,
-            locked_until = NULL,
-            lease_owner = NULL,
-            lease_token = NULL,
-            lease_expires_at = NULL,
-            heartbeat_at = NULL,
-            last_error = $3,
-            updated_at = now()
-        WHERE uuid = $1
-        "#,
-    )
-    .bind(id)
-    .bind(30_i64)
-    .bind(error)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 fn status_str(status: ExecutionStatus) -> &'static str {
@@ -7846,16 +7708,6 @@ pub async fn list_alert_rules(
                 .await
         }
     }
-}
-
-pub async fn get_alert_rule(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<crate::models::AlertRuleRow>, sqlx::Error> {
-    sqlx::query_as("SELECT * FROM alert_rules WHERE uuid = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
 }
 
 #[allow(clippy::too_many_arguments)]

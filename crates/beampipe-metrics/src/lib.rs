@@ -239,14 +239,6 @@ pub fn set_slurm_ssh_configured(configured: bool) {
     gauge!("beampipe_slurm_ssh_configured").set(if configured { 1.0 } else { 0.0 });
 }
 
-pub fn record_security_check_failure(check: &str) {
-    counter!(
-        "beampipe_security_check_failures",
-        "check" => check.to_string()
-    )
-    .increment(1);
-}
-
 pub fn record_secret_ref_configured(kind: &str) {
     counter!(
         "beampipe_secret_refs_configured",

@@ -791,11 +791,6 @@ fn drop_status_is_error(status: &Value) -> bool {
     raw.contains("ERROR") || raw.contains("FAILED")
 }
 
-/// Preserve the compatibility helper while using the exact DALiuGE session model.
-pub fn classify_dim_session_status(status: &Value) -> ExecutionStatus {
-    DaliugeSessionState::from_raw(status).execution_status()
-}
-
 pub fn dim_graph_status_error_uids(graph: &Value) -> Vec<String> {
     let Some(obj) = graph.as_object() else {
         return Vec::new();
@@ -925,14 +920,13 @@ mod tests {
     }
 
     #[test]
-    fn dim_status_classification_maps_terminals() {
+    fn dim_graph_status_identifies_error_drops() {
         assert_eq!(
-            classify_dim_session_status(&serde_json::json!({"status": "FINISHED"})),
-            ExecutionStatus::Completed
-        );
-        assert_eq!(
-            classify_dim_session_status(&serde_json::json!({"status": "ERROR"})),
-            ExecutionStatus::Failed
+            dim_graph_status_error_uids(&serde_json::json!({
+                "drop-a": 3,
+                "drop-b": 2,
+            })),
+            vec!["drop-a".to_string()]
         );
     }
 }

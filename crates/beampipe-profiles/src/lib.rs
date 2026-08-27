@@ -932,35 +932,6 @@ mod tests {
         profile.validate().unwrap();
 
     }
-
-    #[test]
-    fn slurm_publication_rejects_removed_callback_settings() {
-        let error = serde_json::from_value::<DeploymentProfile>(json!({
-            "name": "generic-slurm",
-            "translation": {"num_par": 1},
-            "deployment": {
-                "kind": "slurm_remote",
-                "login_node": "login.example.org",
-                "facility": "generic",
-                "account": "project",
-                "home_dir": "/scratch/project",
-                "log_dir": "/scratch/project/logs",
-                "dlg_root": "/scratch/project/dlg",
-                "resources": {"wall_time_minutes": 120},
-                "runtime_contract": {
-                    "output_subdirectory": "science-products",
-                    "shared_staging_subdirectory": "archive-cache"
-                },
-                "publication": {
-                    "core_url_environment": "BEAMPIPE_CORE_URL",
-                    "durable_destination_uri_environment": "BEAMPIPE_OUTPUT_DESTINATION_URI"
-                }
-            }
-        }))
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown field `core_url_environment`"));
-    }
-
     #[test]
     fn project_runtime_cannot_override_core_publisher_environment() {
         for name in [

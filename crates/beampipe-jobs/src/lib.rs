@@ -386,11 +386,6 @@ pub fn spawn_workers(pool: PgPool, config: WorkerConfig) -> WorkerPool {
     }
 }
 
-/// Start scheduler bootstrap (optional) + N parallel job consumers.
-pub fn spawn_worker(pool: PgPool, config: WorkerConfig) -> WorkerPool {
-    spawn_workers(pool, config)
-}
-
 async fn run_worker_heartbeat(pool: PgPool, config: WorkerConfig, identity: WorkerIdentity) {
     let registration = identity.registration(&config);
     loop {

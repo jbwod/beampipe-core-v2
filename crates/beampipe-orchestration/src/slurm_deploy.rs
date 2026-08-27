@@ -2,8 +2,8 @@ use crate::scheduler::SchedulerResourceRequest;
 use crate::slurm_ssh::{output_inventory_remote_paths, SlurmSshSession, SlurmTarget};
 use crate::OrchestrationError;
 use beampipe_profiles::{
-    DaliugeAlgo, PublicationRuntimeConfig, SlurmRemoteDeploymentConfig,
-    SlurmRuntimeContractConfig, SlurmRuntimeEnvironmentKind,
+    PublicationRuntimeConfig, SlurmRemoteDeploymentConfig, SlurmRuntimeContractConfig,
+    SlurmRuntimeEnvironmentKind,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -915,13 +915,6 @@ pub fn resolve_remote_user(deployment: &SlurmRemoteDeploymentConfig) -> String {
         .or_else(|| std::env::var("SLURM_REMOTE_USER").ok())
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "root".into())
-}
-
-pub fn algo_str(algo: &DaliugeAlgo) -> &'static str {
-    match algo {
-        DaliugeAlgo::Metis => "metis",
-        DaliugeAlgo::Mysarkar => "mysarkar",
-    }
 }
 
 #[cfg(test)]

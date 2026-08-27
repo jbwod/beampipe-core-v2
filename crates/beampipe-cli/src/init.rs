@@ -211,15 +211,6 @@ telemetry:
 "#
 }
 
-#[allow(dead_code)]
-fn development_env() -> &'static str {
-    r#"# Copy to .env and replace the development-only values before sharing the environment.
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/beampipe
-BEAMPIPE_JWT_SECRET=replace-with-at-least-32-random-characters
-BEAMPIPE_CONFIG=beampipe.yaml
-"#
-}
-
 fn production_env() -> &'static str {
     r#"# Production values must be supplied by your secret manager or deployment environment.
 DATABASE_URL=<secret-reference-or-runtime-value>

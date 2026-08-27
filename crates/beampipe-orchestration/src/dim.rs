@@ -1,9 +1,5 @@
 use serde_json::{json, Value};
 
-pub fn dim_rest_http_base(deploy_host: &str, deploy_port: i32) -> String {
-    dim_rest_base(deploy_host, deploy_port, false)
-}
-
 pub fn dim_rest_base(deploy_host: &str, deploy_port: i32, use_https: bool) -> String {
     let scheme = if use_https { "https" } else { "http" };
     if deploy_port != 80 {

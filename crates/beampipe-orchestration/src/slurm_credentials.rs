@@ -642,31 +642,6 @@ impl SlurmSshCredentials {
     }
 }
 
-/// Build OpenSSH-style `-i` / `UserKnownHostsFile=` args for transitional CLI wrappers.
-pub fn ssh_option_args_from_credentials(
-    creds: &SlurmSshCredentials,
-) -> Result<Vec<String>, OrchestrationError> {
-    let mut args = Vec::new();
-    match &creds.key_source {
-        SlurmKeySource::Path(path) | SlurmKeySource::DevHome(path) => {
-            args.push("-i".into());
-            args.push(path.display().to_string());
-        }
-        SlurmKeySource::Pem(_) => {
-            return Err(OrchestrationError::Backend(
-                "inline PEM credentials cannot be converted to OpenSSH -i arguments".into(),
-            ));
-        }
-    }
-    if let Some(path) = creds.known_hosts_path.as_ref() {
-        if !path.eq_ignore_ascii_case("none") {
-            args.push("-o".into());
-            args.push(format!("UserKnownHostsFile={path}"));
-        }
-    }
-    Ok(args)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

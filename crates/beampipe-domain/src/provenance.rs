@@ -1,6 +1,5 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -45,12 +44,4 @@ impl ProvenanceEventType {
             Self::AlertDeliveryFailed => "alert.delivery_failed",
         }
     }
-}
-
-pub fn build_provenance_payload(fields: &[(&str, Value)]) -> Value {
-    let mut map = serde_json::Map::new();
-    for (k, v) in fields {
-        map.insert((*k).into(), v.clone());
-    }
-    Value::Object(map)
 }

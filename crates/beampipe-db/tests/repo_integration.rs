@@ -27,6 +27,26 @@ async fn test_pool() -> Option<sqlx::PgPool> {
     Some(pool)
 }
 
+async fn complete_job_for_test(pool: &sqlx::PgPool, id: Uuid) {
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET status = 'completed',
+            locked_until = NULL,
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            updated_at = now()
+        WHERE uuid = $1
+        "#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn output_inventory_artifact(
     execution_id: Uuid,
     pattern: &str,
@@ -256,7 +276,7 @@ async fn manual_discovery_requeues_its_completed_trigger() {
     .await
     .unwrap();
     let first = first.unwrap();
-    repo::complete_job(&pool, first.uuid).await.unwrap();
+    complete_job_for_test(&pool, first.uuid).await;
 
     let (_, second) = repo::mark_sources_and_enqueue_discovery_tick(
         &pool,
@@ -273,7 +293,7 @@ async fn manual_discovery_requeues_its_completed_trigger() {
     assert_eq!(second.attempts, 0);
     assert_eq!(second.payload["manual"], true);
 
-    repo::complete_job(&pool, second.uuid).await.unwrap();
+    complete_job_for_test(&pool, second.uuid).await;
     repo::delete_all_sources_for_project_module(&pool, &module)
         .await
         .unwrap();
@@ -352,8 +372,8 @@ async fn queue_gauges_only_include_runnable_jobs() {
 
     queue_snapshot.commit().await.unwrap();
 
-    repo::complete_job(&pool, future.uuid).await.unwrap();
-    repo::complete_job(&pool, overdue.uuid).await.unwrap();
+    complete_job_for_test(&pool, future.uuid).await;
+    complete_job_for_test(&pool, overdue.uuid).await;
 }
 
 #[tokio::test]
@@ -3082,7 +3102,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         .unwrap()
         .iter()
         .any(|row| row.uuid == slurm_execution.uuid));
-    repo::complete_job(&pool, slurm_execute.uuid).await.unwrap();
+    complete_job_for_test(&pool, slurm_execute.uuid).await;
 
     let rest_queue = format!("selector_rest_{}", Uuid::now_v7().simple());
     let rest_worker = Uuid::now_v7();
@@ -3163,7 +3183,7 @@ async fn reconciliation_selectors_wait_for_the_active_execute_lease() {
         .unwrap()
         .iter()
         .any(|row| row.uuid == rest_execution.uuid));
-    repo::complete_job(&pool, rest_execute.uuid).await.unwrap();
+    complete_job_for_test(&pool, rest_execute.uuid).await;
 
     let dim_poll = repo::enqueue_job_with_options(
         &pool,
@@ -3832,7 +3852,7 @@ async fn failed_pre_submission_execution_retries_atomically_from_submit() {
     )
     .await
     .unwrap();
-    repo::complete_job(&pool, original.uuid).await.unwrap();
+    complete_job_for_test(&pool, original.uuid).await;
     sqlx::query(
         r#"
         UPDATE batch_execution_record

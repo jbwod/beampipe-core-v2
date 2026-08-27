@@ -13,7 +13,6 @@ use russh::keys::PrivateKeyWithHashAlg;
 use russh::ChannelMsg;
 use ssh_key::known_hosts::{HostPatterns, KnownHosts};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -125,11 +124,6 @@ impl SlurmTarget {
         }
     }
 
-    pub fn advisory_lock_key(&self) -> i64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut hasher);
-        (hasher.finish() & i64::MAX as u64) as i64
-    }
 }
 
 struct SshClientHandler {
@@ -493,18 +487,6 @@ impl SlurmSshSession {
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             exit_status: code,
         })
-    }
-
-    /// Upload text as an owner-only SFTP artifact.
-    ///
-    /// Retained for API compatibility; all artifact writes now use the same
-    /// durable, atomic SFTP path as `upload_text_atomic`.
-    pub async fn upload_text(
-        &mut self,
-        remote_path: &str,
-        content: &str,
-    ) -> Result<(), OrchestrationError> {
-        self.upload_text_atomic(remote_path, content).await
     }
 
     /// Upload through an exclusive same-directory SFTP temporary file, sync it,

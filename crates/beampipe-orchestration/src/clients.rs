@@ -51,9 +51,6 @@ impl HttpTranslatorClient {
         }
     }
 
-    pub fn from_translation(tm_url: Option<String>) -> Self {
-        Self::new(tm_url.unwrap_or_else(|| "http://localhost:9000".into()))
-    }
 }
 
 #[async_trait]

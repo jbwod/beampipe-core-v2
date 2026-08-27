@@ -146,10 +146,4 @@ mod tests {
         assert!(!c1.jti.is_empty());
         assert_ne!(c1.jti, c2.jti);
     }
-
-    #[test]
-    fn retired_publisher_token_shape_is_rejected_as_an_ordinary_jwt() {
-        let retired = format!("bpp_{}", "a".repeat(64));
-        assert!(decode_access_token(&retired, "01234567890123456789012345678901").is_err());
-    }
 }

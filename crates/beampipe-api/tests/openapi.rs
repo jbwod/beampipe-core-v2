@@ -1,11 +1,4 @@
 #[test]
-fn openapi_spec_generates() {
-    use utoipa::OpenApi;
-    let spec = beampipe_api::ApiDoc::openapi();
-    assert!(spec.paths.paths.len() > 10);
-}
-
-#[test]
 fn every_success_response_has_content_and_resolvable_schemas() {
     const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
 

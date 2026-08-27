@@ -26,10 +26,6 @@ impl SecretPolicy {
         }
     }
 
-    pub fn from_process_env() -> Self {
-        Self::from_env_name(&std::env::var("BEAMPIPE_ENV").unwrap_or_else(|_| "development".into()))
-    }
-
     /// Resolve the effective runtime environment selected by fully resolved settings.
     pub fn from_runtime_env() -> Self {
         Self::from_env_name(&runtime_env_name())
@@ -54,10 +50,6 @@ pub fn is_production_env_name(env: &str) -> bool {
 
 pub fn process_env_name() -> String {
     std::env::var("BEAMPIPE_ENV").unwrap_or_else(|_| "development".into())
-}
-
-pub fn is_process_production() -> bool {
-    is_production_env_name(&process_env_name())
 }
 
 /// Install the environment selected by the application's resolved settings without mutating
@@ -181,18 +173,6 @@ pub fn resolve_secret(
 
 pub fn parse_secret_ref(value: &Value) -> Option<SecretRef> {
     serde_json::from_value(value.clone()).ok()
-}
-
-pub fn resolve_secret_value(
-    value: &Value,
-    policy: SecretPolicy,
-) -> Result<Option<SecretValue>, SecretError> {
-    match parse_secret_ref(value) {
-        Some(reference) => resolve_secret(&reference, policy).map(Some),
-        None => Ok(value
-            .as_str()
-            .map(|s| SecretValue(Zeroizing::new(s.to_string())))),
-    }
 }
 
 pub fn resolve_secret_value_strict(
