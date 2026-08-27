@@ -29,8 +29,8 @@ DNS, Traefik, or any remote network path.
 ## Run the qualification
 
 Use the same Python environment for the DALiuGE Engine and Translator, the
-WALLABY package, and `beampipe-pallette`. The current path is qualified with
-DALiuGE 6.6 and `beampipe-pallette` 0.4.
+WALLABY package, and `beampipe-palette`. The current path is qualified with
+DALiuGE 6.6 and `beampipe-palette` 0.5.1.
 
 From the `wallaby-hires-beampipe` checkout:
 

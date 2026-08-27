@@ -5,6 +5,13 @@ All notable changes to Beampipe Core are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Corrected the standalone DALiuGE package, repository, and Python namespace
+  spelling to `beampipe-palette` / `beampipe_palette`.
+- Re-vendored the Wallaby graphs from `wallaby-hires` 0.1.19 with immutable
+  `beampipe-palette` 0.5.1 component metadata and refreshed graph digests.
+
 ## [0.2.0] - 2026-08-27
 
 Version 0.2.0 is a project-neutral control-plane release. It replaces the
@@ -22,10 +29,10 @@ transport.
   staging provider, graph patches, and output-verification policy explicitly.
   The old v1 compatibility parser and `source_id_transform` are removed.
 - Remote Slurm publication no longer calls back to Core and no publisher token
-  is injected into a graph. Install `beampipe-pallette >=0.4,<0.5` in the
-  remote DALiuGE runtime. The terminal publisher writes a canonical inventory
-  handoff inside the execution session; Core retrieves and verifies it through
-  the existing SFTP connection after scheduler completion.
+  is injected into a graph. Install the public `beampipe-palette` 0.5.1 wheel
+  in the remote DALiuGE runtime. The terminal publisher writes a canonical
+  inventory handoff inside the execution session; Core retrieves and verifies
+  it through the existing SFTP connection after scheduler completion.
 - The publisher-token and output-callback API routes are removed. Regenerate
   API clients from the v0.2.0 OpenAPI document.
 - Worker routing is all-of and namespaced. Workers must advertise every
@@ -46,7 +53,7 @@ transport.
   metadata templates, staging providers, graph patches, manifests, and output
   patterns.
 - Native `BeampipeIngestApp` and `BeampipePublishApp` DALiuGE components in the
-  separately versioned `beampipe-pallette` package, with EAGLE-compatible ports
+  separately versioned `beampipe-palette` package, with EAGLE-compatible ports
   and project-owned pattern configuration.
 - Required output-verification policy using
   `beampipe-output-inventory/v1`, exact expected-pattern counts, canonical

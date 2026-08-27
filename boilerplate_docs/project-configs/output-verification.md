@@ -28,7 +28,7 @@ whereas the neutral example requires `**/result.bin`.
 ## Publication topology
 
 The terminal `beampipe-publish` DALiuGE application belongs to the standalone
-`beampipe-pallette` package. Its initial storage adapters support an approved
+`beampipe-palette` package. Its initial storage adapters support an approved
 project filesystem and S3-compatible object storage. The Core report contract
 can also represent future NGAS or HTTPS-backed adapters, but their URI support
 does not imply that the standalone package implements them yet.

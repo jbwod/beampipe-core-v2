@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(profile["deployment"]["resources"]["wall_time_minutes"], 120);
         assert_eq!(
             profile["deployment"]["runtime_contract"]["required_python_modules"],
-            serde_json::json!(["wallaby_hires", "beampipe_pallette.apps"])
+            serde_json::json!(["wallaby_hires", "beampipe_palette.apps"])
         );
         assert_eq!(
             sha256(
@@ -282,7 +282,7 @@ mod tests {
                 )
                 .unwrap()
             ),
-            "b800492c5a940c9ebc1e9aaacbb723d861ad248d9e3368f4330180ee9345d642"
+            "337d0e8b811cb28d9135811a469af23d6169319f49ce11eb2f576b43c07d9264"
         );
         assert_eq!(
             sha256(
@@ -293,7 +293,7 @@ mod tests {
                 )
                 .unwrap()
             ),
-            "f2f5db47b7b30c12ab00c7eb0c868a0a14f4000f5706f15a6a27a5ec6e17267a"
+            "c31214e6e8be51887e70f24059cd7db92acd308c6f54c96af51d12ee4a8cd089"
         );
     }
 

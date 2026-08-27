@@ -53,9 +53,9 @@ staging:
   provider: casda_uws
 
 graph:
-  # Vendored from wallaby-hires-beampipe commit 5fb72fdb13f44642fafd0d9b918b79210511ee00.
+  # Vendored from wallaby-hires-beampipe commit fcdca2e2fc5987b10cc5a74c4c007c2f5b8f08f0.
   path: config/graphs/wallaby-hires_deploy-setonix-beampipe.graph
-  sha256: b800492c5a940c9ebc1e9aaacbb723d861ad248d9e3368f4330180ee9345d642
+  sha256: 337d0e8b811cb28d9135811a469af23d6169319f49ce11eb2f576b43c07d9264
 
 discovery:
   queries:

@@ -146,7 +146,7 @@ curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 ```
 
 When the pinned project requires durable output verification, use the terminal
-`beampipe-publish` application from standalone `beampipe-pallette`. The trusted
+`beampipe-publish` application from standalone `beampipe-palette`. The trusted
 Slurm path retrieves its canonical receipt over authenticated SFTP after
 scheduler success, so the remote graph needs no route or credential back to
 Core. There is no publisher callback or execution token to put in graph or

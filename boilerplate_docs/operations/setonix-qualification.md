@@ -115,9 +115,9 @@ The production qualification artifacts are:
 
 | Artifact | Expected evidence |
 |---|---|
-| WALLABY graph | SHA-256 `b800492c5a940c9ebc1e9aaacbb723d861ad248d9e3368f4330180ee9345d642` |
+| WALLABY graph | SHA-256 `337d0e8b811cb28d9135811a469af23d6169319f49ce11eb2f576b43c07d9264` |
 | Wallaby package | `wallaby_hires --version` matches the reviewed release |
-| Publisher package | `python3 -m beampipe_pallette --version` matches the reviewed standalone package release |
+| Publisher package | `python3 -m beampipe_palette --version` matches the reviewed standalone package release |
 | Python wheels | SHA-256 recorded for every exact installed wheel |
 
 Capture the versions without pinning this runbook to a release that will go
@@ -125,8 +125,8 @@ stale:
 
 ```bash
 wallaby_hires --version
-python3 -m beampipe_pallette --version
-python3 -c 'from beampipe_pallette.apps import BeampipeIngestApp, BeampipePublishApp'
+python3 -m beampipe_palette --version
+python3 -c 'from beampipe_palette.apps import BeampipeIngestApp, BeampipePublishApp'
 ```
 
 Set the durable publication destination in the Core/jobs worker environment.
@@ -164,8 +164,8 @@ command -v scontrol
 command -v srun
 command -v python3
 command -v wallaby_hires
-python3 -m beampipe_pallette --version
-python3 -c 'from beampipe_pallette.apps import BeampipeIngestApp, BeampipePublishApp'
+python3 -m beampipe_palette --version
+python3 -c 'from beampipe_palette.apps import BeampipeIngestApp, BeampipePublishApp'
 sinfo --version
 python3 -c '<import every runtime_contract.required_python_modules entry>'
 test -d '<DLG_ROOT>' && test -w '<DLG_ROOT>'
@@ -397,7 +397,7 @@ evidence but cannot reopen the terminal ledger, and retry remains blocked.
 Slurm `COMPLETED` records compute evidence only. The production project requires
 a non-empty Beampipe output inventory, durable publication, and trusted
 acknowledgement. Its terminal native `BeampipePublishApp` from standalone
-`beampipe-pallette` uploads only the run's selected paths, re-reads or re-hashes
+`beampipe-palette` uploads only the run's selected paths, re-reads or re-hashes
 the durable objects, atomically writes the inventory FileDROP, and leaves the
 byte-identical report at the Core-owned handoff path beneath the remote session.
 Core retrieves it over SFTP only after observing scheduler success, validates it

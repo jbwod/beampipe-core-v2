@@ -53,9 +53,9 @@ staging:
   provider: none
 
 graph:
-  # Vendored from wallaby-hires-beampipe commit 5fb72fdb13f44642fafd0d9b918b79210511ee00.
+  # Vendored from wallaby-hires-beampipe commit fcdca2e2fc5987b10cc5a74c4c007c2f5b8f08f0.
   path: config/graphs/wallaby-hires_test-pipeline-nodownloads-beampipe.graph
-  sha256: f2f5db47b7b30c12ab00c7eb0c868a0a14f4000f5706f15a6a27a5ec6e17267a
+  sha256: c31214e6e8be51887e70f24059cd7db92acd308c6f54c96af51d12ee4a8cd089
 
 discovery:
   queries:

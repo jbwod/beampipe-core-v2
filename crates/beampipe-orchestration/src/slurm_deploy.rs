@@ -13,7 +13,7 @@ use url::Url;
 const JOBSUB_CREATED_RE: &str = "Created job submission script";
 const PYTHON_PATH_ENV: &str = "PYTHONPATH";
 const OUTER_TERMINATION_NOTICE_SECONDS: i32 = 120;
-const BEAMPIPE_APPS_PYTHON_MODULE: &str = "beampipe_pallette.apps";
+const BEAMPIPE_APPS_PYTHON_MODULE: &str = "beampipe_palette.apps";
 const INGEST_APP_CLASS: &str = "BeampipeIngestApp";
 const PUBLISHER_APP_CLASS: &str = "BeampipePublishApp";
 const PUBLISHER_EXECUTION_ID_ENV: &str = "BEAMPIPE_EXECUTION_ID";
@@ -1334,7 +1334,7 @@ mod tests {
         let mut dep = deployment();
         dep.runtime_contract
             .required_python_modules
-            .push("beampipe_pallette.apps".into());
+            .push("beampipe_palette.apps".into());
         dep.publication = Some(PublicationRuntimeConfig {
             durable_destination_uri_environment: "BEAMPIPE_OUTPUT_DESTINATION_URI".into(),
         });
@@ -1343,13 +1343,13 @@ mod tests {
             _ => None,
         })
         .unwrap();
-        assert!(script.contains("beampipe_pallette.apps"));
+        assert!(script.contains("beampipe_palette.apps"));
         assert!(script.contains("BeampipeIngestApp"));
         assert!(script.contains("BeampipePublishApp"));
         assert!(!script.to_ascii_lowercase().contains("wallaby"));
 
         let opt_out = slurm_preflight_script_with(&dep, false, |_| None).unwrap();
-        assert!(opt_out.contains("beampipe_pallette.apps"));
+        assert!(opt_out.contains("beampipe_palette.apps"));
         assert!(opt_out.contains("BeampipeIngestApp"));
         assert!(!opt_out.contains("BeampipePublishApp"));
     }
