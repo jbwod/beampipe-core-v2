@@ -27,6 +27,9 @@ whereas the neutral example requires `**/result.bin`.
 
 ## Publication topology
 
+For the EAGLE editor workflow, real component screenshots, and exact port
+wiring, start with [Preparing DALiuGE graphs](preparing-daliuge-graphs.md).
+
 The terminal `beampipe-publish` DALiuGE application belongs to the standalone
 `beampipe-palette` package. Its initial storage adapters support an approved
 project filesystem and S3-compatible object storage. The Core report contract

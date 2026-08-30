@@ -2,6 +2,11 @@
 
 Graph preparation combines a generated manifest with a logical DALiuGE graph, applies deterministic patches, and stores checksummed source and patched artifacts before translation.
 
+Start with [Preparing DALiuGE graphs in EAGLE](preparing-daliuge-graphs.md) for
+the native `beampipe-ingest` and `beampipe-publish` topology, port contracts,
+and release checklist. This page covers the deterministic patches Core applies
+after that logical graph has been selected.
+
 ## Patch a node
 
 ```yaml
