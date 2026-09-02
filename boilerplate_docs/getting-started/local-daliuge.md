@@ -85,5 +85,5 @@ promoted to Core success.
 
 Do not weaken the no-download project to `output_verification.required: false`
 to make a REST run terminal. Use this direct runner for local DALiuGE graph
-qualification and the [Setonix qualification](../operations/setonix-qualification.md)
-for a Core-managed WALLABY facility run.
+qualification only; qualify facility execution separately under the target
+site's approval and operations controls.

@@ -1,4 +1,8 @@
-# Output verification and publication
+# Output verification and publication (in progress)
+
+!!! warning "Status: in progress"
+    Output verification and publication are under active development. Treat the
+    contract on this page as provisional until this notice is removed.
 
 The Core output contract is project-neutral. A production project declares the
 durable products that must exist before an execution can succeed:

@@ -2,7 +2,7 @@
 
 Project configuration is immutable, dynamically loaded workflow policy. It
 defines source identity, named TAP endpoints, discovery queries, metadata
-preparation, staging, manifests, graph preparation, output verification, and
+preparation, staging, manifests, graph preparation, output verification (in progress), and
 automation. Core does not assign scientific meaning to a project identifier,
 endpoint name, group, or record.
 
@@ -249,10 +249,10 @@ output_verification:
 
 A graph may use an immutable URL instead of a path. Every source is bounded,
 hashed, and checked against the configured SHA-256 before parsing. Successful
-backend completion does not satisfy required output verification; a trusted
+backend completion does not satisfy required output verification (in progress); a trusted
 publisher must durably verify at least one product for every pinned pattern and
 submit the generic inventory described in
-[Output verification](output-verification.md).
+[Output verification (in progress)](output-verification.md).
 
 ## Automation
 
@@ -293,5 +293,5 @@ extension:
 Hooks must be deterministic and secret-free. They are project logic, not an
 escape hatch for network calls or deployment behavior.
 
-Continue with [Transforms](transforms.md), [Graph preparation](graph-patches.md),
-and the [project-neutral acceptance path](../getting-started/neutral-project.md).
+Continue with [Transforms](transforms.md) and
+[Graph preparation](graph-patches.md).

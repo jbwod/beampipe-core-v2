@@ -1,16 +1,20 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help openapi docs-copy docs-build docs-serve
+.PHONY: help openapi db-schema docs-copy docs-build docs-serve
 
 help:
 	@echo "Documentation:"
 	@echo "  openapi       Regenerate openapi.json from Rust utoipa spec"
+	@echo "  db-schema     Regenerate the database schema explorer snapshot"
 	@echo "  docs-copy     Copy openapi.json into boilerplate_docs/ for ReDoc"
 	@echo "  docs-build    docs-copy + mkdocs build --strict"
 	@echo "  docs-serve    docs-copy + mkdocs serve"
 
 openapi:
 	./scripts/export-openapi.sh
+
+db-schema:
+	./scripts/export-database-schema.sh
 
 docs-copy:
 	@if command -v cargo >/dev/null 2>&1; then \

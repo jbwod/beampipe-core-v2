@@ -145,14 +145,14 @@ curl -fsS "$BASE/api/v2/executions/$EXEC_ID/artifacts" -H "$AUTH" | jq .
 curl -fsS "$BASE/api/v2/executions/$EXEC_ID/events" -H "$AUTH" | jq .
 ```
 
-When the pinned project requires durable output verification, use the terminal
+When the pinned project requires durable output verification (in progress), use the terminal
 `beampipe-publish` application from standalone `beampipe-palette`. The trusted
 Slurm path retrieves its canonical receipt over authenticated SFTP after
 scheduler success, so the remote graph needs no route or credential back to
 Core. There is no publisher callback or execution token to put in graph or
 scheduler artifacts. The complete pull, inventory, ordering, and
 idempotent-retry contract is in
-[Output verification](../project-configs/output-verification.md).
+[Output verification (in progress)](../project-configs/output-verification.md).
 
 ## Clean-break field migration
 

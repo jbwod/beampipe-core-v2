@@ -15,7 +15,7 @@ make docs-build
 ```
 
 `make docs-build` exports OpenAPI, copies it into the docs tree, and runs MkDocs in strict mode.
-The neutral acceptance test needs PostgreSQL but uses mock catalog and DALiuGE
+The database-backed end-to-end test needs PostgreSQL but uses mock catalog and DALiuGE
 adapters; it performs no provider, SSH, or remote-runtime I/O. Validate the
 WALLABY configuration separately when changing that explicit sample.
 

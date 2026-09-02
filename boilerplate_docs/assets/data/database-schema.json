@@ -1,0 +1,2444 @@
+{
+    "schema": "public",
+    "tables": [
+        {
+            "name": "alert_deliveries",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "rule_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "alert_rules",
+                        "column": "uuid",
+                        "on_delete": "SET NULL"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "channel_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "notification_channels",
+                        "column": "uuid",
+                        "on_delete": "SET NULL"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "status",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "payload",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "error",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_alert_deliveries_created",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_alert_deliveries_created ON public.alert_deliveries USING btree (created_at DESC)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "alert_rules",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "name",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "project_module",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "enabled",
+                    "type": "boolean",
+                    "default": "true",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "severity",
+                    "type": "text",
+                    "default": "'warning'::text",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "trigger_kind",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "trigger_config",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "channel_ids",
+                    "type": "uuid[]",
+                    "default": "'{}'::uuid[]",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "cooldown_minutes",
+                    "type": "integer",
+                    "default": "60",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_fired_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_alert_rules_project",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_alert_rules_project ON public.alert_rules USING btree (project_module)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "archive_metadata",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "project_module",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "source_identifier",
+                    "type": "character varying(100)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "group_key",
+                    "type": "character varying(255)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "metadata_json",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_archive_metadata_group_key",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_archive_metadata_group_key ON public.archive_metadata USING btree (group_key)"
+                },
+                {
+                    "name": "idx_archive_metadata_project_source",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_archive_metadata_project_source ON public.archive_metadata USING btree (project_module, source_identifier)"
+                },
+                {
+                    "name": "uq_archive_metadata_composite",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_archive_metadata_composite ON public.archive_metadata USING btree (project_module, source_identifier, group_key)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "batch_execution_record",
+            "checks": [
+                {
+                    "name": "ck_execution_phase",
+                    "definition": "CHECK (execution_phase IS NULL OR (execution_phase::text = ANY (ARRAY['stage_and_manifest'::character varying, 'submit'::character varying]::text[])))"
+                },
+                {
+                    "name": "ck_execution_status",
+                    "definition": "CHECK (status::text = ANY (ARRAY['pending'::character varying, 'running'::character varying, 'awaiting_scheduler'::character varying, 'not_submitted'::character varying, 'completed'::character varying, 'failed'::character varying, 'retrying'::character varying, 'cancelled'::character varying]::text[]))"
+                },
+                {
+                    "name": "ck_required_output_completion_verified",
+                    "definition": "CHECK (status::text <> 'completed'::text OR output_verification_required = false OR COALESCE(output_state, ''::character varying)::text = 'verified'::text)"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "project_module",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "sources",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "archive_name",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "deployment_profile_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "daliuge_deployment_profile",
+                        "column": "uuid",
+                        "on_delete": "NO ACTION"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "workflow_manifest",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "execution_phase",
+                    "type": "character varying(32)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "scheduler_name",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "scheduler_job_id",
+                    "type": "character varying(512)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_error",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_by_id",
+                    "type": "integer",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "users",
+                        "column": "id",
+                        "on_delete": "NO ACTION"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "status",
+                    "type": "character varying(32)",
+                    "default": "'pending'::character varying",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "retry_count",
+                    "type": "integer",
+                    "default": "0",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "started_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "completed_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "project_config_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "project_configs",
+                        "column": "uuid",
+                        "on_delete": "NO ACTION"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "deployment_profile_revision",
+                    "type": "integer",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "deployment_profile_snapshot",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "discovery_signature",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "manifest_sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "source_graph_sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "patched_graph_sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "physical_graph_sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "daliuge_session_id",
+                    "type": "character varying(255)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "daliuge_manager_url",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "remote_session_dir",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "control_phase",
+                    "type": "character varying(64)",
+                    "default": "'discovered'::character varying",
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "submission_state",
+                    "type": "character varying(32)",
+                    "default": "'not_started'::character varying",
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "scheduler_state",
+                    "type": "character varying(32)",
+                    "default": "'not_submitted'::character varying",
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "scheduler_raw_state",
+                    "type": "character varying(128)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "scheduler_reason",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "daliuge_state",
+                    "type": "character varying(32)",
+                    "default": "'not_created'::character varying",
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "daliuge_raw_status",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "output_state",
+                    "type": "character varying(32)",
+                    "default": "'not_started'::character varying",
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "output_verification_required",
+                    "type": "boolean",
+                    "default": "false",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "terminal_outcome",
+                    "type": "character varying(32)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "failure_class",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "phase_timestamps",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_reconciled_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "create_idempotency_key",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "create_request_sha256",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "output_verification_policy",
+                    "type": "jsonb",
+                    "default": "'{\"required\": false, \"inventory_schema\": \"beampipe-output-inventory/v1\", \"expected_patterns\": []}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "submission_deadline_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "submission_abandoned_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_batch_execution_record_deployment_profile_id",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_batch_execution_record_deployment_profile_id ON public.batch_execution_record USING btree (deployment_profile_id)"
+                },
+                {
+                    "name": "idx_batch_execution_record_project",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_batch_execution_record_project ON public.batch_execution_record USING btree (project_module)"
+                },
+                {
+                    "name": "idx_batch_execution_record_project_config_id",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_batch_execution_record_project_config_id ON public.batch_execution_record USING btree (project_config_id)"
+                },
+                {
+                    "name": "idx_batch_execution_record_scheduler_job_id",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_batch_execution_record_scheduler_job_id ON public.batch_execution_record USING btree (scheduler_job_id)"
+                },
+                {
+                    "name": "idx_batch_execution_record_status",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_batch_execution_record_status ON public.batch_execution_record USING btree (status)"
+                },
+                {
+                    "name": "idx_execution_active_profile",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_execution_active_profile ON public.batch_execution_record USING btree (deployment_profile_id, status) WHERE ((status)::text = ANY ((ARRAY['pending'::character varying, 'running'::character varying, 'awaiting_scheduler'::character varying, 'retrying'::character varying])::text[]))"
+                },
+                {
+                    "name": "idx_execution_daliuge_session",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_execution_daliuge_session ON public.batch_execution_record USING btree (daliuge_session_id) WHERE (daliuge_session_id IS NOT NULL)"
+                },
+                {
+                    "name": "idx_execution_daliuge_state",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_execution_daliuge_state ON public.batch_execution_record USING btree (daliuge_state, last_reconciled_at) WHERE (daliuge_session_id IS NOT NULL)"
+                },
+                {
+                    "name": "idx_execution_scheduler_state",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_execution_scheduler_state ON public.batch_execution_record USING btree (scheduler_state, last_reconciled_at) WHERE (scheduler_job_id IS NOT NULL)"
+                },
+                {
+                    "name": "idx_execution_submission_abandoned",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_execution_submission_abandoned ON public.batch_execution_record USING btree (submission_abandoned_at) WHERE ((submission_abandoned_at IS NOT NULL) AND ((scheduler_name)::text = 'slurm'::text) AND (scheduler_job_id IS NULL))"
+                },
+                {
+                    "name": "uq_execution_create_idempotency",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_execution_create_idempotency ON public.batch_execution_record USING btree (created_by_id, create_idempotency_key) WHERE ((created_by_id IS NOT NULL) AND (create_idempotency_key IS NOT NULL))"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "daliuge_deployment_profile",
+            "checks": [
+                {
+                    "name": "ck_deployment_profile_concurrency",
+                    "definition": "CHECK (max_concurrent_executions IS NULL OR max_concurrent_executions > 0)"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "name",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "description",
+                    "type": "character varying(255)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "project_module",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "is_default",
+                    "type": "boolean",
+                    "default": "false",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "translation",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "deployment",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "revision",
+                    "type": "integer",
+                    "default": "1",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "spec_sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "max_concurrent_executions",
+                    "type": "integer",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "daliuge_deployment_profile_name_key",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX daliuge_deployment_profile_name_key ON public.daliuge_deployment_profile USING btree (name)"
+                },
+                {
+                    "name": "idx_daliuge_profile_project_default",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_daliuge_profile_project_default ON public.daliuge_deployment_profile USING btree (project_module, is_default)"
+                },
+                {
+                    "name": "uq_daliuge_profile_single_default",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_daliuge_profile_single_default ON public.daliuge_deployment_profile USING btree (((project_module IS NULL)), COALESCE(project_module, ''::character varying)) WHERE (is_default = true)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "execution_artifacts",
+            "checks": [
+                {
+                    "name": "ck_execution_artifact_location",
+                    "definition": "CHECK (uri IS NOT NULL OR inline_json IS NOT NULL)"
+                },
+                {
+                    "name": "ck_execution_artifact_storage",
+                    "definition": "CHECK (storage_kind::text = ANY (ARRAY['database'::character varying, 'file'::character varying, 'remote'::character varying, 'http'::character varying]::text[]))"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "execution_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": {
+                        "table": "batch_execution_record",
+                        "column": "uuid",
+                        "on_delete": "CASCADE"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "kind",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "storage_kind",
+                    "type": "character varying(32)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "uri",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "inline_json",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "media_type",
+                    "type": "character varying(128)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "size_bytes",
+                    "type": "bigint",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "producer_phase",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "metadata",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_execution_artifacts_execution",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_execution_artifacts_execution ON public.execution_artifacts USING btree (execution_id, created_at DESC)"
+                },
+                {
+                    "name": "uq_execution_artifact",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_execution_artifact ON public.execution_artifacts USING btree (execution_id, kind, sha256)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "execution_observations",
+            "checks": [
+                {
+                    "name": "ck_execution_observation_kind",
+                    "definition": "CHECK (kind::text = ANY (ARRAY['scheduler'::character varying, 'daliuge_session'::character varying, 'daliuge_graph'::character varying, 'output'::character varying]::text[]))"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "execution_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": {
+                        "table": "batch_execution_record",
+                        "column": "uuid",
+                        "on_delete": "CASCADE"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "kind",
+                    "type": "character varying(32)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "normalized_state",
+                    "type": "character varying(32)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "raw_state",
+                    "type": "character varying(128)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "reason",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "payload",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "source_version",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "observed_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_execution_observations_execution",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_execution_observations_execution ON public.execution_observations USING btree (execution_id, observed_at DESC)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "job_claim_history",
+            "checks": [
+                {
+                    "name": "ck_job_claim_event",
+                    "definition": "CHECK (event::text = ANY (ARRAY['claimed'::character varying, 'recovered'::character varying, 'renewed'::character varying, 'completed'::character varying, 'requeued'::character varying, 'failed'::character varying, 'dead_lettered'::character varying, 'lease_lost'::character varying, 'released'::character varying]::text[]))"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "job_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": {
+                        "table": "jobs",
+                        "column": "uuid",
+                        "on_delete": "CASCADE"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "worker_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "worker_instances",
+                        "column": "uuid",
+                        "on_delete": "SET NULL"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "lease_token",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "event",
+                    "type": "character varying(32)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "occurred_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "details",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_job_claim_history_job",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_job_claim_history_job ON public.job_claim_history USING btree (job_id, occurred_at DESC)"
+                },
+                {
+                    "name": "idx_job_claim_history_worker",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_job_claim_history_worker ON public.job_claim_history USING btree (worker_id, occurred_at DESC) WHERE (worker_id IS NOT NULL)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "jobs",
+            "checks": [
+                {
+                    "name": "ck_job_status",
+                    "definition": "CHECK (status::text = ANY (ARRAY['queued'::character varying, 'running'::character varying, 'completed'::character varying, 'failed'::character varying, 'dead_letter'::character varying, 'cancelled'::character varying]::text[]))"
+                },
+                {
+                    "name": "ck_jobs_required_capabilities",
+                    "definition": "CHECK (array_position(required_capabilities, NULL::text) IS NULL AND NOT (''::text = ANY (required_capabilities)))"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "kind",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "payload",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "status",
+                    "type": "character varying(32)",
+                    "default": "'queued'::character varying",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "execution_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "batch_execution_record",
+                        "column": "uuid",
+                        "on_delete": "NO ACTION"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "phase",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "attempts",
+                    "type": "integer",
+                    "default": "0",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "max_attempts",
+                    "type": "integer",
+                    "default": "3",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "next_run_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "locked_until",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "idempotency_key",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_error",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "lease_owner",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": {
+                        "table": "worker_instances",
+                        "column": "uuid",
+                        "on_delete": "SET NULL"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "lease_token",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "lease_expires_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "heartbeat_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "pool",
+                    "type": "character varying(64)",
+                    "default": "'default'::character varying",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "priority",
+                    "type": "integer",
+                    "default": "0",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "failure_class",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "dead_lettered_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "dead_letter_reason",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "required_labels",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "required_capabilities",
+                    "type": "text[]",
+                    "default": "ARRAY[]::text[]",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_jobs_active_pool",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_active_pool ON public.jobs USING btree (pool, status, lease_expires_at) WHERE ((status)::text = 'running'::text)"
+                },
+                {
+                    "name": "idx_jobs_claim",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_claim ON public.jobs USING btree (status, next_run_at, locked_until)"
+                },
+                {
+                    "name": "idx_jobs_execution_id",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_execution_id ON public.jobs USING btree (execution_id)"
+                },
+                {
+                    "name": "idx_jobs_kind",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_kind ON public.jobs USING btree (kind)"
+                },
+                {
+                    "name": "idx_jobs_lease_recovery",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_lease_recovery ON public.jobs USING btree (status, lease_expires_at) WHERE ((status)::text = 'running'::text)"
+                },
+                {
+                    "name": "idx_jobs_pool_claim",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_pool_claim ON public.jobs USING btree (pool, status, priority DESC, next_run_at, lease_expires_at)"
+                },
+                {
+                    "name": "idx_jobs_required_capabilities",
+                    "method": "gin",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_required_capabilities ON public.jobs USING gin (required_capabilities)"
+                },
+                {
+                    "name": "idx_jobs_required_labels",
+                    "method": "gin",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_jobs_required_labels ON public.jobs USING gin (required_labels jsonb_path_ops)"
+                },
+                {
+                    "name": "uq_jobs_idempotency_key",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_jobs_idempotency_key ON public.jobs USING btree (idempotency_key) WHERE (idempotency_key IS NOT NULL)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "notification_channels",
+            "checks": [
+                {
+                    "name": "notification_channels_kind_check",
+                    "definition": "CHECK (kind = ANY (ARRAY['webhook'::text, 'email'::text]))"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "name",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "kind",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "config",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "enabled",
+                    "type": "boolean",
+                    "default": "true",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "notification_channels_name_key",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX notification_channels_name_key ON public.notification_channels USING btree (name)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "project_config_wasm",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "project_config_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": {
+                        "table": "project_configs",
+                        "column": "uuid",
+                        "on_delete": "CASCADE"
+                    },
+                    "primary_key": false
+                },
+                {
+                    "name": "wasm_sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "wasm_bytes",
+                    "type": "bytea",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "uploaded_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "uq_project_config_wasm_sha",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_project_config_wasm_sha ON public.project_config_wasm USING btree (project_config_id, wasm_sha256)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "project_configs",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "project_id",
+                    "type": "character varying(80)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "version",
+                    "type": "integer",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "spec",
+                    "type": "jsonb",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "spec_sha256",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "active",
+                    "type": "boolean",
+                    "default": "true",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "uploaded_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_project_configs_project",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_project_configs_project ON public.project_configs USING btree (project_id)"
+                },
+                {
+                    "name": "uq_project_config_active",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_project_config_active ON public.project_configs USING btree (project_id) WHERE active"
+                },
+                {
+                    "name": "uq_project_config_version",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_project_config_version ON public.project_configs USING btree (project_id, version)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "provenance_events",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "occurred_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "event_type",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "project_module",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "source_identifier",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "execution_id",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "actor",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "correlation_id",
+                    "type": "text",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "payload",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_provenance_events_execution",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_provenance_events_execution ON public.provenance_events USING btree (execution_id, occurred_at DESC) WHERE (execution_id IS NOT NULL)"
+                },
+                {
+                    "name": "idx_provenance_events_occurred_at",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_provenance_events_occurred_at ON public.provenance_events USING btree (occurred_at)"
+                },
+                {
+                    "name": "idx_provenance_events_project_occurred",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_provenance_events_project_occurred ON public.provenance_events USING btree (project_module, occurred_at DESC)"
+                },
+                {
+                    "name": "idx_provenance_events_source",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_provenance_events_source ON public.provenance_events USING btree (project_module, source_identifier, occurred_at DESC) WHERE (source_identifier IS NOT NULL)"
+                }
+            ],
+            "description": "Append-only audit stream; purge old rows with beampipe purge-provenance"
+        },
+        {
+            "name": "source_registry",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "project_module",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "source_identifier",
+                    "type": "character varying(100)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "enabled",
+                    "type": "boolean",
+                    "default": "false",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_checked_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_attempted_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "stale_after_hours",
+                    "type": "integer",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "discovery_signature",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "discovery_claim_token",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "discovery_claim_expires_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "workflow_run_pending",
+                    "type": "boolean",
+                    "default": "false",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "workflow_run_pending_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "workflow_claim_token",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "workflow_claimed_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "workflow_claim_expires_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_executed_discovery_signature",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_source_registry_discovery_claim_expires_at",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_source_registry_discovery_claim_expires_at ON public.source_registry USING btree (discovery_claim_expires_at)"
+                },
+                {
+                    "name": "idx_source_registry_enabled",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_source_registry_enabled ON public.source_registry USING btree (enabled)"
+                },
+                {
+                    "name": "idx_source_registry_identifier",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_source_registry_identifier ON public.source_registry USING btree (source_identifier)"
+                },
+                {
+                    "name": "idx_source_registry_project",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_source_registry_project ON public.source_registry USING btree (project_module)"
+                },
+                {
+                    "name": "idx_source_registry_project_pending",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_source_registry_project_pending ON public.source_registry USING btree (project_module, workflow_run_pending)"
+                },
+                {
+                    "name": "uq_source_registry_composite",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX uq_source_registry_composite ON public.source_registry USING btree (project_module, source_identifier)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "token_blacklist",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "integer",
+                    "default": "nextval('token_blacklist_id_seq'::regclass)",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "token_hash",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "expires_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "token_blacklist_token_hash_key",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX token_blacklist_token_hash_key ON public.token_blacklist USING btree (token_hash)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "users",
+            "checks": [
+            ],
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "integer",
+                    "default": "nextval('users_id_seq'::regclass)",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "name",
+                    "type": "character varying(30)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "username",
+                    "type": "character varying(20)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "email",
+                    "type": "character varying(50)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "hashed_password",
+                    "type": "text",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "profile_image_url",
+                    "type": "text",
+                    "default": "'https://profileimageurl.com'::text",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "created_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "deleted_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "is_deleted",
+                    "type": "boolean",
+                    "default": "false",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "is_superuser",
+                    "type": "boolean",
+                    "default": "false",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_users_email",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_users_email ON public.users USING btree (email)"
+                },
+                {
+                    "name": "idx_users_is_deleted",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_users_is_deleted ON public.users USING btree (is_deleted)"
+                },
+                {
+                    "name": "idx_users_username",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_users_username ON public.users USING btree (username)"
+                },
+                {
+                    "name": "users_email_key",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX users_email_key ON public.users USING btree (email)"
+                },
+                {
+                    "name": "users_username_key",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX users_username_key ON public.users USING btree (username)"
+                },
+                {
+                    "name": "users_uuid_key",
+                    "method": "btree",
+                    "unique": true,
+                    "definition": "CREATE UNIQUE INDEX users_uuid_key ON public.users USING btree (uuid)"
+                }
+            ],
+            "description": null
+        },
+        {
+            "name": "worker_instances",
+            "checks": [
+                {
+                    "name": "ck_worker_concurrency",
+                    "definition": "CHECK (concurrency_limit > 0)"
+                },
+                {
+                    "name": "ck_worker_role",
+                    "definition": "CHECK (role::text = ANY (ARRAY['worker'::character varying, 'scheduler_worker'::character varying]::text[]))"
+                },
+                {
+                    "name": "ck_worker_status",
+                    "definition": "CHECK (status::text = ANY (ARRAY['active'::character varying, 'draining'::character varying, 'stopped'::character varying, 'unhealthy'::character varying]::text[]))"
+                }
+            ],
+            "columns": [
+                {
+                    "name": "uuid",
+                    "type": "uuid",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": true
+                },
+                {
+                    "name": "instance_name",
+                    "type": "character varying(128)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "host_name",
+                    "type": "character varying(255)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "process_id",
+                    "type": "integer",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "role",
+                    "type": "character varying(32)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "pool",
+                    "type": "character varying(64)",
+                    "default": "'default'::character varying",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "capabilities",
+                    "type": "text[]",
+                    "default": "ARRAY[]::text[]",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "labels",
+                    "type": "jsonb",
+                    "default": "'{}'::jsonb",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "version",
+                    "type": "character varying(64)",
+                    "default": null,
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "concurrency_limit",
+                    "type": "integer",
+                    "default": "1",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "status",
+                    "type": "character varying(32)",
+                    "default": "'active'::character varying",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "started_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "last_heartbeat_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "draining_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "stopped_at",
+                    "type": "timestamp with time zone",
+                    "default": null,
+                    "nullable": true,
+                    "references": null,
+                    "primary_key": false
+                },
+                {
+                    "name": "updated_at",
+                    "type": "timestamp with time zone",
+                    "default": "now()",
+                    "nullable": false,
+                    "references": null,
+                    "primary_key": false
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_worker_instances_capabilities",
+                    "method": "gin",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_worker_instances_capabilities ON public.worker_instances USING gin (capabilities)"
+                },
+                {
+                    "name": "idx_worker_instances_heartbeat",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_worker_instances_heartbeat ON public.worker_instances USING btree (status, last_heartbeat_at)"
+                },
+                {
+                    "name": "idx_worker_instances_pool",
+                    "method": "btree",
+                    "unique": false,
+                    "definition": "CREATE INDEX idx_worker_instances_pool ON public.worker_instances USING btree (pool, status)"
+                }
+            ],
+            "description": null
+        }
+    ],
+    "index_count": 58,
+    "table_count": 17,
+    "column_count": 214,
+    "relationships": [
+        {
+            "name": "alert_deliveries_channel_id_fkey",
+            "to_table": "notification_channels",
+            "on_delete": "SET NULL",
+            "to_column": "uuid",
+            "from_table": "alert_deliveries",
+            "from_column": "channel_id"
+        },
+        {
+            "name": "alert_deliveries_rule_id_fkey",
+            "to_table": "alert_rules",
+            "on_delete": "SET NULL",
+            "to_column": "uuid",
+            "from_table": "alert_deliveries",
+            "from_column": "rule_id"
+        },
+        {
+            "name": "batch_execution_record_created_by_id_fkey",
+            "to_table": "users",
+            "on_delete": "NO ACTION",
+            "to_column": "id",
+            "from_table": "batch_execution_record",
+            "from_column": "created_by_id"
+        },
+        {
+            "name": "batch_execution_record_deployment_profile_id_fkey",
+            "to_table": "daliuge_deployment_profile",
+            "on_delete": "NO ACTION",
+            "to_column": "uuid",
+            "from_table": "batch_execution_record",
+            "from_column": "deployment_profile_id"
+        },
+        {
+            "name": "batch_execution_record_project_config_id_fkey",
+            "to_table": "project_configs",
+            "on_delete": "NO ACTION",
+            "to_column": "uuid",
+            "from_table": "batch_execution_record",
+            "from_column": "project_config_id"
+        },
+        {
+            "name": "execution_artifacts_execution_id_fkey",
+            "to_table": "batch_execution_record",
+            "on_delete": "CASCADE",
+            "to_column": "uuid",
+            "from_table": "execution_artifacts",
+            "from_column": "execution_id"
+        },
+        {
+            "name": "execution_observations_execution_id_fkey",
+            "to_table": "batch_execution_record",
+            "on_delete": "CASCADE",
+            "to_column": "uuid",
+            "from_table": "execution_observations",
+            "from_column": "execution_id"
+        },
+        {
+            "name": "job_claim_history_job_id_fkey",
+            "to_table": "jobs",
+            "on_delete": "CASCADE",
+            "to_column": "uuid",
+            "from_table": "job_claim_history",
+            "from_column": "job_id"
+        },
+        {
+            "name": "job_claim_history_worker_id_fkey",
+            "to_table": "worker_instances",
+            "on_delete": "SET NULL",
+            "to_column": "uuid",
+            "from_table": "job_claim_history",
+            "from_column": "worker_id"
+        },
+        {
+            "name": "jobs_execution_id_fkey",
+            "to_table": "batch_execution_record",
+            "on_delete": "NO ACTION",
+            "to_column": "uuid",
+            "from_table": "jobs",
+            "from_column": "execution_id"
+        },
+        {
+            "name": "jobs_lease_owner_fkey",
+            "to_table": "worker_instances",
+            "on_delete": "SET NULL",
+            "to_column": "uuid",
+            "from_table": "jobs",
+            "from_column": "lease_owner"
+        },
+        {
+            "name": "project_config_wasm_project_config_id_fkey",
+            "to_table": "project_configs",
+            "on_delete": "CASCADE",
+            "to_column": "uuid",
+            "from_table": "project_config_wasm",
+            "from_column": "project_config_id"
+        }
+    ],
+    "generated_from": "migrations",
+    "migration_count": 21,
+    "latest_migration": "20260827000100_remove_publisher_callback_credentials",
+    "relationship_count": 12
+}

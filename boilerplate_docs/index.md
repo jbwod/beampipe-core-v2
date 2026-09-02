@@ -190,22 +190,3 @@ Beampipe owns durable intent, preparation artifacts, admission, submission recor
 <a href="operations/"><strong>[05] Understand</strong><span>Follow durable state through discovery, preparation, submission, and polling.</span></a>
 <a href="api/"><strong>[06] Integrate</strong><span>Use the authenticated API workflow and generated schema.</span></a>
 </div>
-
-## Current WALLABY qualification
-
-The current WALLABY no-download graph has passed a direct live DALiuGE smoke
-against disposable NM, DIM, and TM processes. The runner exercises translation,
-deployment, synthetic execution, durable file publication, and the atomic
-inventory handoff. It does not contact Core or prove Core reconciliation. See
-[Local DALiuGE qualification](getting-started/local-daliuge.md).
-
-The bundled no-download project now requires output verification for its two
-synthetic product patterns and its graph contains a mandatory native publisher.
-Core currently trusts the handoff only on `slurm_remote`, where it retrieves the
-receipt over authenticated SSH/SFTP. Required publication on `rest_remote` fails
-closed because there is no trusted receipt retrieval path. Setonix/Slurm has
-passed config and command tests but has not run live without its account, SSH,
-paths, and SIF.
-
-For the provider-neutral Core contract, use the
-[offline PostgreSQL acceptance path](getting-started/neutral-project.md).

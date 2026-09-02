@@ -2,13 +2,11 @@
 
 This procedure configures project policy, selects an execution backend,
 discovers sources, composes a run, and follows durable evidence through Dash.
-For a provider-neutral contract check, use
-[Project-neutral acceptance](../getting-started/neutral-project.md). The
-[WALLABY local DALiuGE qualification](../getting-started/local-daliuge.md)
+The [WALLABY local DALiuGE qualification](../getting-started/local-daliuge.md)
 checks the graph and publisher against direct loopback NM, DIM, and TM services;
 it is intentionally outside this Core/Dash workflow.
 
-<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Dashboard workflow from source registration, discovery, signed metadata, and pinned intent through a REST or Slurm backend, reconciliation and output verification, to terminal ledger evidence">
+<div class="bp-flow-diagram bp-flow-diagram--wide bp-flow-diagram--animated" role="img" aria-label="Dashboard workflow from source registration, discovery, signed metadata, and pinned intent through a REST or Slurm backend, reconciliation and output verification (in progress), to terminal ledger evidence">
   <div class="bp-flow-node" data-tone="cyan"><span>01 / SOURCE</span><strong>registered identity</strong><small>enabled project source</small></div>
   <span class="bp-flow-link" aria-hidden="true">--&gt;</span>
   <div class="bp-flow-node" data-tone="cyan"><span>02 / DISCOVER</span><strong>TAP facts</strong><small>claim, query, normalize</small></div>
@@ -51,7 +49,7 @@ The editor covers:
 - TAP timeout/retry policy, queries, and enrichments;
 - metadata mappings, transforms, flags, and signature fields;
 - graph source, manifest templates, and graph patches;
-- discovery, execution, and output-verification policy.
+- discovery, execution, and output-verification policy (in progress).
 
 The YAML pane is canonical and synchronizes with the visual editor. Select
 **Save version**. Success creates and activates an immutable Core revision;
@@ -113,7 +111,7 @@ Select same-project sources and choose **Compose run**, or open
 6. For a full live run, keep **Start immediately** and **Submit backend** on.
 7. Keep **Stage inputs** on for a production staging graph; turn it off only
    for an explicitly no-download qualification graph. This does not disable
-   that project's output-verification policy.
+   that project's output-verification policy (in progress).
 8. Select **Create + start**.
 
 Preparation calls Core's authoritative readiness endpoint. Changing a source,
@@ -151,7 +149,8 @@ it into a different run or assume no ledger row was created.
 | Manifest + graph | Structured data exploration and EAGLE links |
 | Ledger | Compact snapshot plus run record, staging, backend merges, scheduler metadata, and timestamps |
 
-The bundled WALLABY no-download project is not an output-verification opt-out.
+The bundled WALLABY no-download project is not an output-verification opt-out
+(the feature is in progress).
 It requires the two synthetic image and weights patterns, and its graph contains
 a mandatory native publisher. Core currently reconciles that handoff only for
 `slurm_remote`, by pulling the attempt-scoped inventory through authenticated

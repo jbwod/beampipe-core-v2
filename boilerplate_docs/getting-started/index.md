@@ -86,7 +86,7 @@ Choose one path; Core does not assume a project.
     beampipe project add -f PROJECT_CONFIG.yaml
     ```
 
-    Start from [`minimal_survey.v2.yaml`](https://github.com/jbwod/beampipe-core-v2/blob/main/config/examples/minimal_survey.v2.yaml), or follow [Project-neutral acceptance](neutral-project.md) for an offline end-to-end proof.
+    Start from [`minimal_survey.v2.yaml`](https://github.com/jbwod/beampipe-core-v2/blob/main/config/examples/minimal_survey.v2.yaml) as a project-neutral template.
 
 === "WALLABY sample"
 

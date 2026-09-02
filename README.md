@@ -98,7 +98,7 @@
 
 ### `Adding a project`
 
-Project config is immutable workflow policy: source identity, named TAP endpoints and queries, metadata preparation, staging provider, manifests, graph patches, output verification, and automation. No project query is hardcoded in the Rust worker.
+Project config is immutable workflow policy: source identity, named TAP endpoints and queries, metadata preparation, staging provider, manifests, graph patches, output verification (in progress), and automation. No project query is hardcoded in the Rust worker.
 
 ```yaml
 apiVersion: beampipe.dev/v2
@@ -164,7 +164,7 @@ curl -fsSL https://github.com/jbwod/beampipe-core-v2/releases/latest/download/in
 
 The API is at `http://127.0.0.1:18080/api/v2`. Files live in `~/beampipe`. You do not need to clone this repository.
 
-Install a deployment profile with `beampipe profile add`, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Continue with the [quick start](https://beampipe.jackblackwood.com/getting-started/) and [project-neutral acceptance](https://beampipe.jackblackwood.com/getting-started/neutral-project/). The [WALLABY first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) applies after explicitly installing that sample.
+Install a deployment profile with `beampipe profile add`, run `beampipe doctor --profile NAME`, then set `BEAMPIPE_USE_REAL_BACKENDS=true` and `beampipe restart`. Continue with the [quick start](https://beampipe.jackblackwood.com/getting-started/). The [WALLABY first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) applies after explicitly installing that sample.
 
 
 ## `Runtime`
@@ -195,7 +195,6 @@ Install a deployment profile with `beampipe profile add`, run `beampipe doctor -
 |---|---|
 | Review release changes and upgrade notes | [Changelog](CHANGELOG.md) |
 | Install and reach a healthy system | [Quick start](https://beampipe.jackblackwood.com/getting-started/) |
-| Prove the project-neutral Core contract offline | [Project-neutral acceptance](https://beampipe.jackblackwood.com/getting-started/neutral-project/) |
 | Run WALLABY discovery and graph preparation | [WALLABY first workflow](https://beampipe.jackblackwood.com/getting-started/first-run/) |
 | Qualify WALLABY with real local DALiuGE | [WALLABY local DALiuGE](https://beampipe.jackblackwood.com/getting-started/local-daliuge/) |
 | Install and operate the web console | [Dashboard setup](https://beampipe.jackblackwood.com/getting-started/dashboard/) |

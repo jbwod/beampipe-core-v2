@@ -233,6 +233,6 @@ encoding, filesystem visibility, or publication durability.
 | Beampipe Core | immutable manifest injection, graph patching and hashing, submission, scheduler reconciliation, receipt retrieval and ledger verification |
 
 Continue with [Graph patching](graph-patches.md) for deterministic mutations,
-[Output verification](output-verification.md) for the inventory and SFTP
+[Output verification (in progress)](output-verification.md) for the inventory and SFTP
 handoff contract, and [Deployment profiles](../architecture/deployment-profiles.md)
 for runtime and remote-system checks.
