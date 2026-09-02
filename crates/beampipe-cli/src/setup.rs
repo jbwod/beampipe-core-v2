@@ -3005,7 +3005,7 @@ struct SetupNextSteps {
 }
 
 fn next_action_choices(slurm_profile: bool, casda_staging: bool) -> Vec<ChoiceItem> {
-    let mut choices = vec![
+    vec![
         ChoiceItem {
             key: "project",
             label: "Add or change project",
@@ -3016,22 +3016,24 @@ fn next_action_choices(slurm_profile: bool, casda_staging: bool) -> Vec<ChoiceIt
             label: "Add a deployment profile",
             hint: "REST DIM or Slurm JSON from the install config dir",
         },
-    ];
-    if slurm_profile {
-        choices.push(ChoiceItem {
+        ChoiceItem {
             key: "slurm",
             label: "Set up Slurm SSH credentials",
-            hint: "generate or import the selected profile's managed key slot",
-        });
-    }
-    if casda_staging {
-        choices.push(ChoiceItem {
+            hint: if slurm_profile {
+                "generate, import, or check the selected profile's managed key slot"
+            } else {
+                "create or import a managed key slot for a Slurm profile"
+            },
+        },
+        ChoiceItem {
             key: "casda",
             label: "Set CASDA credentials",
-            hint: "username and password required by the selected project",
-        });
-    }
-    choices.extend([
+            hint: if casda_staging {
+                "username and password required by the selected project"
+            } else {
+                "optional credentials for projects that use CASDA staging"
+            },
+        },
         ChoiceItem {
             key: "doctor",
             label: "Run doctor for a profile",
@@ -3047,8 +3049,7 @@ fn next_action_choices(slurm_profile: bool, casda_staging: bool) -> Vec<ChoiceIt
             label: "Done",
             hint: "finish setup",
         },
-    ]);
-    choices
+    ]
 }
 
 fn next_action_recipe_lines(
@@ -3158,7 +3159,7 @@ async fn offer_next_actions(ctx: &mut NextActions<'_>) -> Result<()> {
         return Ok(());
     }
 
-    print_section("OPTIONAL CONFIGURATION");
+    print_section("NEXT ACTIONS");
     print_hint("Mock submissions finish immediately and never create a DIM session.");
     print_hint(&format!(
         "BEAMPIPE_USE_REAL_BACKENDS={}",
@@ -4027,14 +4028,34 @@ staging:
     }
 
     #[test]
-    fn capability_actions_follow_the_selected_contracts() {
+    fn credential_actions_are_always_visible_and_contextual() {
         let neutral = next_action_choices(false, false);
-        assert!(neutral.iter().all(|item| item.key != "slurm"));
-        assert!(neutral.iter().all(|item| item.key != "casda"));
+        assert!(neutral
+            .iter()
+            .find(|item| item.key == "slurm")
+            .unwrap()
+            .hint
+            .contains("for a Slurm profile"));
+        assert!(neutral
+            .iter()
+            .find(|item| item.key == "casda")
+            .unwrap()
+            .hint
+            .contains("optional credentials"));
 
         let configured = next_action_choices(true, true);
-        assert!(configured.iter().any(|item| item.key == "slurm"));
-        assert!(configured.iter().any(|item| item.key == "casda"));
+        assert!(configured
+            .iter()
+            .find(|item| item.key == "slurm")
+            .unwrap()
+            .hint
+            .contains("selected profile"));
+        assert!(configured
+            .iter()
+            .find(|item| item.key == "casda")
+            .unwrap()
+            .hint
+            .contains("selected project"));
     }
 
     #[test]

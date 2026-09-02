@@ -37,6 +37,8 @@ The wrapper checks local installer tools, selects the release for your platform,
 
 The wizard walks through **Runtime → PostgreSQL → Network → optional Dash → Project and deployment → Review**. It confirms the install home at the beginning and the complete plan before configuration starts. Setup then creates a random JWT secret and PostgreSQL password, binds PostgreSQL/API/metrics to loopback (API host port `18080` by default), migrates the database, and creates the first administrator. Docker setup starts Core automatically after its checks pass. With host runtime selected, it prepares managed PostgreSQL when requested and prints the foreground `beampipe --home … start` command instead. No scientific project, provider integration, or real execution backend is enabled implicitly.
 
+After the installation checks, guided setup opens a **Next actions** menu. It always offers project and deployment-profile installation, managed Slurm SSH credential generation/import, CASDA credential entry, profile doctor, and live-backend activation. Slurm and CASDA remain visible on a neutral installation so credentials can be prepared before their project or profile is selected; choosing them does not enable a backend. Press **Done** to leave those actions for a later setup rerun.
+
 When guided setup has no administrator password file, the wizard prompts for the password securely. Explicit `--admin-user`, `--admin-email`, and `--admin-password-file` values take precedence in guided and unattended modes.
 
 When setup finishes, open a new terminal or update this one, then verify it:
