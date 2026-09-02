@@ -1,4 +1,3 @@
-<p align="center">
   <img src="assets/brand/beampipe-terminal-logo.svg" alt="Beampipe" width="920">
 </p>
 
@@ -33,24 +32,7 @@
 > - **`Trigger and schedule setup`**: polls configured archives on a project cadence. Frequency, batch size, and admission caps are policy, not code.
 
 > - **`Direct-to-compute`**: deployment profiles select REST DIM or Slurm remote, translator settings, and compute limits per run, per project, or as globals.
-
-<table>
-  <tr>
-    <td>
-<picture>
-<img alt="image" src="https://github.com/user-attachments/assets/3c28165a-9c7d-4403-a367-917be56e5c95" />
-
-</picture>
-    </td>
-    <td>
-<picture>
-<img alt="image" src="https://github.com/user-attachments/assets/60578417-6cad-475d-a3fa-1ca53a2dc1f8" />
-
-</picture>
-    </td>
-  </tr>
-</table>
-
+<img width="4138" height="1352" alt="image" src="https://github.com/user-attachments/assets/23402b33-8d57-4816-96be-049d86014932" />
 
 ## `Modular Orchestration by design`
 
@@ -67,30 +49,12 @@
 <table>
   <tr>
     <td>
+      <img alt="diagan" src="https://github.com/user-attachments/assets/aae4f407-b2e8-462b-99b0-55770a5a4319" />
+
 <picture>
-<img alt="image" src="https://github.com/user-attachments/assets/68218d64-351c-4d5d-bfc6-91b281e17724" />
+
 
 </picture>
-    </td>
-    <td>
-      <pre><code>{
-  "name": "dlg-dim",
-  "project_module": "minimal_survey",
-  "is_default": true,
-  "translation": {
-    "algo": "metis",
-    "num_par": 1,
-    "num_islands": 0,
-    "tm_url": "http://dlg-tm:8084"
-  },
-  "deployment": {
-    "kind": "rest_remote",
-    "dim_host_for_tm": "dlg-dim",
-    "dim_port_for_tm": 8001,
-    "deploy_host": "dlg-dim",
-    "deploy_port": 8001
-  }
-}</code></pre>
     </td>
   </tr>
 </table>
@@ -99,23 +63,17 @@
 ### `Adding a project`
 
 Project config is immutable workflow policy: source identity, named TAP endpoints and queries, metadata preparation, staging provider, manifests, graph patches, output verification (in progress), and automation. No project query is hardcoded in the Rust worker.
-
-```yaml
-apiVersion: beampipe.dev/v2
-kind: ProjectConfig
-metadata: {}
-definitions: {}
-source_identity: {}
-adapters: {}
-staging: {}
-graph: {}
-discovery: {}
-manifest: {}
-graph_patches: []
-output_verification: {}
-automation: {}
-extension: {}
-```
+<table>
+  <tr>
+    <td><img alt="diasdgnn" src="https://github.com/user-attachments/assets/967d53fb-ee4f-41cc-802c-5ca1a79bbf47" />
+</td>
+  <td>
+    <img width="4238" height="2671" alt="image" src="https://github.com/user-attachments/assets/7220b21b-cf07-4a85-a9f9-281f4183f3d2" />
+  </td>
+  </tr>
+</table>
+<p align="center">
+</p>
 
 ```bash
 beampipe project validate -f config/examples/minimal_survey.v2.yaml
@@ -168,12 +126,7 @@ Install a deployment profile with `beampipe profile add`, run `beampipe doctor -
 
 
 ## `Runtime`
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/operations-observability-terminal-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/readme/operations-observability-terminal-transparent.png">
-  <img src="assets/readme/operations-observability-terminal-dark.png" alt="Runtime roles (API, scheduler, worker, Postgres) and inspectability (readiness, metrics, events, ledger, debug fields)" />
-</picture>
+<img width="3969" height="1700" alt="daignn" src="https://github.com/user-attachments/assets/498966e9-c40b-4d5c-8080-cb93b4fa9604" />
 
 | Role | Command | Scale rule |
 |---|---|---|
