@@ -392,6 +392,100 @@ fn core_roles_running(counts: runtime::RoleCounts) -> bool {
     counts.api > 0 && counts.scheduler > 0 && counts.worker > 0
 }
 
+#[derive(Debug, Default)]
+struct RunningComposeInstallation {
+    roles: runtime::RoleCounts,
+    api_container_id: Option<String>,
+}
+
+fn parse_running_compose_services(raw: &str) -> RunningComposeInstallation {
+    let mut installation = RunningComposeInstallation::default();
+    for line in raw.lines() {
+        let Some((container_id, service)) = line.split_once('\t') else {
+            continue;
+        };
+        match service.trim() {
+            "api" => {
+                installation.roles.api += 1;
+                installation
+                    .api_container_id
+                    .get_or_insert_with(|| container_id.trim().to_string());
+            }
+            "scheduler" => installation.roles.scheduler += 1,
+            "worker" => installation.roles.worker += 1,
+            _ => {}
+        }
+    }
+    installation
+}
+
+fn discover_running_compose_installation(root: &Path) -> RunningComposeInstallation {
+    let project = installation::compose_project_name(root);
+    let working_dir = format!(
+        "label=com.docker.compose.project.working_dir={}",
+        root.display()
+    );
+    let project = format!("label=com.docker.compose.project={project}");
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &working_dir,
+            "--filter",
+            &project,
+            "--format",
+            "{{.ID}}\\t{{.Label \"com.docker.compose.service\"}}",
+        ])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            parse_running_compose_services(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => RunningComposeInstallation::default(),
+    }
+}
+
+fn recoverable_compose_environment_key(key: &str) -> bool {
+    (key.starts_with("BEAMPIPE_") || key.starts_with("CASDA_"))
+        && !matches!(
+            key,
+            "BEAMPIPE_CONFIG" | "BEAMPIPE_SSH_CREDENTIALS_DIR" | "CASDA_PASSWORD_FILE"
+        )
+}
+
+fn read_running_compose_environment(container_id: &str) -> Result<Vec<(String, String)>> {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{json .Config.Env}}", container_id])
+        .output()
+        .context("inspect running Beampipe API container")?;
+    if !output.status.success() {
+        bail!(
+            "could not inspect the running Beampipe API container; setup cannot safely recover its missing .env"
+        );
+    }
+    let values: Vec<String> =
+        serde_json::from_slice(&output.stdout).context("parse running Beampipe API environment")?;
+    let entries = values
+        .into_iter()
+        .filter_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            recoverable_compose_environment_key(key).then(|| (key.to_string(), value.to_string()))
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        bail!(
+            "the running Beampipe API container has no recoverable settings; setup will not replace its missing .env"
+        );
+    }
+    Ok(entries)
+}
+
+fn restore_process_environment(entries: &[(String, String)]) {
+    for (key, value) in entries {
+        std::env::set_var(key, value);
+    }
+}
+
 fn installation_services_running(context: &installation::InstallationContext) -> bool {
     if !context.exists()
         || !context
@@ -427,8 +521,25 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("resolve {}", root.display()))?;
     let existing_context = installation::InstallationContext::from_home(root.clone())?;
-    let existing_services_running = installation_services_running(&existing_context);
-    let env_existed = existing_context.environment_file.is_file();
+    let running_compose = discover_running_compose_installation(&root);
+    let existing_services_running = installation_services_running(&existing_context)
+        || core_roles_running(running_compose.roles);
+    let recovered_environment = if !existing_context.environment_file.is_file()
+        && core_roles_running(running_compose.roles)
+    {
+        let container_id = running_compose.api_container_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "running Beampipe services were found, but their API container could not be identified"
+            )
+        })?;
+        let entries = read_running_compose_environment(container_id)?;
+        restore_process_environment(&entries);
+        Some(entries)
+    } else {
+        None
+    };
+    let env_existed =
+        existing_context.environment_file.is_file() || recovered_environment.is_some();
     let compose_preexisting = root.join("docker-compose.yml").is_file();
     if existing_context.exists() {
         existing_context.activate()?;
@@ -444,6 +555,10 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
             "Existing installation detected: runtime={}, database={}.",
             state.runtime.as_str(),
             state.database_mode
+        );
+    } else if recovered_environment.is_some() {
+        println!(
+            "Running Docker installation detected; its missing configuration will be recovered after review."
         );
     }
 
@@ -676,6 +791,15 @@ pub async fn run_setup(mut opts: SetupOptions) -> Result<()> {
         )?
     {
         bail!("setup aborted");
+    }
+    if let Some(entries) = recovered_environment.as_ref() {
+        for (key, value) in entries {
+            update_env_file(&env_path, key, value)?;
+        }
+        print_status(
+            "Existing settings",
+            "recovered from the running API container",
+        );
     }
 
     let credential_root =
@@ -1482,7 +1606,7 @@ fn require_bind_ports_free(ports: &[(u16, &str)]) -> Result<()> {
     }
     if !busy.is_empty() {
         bail!(
-            "bind ports already in use: {}. Stop the service that owns the port or choose a different setup port. For a running Beampipe installation, use `beampipe stop`; use --no-start to configure without binding ports.",
+            "bind ports already in use: {}. Stop the service that owns the port or choose a different setup port. For a running Beampipe installation, use `beampipe stop`; if Docker cannot see that installation, check `docker context ls`; use --no-start to configure without binding ports.",
             busy.join(", ")
         );
     }
@@ -4324,6 +4448,45 @@ staging:
         assert!(message.contains("--no-start"));
         assert!(message.contains("beampipe stop"));
         assert!(!message.contains("down --volumes"));
+    }
+
+    #[test]
+    fn running_compose_detection_requires_all_core_roles() {
+        let detected = parse_running_compose_services(
+            "api-id\tapi\nscheduler-id\tscheduler\nworker-a\tworker\nworker-b\tworker\n",
+        );
+        assert_eq!(detected.api_container_id.as_deref(), Some("api-id"));
+        assert_eq!(detected.roles.api, 1);
+        assert_eq!(detected.roles.scheduler, 1);
+        assert_eq!(detected.roles.worker, 2);
+        assert!(core_roles_running(detected.roles));
+
+        let incomplete = parse_running_compose_services("api-id\tapi\nworker-a\tworker\n");
+        assert!(!core_roles_running(incomplete.roles));
+    }
+
+    #[test]
+    fn running_installation_skips_new_bind_preflight() {
+        let opts = SetupOptions {
+            start: true,
+            ..Default::default()
+        };
+        preflight_before_materialize(&opts, true).unwrap();
+    }
+
+    #[test]
+    fn compose_recovery_accepts_only_application_settings() {
+        assert!(recoverable_compose_environment_key(
+            "BEAMPIPE_POSTGRES_PASSWORD"
+        ));
+        assert!(recoverable_compose_environment_key("CASDA_USERNAME"));
+        assert!(!recoverable_compose_environment_key("BEAMPIPE_CONFIG"));
+        assert!(!recoverable_compose_environment_key(
+            "BEAMPIPE_SSH_CREDENTIALS_DIR"
+        ));
+        assert!(!recoverable_compose_environment_key("CASDA_PASSWORD_FILE"));
+        assert!(!recoverable_compose_environment_key("DATABASE_URL"));
+        assert!(!recoverable_compose_environment_key("PATH"));
     }
 
     #[test]
